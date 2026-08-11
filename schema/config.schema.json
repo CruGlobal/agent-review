@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://wealthtracker.app/review/config.schema.json",
-  "title": "HisHarvest Agent-Review Config",
+  "$id": "https://github.com/dr-bizz/agent-review/schema/config.schema.json",
+  "title": "Agent-Review Config",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "profile", "risk", "agents", "excluded_paths"],
   "properties": {
-    "version": { "type": "integer", "enum": [1] },
+    "version": { "type": "integer", "enum": [1, 2] },
+    "base_branch": { "type": "string" },
     "profile": { "type": "string", "enum": ["chill", "standard", "assertive"] },
     "risk": {
       "type": "object",
@@ -117,6 +118,8 @@
         "required": ["id"],
         "properties": {
           "id": { "type": "string" },
+          "title": { "type": "string" },
+          "expertise": { "type": "string" },
           "enabled": { "type": "boolean" },
           "always": { "type": "boolean" },
           "model": {

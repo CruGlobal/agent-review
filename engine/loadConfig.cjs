@@ -2,6 +2,7 @@
 const { readFileSync } = require('node:fs');
 const { parse } = require('yaml');
 const Ajv = require('ajv/dist/2020');
+const { upgradeConfig } = require('./upgradeConfig.cjs');
 
 function parseConfig(yamlText) {
   return parse(yamlText);
@@ -28,7 +29,7 @@ function loadConfig({ configPath, schemaPath }) {
       `Invalid review config (${configPath}):\n- ${errors.join('\n- ')}`,
     );
   }
-  return configObj;
+  return upgradeConfig(configObj);
 }
 
 module.exports = { parseConfig, validateConfig, loadConfig };
