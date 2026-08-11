@@ -26,14 +26,7 @@ const {
   preflightSummary,
 } = require('./cliCommands.cjs');
 
-const ROOT = process.cwd();
-const RD = join(ROOT, '.claude/review');
-const CONFIG = join(RD, 'config.yml');
-const SCHEMA = join(RD, 'config.schema.json');
-const INDEX = join(RD, 'index');
-const FEEDBACK = join(RD, 'learnings/feedback.jsonl');
-const LEARNINGS = join(RD, 'learnings/learnings.yml');
-const MODES = ['quick', 'standard', 'deep'];
+const { repoRoot, reviewDir } = require('./paths.cjs');
 
 function out(s) {
   process.stdout.write(s + '\n');
@@ -47,16 +40,38 @@ function flag(argv, name) {
   return v === undefined || v.startsWith('--') ? undefined : v;
 }
 
+// Global flags (parsed before dispatch): --root, --review-dir.
+function ctx(argv) {
+  const opts = { root: flag(argv, '--root'), reviewDir: flag(argv, '--review-dir') };
+  const ROOT = repoRoot(opts);
+  const RD = reviewDir({ ...opts, root: ROOT });
+  return {
+    ROOT,
+    RD,
+    CONFIG: join(RD, 'config.yml'),
+    SCHEMA: join(__dirname, '../schema/config.schema.json'),
+    INDEX: join(RD, 'index'),
+  };
+}
+const MODES = ['quick', 'standard', 'deep'];
+
+// learning paths come from config (learning.path, default '.claude/review/learnings')
+function learningPaths(cfg, C) {
+  const lp = (cfg.learning && cfg.learning.path) || null;
+  const base = lp ? (require('node:path').isAbsolute(lp) ? lp : join(C.ROOT, lp)) : join(C.RD, 'learnings');
+  return { FEEDBACK: join(base, 'feedback.jsonl'), LEARNINGS: join(base, 'learnings.yml') };
+}
+
 function validRef(ref) {
   return /^[A-Za-z0-9._/~^-]+$/.test(ref) && !ref.startsWith('-');
 }
 
-function changedFiles(base) {
+function changedFiles(base, C) {
   let b = base;
   if (b && !validRef(b)) throw new Error(`invalid --base ref: "${b}"`);
   if (!b) {
     try {
-      b = execFileSync('git', ['-C', ROOT, 'merge-base', 'main', 'HEAD'], {
+      b = execFileSync('git', ['-C', C.ROOT, 'merge-base', 'main', 'HEAD'], {
         encoding: 'utf8',
       }).trim();
     } catch {
@@ -67,7 +82,7 @@ function changedFiles(base) {
   try {
     raw = execFileSync(
       'git',
-      ['-C', ROOT, 'diff', '--name-only', `${b}...HEAD`],
+      ['-C', C.ROOT, 'diff', '--name-only', `${b}...HEAD`],
       { encoding: 'utf8' },
     );
   } catch (e) {
@@ -89,19 +104,20 @@ function indexOpts(cfg) {
   return { aliases: ix.aliases, exts: ix.extensions, roots: ix.roots };
 }
 
-function loadIndex(cfg, { force } = {}) {
-  const c = cfg || loadConfig({ configPath: CONFIG, schemaPath: SCHEMA });
-  const indexPath = c.index && c.index.path ? join(ROOT, c.index.path) : INDEX;
+function loadIndex(C, cfg, { force } = {}) {
+  const c = cfg || loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+  const indexPath =
+    c.index && c.index.path ? join(C.ROOT, c.index.path) : C.INDEX;
   if (force) {
     const gf = join(indexPath, 'graph.json');
     if (existsSync(gf)) rmSync(gf);
   }
   const opts = indexOpts(c);
   return loadOrBuildIndex({
-    repoRoot: ROOT,
+    repoRoot: C.ROOT,
     indexPath,
-    head: gitHead(ROOT),
-    files: listRepoFiles(ROOT, opts),
+    head: gitHead(C.ROOT),
+    files: listRepoFiles(C.ROOT, opts),
     opts,
   });
 }
@@ -117,12 +133,29 @@ const USAGE = `usage: yarn review <command>
   run [--base <ref>] [--scope <s>] [mode]   pre-flight + launch the Claude Code review
   help`;
 
-function main(argv) {
+// Strips global `--root <v>` / `--review-dir <v>` tokens so subcommand parsing never sees them.
+function stripGlobalFlags(argv) {
+  const out = [];
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i];
+    if (tok === '--root' || tok === '--review-dir') {
+      const v = argv[i + 1];
+      if (v !== undefined && !v.startsWith('--')) i++;
+      continue;
+    }
+    out.push(tok);
+  }
+  return out;
+}
+
+function main(rawArgv) {
+  const C = ctx(rawArgv);
+  const argv = stripGlobalFlags(rawArgv);
   const cmd = argv[0];
   const rest = argv.slice(1);
   switch (cmd) {
     case 'config': {
-      const cfg = loadConfig({ configPath: CONFIG, schemaPath: SCHEMA });
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       if (rest[0] === 'validate') {
         out('config OK');
         return 0;
@@ -146,15 +179,15 @@ function main(argv) {
       return 0;
     }
     case 'index': {
-      const g = loadIndex(undefined, { force: rest.includes('--force') });
+      const g = loadIndex(C, undefined, { force: rest.includes('--force') });
       out(
         `Indexed ${g.fileCount} files; ${Object.keys(g.importedBy).length} have dependents.`,
       );
       return 0;
     }
     case 'impact': {
-      const { files } = changedFiles(flag(rest, '--base'));
-      out(JSON.stringify(queryImpact(files, loadIndex(), {}), null, 2));
+      const { files } = changedFiles(flag(rest, '--base'), C);
+      out(JSON.stringify(queryImpact(files, loadIndex(C), {}), null, 2));
       return 0;
     }
     case 'feedback': {
@@ -162,6 +195,8 @@ function main(argv) {
         out('usage: yarn review feedback <pendingFile>');
         return 1;
       }
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { FEEDBACK } = learningPaths(cfg, C);
       const entries = parsePending(readFileSync(rest[0], 'utf8')).map((e) => ({
         ts: new Date().toISOString(),
         ...e,
@@ -181,6 +216,8 @@ function main(argv) {
         }
         minSupport = n;
       }
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
       const proposals = mineLearnings(loadFeedback(FEEDBACK), { minSupport });
       const merged = mergeProposals(loadLearnings(LEARNINGS), proposals);
       saveLearnings(LEARNINGS, merged);
@@ -190,6 +227,8 @@ function main(argv) {
       return 0;
     }
     case 'learnings': {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { LEARNINGS } = learningPaths(cfg, C);
       out(
         JSON.stringify(
           listLearnings(loadLearnings(LEARNINGS), flag(rest, '--status')),
@@ -205,6 +244,8 @@ function main(argv) {
         out(`usage: yarn review ${cmd} <id>`);
         return 1;
       }
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { LEARNINGS } = learningPaths(cfg, C);
       const status = cmd === 'approve' ? 'approved' : 'rejected';
       saveLearnings(
         LEARNINGS,
@@ -223,17 +264,17 @@ function main(argv) {
         out(`error: unknown mode "${mode}" (use ${MODES.join('/')})`);
         return 1;
       }
-      const { base: b, files } = changedFiles(base);
-      const diff = execFileSync('git', ['-C', ROOT, 'diff', `${b}...HEAD`], {
+      const { base: b, files } = changedFiles(base, C);
+      const diff = execFileSync('git', ['-C', C.ROOT, 'diff', `${b}...HEAD`], {
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
       });
       const stat = execFileSync(
         'git',
-        ['-C', ROOT, 'diff', '--stat', `${b}...HEAD`],
+        ['-C', C.ROOT, 'diff', '--stat', `${b}...HEAD`],
         { encoding: 'utf8' },
       );
-      const cfg = loadConfig({ configPath: CONFIG, schemaPath: SCHEMA });
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       const plan = buildPlan(
         {
           files,
@@ -245,7 +286,7 @@ function main(argv) {
       );
       const impact =
         cfg.index && cfg.index.enabled
-          ? queryImpact(files, loadIndex(cfg), {})
+          ? queryImpact(files, loadIndex(C, cfg), {})
           : null;
       out(preflightSummary(plan, impact));
       writeFileSync(

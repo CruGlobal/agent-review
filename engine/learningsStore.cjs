@@ -93,8 +93,11 @@ module.exports = {
 
 if (require.main === module) {
   const { parseArgs } = require('./args.cjs');
+  const { reviewDir } = require('./paths.cjs');
   const a = parseArgs(process.argv.slice(2));
-  const base = join(process.cwd(), '.claude/review/learnings');
+  const base =
+    a['learning-dir'] ||
+    join(reviewDir({ root: a.root, reviewDir: a['review-dir'] }), 'learnings');
   const feedbackPath = join(base, 'feedback.jsonl');
   const learningsPath = join(base, 'learnings.yml');
   const findingsPath = join(base, 'findings.json');

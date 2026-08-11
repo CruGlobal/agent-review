@@ -10,12 +10,16 @@ function isExcluded(file, config) {
 // The reviewer's own definition files legitimately contain trigger vocabulary as DATA
 // (config.yml lists the trigger keywords; rule docs describe them). Scanning them for content
 // triggers self-matches. Drop them — plus markdown/docs and excluded paths — from content scanning.
-const DEFN_RE = /(^|\/)\.claude\/review\/config(\.schema)?\.(ya?ml|json)$/;
+function defnRe(reviewDirRel = '.claude/review') {
+  const esc = reviewDirRel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|/)${esc}/config(\\.schema)?\\.(ya?ml|json)$`);
+}
 
 // Keep only diff hunks for reviewable CODE files so content triggers match real code, not prose
 // or the reviewer's own config/rule definitions.
-function codeDiff(diffText, config) {
+function codeDiff(diffText, config, reviewDirRel) {
   if (!diffText) return '';
+  const RE = defnRe(reviewDirRel);
   const blocks = diffText.split(/(?=^diff --git )/m);
   const kept = [];
   for (const b of blocks) {
@@ -25,7 +29,7 @@ function codeDiff(diffText, config) {
       continue;
     }
     const file = m[1];
-    if (file.endsWith('.md') || DEFN_RE.test(file) || isExcluded(file, config))
+    if (file.endsWith('.md') || RE.test(file) || isExcluded(file, config))
       continue;
     kept.push(b);
   }
@@ -46,9 +50,9 @@ function agentMatches(agent, files, contentText) {
   return null;
 }
 
-function selectAgents({ files, diffText }, config) {
+function selectAgents({ files, diffText, reviewDirRel }, config) {
   const reviewed = files.filter((f) => !isExcluded(f, config));
-  const contentText = codeDiff(diffText, config);
+  const contentText = codeDiff(diffText, config, reviewDirRel);
   const out = [];
   for (const a of config.agents) {
     if (a.enabled === false) continue;

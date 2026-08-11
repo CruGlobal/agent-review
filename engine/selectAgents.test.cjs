@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { selectAgents } = require('./selectAgents.cjs');
+const { selectAgents, codeDiff } = require('./selectAgents.cjs');
 
 const config = {
   excluded_paths: ['**/*.snap'],
@@ -58,4 +58,10 @@ test('disabled agent never selected', () => {
     config,
   );
   assert.ok(!sel.some((a) => a.id === 'financial'));
+});
+
+test('codeDiff drops the reviewer config under a custom review dir', () => {
+  const cfg = { excluded_paths: [], agents: [] };
+  const diff = 'diff --git a/.review/config.yml b/.review/config.yml\n+content: [foo]\n';
+  assert.strictEqual(codeDiff(diff, cfg, '.review'), '');
 });

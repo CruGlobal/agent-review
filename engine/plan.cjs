@@ -7,10 +7,10 @@ const { selectAgents } = require('./selectAgents.cjs');
 const { resolveRules } = require('./resolveRules.cjs');
 const { detectSpecial } = require('./detectSpecial.cjs');
 
-function buildPlan({ files, diffText, linesChanged, scope }, config) {
+function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel }, config) {
   const special = detectSpecial(diffText, files, config);
   const risk = scoreRisk({ files, linesChanged, scope, special }, config);
-  const selected = selectAgents({ files, diffText }, config);
+  const selected = selectAgents({ files, diffText, reviewDirRel }, config);
   const agents = selected.map((a) => ({
     ...a,
     rules: resolveRules(a.id, files, config),
