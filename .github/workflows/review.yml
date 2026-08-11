@@ -1,0 +1,40 @@
+name: agent-review (reusable)
+on:
+  workflow_call:
+    inputs:
+      mode:
+        type: string
+        default: standard
+      debate:
+        type: boolean
+        default: false
+    secrets:
+      anthropic_api_key:
+        required: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: anthropics/claude-code-action@v1
+        env:
+          AGENT_REVIEW_CI: '1'
+          AGENT_REVIEW_DEBATE: ${{ inputs.debate }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          # gh CLI (invoked directly by the review skill's CI-mode steps
+          # for `gh pr view` / `gh pr comment` / `gh api`) needs its own
+          # auth in the process env — separate from the action's
+          # `github_token` input, which only governs the action's
+          # internal GitHub operations.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          plugin_marketplaces: 'https://github.com/dr-bizz/agent-review.git'
+          plugins: 'agent-review@dr-bizz'
+          prompt: '/agent-review:review ${{ inputs.mode }} ci'
