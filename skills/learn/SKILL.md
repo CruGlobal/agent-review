@@ -54,8 +54,10 @@ agent-review learn --min-support 5
 agent-review learnings --status proposed
 ```
 
-For each proposal, present `ruleText` (or `example`, for `suppress` kind), `rationale`, and
-`support`, and ask the user to approve or reject it:
+Each proposal's JSON includes `kind`, `support`, `paths`, `example` (the sample finding message
+for either kind), `ruleText` (set only for `kind: rule`), and `rationale` (e.g. "Accepted 4/4
+times"). For each proposal, present `ruleText` if set — otherwise `example` — plus `rationale`
+and `support`, and ask the user to approve or reject it:
 
 ```bash
 agent-review approve <id>

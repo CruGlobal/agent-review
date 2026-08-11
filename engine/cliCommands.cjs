@@ -21,6 +21,8 @@ function listLearnings(learnings, statusFilter) {
       support: l.support,
       paths: l.paths || [],
       example: l.example || l.ruleText || '',
+      ruleText: l.ruleText || '',
+      rationale: l.rationale || '',
     }));
 }
 

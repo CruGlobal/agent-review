@@ -17,6 +17,7 @@ const learnings = {
       support: 3,
       paths: ['src/**'],
       example: 'x',
+      rationale: 'Dismissed 3/3 times',
     },
     {
       id: 'L-b',
@@ -25,6 +26,7 @@ const learnings = {
       support: 4,
       paths: ['pages/**'],
       ruleText: 'y',
+      rationale: 'Accepted 4/4 times',
     },
   ],
 };
@@ -55,6 +57,30 @@ test('listLearnings filters by status', () => {
     ['L-b'],
   );
   assert.equal(listLearnings(learnings).length, 2);
+});
+
+test('listLearnings projects rationale and ruleText alongside example', () => {
+  const [suppress, rule] = listLearnings(learnings);
+  assert.deepEqual(suppress, {
+    id: 'L-a',
+    kind: 'suppress',
+    status: 'proposed',
+    support: 3,
+    paths: ['src/**'],
+    example: 'x',
+    ruleText: '',
+    rationale: 'Dismissed 3/3 times',
+  });
+  assert.deepEqual(rule, {
+    id: 'L-b',
+    kind: 'rule',
+    status: 'approved',
+    support: 4,
+    paths: ['pages/**'],
+    example: 'y', // falls back to ruleText for compatibility
+    ruleText: 'y',
+    rationale: 'Accepted 4/4 times',
+  });
 });
 
 test('preflightSummary includes risk, reviewer, agents, blast radius', () => {

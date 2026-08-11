@@ -17309,7 +17309,9 @@ var require_cliCommands = __commonJS({
         status: l.status,
         support: l.support,
         paths: l.paths || [],
-        example: l.example || l.ruleText || ""
+        example: l.example || l.ruleText || "",
+        ruleText: l.ruleText || "",
+        rationale: l.rationale || ""
       }));
     }
     function preflightSummary(plan, impact) {
