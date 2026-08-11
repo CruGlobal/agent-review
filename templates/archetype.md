@@ -58,6 +58,19 @@ OUTPUT FORMAT:
   - Severity: [3-5]/10
   - Benefit: Why this matters
 
+### Rule Checklist Results
+
+[INCLUDE THIS SECTION ONLY IF the PROJECT-SPECIFIC RULES above define explicit checklists —
+i.e. `- [ ]` items or numbered/bulleted groups the rules say must be reported per item. OMIT the
+heading entirely otherwise.]
+
+Report one line per checklist group, using the group's own heading:
+
+- **[Checklist group name]**: ✅ / ⚠️ / ❌ / N/A — [what passed, or which item failed and where]
+
+Items marked ⚠️ or ❌ must also appear as a finding above, at the severity their impact warrants —
+this section is a compliance summary, not a substitute for reporting the issue.
+
 ### Questions for Other Agents
 
 - **To [Agent]**: Question
