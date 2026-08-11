@@ -153,9 +153,11 @@ else
   { echo '<!-- agent-review -->'; echo; cat /tmp/agent_review_report.md; } \
     > /tmp/agent_review_comment.md
 
+  # `--paginate` runs `--jq` once PER PAGE, so a marker match on more than one page emits more
+  # than one id. Take the first — the oldest marked comment is the one we keep updating.
   EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
     --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
-    2>/dev/null)
+    2>/dev/null | head -n1)
 
   if [ -n "$EXISTING" ]; then
     gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md
@@ -174,13 +176,28 @@ fi
 ### Gather PR Context
 
 ```bash
-# PR metadata if we're on a PR branch (harmless when we're not).
-gh pr view --json number,title,baseRefName,headRefName,additions,deletions,changedFiles 2>/dev/null \
+. /tmp/review_env.sh 2>/dev/null || true
+
+# Resolve the PR number ONCE, here, and persist it — every later `gh pr view`/`gh pr comment`
+# depends on it. CI checks out a PR as a DETACHED HEAD, so a bare `gh pr view` has no branch to
+# resolve and returns nothing; the workflow therefore exports $PR_NUMBER, which wins. Locally
+# (on a PR branch) the fallback resolves it from the branch instead.
+PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
+[ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context — local review"
+
+# One id per review run, so successive runs never clobber each other's pending findings.
+REVIEW_ID="${PR_NUMBER:-local}-$(date +%Y%m%d-%H%M%S)"
+
+# PR metadata if we're on a PR (harmless when we're not). `${PR_NUMBER:+"$PR_NUMBER"}` passes the
+# number when we have one and expands to NOTHING when we don't — never an empty argument.
+gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number,title,baseRefName,headRefName,additions,deletions,changedFiles 2>/dev/null \
   || echo "Not in a PR branch — falling back to the configured base branch"
 
 DAY_OF_WEEK=$(date +%A)
 echo "Today is: $DAY_OF_WEEK"
-echo "export DAY_OF_WEEK=\"$DAY_OF_WEEK\"" >> /tmp/review_env.sh
+cat >> /tmp/review_env.sh <<EOF
+export DAY_OF_WEEK="$DAY_OF_WEEK" PR_NUMBER="$PR_NUMBER" REVIEW_ID="$REVIEW_ID"
+EOF
 ```
 
 Build the diff manifest the whole review runs on:
@@ -188,8 +205,8 @@ Build the diff manifest the whole review runs on:
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 
-BASE_REF=$(gh pr view --json baseRefOid -q .baseRefOid 2>/dev/null)
-HEAD_REF=$(gh pr view --json headRefOid -q .headRefOid 2>/dev/null)
+BASE_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null)
+HEAD_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null)
 
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   RANGE="$BASE_REF..$HEAD_REF"
@@ -202,10 +219,14 @@ else
   if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
     BASE_BRANCH=main
   fi
-  MERGE_BASE=$(git merge-base HEAD "$BASE_BRANCH") || {
-    echo "❌ Could not resolve a diff base (tried '$BASE_BRANCH'). Set base_branch in config.yml."
-    exit 1
-  }
+  # A CI checkout has no local branches — only remote-tracking refs — so try `origin/<branch>`
+  # first and fall back to the bare name for local runs where `main` exists as a local branch.
+  MERGE_BASE=$(git merge-base HEAD "origin/$BASE_BRANCH" 2>/dev/null) \
+    || MERGE_BASE=$(git merge-base HEAD "$BASE_BRANCH" 2>/dev/null) \
+    || {
+      echo "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml."
+      exit 1
+    }
   RANGE="$MERGE_BASE..HEAD"
 fi
 
@@ -340,7 +361,8 @@ plan's `agents[]` has:
 - **deep** → every agent with `enabled: true` in config (`agent-review config get agents`), even
   ones whose triggers did not fire. For agents also present in the plan, use the plan's entry (its
   `rules[]` already includes any matching `path_rules`); for the others, use the config entry's own
-  `id`/`title`/`expertise`/`rules`.
+  `id`/`title`/`expertise`/`rules`. Note the asymmetry: config-only agents get their own `rules[]`
+  without `path_rules` merging; only plan entries carry those.
 - **quick** → at most three agents drawn from the plan's `agents[]`: `testing`, `standards`, and the
   first entry not already picked (the first triggered agent). If any of those ids do not exist in
   this repo's config, just take the first three plan entries.
@@ -578,6 +600,10 @@ findings.
 
 ### Debate Prompt Template
 
+Debate reuses each agent's Stage-1 model — a deliberate deviation from the in-repo review system
+this skill was extracted from, which pinned every debate round to the largest model. A cheap agent
+therefore stays cheap through debate and rebuttal.
+
 Use the Task tool for each agent with:
 
 - **description**: "[Agent title] cross-examination"
@@ -783,7 +809,8 @@ Average Confidence: [High/Medium/Low]
 . /tmp/review_env.sh 2>/dev/null || true   # AGENT_MODE, FIX_COUNT, CI_MODE …
 echo "📊 Generating quality metrics dashboard..."
 
-PR_NUM=$(gh pr view --json number -q .number 2>/dev/null || echo "local")
+PR_NUM="${PR_NUMBER:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number -q .number 2>/dev/null)}"
+[ -n "$PR_NUM" ] || PR_NUM="local"
 CURRENT_DATE=$(date +%Y-%m-%d)
 AUTHOR=$(git config user.name || echo "Developer")
 
@@ -899,7 +926,10 @@ Gated on the learning layer being enabled. Write the consensus findings as a JSO
 `{ agent, category, severity, file, line, message }` — then emit them and apply approved learnings:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, set once in Stage 0
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
+  # REVIEW_ID is "<pr-or-local>-<timestamp>", so two reviews of the same branch never write to the
+  # same pending/<reviewId>.yml.
   agent-review emit --in /tmp/consensus_findings.json --review "${REVIEW_ID:-local}"
   agent-review filter > /tmp/review_filtered.json   # defaults to the just-emitted findings.json
 fi
@@ -1004,10 +1034,30 @@ Please respond: 1, 2, 3, 4, 5, or 6
 Handle the choice:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, FIX_COUNT
+. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, PR_NUMBER, FIX_COUNT
 case "$choice" in
   1) cat .claude/review/metrics/PR_${PR_NUM}_metrics.md ;;
-  2) gh pr comment "$PR_NUM" --body-file /tmp/agent_review_report.md && echo "✅ Review posted" ;;
+  2)
+    # Same create-or-update path as CI: the marker makes repeat posts update one comment instead
+    # of stacking new ones, so an interactive re-post never duplicates the CI comment.
+    if [ -z "${PR_NUMBER:-}" ]; then
+      echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
+    else
+      REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+      { echo '<!-- agent-review -->'; echo; cat /tmp/agent_review_report.md; } \
+        > /tmp/agent_review_comment.md
+      EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+        --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
+        2>/dev/null | head -n1)
+      if [ -n "$EXISTING" ]; then
+        gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md \
+          && echo "✅ Updated existing review comment ($EXISTING)"
+      else
+        gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md \
+          && echo "✅ Review posted"
+      fi
+    fi
+    ;;
   3)
     if [ "$FIX_COUNT" -gt 0 ]; then
       cat /tmp/fix_summary.txt

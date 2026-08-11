@@ -20,11 +20,12 @@ base_branch: main
 # ── Risk scoring ──────────────────────────────────────────────────────────────
 risk:
   # File-pattern contributions. `tier` is descriptive; `points` drives the score.
-  # First-match-wins is NOT used — every matching pattern contributes, so keep
-  # explicit 0-point entries for paths that should never raise the score.
+  # Per file, the highest-scoring matching pattern wins (patterns don't stack on
+  # one file; files sum across the diff). A 0-point entry only matters when no
+  # other pattern matches — use `excluded_paths` to exclude.
   patterns:
     - { glob: '.github/workflows/**', points: 3, tier: critical }
-    # Low-risk overrides (explicit 0 points)
+    # Explicit 0-point entries: only take effect when no other pattern matches.
     - { glob: '**/*.test.*', points: 0, tier: low }
     - { glob: '**/*.snap', points: 0, tier: low }
     # Examples — uncomment and adapt to this repo's layout:
@@ -158,9 +159,9 @@ index: { enabled: true, path: '.claude/review/index' }
 learning:
   enabled: true
   path: '.claude/review/learnings'
-  approval_required: true
+  approval_required: true # not yet enforced — reserved; promotion is always approval-gated today
   min_support: 3
-  scope: local
+  scope: local # not yet enforced — reserved (local | shared)
 
 enforcement:
   mode: warn # warn | block — reserved for future merge-gating

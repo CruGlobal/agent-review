@@ -29,7 +29,7 @@ universal checks implied by your expertise.
 
 OUTPUT FORMAT:
 
-## {{TITLE}} Review
+## {{TITLE}} — Findings
 
 ### Critical Issues (BLOCKING) - Severity: 10/10
 

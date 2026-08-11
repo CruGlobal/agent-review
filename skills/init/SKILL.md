@@ -94,6 +94,10 @@ merged PRs (the default clamp — recency beats volume for learning current conv
 confirm the larger run explicitly, accepting the cost and the wider fan-out. Do not spawn more than
 10 batch subagents without that explicit confirmation.
 
+If the user explicitly confirms the larger run, recompute `BATCHES` **without** the 10-batch clamp
+— `BATCHES=$(( (PRS + 9) / 10 ))` — and re-persist it to `/tmp/agent_review_init.sh` before Phase 2
+fans out. Without that recompute the confirmation is a no-op and mining still stops at 100 PRs.
+
 ```bash
 git rev-parse --show-toplevel || { echo "❌ Not a git repository — run init from the repo root."; exit 1; }
 ls -A .claude/review/config.yml 2>/dev/null && echo "⚠️  This repo already has .claude/review/config.yml"
@@ -157,6 +161,60 @@ list never fires. Then report what changed and stop — migrate mode runs no oth
 
 ---
 
+## The read-only guard
+
+Every subagent this skill dispatches is told, verbatim, to write nothing. That instruction is
+defense in depth, not proof. **Verify it mechanically**, because the 3B gate tells a human
+"nothing has been written" and that claim has to be true at the moment it is made.
+
+**Capture a baseline before dispatching ANY subagent** — the Phase 1 drafter and each Phase 2
+miner alike:
+
+```bash
+git rev-parse HEAD > /tmp/agent_review_init_baseline_head.txt
+git status --porcelain > /tmp/agent_review_init_baseline_status.txt
+wc -l < /tmp/agent_review_init_baseline_status.txt
+```
+
+The porcelain snapshot deliberately records the user's **pre-existing** untracked files. They are
+not ours to touch, and the recovery steps below depend on knowing which untracked paths were there
+first.
+
+**Re-check after EVERY subagent returns**, and **once more immediately before presenting the 3B
+gate**:
+
+```bash
+git rev-parse HEAD > /tmp/agent_review_init_now_head.txt
+git status --porcelain > /tmp/agent_review_init_now_status.txt
+diff /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_now_head.txt \
+  && diff /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_now_status.txt \
+  && echo "✅ clean — nothing written since baseline"
+```
+
+Both diffs silent → continue. Any output → **drift**. Then:
+
+1. **Stop.** Dispatch nothing further.
+2. **Show the human the delta** — the `diff` output above plus
+   `git log <baselineHEAD>..HEAD --oneline` if HEAD moved.
+3. **Discard the offending subagent's returned content as contaminated.** A subagent that ignored
+   the read-only constraint may have ignored other parts of its brief too; detecting the write
+   without discarding the output still poisons the mined result. Re-run that subagent from a fresh
+   baseline, or drop its contribution and say so in the 3B proposal.
+4. **Revert surgically**, never broadly:
+   - HEAD moved → `git reset --soft <baselineHEAD>` (keeps the working tree; nothing else is lost).
+   - Tracked file drifted → `git checkout -- <that path>`, path by path.
+   - New untracked path that is **not** in the baseline snapshot → delete that specific path.
+     **Never `git clean -fd`** — it would also delete the user's pre-existing untracked files,
+     which the baseline snapshot exists to protect.
+   - Anything not clearly subagent-authored → ask the user before touching it.
+
+**What this check cannot see**, which is why the verbatim constraint stays in every brief: writes
+outside the repo (`/tmp`, `$HOME`, a sibling checkout), a write that reproduces a file's existing
+bytes exactly, and a `git push` (which changes no local state). The brief must still forbid all
+three.
+
+---
+
 ## Phase 1 — Codebase scan
 
 Goal: a factual picture of this repo's stack and layout, from which the risk patterns, triggers,
@@ -188,8 +246,9 @@ styling, database/ORM + migrations location, auth library, payment/billing libra
 API layer style, CI system. Note the evidence for each (which file, which dependency).
 
 **Risk `patterns`** — build the list from what actually exists; every glob must match real paths.
-Every matching pattern contributes (there is no first-match-wins), so keep explicit `0`-point
-entries for paths that must never raise the score.
+Per file, the highest-scoring matching pattern wins — patterns do **not** stack on one file, and
+the per-file scores sum across the diff. A `0`-point entry therefore only matters when no other
+pattern matches it; to keep a path out of scoring entirely, put it in `excluded_paths`.
 
 | Kind of path                                     | points | tier     |
 | ------------------------------------------------ | ------ | -------- |
@@ -209,6 +268,21 @@ review are worth `2`-`3` points, because weakening them weakens every future rev
 **`manifests` / `lockfiles`** — the detected pair(s). Keep them accurate: they drive the
 `new_dependency`, `critical_pkg_update`, and `lockfile_only_change` detections.
 
+> **JSON-manifest limitation.** `new_dependency` and `critical_pkg_update` parse the manifest as
+> JSON to diff its dependency map. They work for `package.json`-shaped manifests and produce
+> nothing for `Gemfile`, `pyproject.toml`, `go.mod`, `Cargo.toml`, `composer.json`'s non-JSON
+> siblings, and the like. When the detected manifest is not JSON, do **not** configure those two
+> detections — leave them commented out with the reason inline:
+>
+> ```yaml
+> # - { when: new_dependency, points: 2 }        # disabled: go.mod is not a JSON manifest
+> # - { when: critical_pkg_update, points: 3, packages: [] }   # same
+> ```
+>
+> `lockfile_only_change` is path-based and still works, so keep `lockfiles` accurate regardless.
+> State this limitation explicitly in the 3B proposal so the human knows those two risk signals
+> are off in this repo.
+
 **`migration_change.paths`** — globs for the detected migrations directory. Leave `[]` if the
 repo has no migrations; an empty list means the detection never fires, which is correct.
 
@@ -225,6 +299,18 @@ and validation library, by their real package names from the manifest.
 `{ prefix: '@/', target: 'src/' }`. Bare-string aliases are also accepted; prefer the object form
 because it maps the prefix to a real directory.
 
+> **JS/TS-only limitation.** The index resolves ES `import` / CommonJS `require` statements only.
+> In a repo whose primary language is not JS/TS, it would index nothing and every review would
+> report an empty blast radius — which reads as "no dependents" rather than "not measured".
+> Propose `index: { enabled: false }` there, with the reason inline:
+>
+> ```yaml
+> index: { enabled: false } # impact analysis parses ES/CJS imports only; this repo is <language>
+> ```
+>
+> Enable it for mixed repos with a substantial JS/TS surface, scoping `roots` to that surface. Call
+> the decision out in the 3B proposal either way.
+
 **Agent roster** — always the five core agents from the skeleton (`security`, `architecture`,
 `data-integrity`, `testing`, `standards`), plus domain specialists where the scan matches:
 
@@ -235,9 +321,23 @@ because it maps the prefix to a real directory.
 | a GraphQL or REST API layer                         | `api-contracts`  | schema/router dirs; content: `resolver`, `router.`                    |
 | i18n / localization libraries                       | `i18n`           | locale dirs; content: `t(`, `useTranslation`                          |
 
-Extend by judgment when the repo has an obvious domain the table misses (e.g. heavy background-job
-infrastructure, a public SDK surface) — but only add a specialist you can give real triggers and a
-real rule doc. A specialist with empty triggers never runs and is just noise.
+**Novel agents are allowed and encouraged.** The table above is a starting set, not a whitelist:
+init MAY propose specialists beyond it whenever Phase 1 or Phase 2 evidence shows a coherent
+domain that no core agent and no table row covers (heavy background-job infrastructure, a public
+SDK surface, a realtime/streaming layer, a hardware or protocol boundary, …). A proposed novel
+agent must arrive complete, or not at all:
+
+- an `id` (lowercase, hyphenated), a `title`, and an `expertise` line in the same voice as the core
+  agents;
+- real `triggers.paths` and/or `triggers.content` drawn from paths and identifiers that actually
+  exist in this repo — an agent with empty triggers never runs and is just noise;
+- its own drafted rule doc (`rules/<id>.md`), authored by the Phase 1 drafter alongside the others;
+- the evidence that justifies it — the files, dependencies, or mined PR findings that show the
+  domain is real and recurring, linked so the human can check.
+
+Novel agent ids must also be added to the `targetAgent` roster the Phase 2 miners are given, so
+mined findings can land on them rather than being forced into a core bucket. They are flagged for
+specific ratification at the 3B gate (see step 3B item 2).
 
 The skeleton ships `security` and `data-integrity` with empty `triggers` — **fill them in**, or
 those agents never fire. Use the repo's real auth/API/migration/CI paths and real content markers
@@ -245,6 +345,9 @@ those agents never fire. Use the repo's real auth/API/migration/CI paths and rea
 calls, schema parse calls) taken from the sampled files.
 
 ### Draft the rule docs (subagent)
+
+**Capture the [read-only guard](#the-read-only-guard) baseline before dispatching**, and re-check
+it the moment the subagent returns.
 
 Dispatch one general-purpose subagent to draft the rule docs while Phase 2 runs. Give it the stack
 summary, the sampled files, and `CLAUDE.md`/`AGENTS.md`/`CONTRIBUTING.md` contents. Open its brief
@@ -273,7 +376,10 @@ Then its job:
   that is what the config schema accepts. Name the file in your returned text; do not create it.
 
 The subagent returns the full drafted text of each doc. Nothing is written to disk yet — the docs
-exist only as text until the Phase 3 approval gate (step 3B) passes. If a subagent reports having written a file anyway, revert it before continuing.
+exist only as text until the Phase 3 approval gate (step 3B) passes. Run the
+[read-only guard](#the-read-only-guard) re-check now: do not trust the subagent's own account of
+whether it wrote anything, and if it did, discard its draft as contaminated rather than merely
+reverting the file.
 
 ---
 
@@ -315,8 +421,18 @@ gh pr list --state merged --limit "$PRS" --json number --jq '.[].number' \
   | paste -d' ' - - - - - - - - - -
 ```
 
-Each output line is one batch of up to 10 PR numbers. **Dispatch one general-purpose subagent per
-batch — at most `$BATCHES` of them — all in a SINGLE message so they run in parallel.**
+Each output line is one batch of up to 10 PR numbers. **Capture the
+[read-only guard](#the-read-only-guard) baseline first**, then **dispatch one general-purpose
+subagent per batch — at most `$BATCHES` of them — all in a SINGLE message so they run in
+parallel.** Re-check the guard as each batch returns; discard any batch's candidates if drift
+appeared while it was running.
+
+Miners are read-only too. Open each miner's brief with the same constraint the Phase 1 drafter
+gets, verbatim:
+
+> **You are reading history and returning JSON, not writing files. Create and modify NO files — no
+> Write, no Edit, no shell redirection, no `gh` command that mutates a PR or the repo. Return your
+> candidates in your final message. A human has not yet approved anything.**
 
 Each subagent reads its batch cheaply-first: metadata and review conversation always, the file
 list always, and the **full patch only for the PRs where a lens actually needs the code** (a
@@ -378,6 +494,11 @@ Rules for the subagents: `evidence` holds PR numbers it actually read; prefix `t
 for lens-3 candidates and keep the failure mode in the `suggestedRule`; `targetAgent` must be an
 id from the roster you gave it; no candidate without evidence.
 
+The roster you give each miner is the **full Phase 1 roster**: the five core agents, every table
+specialist you selected, **and every novel agent you proposed**, each with its `title` and
+`expertise` so the miner can route accurately. Omitting a novel id forces its findings into a core
+bucket and quietly buries the evidence that justified proposing it.
+
 ### Merge candidates
 
 Merge the batches: group candidates by theme (same underlying pattern, however differently worded)
@@ -419,7 +540,8 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
   `id`/`title`/`expertise`/`triggers`/`rules`.
 - `path_rules` — only if a rule doc genuinely applies to every agent touching some path.
 - `excluded_paths` — the skeleton's defaults plus this repo's generated/vendored directories.
-- `index` — `enabled: true`, plus the derived `roots`/`aliases`/`extensions`.
+- `index` — `enabled: true` plus the derived `roots`/`aliases`/`extensions` for a JS/TS repo;
+  `enabled: false` with the inline reason where the source language is not ES/CJS-import-based.
 - `learning` and `enforcement` — leave at the skeleton's defaults.
 
 Keep the skeleton's comments; they are the documentation a human editing this file will read.
@@ -430,12 +552,21 @@ Keep the skeleton's comments; they are the documentation a human editing this fi
 > This gate is not optional, not skippable, and not satisfied by silence or by an earlier "go
 > ahead" that predates the proposal. Bootstrap suggests; the human ratifies.
 
+**Run the [read-only guard](#the-read-only-guard) re-check one final time, immediately before
+presenting** — this proposal tells the human nothing has been written yet, so that has to be
+verified at the moment they are told, not merely earlier. If it reports drift, say so instead of
+presenting, and follow the guard's discard-and-revert steps.
+
 Present the complete proposal:
 
 1. **Detected stack** — the summary, with the evidence for each detection.
 2. **`config.yml`** — the risk patterns table (glob → points), manifests/lockfiles, the special
    detections that will fire, the agent roster with each agent's trigger summary, the index
-   settings, and the exclusions.
+   settings, and the exclusions. Flag any special detection or the index you disabled, with the
+   reason (non-JSON manifest, non-JS/TS source). **Mark every proposed novel agent — one not from
+   the standard specialist table — with "novel — not from the standard table"**, next to the
+   evidence that justifies it, so the human ratifies those specifically rather than nodding through
+   the roster as a whole.
 3. **Every rule doc, in full** — core and specialist, generic baseline plus the appended
    repo-specific and mined sections, with their `<!-- evidence: … -->` comments visible.
 4. **Phase 2 summary** — PRs mined, candidates found, how many cleared the threshold, and which

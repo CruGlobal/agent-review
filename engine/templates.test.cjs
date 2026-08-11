@@ -86,6 +86,12 @@ test('every agent-review subcommand used in skill bash blocks exists in the CLI'
     for (const m of head.matchAll(/(?:^|\s\|\s)([a-z][a-z-]*)/g)) known.add(m[1]);
   }
   assert.ok(known.size > 5, 'could not parse subcommands out of the CLI usage text');
+  // "show" only ever appears as an argument alternation ("show|validate|get"). If it leaks into
+  // the known set the unspaced-pipe convention has broken and this test stops catching typos.
+  assert.ok(
+    !known.has('show'),
+    'usage-line parse picked up an argument alternation as a subcommand — keep argument alternations unspaced ("show|validate|get")',
+  );
 
   for (const { name, path } of SKILLS) {
     const used = new Set(

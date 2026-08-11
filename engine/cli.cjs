@@ -78,6 +78,8 @@ function changedFiles(base, C, cfg) {
   if (b && !validRef(b)) throw new Error(`invalid --base ref: "${b}"`);
   if (!b) {
     b = (cfg && cfg.base_branch) || 'main';
+    // config-supplied refs get the same validation as --base: they reach git argv too.
+    if (!validRef(b)) throw new Error(`invalid --base ref: "${b}"`);
   }
   let raw;
   try {

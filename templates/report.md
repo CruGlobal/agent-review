@@ -80,8 +80,11 @@ bash /tmp/automated_fixes/fix_N_category.sh
 # Review all fixes first
 ls -la /tmp/automated_fixes/
 
-# Apply all (REVIEW FIRST!)
+# Dry run — prints what each fix would change, writes nothing
 bash /tmp/automated_fixes/apply_all.sh
+
+# Apply for real once the dry run looks right
+bash /tmp/automated_fixes/apply_all.sh --yes
 
 # Then review changes
 git diff
@@ -99,7 +102,7 @@ git checkout .
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-[Include contents of /tmp/dependency_impact.txt]
+[Blast radius, direct dependents and top-impacted files from /tmp/review_impact.json]
 
 ### High-Impact Changes
 
@@ -109,7 +112,7 @@ Files with 10+ dependents - test thoroughly:
 
 ### Breaking Changes
 
-[List any removed exports or breaking changes from /tmp/breaking_changes.txt]
+[Removed exports or breaking changes as reported by the agents; omit this subsection when none]
 
 ### Recommendations
 

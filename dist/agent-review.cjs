@@ -17410,6 +17410,7 @@ var require_cli = __commonJS({
       if (b && !validRef(b)) throw new Error(`invalid --base ref: "${b}"`);
       if (!b) {
         b = cfg && cfg.base_branch || "main";
+        if (!validRef(b)) throw new Error(`invalid --base ref: "${b}"`);
       }
       let raw;
       try {

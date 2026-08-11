@@ -87,6 +87,33 @@ Actions → New repository secret`.
 
 Pulls the latest `agent-review` plugin release from this repo.
 
+## Known limitations
+
+Current, deliberate boundaries — worth knowing before you rely on any of them.
+
+- **Fork PRs are silently skipped.** `secrets.ANTHROPIC_API_KEY` is not exposed to workflow runs
+  triggered from a fork, so the CI review job fails to start and posts nothing. PRs from branches
+  in the same repository work normally; forks currently get no review and no explanation comment.
+- **Impact analysis is JS/TS-only.** The import-graph index parses ES `import` and CommonJS
+  `require` statements. In a repo of any other language it indexes nothing, and reviews report an
+  empty blast radius — which reads like "no dependents" rather than "not measured". Set
+  `index: { enabled: false }` there.
+- **`new_dependency` and `critical_pkg_update` assume JSON manifests.** They diff the manifest as
+  JSON, so they work for `package.json` and produce nothing for `Gemfile`, `pyproject.toml`,
+  `go.mod`, or `Cargo.toml`. `lockfile_only_change` is path-based and works everywhere.
+- **The skills assume the default `.claude/review` directory.** A custom location via
+  `--review-dir` / `$AGENT_REVIEW_DIR` is honored by the CLI but not threaded through the skills'
+  bash blocks, which reference `.claude/review/...` paths directly.
+- **`config validate` checks the schema only.** It does not verify that the rule docs named in
+  `agents[].rules` or `path_rules[].rules` actually exist on disk; a typo'd filename validates
+  clean and silently contributes no rules at review time.
+- **Some config keys are accepted but not yet enforced.** `learning.scope`,
+  `learning.approval_required`, and `enforcement.mode` pass validation and are reserved for future
+  behavior; today promotion is always approval-gated and reviews never block a merge.
+- **Consumer workflows track `@main`.** The generated `agent-review.yml` calls the reusable
+  workflow at `@main`, so consuming repos pick up changes as they land. There is no release-tag or
+  SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.
+
 ## Repo layout
 
 | Path | What it is |
