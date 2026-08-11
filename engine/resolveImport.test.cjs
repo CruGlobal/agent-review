@@ -50,3 +50,17 @@ test('string alias still resolves (no regression)', () => {
   });
   assert.strictEqual(r, 'src/b.ts');
 });
+
+test('string alias equality-branch: spec equals alias root (defaults)', () => {
+  const files = new Set(['src/index.ts', 'src.ts']);
+  const r = resolveImport('other/file.ts', 'src', files);
+  assert.strictEqual(r, 'src.ts');
+});
+
+test('object alias equality-branch: spec equals target root', () => {
+  const files = new Set(['src/index.ts']);
+  const r = resolveImport('other/file.ts', '@', files, {
+    aliases: [{ prefix: '@/', target: 'src/' }],
+  });
+  assert.strictEqual(r, 'src/index.ts');
+});

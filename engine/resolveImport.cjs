@@ -28,7 +28,14 @@ function resolveImport(fromFile, spec, fileSet, opts = {}) {
   );
 
   if (hit) {
-    base = hit.target + spec.slice(hit.prefix.length);
+    // Distinguish equality (spec == alias root) from startsWith (spec starts with alias prefix)
+    if (spec === hit.prefix.replace(/\/$/, '')) {
+      // Equality: use target root itself (no remainder to append)
+      base = hit.target.replace(/\/$/, '');
+    } else {
+      // StartsWith: target + remainder of spec
+      base = hit.target + spec.slice(hit.prefix.length);
+    }
   } else if (spec.startsWith('.')) {
     base = path.posix.normalize(
       path.posix.join(path.posix.dirname(fromFile), spec),
