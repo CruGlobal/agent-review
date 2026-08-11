@@ -51,6 +51,14 @@
           "type": "object",
           "additionalProperties": { "type": "number" }
         },
+        "manifests": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "lockfiles": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
         "special": {
           "type": "array",
           "items": {
@@ -58,9 +66,23 @@
             "additionalProperties": false,
             "required": ["when", "points"],
             "properties": {
-              "when": { "type": "string" },
+              "when": {
+                "type": "string",
+                "enum": [
+                  "new_dependency",
+                  "critical_pkg_update",
+                  "lockfile_only_change",
+                  "migration_change",
+                  "config_security_change",
+                  "supabase_migration_change",
+                  "next_config_security_change"
+                ]
+              },
               "points": { "type": "integer", "minimum": 0 },
-              "packages": { "type": "array", "items": { "type": "string" } }
+              "packages": { "type": "array", "items": { "type": "string" } },
+              "paths": { "type": "array", "items": { "type": "string" } },
+              "files": { "type": "array", "items": { "type": "string" } },
+              "keywords": { "type": "array", "items": { "type": "string" } }
             }
           }
         },

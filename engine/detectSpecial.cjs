@@ -1,4 +1,6 @@
 'use strict';
+const { minimatch } = require('minimatch');
+const OPTS = { dot: true };
 
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -6,18 +8,22 @@ function escapeRe(s) {
 
 function detectSpecial(diffText, changedFiles, config) {
   const found = new Set();
-  const special = (config.risk && config.risk.special) || [];
-  const pkgEntry = special.find((s) => s.when === 'critical_pkg_update');
-  const pkgs = (pkgEntry && pkgEntry.packages) || [];
+  const risk = (config && config.risk) || {};
+  const special = risk.special || [];
+  const by = (w) => special.find((s) => s.when === w);
 
-  const pkgChanged = changedFiles.includes('package.json');
-  const lockChanged = changedFiles.some((f) => f.endsWith('yarn.lock'));
+  const manifests = risk.manifests || ['package.json'];
+  const lockfiles = risk.lockfiles || ['yarn.lock', 'package-lock.json', 'pnpm-lock.yaml'];
+  const isOneOf = (f, names) => names.some((n) => f === n || f.endsWith('/' + n));
+  const manifestChanged = changedFiles.some((f) => isOneOf(f, manifests));
+  const lockChanged = changedFiles.some((f) => isOneOf(f, lockfiles));
 
-  if (pkgChanged && /^\+\s*"[^"]+":\s*"[^"]+"/m.test(diffText))
+  if (by('new_dependency') && manifestChanged && /^\+\s*"[^"]+":\s*"[^"]+"/m.test(diffText))
     found.add('new_dependency');
 
-  if (pkgChanged) {
-    for (const p of pkgs) {
+  const pkgEntry = by('critical_pkg_update');
+  if (pkgEntry && manifestChanged) {
+    for (const p of pkgEntry.packages || []) {
       if (new RegExp(`^\\+\\s*"${escapeRe(p)}":`, 'm').test(diffText)) {
         found.add('critical_pkg_update');
         break;
@@ -25,17 +31,21 @@ function detectSpecial(diffText, changedFiles, config) {
     }
   }
 
-  if (lockChanged && !pkgChanged) found.add('lockfile_only_change');
+  if (by('lockfile_only_change') && lockChanged && !manifestChanged)
+    found.add('lockfile_only_change');
 
-  if (changedFiles.some((f) => /supabase\/migrations\//.test(f)))
-    found.add('supabase_migration_change');
+  const mig = by('migration_change');
+  if (mig && changedFiles.some((f) => (mig.paths || []).some((g) => minimatch(f, g, OPTS))))
+    found.add('migration_change');
 
+  const sec = by('config_security_change');
   if (
-    changedFiles.some((f) => /next\.config\.(js|ts)$/.test(f)) &&
-    /(headers|content-security|csp|rewrites|images|domains)/i.test(diffText)
-  ) {
-    found.add('next_config_security_change');
-  }
+    sec &&
+    changedFiles.some((f) => (sec.files || []).some((g) => minimatch(f, g, OPTS))) &&
+    (sec.keywords || []).length &&
+    new RegExp(`(${(sec.keywords || []).map(escapeRe).join('|')})`, 'i').test(diffText)
+  )
+    found.add('config_security_change');
 
   return [...found];
 }
