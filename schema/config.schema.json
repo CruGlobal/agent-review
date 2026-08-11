@@ -170,7 +170,23 @@
         "enabled": { "type": "boolean" },
         "path": { "type": "string" },
         "roots": { "type": "array", "items": { "type": "string" } },
-        "aliases": { "type": "array", "items": { "type": "string" } },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "object",
+                "required": ["prefix", "target"],
+                "additionalProperties": false,
+                "properties": {
+                  "prefix": { "type": "string" },
+                  "target": { "type": "string" }
+                }
+              }
+            ]
+          }
+        },
         "extensions": { "type": "array", "items": { "type": "string" } }
       }
     },

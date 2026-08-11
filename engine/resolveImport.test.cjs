@@ -34,3 +34,19 @@ test('returns null for bare/external specifiers', () => {
 test('returns null for unresolvable relative import', () => {
   assert.equal(resolveImport('src/a/c.ts', './nope', fileSet), null);
 });
+
+test('object alias maps prefix to target dir', () => {
+  const files = new Set(['src/lib/money.ts']);
+  const r = resolveImport('src/app/page.tsx', '@/lib/money', files, {
+    aliases: [{ prefix: '@/', target: 'src/' }],
+  });
+  assert.strictEqual(r, 'src/lib/money.ts');
+});
+
+test('string alias still resolves (no regression)', () => {
+  const files = new Set(['src/b.ts']);
+  const r = resolveImport('src/a/c.ts', 'src/b', files, {
+    aliases: ['src/'],
+  });
+  assert.strictEqual(r, 'src/b.ts');
+});

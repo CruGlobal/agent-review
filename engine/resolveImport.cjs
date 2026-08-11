@@ -16,11 +16,19 @@ function resolveImport(fromFile, spec, fileSet, opts = {}) {
   const aliases =
     opts.aliases && opts.aliases.length ? opts.aliases : DEFAULT_ALIASES;
   const exts = opts.exts && opts.exts.length ? opts.exts : DEFAULT_EXTS;
+
+  // Normalize aliases: convert strings to {prefix, target} objects
+  const norm = aliases.map((a) =>
+    typeof a === 'string' ? { prefix: a, target: a } : a,
+  );
+
   let base;
-  if (
-    aliases.some((a) => spec === a.replace(/\/$/, '') || spec.startsWith(a))
-  ) {
-    base = spec; // already repo-root-relative (alias roots)
+  const hit = norm.find(
+    (a) => spec === a.prefix.replace(/\/$/, '') || spec.startsWith(a.prefix),
+  );
+
+  if (hit) {
+    base = hit.target + spec.slice(hit.prefix.length);
   } else if (spec.startsWith('.')) {
     base = path.posix.normalize(
       path.posix.join(path.posix.dirname(fromFile), spec),
