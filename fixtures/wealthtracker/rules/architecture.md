@@ -1,0 +1,15 @@
+# Architecture — Focus Areas
+
+- **Server vs client components** — App Router defaults to Server Components. Reach for `"use client"` only when a component needs hooks, state, effects, or browser APIs. Pushing `"use client"` up too high drags whole subtrees into the client bundle; keep the boundary as low as possible
+- **Route groups & layouts** — routes live under `src/app/(app)/<feature>/page.tsx` + `layout.tsx`, with `(auth)` for unauthenticated flows. New routes should land in the right group; don't recreate auth/shell chrome a layout already provides
+- **Route Handlers** — server endpoints are `src/app/api/**/route.ts` exporting HTTP verb handlers. There is no Pages Router and no `src/middleware.ts`; don't introduce `.page.tsx`, `pages/api`, or middleware-style auth gating
+- **Supabase access boundaries** — `src/lib/supabase/client.ts` (browser), `server.ts` (Server Components / Route Handlers), `admin.ts` (SERVICE ROLE). The admin client must never reach the client bundle. RLS in `supabase/migrations/*.sql` is the real authorization boundary — verify queries aren't relying on UI checks alone
+- **Thin route components** — `page.tsx` should compose feature components and fetch data; business logic belongs in `src/lib/<domain>/` or hooks, not inline in the page. Domain math (net worth, allocation, projections, XIRR) stays in `src/lib` where it can be unit-tested
+- **Component feature organization** — new components belong under `src/components/<feature>/` (wealth, invest, spend, cards, settings, onboarding, layout, providers, shared, theme); cross-feature components go in `src/components/shared/`. Don't drop one-off components into `shared/`
+- **React Query data flow** — client caching uses `@tanstack/react-query` (`useQuery`/`useMutation`). Mutations should `invalidateQueries` or `setQueryData` for the affected keys; check `staleTime` choices and that query keys are stable and specific. Don't refetch in a `useEffect` what a query already owns
+- **useEffect dependency arrays** — verify all referenced values are listed; flag empty arrays that reference props/state (stale closures); flag effects that should be `useMemo` or event handlers instead
+- **Error boundaries** — feature routes should provide an `error.tsx` (and `loading.tsx` where useful). Errors should surface to the user, not be swallowed
+- **Sequential-await waterfalls** — collapse independent `await`s with `Promise.all`; only keep awaits sequential when one genuinely depends on the prior result
+- **Prop drilling vs context vs React Query cache** — if a value is passed through 3+ layers, consider reading it from the React Query cache, a context, or moving the fetch closer to the consumer
+- **Convention compliance** — every investing surface leads with SINCE-PURCHASE gain, never daily/day-change. New code should follow `AGENTS.md`/`CLAUDE.md` and look like the code around it unless the existing pattern is what's being fixed
+- **Technical debt** — debt added vs reduced by this PR. Refactors that only move code without improving clarity are neutral, not positive. When unsure of a convention, defer to the senior maintainer
