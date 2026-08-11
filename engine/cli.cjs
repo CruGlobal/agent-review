@@ -1,5 +1,5 @@
 'use strict';
-const { join } = require('node:path');
+const { join, relative } = require('node:path');
 const { execFileSync } = require('node:child_process');
 const { readFileSync, writeFileSync, existsSync, rmSync } = require('node:fs');
 const os = require('node:os');
@@ -48,6 +48,9 @@ function ctx(argv) {
   return {
     ROOT,
     RD,
+    // Relative form of RD under ROOT — used to suppress self-matches on the reviewer's own
+    // config when scanning diff content (see selectAgents.codeDiff's reviewDirRel param).
+    reviewDirRel: relative(ROOT, RD),
     CONFIG: join(RD, 'config.yml'),
     SCHEMA: join(__dirname, '../schema/config.schema.json'),
     INDEX: join(RD, 'index'),
@@ -281,6 +284,7 @@ function main(rawArgv) {
           diffText: diff,
           linesChanged: linesChangedFromStat(stat),
           scope,
+          reviewDirRel: C.reviewDirRel,
         },
         cfg,
       );
@@ -327,4 +331,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main };
+module.exports = { main, ctx };
