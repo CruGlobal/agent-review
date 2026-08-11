@@ -1,7 +1,17 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { main, ctx } = require('./cli.cjs');
+const { execFileSync } = require('node:child_process');
+const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+const { join } = require('node:path');
+const os = require('node:os');
+const {
+  main,
+  ctx,
+  changedFiles,
+  resolveMinSupport,
+  planTmpPath,
+} = require('./cli.cjs');
 const { buildPlan } = require('./plan.cjs');
 
 function run(args) {
@@ -135,4 +145,96 @@ test('plan subcommand emits plan JSON', () => {
   assert.strictEqual(plan.profile, 'standard');
   assert.ok(Array.isArray(plan.agents));
   assert.strictEqual(plan.agents[0].id, 'standards');
+});
+
+// --- Regression coverage for the audit fixes (base_branch, min_support, tmp-file collision) ---
+
+// main <- release <- feature, one file added per branch, HEAD parked on `feature`.
+function tmpGitRepo() {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-git-'));
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+  git('init', '-q');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'Test');
+  writeFileSync(join(root, 'README.md'), 'init\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  git('branch', '-M', 'main');
+  git('checkout', '-q', '-b', 'release');
+  writeFileSync(join(root, 'release.txt'), 'r\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'release commit');
+  git('checkout', '-q', '-b', 'feature');
+  writeFileSync(join(root, 'feature.txt'), 'f\n');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'feature commit');
+  return root;
+}
+
+test('changedFiles defaults to cfg.base_branch, or "main" when absent', () => {
+  const root = tmpGitRepo();
+  try {
+    const C = ctx(['x', '--root', root]);
+    const noCfg = changedFiles(undefined, C, {});
+    assert.equal(noCfg.base, 'main');
+    assert.deepEqual(noCfg.files.sort(), ['feature.txt', 'release.txt']);
+
+    const withCfg = changedFiles(undefined, C, { base_branch: 'release' });
+    assert.equal(withCfg.base, 'release');
+    assert.deepEqual(withCfg.files, ['feature.txt']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('changedFiles falls back to HEAD~1 when the default base branch does not resolve', () => {
+  const root = tmpGitRepo();
+  try {
+    const C = ctx(['x', '--root', root]);
+    const r = changedFiles(undefined, C, { base_branch: 'does-not-exist' });
+    assert.equal(r.base, 'HEAD~1');
+    assert.deepEqual(r.files, ['feature.txt']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('changedFiles throws (no silent fallback) when an explicit --base fails to resolve', () => {
+  const root = tmpGitRepo();
+  try {
+    const C = ctx(['x', '--root', root]);
+    assert.throws(
+      () => changedFiles('does-not-exist', C, {}),
+      /could not determine a diff base/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('resolveMinSupport defaults from cfg.learning.min_support, else 3; explicit flag wins', () => {
+  assert.deepEqual(resolveMinSupport({}, undefined), { minSupport: 3 });
+  assert.deepEqual(
+    resolveMinSupport({ learning: { min_support: 7 } }, undefined),
+    { minSupport: 7 },
+  );
+  assert.deepEqual(
+    resolveMinSupport({ learning: { min_support: 7 } }, '2'),
+    { minSupport: 2 },
+  );
+});
+
+test('resolveMinSupport rejects a non-positive-integer explicit value', () => {
+  const r = resolveMinSupport({}, 'abc');
+  assert.ok(r.error);
+  assert.equal(r.minSupport, undefined);
+});
+
+test('planTmpPath is stable per ROOT, distinct across ROOTs, and namespaced', () => {
+  const a1 = planTmpPath('/tmp/repo-a');
+  const a2 = planTmpPath('/tmp/repo-a');
+  const b = planTmpPath('/tmp/repo-b');
+  assert.equal(a1, a2);
+  assert.notEqual(a1, b);
+  assert.match(a1, /agent-review-plan-[0-9a-f]{12}\.json$/);
 });

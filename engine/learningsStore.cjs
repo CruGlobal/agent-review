@@ -48,6 +48,38 @@ function parsePending(yamlText) {
   return out;
 }
 
+// Shapes raw findings into ids/signatures, writes <dir>/findings.json and
+// <dir>/pending/<reviewId>.yml, and returns the shaped findings. Shared by
+// learningsStore's own `--emit` CLI branch and cli.cjs's `emit` subcommand so
+// the pending-file shape only has one place to change.
+function emitFindings({ dir, reviewId, rawFindings }) {
+  const findings = (rawFindings.findings || rawFindings).map((f, i) => ({
+    id: `f${i + 1}`,
+    signature: signature(f),
+    ...f,
+  }));
+  mkdirSync(join(dir, 'pending'), { recursive: true });
+  writeFileSync(
+    join(dir, 'findings.json'),
+    JSON.stringify({ reviewId, findings }, null, 2),
+  );
+  const pending = {
+    reviewId,
+    findings: findings.map((f) => ({
+      id: f.id,
+      signature: f.signature,
+      agent: f.agent,
+      category: f.category,
+      severity: f.severity,
+      file: f.file,
+      message: f.message,
+      outcome: '',
+    })),
+  };
+  writeFileSync(join(dir, 'pending', `${reviewId}.yml`), YAML.stringify(pending));
+  return findings;
+}
+
 function loadApproved(learnings) {
   return ((learnings && learnings.learnings) || []).filter(
     (l) => l.status === 'approved',
@@ -89,6 +121,7 @@ module.exports = {
   saveLearnings,
   loadFeedback,
   appendFeedback,
+  emitFindings,
 };
 
 if (require.main === module) {
@@ -105,33 +138,7 @@ if (require.main === module) {
   if (a.emit) {
     const raw = JSON.parse(readFileSync(a.in, 'utf8'));
     const reviewId = typeof a.review === 'string' ? a.review : 'review';
-    const findings = (raw.findings || raw).map((f, i) => ({
-      id: `f${i + 1}`,
-      signature: signature(f),
-      ...f,
-    }));
-    mkdirSync(join(base, 'pending'), { recursive: true });
-    writeFileSync(
-      findingsPath,
-      JSON.stringify({ reviewId, findings }, null, 2),
-    );
-    const pending = {
-      reviewId,
-      findings: findings.map((f) => ({
-        id: f.id,
-        signature: f.signature,
-        agent: f.agent,
-        category: f.category,
-        severity: f.severity,
-        file: f.file,
-        message: f.message,
-        outcome: '',
-      })),
-    };
-    writeFileSync(
-      join(base, 'pending', `${reviewId}.yml`),
-      YAML.stringify(pending),
-    );
+    const findings = emitFindings({ dir: base, reviewId, rawFindings: raw });
     process.stdout.write(
       `Emitted ${findings.length} findings; pending/${reviewId}.yml\n`,
     );

@@ -1,16 +1,9 @@
 'use strict';
 const { join, relative, dirname } = require('node:path');
 const { execFileSync } = require('node:child_process');
-const {
-  readFileSync,
-  writeFileSync,
-  existsSync,
-  rmSync,
-  mkdirSync,
-} = require('node:fs');
+const { readFileSync, writeFileSync, existsSync, rmSync } = require('node:fs');
 const os = require('node:os');
 const { createHash } = require('node:crypto');
-const YAML = require('yaml');
 const { loadConfig } = require('./loadConfig.cjs');
 const { buildPlan, linesChangedFromStat } = require('./plan.cjs');
 const {
@@ -28,8 +21,8 @@ const {
   saveLearnings,
   mergeProposals,
   loadApproved,
+  emitFindings,
 } = require('./learningsStore.cjs');
-const { signature } = require('./findingSignature.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const {
   setLearningStatus,
@@ -120,6 +113,29 @@ function changedFiles(base, C, cfg) {
       .map((s) => s.trim())
       .filter(Boolean),
   };
+}
+
+// Resolves `learn`'s --min-support: explicit flag wins, else cfg.learning.min_support, else 3.
+function resolveMinSupport(cfg, explicit) {
+  if (explicit === undefined) {
+    return { minSupport: (cfg.learning && cfg.learning.min_support) || 3 };
+  }
+  const n = Number(explicit);
+  if (!Number.isInteger(n) || n < 1) {
+    return { error: '--min-support must be a positive integer' };
+  }
+  return { minSupport: n };
+}
+
+// Namespaces `run`'s tmp plan file per-repo so concurrent runs against different repos
+// (or repeated runs against the same one) don't collide/clobber each other.
+function planTmpPath(root) {
+  return join(
+    os.tmpdir(),
+    'agent-review-plan-' +
+      createHash('sha1').update(root).digest('hex').slice(0, 12) +
+      '.json',
+  );
 }
 
 function indexOpts(cfg) {
@@ -245,33 +261,7 @@ function main(rawArgv) {
       const base = dirname(FEEDBACK);
       const reviewId = flag(rest, '--review') || 'review';
       const raw = JSON.parse(readFileSync(flag(rest, '--in'), 'utf8'));
-      const findings = (raw.findings || raw).map((f, i) => ({
-        id: `f${i + 1}`,
-        signature: signature(f),
-        ...f,
-      }));
-      mkdirSync(join(base, 'pending'), { recursive: true });
-      writeFileSync(
-        join(base, 'findings.json'),
-        JSON.stringify({ reviewId, findings }, null, 2),
-      );
-      const pending = {
-        reviewId,
-        findings: findings.map((f) => ({
-          id: f.id,
-          signature: f.signature,
-          agent: f.agent,
-          category: f.category,
-          severity: f.severity,
-          file: f.file,
-          message: f.message,
-          outcome: '',
-        })),
-      };
-      writeFileSync(
-        join(base, 'pending', `${reviewId}.yml`),
-        YAML.stringify(pending),
-      );
+      const findings = emitFindings({ dir: base, reviewId, rawFindings: raw });
       out(`Emitted ${findings.length} findings; pending/${reviewId}.yml`);
       return 0;
     }
@@ -322,16 +312,12 @@ function main(rawArgv) {
     }
     case 'learn': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      let minSupport = (cfg.learning && cfg.learning.min_support) || 3;
-      const ms = flag(rest, '--min-support');
-      if (ms !== undefined) {
-        const n = Number(ms);
-        if (!Number.isInteger(n) || n < 1) {
-          out('error: --min-support must be a positive integer');
-          return 1;
-        }
-        minSupport = n;
+      const resolved = resolveMinSupport(cfg, flag(rest, '--min-support'));
+      if (resolved.error) {
+        out(`error: ${resolved.error}`);
+        return 1;
       }
+      const { minSupport } = resolved;
       const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
       const proposals = mineLearnings(loadFeedback(FEEDBACK), { minSupport });
       const merged = mergeProposals(loadLearnings(LEARNINGS), proposals);
@@ -405,12 +391,7 @@ function main(rawArgv) {
           ? queryImpact(files, loadIndex(C, cfg), {})
           : null;
       out(preflightSummary(plan, impact));
-      const planPath = join(
-        os.tmpdir(),
-        'agent-review-plan-' +
-          createHash('sha1').update(C.ROOT).digest('hex').slice(0, 12) +
-          '.json',
-      );
+      const planPath = planTmpPath(C.ROOT);
       writeFileSync(planPath, JSON.stringify({ ...plan, impact }, null, 2));
       out(planPath);
       if (rest.includes('--no-launch')) {
@@ -447,4 +428,10 @@ if (require.main === module) {
   }
 }
 
-module.exports = { main, ctx };
+module.exports = {
+  main,
+  ctx,
+  changedFiles,
+  resolveMinSupport,
+  planTmpPath,
+};

@@ -109,4 +109,5 @@ module.exports = {
   listRepoFiles,
   indexRegex,
   DEFAULT_ROOTS,
+  csv,
 };

@@ -57,4 +57,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { parseArgs, posInt };
+module.exports = { parseArgs, posInt, csv };
