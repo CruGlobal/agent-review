@@ -1,0 +1,6 @@
+{
+  "extraKnownMarketplaces": {
+    "dr-bizz": { "source": { "source": "github", "repo": "dr-bizz/agent-review" } }
+  },
+  "enabledPlugins": { "agent-review@dr-bizz": true }
+}

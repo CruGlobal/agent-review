@@ -1,0 +1,11 @@
+name: agent-review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+jobs:
+  review:
+    uses: dr-bizz/agent-review/.github/workflows/review.yml@main
+    with:
+      mode: standard
+    secrets:
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
