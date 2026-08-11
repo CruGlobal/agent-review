@@ -21,11 +21,12 @@ base_branch: main
 risk:
   # File-pattern contributions. `tier` is descriptive; `points` drives the score.
   # Per file, the highest-scoring matching pattern wins (patterns don't stack on
-  # one file; files sum across the diff). A 0-point entry only matters when no
-  # other pattern matches — use `excluded_paths` to exclude.
+  # one file; files sum across the diff). A 0-point entry never changes the score
+  # (max starts at 0) — it documents that a path was considered and deemed
+  # no-risk; use `excluded_paths` to actually exclude.
   patterns:
     - { glob: '.github/workflows/**', points: 3, tier: critical }
-    # Explicit 0-point entries: only take effect when no other pattern matches.
+    # Explicit 0-point entries: documentation of intent, not scoring behavior.
     - { glob: '**/*.test.*', points: 0, tier: low }
     - { glob: '**/*.snap', points: 0, tier: low }
     # Examples — uncomment and adapt to this repo's layout:

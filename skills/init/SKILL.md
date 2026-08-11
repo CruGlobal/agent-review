@@ -65,6 +65,9 @@ BATCHES=$(( (PRS + 9) / 10 ))
 # survive between blocks. Everything a later stage needs goes in this file, and every later
 # block starts by sourcing it. TPL is the plugin templates dir — substitute the real path.
 : > /tmp/agent_review_init.sh
+# Clear any read-only-guard baseline left by a previous run — the guard's `[ -f ] ||` capture
+# would otherwise reuse a stale snapshot for this run's drift checks.
+rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt
 cat >> /tmp/agent_review_init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
 export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
@@ -167,21 +170,36 @@ Every subagent this skill dispatches is told, verbatim, to write nothing. That i
 defense in depth, not proof. **Verify it mechanically**, because the 3B gate tells a human
 "nothing has been written" and that claim has to be true at the moment it is made.
 
-**Capture a baseline before dispatching ANY subagent** — the Phase 1 drafter and each Phase 2
-miner alike:
+**Capture the baseline ONCE per run, before the FIRST subagent dispatch of the run** — that is the
+Phase 1 drafter in a normal run, or the Phase 2 fan-out when `--skip-history` is not set but Phase
+1's drafter was somehow skipped. The block is idempotent, so both dispatch sites can run it and
+only the first one takes effect:
 
 ```bash
-git rev-parse HEAD > /tmp/agent_review_init_baseline_head.txt
-git status --porcelain > /tmp/agent_review_init_baseline_status.txt
+# ONE baseline per run. The `[ -f ] ||` guard is load-bearing — see below.
+[ -f /tmp/agent_review_init_baseline_head.txt ] || {
+  git rev-parse HEAD > /tmp/agent_review_init_baseline_head.txt
+  git status --porcelain > /tmp/agent_review_init_baseline_status.txt
+}
 wc -l < /tmp/agent_review_init_baseline_status.txt
 ```
+
+**Never re-baseline mid-run.** The Phase 1 drafter runs *concurrently* with the Phase 2 fan-out, so
+a second capture taken at fan-out time would absorb anything the drafter had already written into
+the "clean" snapshot. Every later check — including the one immediately before the 3B gate — would
+then diff against a contaminated baseline and report clean, and `git reset --soft <baselineHEAD>`
+would be a no-op against a commit the drafter had already made. One baseline, taken before anything
+was dispatched, is the only snapshot that can be trusted.
+
+(If a *previous* init run left these files behind, the guard would reuse a stale baseline. Delete
+both files at Stage 0, alongside `: > /tmp/agent_review_init.sh`, so each run starts fresh.)
 
 The porcelain snapshot deliberately records the user's **pre-existing** untracked files. They are
 not ours to touch, and the recovery steps below depend on knowing which untracked paths were there
 first.
 
 **Re-check after EVERY subagent returns**, and **once more immediately before presenting the 3B
-gate**:
+gate**. Every re-check compares current state against that one original baseline:
 
 ```bash
 git rev-parse HEAD > /tmp/agent_review_init_now_head.txt
@@ -198,8 +216,9 @@ Both diffs silent → continue. Any output → **drift**. Then:
    `git log <baselineHEAD>..HEAD --oneline` if HEAD moved.
 3. **Discard the offending subagent's returned content as contaminated.** A subagent that ignored
    the read-only constraint may have ignored other parts of its brief too; detecting the write
-   without discarding the output still poisons the mined result. Re-run that subagent from a fresh
-   baseline, or drop its contribution and say so in the 3B proposal.
+   without discarding the output still poisons the mined result. Either re-run that subagent
+   *after* the revert below — against the same original baseline, which still stands — or drop its
+   contribution and say so in the 3B proposal.
 4. **Revert surgically**, never broadly:
    - HEAD moved → `git reset --soft <baselineHEAD>` (keeps the working tree; nothing else is lost).
    - Tracked file drifted → `git checkout -- <that path>`, path by path.
@@ -247,8 +266,9 @@ API layer style, CI system. Note the evidence for each (which file, which depend
 
 **Risk `patterns`** — build the list from what actually exists; every glob must match real paths.
 Per file, the highest-scoring matching pattern wins — patterns do **not** stack on one file, and
-the per-file scores sum across the diff. A `0`-point entry therefore only matters when no other
-pattern matches it; to keep a path out of scoring entirely, put it in `excluded_paths`.
+the per-file scores sum across the diff. A `0`-point entry never changes the score (the per-file
+max starts at 0), so it is documentation of intent — a record that the path was considered and
+deemed no-risk. To actually keep a path out of scoring, put it in `excluded_paths`.
 
 | Kind of path                                     | points | tier     |
 | ------------------------------------------------ | ------ | -------- |
@@ -346,7 +366,8 @@ calls, schema parse calls) taken from the sampled files.
 
 ### Draft the rule docs (subagent)
 
-**Capture the [read-only guard](#the-read-only-guard) baseline before dispatching**, and re-check
+**This is the run's first subagent dispatch, so capture the
+[read-only guard](#the-read-only-guard) baseline here** — once, before dispatching — and re-check
 it the moment the subagent returns.
 
 Dispatch one general-purpose subagent to draft the rule docs while Phase 2 runs. Give it the stack
@@ -421,11 +442,13 @@ gh pr list --state merged --limit "$PRS" --json number --jq '.[].number' \
   | paste -d' ' - - - - - - - - - -
 ```
 
-Each output line is one batch of up to 10 PR numbers. **Capture the
-[read-only guard](#the-read-only-guard) baseline first**, then **dispatch one general-purpose
-subagent per batch — at most `$BATCHES` of them — all in a SINGLE message so they run in
-parallel.** Re-check the guard as each batch returns; discard any batch's candidates if drift
-appeared while it was running.
+Each output line is one batch of up to 10 PR numbers. **Run the
+[read-only guard](#the-read-only-guard) capture block first** — its `[ -f ] ||` guard makes this a
+no-op when Phase 1 already took the baseline, which is the point: the drafter is still running, and
+re-baselining now would fold its writes into the "clean" snapshot. Then **dispatch one
+general-purpose subagent per batch — at most `$BATCHES` of them — all in a SINGLE message so they
+run in parallel.** Re-check the guard as each batch returns; discard any batch's candidates if
+drift appeared while it was running.
 
 Miners are read-only too. Open each miner's brief with the same constraint the Phase 1 drafter
 gets, verbatim:
@@ -553,8 +576,9 @@ Keep the skeleton's comments; they are the documentation a human editing this fi
 > ahead" that predates the proposal. Bootstrap suggests; the human ratifies.
 
 **Run the [read-only guard](#the-read-only-guard) re-check one final time, immediately before
-presenting** — this proposal tells the human nothing has been written yet, so that has to be
-verified at the moment they are told, not merely earlier. If it reports drift, say so instead of
+presenting, diffing against the run's ORIGINAL baseline** (never a re-captured one) — this proposal
+tells the human nothing has been written yet, so that has to be verified at the moment they are
+told, against the state the run actually started from. If it reports drift, say so instead of
 presenting, and follow the guard's discard-and-revert steps.
 
 Present the complete proposal:
