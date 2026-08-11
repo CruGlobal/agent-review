@@ -54,16 +54,45 @@ while [ $# -gt 0 ]; do
 done
 case "$PRS" in ''|*[!0-9]*) PRS=50 ;; esac
 
+# Phase 2 fans out one subagent per 10 PRs. Hard cap: 10 batches (~100 PRs). Anything above that
+# needs an explicit decision from the user (see below) rather than silently spawning 20+ agents.
+OVER_CAP=""
+[ "$PRS" -gt 100 ] && OVER_CAP="true"
+BATCHES=$(( (PRS + 9) / 10 ))
+[ "$BATCHES" -gt 10 ] && BATCHES=10
+
 # ⚠️ CROSS-STAGE STATE — each bash block below is a SEPARATE shell; shell variables do NOT
 # survive between blocks. Everything a later stage needs goes in this file, and every later
 # block starts by sourcing it. TPL is the plugin templates dir — substitute the real path.
 : > /tmp/agent_review_init.sh
 cat >> /tmp/agent_review_init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
+export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
 export TPL="<absolute path to the plugin's templates/ directory>"
 EOF
-echo "prs=$PRS migrate=${MIGRATE:-false} skip_history=${SKIP_HISTORY:-false}"
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "🧭 /agent-review:init"
+echo "• Phase 1 codebase scan — 1 subagent"
+if [ -n "$MIGRATE" ]; then
+  echo "• Migrate mode — no scan, no history mining"
+elif [ -n "$SKIP_HISTORY" ]; then
+  echo "• Phase 2 PR-history mining — SKIPPED (--skip-history)"
+else
+  echo "• Phase 2 PR-history mining — up to $PRS merged PRs across $BATCHES parallel subagents"
+  echo "  Rough cost: ~\$0.30-0.60 per 10-PR batch (larger diffs cost more)"
+  printf '  Estimated total: ~$%s.%02d-%s.%02d\n' \
+    $((BATCHES * 30 / 100)) $((BATCHES * 30 % 100)) \
+    $((BATCHES * 60 / 100)) $((BATCHES * 60 % 100))
+fi
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+[ -n "$OVER_CAP" ] && echo "⚠️  --prs $PRS exceeds the 100-PR fan-out cap — see below before continuing"
 ```
+
+If `OVER_CAP` is set, **stop and ask the user** before mining. Offer: (a) mine the 100 most recent
+merged PRs (the default clamp — recency beats volume for learning current conventions), or (b)
+confirm the larger run explicitly, accepting the cost and the wider fan-out. Do not spawn more than
+10 batch subagents without that explicit confirmation.
 
 ```bash
 git rev-parse --show-toplevel || { echo "❌ Not a git repository — run init from the repo root."; exit 1; }
@@ -97,11 +126,34 @@ mapping hardcodes the strings the v1 keys meant. Preserve `points` values, every
 entry, and all surrounding comments untouched. If the file is already `version: 2`, report that
 and change nothing.
 
+### Verify the migration mechanically
+
+`config validate` alone is **not** a sufficient backstop here: the schema still accepts legacy
+`when:` values, and the engine's in-memory upgrade only fires on `version: 1`. So a half-migrated
+file — `version:` bumped to `2` but a legacy key left behind — validates clean while that key's
+detection silently never fires again. Run both checks, in this order:
+
 ```bash
+# 1. Mechanical: no legacy keys and no v1 marker may survive. This must print NOTHING.
+if grep -n 'supabase_migration_change\|next_config_security_change\|version: 1' \
+     .claude/review/config.yml; then
+  echo "❌ MIGRATION INCOMPLETE — the lines above are still v1. Finish the mapping and re-run;"
+  echo "   do NOT commit. A bumped version with a leftover legacy key validates clean but"
+  echo "   permanently disables that detection."
+  exit 1
+fi
+echo "✅ no legacy keys remain"
+
+# 2. Schema.
 agent-review config validate
+
+# 3. Eyeball: the special detections as the engine now reads them.
+agent-review config get risk.special
 ```
 
-Must print `config OK`. Then report what changed and stop — migrate mode runs no other phase.
+Step 2 must print `config OK`. Show the step-3 output to the user and have them confirm that every
+special entry carries the `paths`/`files`/`keywords` it needs — an entry with an empty or missing
+list never fires. Then report what changed and stop — migrate mode runs no other phase.
 
 ---
 
@@ -195,11 +247,21 @@ calls, schema parse calls) taken from the sampled files.
 ### Draft the rule docs (subagent)
 
 Dispatch one general-purpose subagent to draft the rule docs while Phase 2 runs. Give it the stack
-summary, the sampled files, and `CLAUDE.md`/`AGENTS.md`/`CONTRIBUTING.md` contents. Its job:
+summary, the sampled files, and `CLAUDE.md`/`AGENTS.md`/`CONTRIBUTING.md` contents. Open its brief
+with this constraint, verbatim, before anything else:
 
-- Start from `$TPL/rules/<agent>.md` for each of the five core agents. **Keep the generic body
-  verbatim** — it is the shared baseline — and append a repo-specific section below the
-  `<!-- init: extend this file with repo-specific focus areas and evidence links -->` marker.
+> **You are drafting text, not files. Return the full drafted content of each document in your
+> final message. Create and modify NO files — no Write, no Edit, no shell redirection. The
+> template files you read are READ-ONLY inputs: never edit a template in place, and never write
+> anything under `.claude/review/`. A human has not yet approved this proposal.**
+
+Then its job:
+
+- Read `$TPL/rules/<agent>.md` for each of the five core agents and use it as the base of your
+  draft. **Keep the generic body verbatim** — it is the shared baseline — and add a repo-specific
+  section after the
+  `<!-- init: extend this file with repo-specific focus areas and evidence links -->` marker line
+  in the text you return.
 - Author a new doc from scratch for each selected specialist, following the same shape as the core
   docs (short intro, bolded focus groups, `Look for:` bullets, a checklist where a checklist fits).
 - Repo-specific content must be concrete: real directory paths, real helper names, real idioms
@@ -208,9 +270,10 @@ summary, the sampled files, and `CLAUDE.md`/`AGENTS.md`/`CONTRIBUTING.md` conten
   validation approach, test location and idioms, and the repo's own commands for lint/type-check/
   test, quoted exactly.
 - Every rule doc filename must match `rules/<name>.md` (letters, digits, `.`, `_`, `-` only) —
-  that is what the config schema accepts.
+  that is what the config schema accepts. Name the file in your returned text; do not create it.
 
-Have it return the full drafted text of each doc. Nothing is written to disk yet.
+The subagent returns the full drafted text of each doc. Nothing is written to disk yet — the docs
+exist only as text until the Phase 3 approval gate (step 3B) passes. If a subagent reports having written a file anyway, revert it before continuing.
 
 ---
 
@@ -246,21 +309,32 @@ PRs is still worth mining; just expect fewer candidates to clear the evidence th
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
+# Most recent first, clamped to the batch cap from Stage 0 (10 batches × 10 PRs).
 gh pr list --state merged --limit "$PRS" --json number --jq '.[].number' \
+  | head -n $((BATCHES * 10)) \
   | paste -d' ' - - - - - - - - - -
 ```
 
 Each output line is one batch of up to 10 PR numbers. **Dispatch one general-purpose subagent per
-batch, all in a SINGLE message so they run in parallel.** Each subagent reads its batch's PRs with:
+batch — at most `$BATCHES` of them — all in a SINGLE message so they run in parallel.**
+
+Each subagent reads its batch cheaply-first: metadata and review conversation always, the file
+list always, and the **full patch only for the PRs where a lens actually needs the code** (a
+fix/revert whose mistake has to be identified, a PR whose review comments point at specific lines,
+an AI-authored PR being characterized). Skimming a file list is enough to classify most PRs.
 
 ```bash
 gh pr view <n> --json number,title,body,author,mergedAt,url,comments,reviews
-gh pr diff <n>
+gh pr diff <n> --name-only          # always — cheap; often enough on its own
 gh api repos/<owner>/<repo>/pulls/<n>/comments --jq '.[] | {path, line, user: .user.login, body}'
+gh pr diff <n>                      # only when a lens needs the actual code
 ```
 
 (`gh pr view --json comments,reviews` gives conversation comments and review summaries; the
 `gh api …/pulls/<n>/comments` call gives the inline line-level review comments — mine both.)
+Tell each subagent to cap full-patch reads at roughly half its batch, and to truncate any single
+patch it does pull to the hunks the relevant comments point at — a 3000-line diff read in full
+buys nothing over its first few hundred lines of signal.
 
 Each subagent examines every PR through these **four lenses**:
 
