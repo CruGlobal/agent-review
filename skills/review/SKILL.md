@@ -76,16 +76,28 @@ case "$MODE" in
 esac
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+
+# ⚠️ CROSS-STAGE STATE — read this once, it applies to every bash block below.
+# Each block you run is a SEPARATE shell: shell variables do NOT survive from one block to the
+# next. Anything a later stage needs is persisted to /tmp/review_env.sh at the moment it is
+# computed, and every later block starts by sourcing that file. Keep this discipline or later
+# stages will silently operate on empty strings.
+: > /tmp/review_env.sh    # fresh state for this review
+cat >> /tmp/review_env.sh <<EOF
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE"
+EOF
 ```
 
 ### Detect CI Mode
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 # CI mode: the `ci` argument was passed, or $AGENT_REVIEW_CI is set to anything non-empty.
 CI_MODE=""
 case " $* " in *" ci "*) CI_MODE="true" ;; esac
 [ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
+echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
 ```
 
 If `CI_MODE` is set, follow **[CI Mode](#ci-mode)** below — it changes what several stages do.
@@ -102,9 +114,10 @@ agent-review config validate || {
 ### Initialize Directories
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 mkdir -p /tmp/automated_fixes
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
-[ -z "$CI_MODE" ] && mkdir -p .claude/review/metrics/history
+[ -z "${CI_MODE:-}" ] && mkdir -p .claude/review/metrics/history
 ```
 
 ---
@@ -131,6 +144,7 @@ Always embed the `<!-- agent-review -->` marker so subsequent runs update the sa
 instead of stacking new ones.
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 if [ -z "$PR_NUMBER" ]; then
   echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
@@ -166,11 +180,14 @@ gh pr view --json number,title,baseRefName,headRefName,additions,deletions,chang
 
 DAY_OF_WEEK=$(date +%A)
 echo "Today is: $DAY_OF_WEEK"
+echo "export DAY_OF_WEEK=\"$DAY_OF_WEEK\"" >> /tmp/review_env.sh
 ```
 
 Build the diff manifest the whole review runs on:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
+
 BASE_REF=$(gh pr view --json baseRefOid -q .baseRefOid 2>/dev/null)
 HEAD_REF=$(gh pr view --json headRefOid -q .headRefOid 2>/dev/null)
 
@@ -178,14 +195,34 @@ if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   RANGE="$BASE_REF..$HEAD_REF"
 else
   # Fallback: merge-base against the repo's configured base branch.
-  BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null || echo main)
-  RANGE="$(git merge-base HEAD "$BASE_BRANCH")..HEAD"
+  # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
+  # (base_branch is optional), so guard on BOTH empty and "undefined" — otherwise RANGE would
+  # degrade to "..HEAD" and the whole review would silently run on an empty diff.
+  BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null)
+  if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
+    BASE_BRANCH=main
+  fi
+  MERGE_BASE=$(git merge-base HEAD "$BASE_BRANCH") || {
+    echo "❌ Could not resolve a diff base (tried '$BASE_BRANCH'). Set base_branch in config.yml."
+    exit 1
+  }
+  RANGE="$MERGE_BASE..HEAD"
 fi
 
+echo "Diff range: $RANGE"
 git diff $RANGE --name-only > /tmp/changed_files.txt
 git diff $RANGE --stat      > /tmp/diff_stat.txt
 git diff $RANGE             > /tmp/pr_diff.txt
+
+if [ ! -s /tmp/changed_files.txt ]; then
+  echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
+  exit 1
+fi
 wc -l < /tmp/changed_files.txt
+
+cat >> /tmp/review_env.sh <<EOF
+export BASE_REF="$BASE_REF" RANGE="$RANGE"
+EOF
 ```
 
 Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
@@ -362,7 +399,24 @@ filled copy:
 | `{{PROFILE_INSTRUCTION}}` | From the plan's `profile`: `chill` → "Report only high-confidence, severity ≥ 7 findings; suppress nits." · `standard` → "Report findings at all severities per the output format above." · `assertive` → "Report all findings including low-severity suggestions." |
 | `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against the repo's review dir (`rules/security.md` → `.claude/review/rules/security.md`), each preceded by a `----- <path> -----` line. If a listed doc is missing, note it in your output and continue with the rest. |
 | `{{LEARNINGS}}`         | Entries from `/tmp/review_rules.json` whose `agent` matches this agent's `id`, rendered as `APPROVED LEARNINGS (ratified from prior reviews — apply to files under <paths>):` followed by one bullet per `ruleText`. Empty string when there are none. |
-| `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only (when `/tmp/review_impact.json` exists): a properly numbered next step, worded — "6. Read /tmp/review_impact.json for directDependents / topImpacted. This change affects those dependent files — verify the change does not break them." The template splices this in right after instruction 5, so it must start with its own number and read as a standalone step. Empty string for every other agent. |
+| `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only, and only when `/tmp/review_impact.json` exists: the **actual dependents, inlined** (see the block below). Empty string for every other agent, and when impact was not computed. |
+
+**`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
+begin with its own step number and read as a standalone step. Build it from
+`/tmp/review_impact.json` (Stage 1B), listing real file names rather than pointing at the JSON:
+
+```
+6. BLAST RADIUS — this change has <blastRadius> transitive dependents. The changed files below
+   are imported by these files; verify the change does not break them:
+   - <changed file>: <its directDependents, comma-separated>
+   - <changed file>: <its directDependents, comma-separated>
+   Highest-impact changed files: <topImpacted entries as "file (N dependents)">
+   [If `truncated` is true, add: "(dependent list truncated by the traversal cap.)"]
+```
+
+Truncate sensibly — at most ~15 dependent paths per changed file and ~15 changed files, with a
+"…and N more" tail — so a wide blast radius cannot crowd out the rest of the prompt. Omit the
+placeholder entirely (empty string) if `blastRadius` is 0.
 
 Then launch each one with the Task tool:
 
@@ -394,10 +448,11 @@ slot needs the output; otherwise run it in parallel while the agents work. It is
 index being enabled in config:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 echo "🔍 Analyzing dependency impact (index engine)..."
 
 if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
-  if [ -n "$BASE_REF" ]; then
+  if [ -n "${BASE_REF:-}" ]; then
     agent-review impact --base "$BASE_REF" > /tmp/review_impact.json
   else
     agent-review impact > /tmp/review_impact.json
@@ -418,8 +473,9 @@ The JSON report has these fields:
 - `truncated` — `true` if the traversal cap was hit
 
 **Display** `blastRadius` and `topImpacted` as the dependency-impact summary (flag `truncated` if
-set). **Feed** the affected `directDependents`/`topImpacted` files into the architecture and
-data-integrity agents via `{{IMPACT}}` (Stage 1).
+set). **Feed** the actual dependent file names into the architecture and data-integrity agents by
+inlining them in `{{IMPACT}}` (Stage 1) — the agents never read this JSON themselves, so whatever
+you do not inline is invisible to them.
 
 ---
 
@@ -451,9 +507,11 @@ Store these in structured form for the debate rounds.
 Parse agent outputs for automated fixes:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 echo "🔧 Extracting automated fixes from agent reports..."
 
 FIX_COUNT=$(find /tmp/automated_fixes -name "fix_*.sh" 2>/dev/null | wc -l | tr -d ' ')
+echo "export FIX_COUNT=\"$FIX_COUNT\"" >> /tmp/review_env.sh
 
 if [ "$FIX_COUNT" -gt 0 ]; then
   echo "Found $FIX_COUNT automated fixes"
@@ -722,6 +780,7 @@ Average Confidence: [High/Medium/Low]
 **SKIP THIS ENTIRE STAGE IN CI MODE.** Nothing under `.claude/review/metrics/` is written in CI.
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true   # AGENT_MODE, FIX_COUNT, CI_MODE …
 echo "📊 Generating quality metrics dashboard..."
 
 PR_NUM=$(gh pr view --json number -q .number 2>/dev/null || echo "local")
@@ -730,6 +789,10 @@ AUTHOR=$(git config user.name || echo "Developer")
 
 # Average consensus severity for this review (from Stage 5) — substitute the real number.
 CURRENT_SEVERITY="[X.X]"
+
+cat >> /tmp/review_env.sh <<EOF
+export PR_NUM="$PR_NUM" CURRENT_DATE="$CURRENT_DATE" CURRENT_SEVERITY="$CURRENT_SEVERITY"
+EOF
 
 if [ -f .claude/review/metrics/severity_history.txt ]; then
   AVG_SEVERITY=$(awk '{sum+=$2; count++} END {printf "%.1f", sum/count}' \
@@ -801,6 +864,7 @@ echo "✅ Metrics dashboard created: .claude/review/metrics/PR_${PR_NUM}_metrics
 ### Update Review History
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 echo "$PR_NUM $CURRENT_SEVERITY $CURRENT_DATE" >> .claude/review/metrics/severity_history.txt
 
 cat > .claude/review/metrics/history/${CURRENT_DATE}_${PR_NUM}.json << EOF
@@ -876,7 +940,8 @@ straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
 ### Commit Metrics Dashboard
 
 ```bash
-if [ -f .claude/review/metrics/PR_${PR_NUM}_metrics.md ]; then
+. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
+if [ -f ".claude/review/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
   echo "📊 Committing quality metrics dashboard..."
   git add .claude/review/metrics/PR_${PR_NUM}_metrics.md \
           .claude/review/metrics/severity_history.txt \
@@ -939,6 +1004,7 @@ Please respond: 1, 2, 3, 4, 5, or 6
 Handle the choice:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, FIX_COUNT
 case "$choice" in
   1) cat .claude/review/metrics/PR_${PR_NUM}_metrics.md ;;
   2) gh pr comment "$PR_NUM" --body-file /tmp/agent_review_report.md && echo "✅ Review posted" ;;
@@ -1026,6 +1092,14 @@ Display:
 - Prompt shape and report shape → this plugin's `templates/archetype.md` and `templates/report.md`.
 - Everything computed (score, agent set, rule resolution, impact, learnings) → the `agent-review`
   binary. Never recompute those inline.
+
+**Cross-stage state**
+
+Every bash block runs in its own shell. `/tmp/review_env.sh` is the only carrier between stages:
+Stage 0A truncates it and writes `MODE`/`AGENT_MODE`/`MODEL_OVERRIDE`, then `CI_MODE`; Stage 0 adds
+`DAY_OF_WEEK`, `BASE_REF`, `RANGE`; Stage 2B adds `FIX_COUNT`; Stage 5B adds `PR_NUM`,
+`CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute itself begins with
+`. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the discipline.
 
 **Modes**
 
