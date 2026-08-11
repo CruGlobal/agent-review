@@ -23,13 +23,13 @@ function run(args) {
 test('help returns 0 and prints usage', () => {
   const { code, s } = run(['help']);
   assert.equal(code, 0);
-  assert.match(s, /usage: yarn review/);
+  assert.match(s, /usage: agent-review/);
 });
 
 test('no command prints usage', () => {
   const { code, s } = run([]);
   assert.equal(code, 0);
-  assert.match(s, /usage: yarn review/);
+  assert.match(s, /usage: agent-review/);
 });
 
 test('unknown command returns 1', () => {
@@ -92,4 +92,47 @@ test('ctx()-derived reviewDirRel reaches buildPlan and suppresses self-match und
     !plan.agents.some((a) => a.id === 'security'),
     'security must not self-select on the reviewer\'s own config content under a custom review dir',
   );
+});
+
+// Self-contained stdout capture (works regardless of existing helpers in this file).
+function captured(fn) {
+  const chunks = [];
+  const orig = process.stdout.write;
+  process.stdout.write = (s) => (chunks.push(String(s)), true);
+  try { fn(); } finally { process.stdout.write = orig; }
+  return chunks.join('');
+}
+
+test('usage names the agent-review binary', () => {
+  const out = captured(() => main(['help']));
+  assert.ok(out.includes('usage: agent-review <command>'));
+  assert.ok(out.includes('plan --files'));
+});
+
+test('plan subcommand emits plan JSON', () => {
+  const os = require('node:os');
+  const { mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-'));
+  mkdirSync(join(root, 'rd'), { recursive: true });
+  writeFileSync(join(root, 'rd', 'config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', '',
+  ].join('\n'));
+  const f = join(root, 'files.txt'); writeFileSync(f, 'src/a.ts\n');
+  const d = join(root, 'diff.txt'); writeFileSync(d, '');
+  const s = join(root, 'stat.txt'); writeFileSync(s, ' 1 file changed, 3 insertions(+)\n');
+  const out = captured(() =>
+    main(['plan', '--files', f, '--diff', d, '--stat', s, '--root', root, '--review-dir', 'rd']),
+  );
+  const plan = JSON.parse(out);
+  assert.strictEqual(plan.profile, 'standard');
+  assert.ok(Array.isArray(plan.agents));
+  assert.strictEqual(plan.agents[0].id, 'standards');
 });

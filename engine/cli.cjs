@@ -1,8 +1,16 @@
 'use strict';
-const { join, relative } = require('node:path');
+const { join, relative, dirname } = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { readFileSync, writeFileSync, existsSync, rmSync } = require('node:fs');
+const {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+  mkdirSync,
+} = require('node:fs');
 const os = require('node:os');
+const { createHash } = require('node:crypto');
+const YAML = require('yaml');
 const { loadConfig } = require('./loadConfig.cjs');
 const { buildPlan, linesChangedFromStat } = require('./plan.cjs');
 const {
@@ -19,7 +27,10 @@ const {
   loadLearnings,
   saveLearnings,
   mergeProposals,
+  loadApproved,
 } = require('./learningsStore.cjs');
+const { signature } = require('./findingSignature.cjs');
+const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const {
   setLearningStatus,
   listLearnings,
@@ -69,17 +80,11 @@ function validRef(ref) {
   return /^[A-Za-z0-9._/~^-]+$/.test(ref) && !ref.startsWith('-');
 }
 
-function changedFiles(base, C) {
+function changedFiles(base, C, cfg) {
   let b = base;
   if (b && !validRef(b)) throw new Error(`invalid --base ref: "${b}"`);
   if (!b) {
-    try {
-      b = execFileSync('git', ['-C', C.ROOT, 'merge-base', 'main', 'HEAD'], {
-        encoding: 'utf8',
-      }).trim();
-    } catch {
-      b = 'HEAD~1';
-    }
+    b = (cfg && cfg.base_branch) || 'main';
   }
   let raw;
   try {
@@ -89,9 +94,24 @@ function changedFiles(base, C) {
       { encoding: 'utf8' },
     );
   } catch (e) {
-    throw new Error(
-      `could not determine a diff base (tried "${b}"). Pass --base <ref>. [${e.message.split('\n')[0]}]`,
-    );
+    if (base) {
+      throw new Error(
+        `could not determine a diff base (tried "${b}"). Pass --base <ref>. [${e.message.split('\n')[0]}]`,
+      );
+    }
+    // Default base wasn't resolvable (e.g. no "main" branch locally) — fall back to HEAD~1.
+    try {
+      b = 'HEAD~1';
+      raw = execFileSync(
+        'git',
+        ['-C', C.ROOT, 'diff', '--name-only', `${b}...HEAD`],
+        { encoding: 'utf8' },
+      );
+    } catch (e2) {
+      throw new Error(
+        `could not determine a diff base (tried default base and "HEAD~1"). Pass --base <ref>. [${e2.message.split('\n')[0]}]`,
+      );
+    }
   }
   return {
     base: b,
@@ -125,11 +145,15 @@ function loadIndex(C, cfg, { force } = {}) {
   });
 }
 
-const USAGE = `usage: yarn review <command>
-  config show|validate|get <k>  show / validate / read a config value
-  index                         rebuild the import-graph cache
-  impact [--base <ref>]         cross-file blast radius for the current diff
-  feedback <pendingFile>        ingest marked outcomes
+const USAGE = `usage: agent-review <command>
+  config show|validate|get <k>   show / validate / read a config value
+  index                          rebuild the import-graph cache
+  impact [--base <ref>]          cross-file blast radius for the current diff
+  plan --files <f> --diff <f> --stat <f> [--scope <s>]   compute a review plan (JSON)
+  emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
+  filter --in <findings.json>    drop findings suppressed by approved learnings
+  rules                          list rules synthesized from approved learnings
+  feedback <pendingFile>         ingest marked outcomes
   learn [--min-support N]        mine feedback into proposed learnings
   learnings [--status S]         list learnings
   approve <id> | reject <id>     set a learning's status
@@ -165,7 +189,7 @@ function main(rawArgv) {
       }
       if (rest[0] === 'get') {
         if (!rest[1]) {
-          out('usage: yarn review config get <dot.path>');
+          out('usage: agent-review config get <dot.path>');
           return 1;
         }
         const val = rest[1]
@@ -189,13 +213,101 @@ function main(rawArgv) {
       return 0;
     }
     case 'impact': {
-      const { files } = changedFiles(flag(rest, '--base'), C);
-      out(JSON.stringify(queryImpact(files, loadIndex(C), {}), null, 2));
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { files } = changedFiles(flag(rest, '--base'), C, cfg);
+      out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
+      return 0;
+    }
+    case 'plan': {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const filesPath = flag(rest, '--files');
+      const diffPath = flag(rest, '--diff');
+      const statPath = flag(rest, '--stat');
+      const scope = flag(rest, '--scope') || 'single_feature';
+      const files = readFileSync(filesPath, 'utf8')
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const diffText = diffPath ? readFileSync(diffPath, 'utf8') : '';
+      const linesChanged = statPath
+        ? linesChangedFromStat(readFileSync(statPath, 'utf8'))
+        : 0;
+      const plan = buildPlan(
+        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel },
+        cfg,
+      );
+      out(JSON.stringify(plan, null, 2));
+      return 0;
+    }
+    case 'emit': {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { FEEDBACK } = learningPaths(cfg, C);
+      const base = dirname(FEEDBACK);
+      const reviewId = flag(rest, '--review') || 'review';
+      const raw = JSON.parse(readFileSync(flag(rest, '--in'), 'utf8'));
+      const findings = (raw.findings || raw).map((f, i) => ({
+        id: `f${i + 1}`,
+        signature: signature(f),
+        ...f,
+      }));
+      mkdirSync(join(base, 'pending'), { recursive: true });
+      writeFileSync(
+        join(base, 'findings.json'),
+        JSON.stringify({ reviewId, findings }, null, 2),
+      );
+      const pending = {
+        reviewId,
+        findings: findings.map((f) => ({
+          id: f.id,
+          signature: f.signature,
+          agent: f.agent,
+          category: f.category,
+          severity: f.severity,
+          file: f.file,
+          message: f.message,
+          outcome: '',
+        })),
+      };
+      writeFileSync(
+        join(base, 'pending', `${reviewId}.yml`),
+        YAML.stringify(pending),
+      );
+      out(`Emitted ${findings.length} findings; pending/${reviewId}.yml`);
+      return 0;
+    }
+    case 'filter': {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
+      const base = dirname(FEEDBACK);
+      const inPath = flag(rest, '--in') || join(base, 'findings.json');
+      const raw = JSON.parse(readFileSync(inPath, 'utf8'));
+      out(
+        JSON.stringify(
+          filterFindings(
+            raw.findings || raw,
+            loadApproved(loadLearnings(LEARNINGS)),
+          ),
+          null,
+          2,
+        ),
+      );
+      return 0;
+    }
+    case 'rules': {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { LEARNINGS } = learningPaths(cfg, C);
+      out(
+        JSON.stringify(
+          rulesFromLearnings(loadApproved(loadLearnings(LEARNINGS))),
+          null,
+          2,
+        ),
+      );
       return 0;
     }
     case 'feedback': {
       if (!rest[0]) {
-        out('usage: yarn review feedback <pendingFile>');
+        out('usage: agent-review feedback <pendingFile>');
         return 1;
       }
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
@@ -209,7 +321,8 @@ function main(rawArgv) {
       return 0;
     }
     case 'learn': {
-      let minSupport = 3;
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      let minSupport = (cfg.learning && cfg.learning.min_support) || 3;
       const ms = flag(rest, '--min-support');
       if (ms !== undefined) {
         const n = Number(ms);
@@ -219,7 +332,6 @@ function main(rawArgv) {
         }
         minSupport = n;
       }
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
       const proposals = mineLearnings(loadFeedback(FEEDBACK), { minSupport });
       const merged = mergeProposals(loadLearnings(LEARNINGS), proposals);
@@ -244,7 +356,7 @@ function main(rawArgv) {
     case 'approve':
     case 'reject': {
       if (!rest[0]) {
-        out(`usage: yarn review ${cmd} <id>`);
+        out(`usage: agent-review ${cmd} <id>`);
         return 1;
       }
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
@@ -267,7 +379,8 @@ function main(rawArgv) {
         out(`error: unknown mode "${mode}" (use ${MODES.join('/')})`);
         return 1;
       }
-      const { base: b, files } = changedFiles(base, C);
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const { base: b, files } = changedFiles(base, C, cfg);
       const diff = execFileSync('git', ['-C', C.ROOT, 'diff', `${b}...HEAD`], {
         encoding: 'utf8',
         maxBuffer: 64 * 1024 * 1024,
@@ -277,7 +390,6 @@ function main(rawArgv) {
         ['-C', C.ROOT, 'diff', '--stat', `${b}...HEAD`],
         { encoding: 'utf8' },
       );
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       const plan = buildPlan(
         {
           files,
@@ -293,22 +405,26 @@ function main(rawArgv) {
           ? queryImpact(files, loadIndex(C, cfg), {})
           : null;
       out(preflightSummary(plan, impact));
-      writeFileSync(
-        join(os.tmpdir(), 'review_plan.json'),
-        JSON.stringify({ ...plan, impact }, null, 2),
+      const planPath = join(
+        os.tmpdir(),
+        'agent-review-plan-' +
+          createHash('sha1').update(C.ROOT).digest('hex').slice(0, 12) +
+          '.json',
       );
+      writeFileSync(planPath, JSON.stringify({ ...plan, impact }, null, 2));
+      out(planPath);
       if (rest.includes('--no-launch')) {
-        out(`\nwould run: claude -p "/agent-review ${mode}"`);
+        out(`\nwould run: claude -p "/agent-review:review ${mode}"`);
         return 0;
       }
-      out(`\nlaunching: claude -p "/agent-review ${mode}" ...\n`);
+      out(`\nlaunching: claude -p "/agent-review:review ${mode}" ...\n`);
       try {
-        execFileSync('claude', ['-p', `/agent-review ${mode}`], {
+        execFileSync('claude', ['-p', `/agent-review:review ${mode}`], {
           stdio: 'inherit',
         });
       } catch (e) {
         out(`(could not launch claude automatically: ${e.message})`);
-        out(`Run it manually in Claude Code:  /agent-review ${mode}`);
+        out(`Run it manually in Claude Code:  /agent-review:review ${mode}`);
       }
       return 0;
     }

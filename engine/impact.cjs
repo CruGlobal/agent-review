@@ -17,6 +17,13 @@ function posInt(value, def) {
   return n;
 }
 
+// Splits a comma-separated CLI flag value into a trimmed, non-empty array (or undefined if absent).
+function csv(v) {
+  return typeof v === 'string'
+    ? v.split(',').map((s) => s.trim()).filter(Boolean)
+    : undefined;
+}
+
 if (require.main === module) {
   try {
     const a = parseArgs(process.argv.slice(2));
@@ -25,11 +32,13 @@ if (require.main === module) {
       typeof a.index === 'string'
         ? a.index
         : join(repoRoot, '.claude/review/index');
+    const idxOpts = { aliases: csv(a.aliases), exts: csv(a.exts), roots: csv(a.roots) };
     const graph = loadOrBuildIndex({
       repoRoot,
       indexPath,
       head: gitHead(repoRoot),
-      files: listRepoFiles(repoRoot),
+      files: listRepoFiles(repoRoot, idxOpts),
+      opts: idxOpts,
     });
     const changed = readFileSync(a.changed, 'utf8')
       .split('\n')

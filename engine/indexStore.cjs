@@ -72,6 +72,13 @@ function loadOrBuildIndex({ repoRoot, indexPath, head, files, opts = {} }) {
   return graph;
 }
 
+// Splits a comma-separated CLI flag value into a trimmed, non-empty array (or undefined if absent).
+function csv(v) {
+  return typeof v === 'string'
+    ? v.split(',').map((s) => s.trim()).filter(Boolean)
+    : undefined;
+}
+
 if (require.main === module) {
   const a = parseArgs(process.argv.slice(2));
   const repoRoot = typeof a.root === 'string' ? a.root : process.cwd();
@@ -83,11 +90,13 @@ if (require.main === module) {
     const gf = join(indexPath, 'graph.json');
     if (existsSync(gf)) rmSync(gf);
   }
+  const opts = { aliases: csv(a.aliases), exts: csv(a.exts), roots: csv(a.roots) };
   const graph = loadOrBuildIndex({
     repoRoot,
     indexPath,
     head: gitHead(repoRoot),
-    files: listRepoFiles(repoRoot),
+    files: listRepoFiles(repoRoot, opts),
+    opts,
   });
   process.stdout.write(
     `Indexed ${graph.fileCount} files; ${Object.keys(graph.importedBy).length} have dependents. head=${graph.head}\n`,
