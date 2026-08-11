@@ -1,0 +1,21 @@
+{
+  "name": "agent-review",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node engine/run-tests.cjs",
+    "build": "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review",
+    "check-dist": "npm run build && git diff --exit-code dist/"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1",
+    "minimatch": "^10.0.1",
+    "yaml": "^2.6.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "dr-bizz",
+  "owner": { "name": "Daniel Bisgrove" },
+  "plugins": [
+    {
+      "name": "agent-review",
+      "source": "./",
+      "description": "Multi-agent PR review with risk-scored agent selection, debate rounds, per-repo bootstrapped rules, and a human-ratified learning loop."
+    }
+  ]
+}
