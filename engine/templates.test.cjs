@@ -8,7 +8,11 @@ const { execFileSync } = require('node:child_process');
 
 const ROOT = join(__dirname, '..');
 const ARCHETYPE = join(ROOT, 'templates/archetype.md');
-const SKILL = join(ROOT, 'skills/review/SKILL.md');
+// Every shipped skill is held to the same CLI/legacy-path contract.
+const SKILLS = ['review', 'init', 'learn'].map((name) => ({
+  name,
+  path: join(ROOT, `skills/${name}/SKILL.md`),
+}));
 
 const PLACEHOLDERS = [
   'TITLE',
@@ -32,13 +36,15 @@ test('archetype.md uses exactly the seven documented placeholders', () => {
   );
 });
 
-test('review SKILL.md references the CLI, never legacy engine paths', () => {
-  const text = readFileSync(SKILL, 'utf8');
-  for (const legacy of ['.claude/review/engine', 'cli.cjs']) {
-    assert.ok(
-      !text.includes(legacy),
-      `SKILL.md must not reference "${legacy}" — call the agent-review binary instead`,
-    );
+test('skills reference the CLI, never legacy engine paths', () => {
+  for (const { name, path } of SKILLS) {
+    const text = readFileSync(path, 'utf8');
+    for (const legacy of ['.claude/review/engine', 'cli.cjs']) {
+      assert.ok(
+        !text.includes(legacy),
+        `skills/${name}/SKILL.md must not reference "${legacy}" — call the agent-review binary instead`,
+      );
+    }
   }
 });
 
@@ -63,28 +69,39 @@ function bashBlocks(text) {
   return out.join('\n');
 }
 
-test('every agent-review subcommand used in SKILL.md bash blocks exists in the CLI', () => {
+test('every agent-review subcommand used in skill bash blocks exists in the CLI', () => {
   const usage = execFileSync(
     process.execPath,
     [join(ROOT, 'bin/agent-review'), 'help'],
     { encoding: 'utf8' },
   );
-  const known = new Set(
-    usage
-      .split('\n')
-      .slice(1) // drop the "usage:" line
-      .map((l) => l.trim().split(/[\s|]+/)[0])
-      .filter((w) => /^[a-z][a-z-]*$/.test(w)),
-  );
+  // Each usage line is "<command column>  <description>". Within the command column the first
+  // word is a subcommand, as is any word after a spaced ` | ` alternation ("approve <id> | reject
+  // <id>"). Unspaced pipes ("show|validate|get") separate a subcommand's own arguments, not
+  // subcommands, so they are deliberately not collected.
+  const known = new Set();
+  for (const line of usage.split('\n').slice(1)) {
+    // drop the "usage:" line
+    const head = line.trim().split(/\s{2,}/)[0];
+    for (const m of head.matchAll(/(?:^|\s\|\s)([a-z][a-z-]*)/g)) known.add(m[1]);
+  }
   assert.ok(known.size > 5, 'could not parse subcommands out of the CLI usage text');
 
-  const used = new Set(
-    [...bashBlocks(readFileSync(SKILL, 'utf8')).matchAll(
-      /\bagent-review\s+([a-z][a-z-]*)/g,
-    )].map((m) => m[1]),
-  );
-  assert.ok(used.size > 0, 'no agent-review invocations found in SKILL.md bash blocks');
-  for (const sub of used) {
-    assert.ok(known.has(sub), `SKILL.md calls "agent-review ${sub}" but the CLI has no such command`);
+  for (const { name, path } of SKILLS) {
+    const used = new Set(
+      [...bashBlocks(readFileSync(path, 'utf8')).matchAll(
+        /\bagent-review\s+([a-z][a-z-]*)/g,
+      )].map((m) => m[1]),
+    );
+    assert.ok(
+      used.size > 0,
+      `no agent-review invocations found in skills/${name}/SKILL.md bash blocks`,
+    );
+    for (const sub of used) {
+      assert.ok(
+        known.has(sub),
+        `skills/${name}/SKILL.md calls "agent-review ${sub}" but the CLI has no such command`,
+      );
+    }
   }
 });
