@@ -14,11 +14,11 @@ hardcoding anything about it.
 In a Claude Code session:
 
 ```
-/plugin marketplace add dr-bizz/agent-review
-/plugin install agent-review@dr-bizz
+/plugin marketplace add CruGlobal/agent-review
+/plugin install agent-review@cruglobal
 ```
 
-This registers the `dr-bizz` marketplace and installs the `agent-review` plugin, which brings
+This registers the `cruglobal` marketplace and installs the `agent-review` plugin, which brings
 three slash commands (`/agent-review:init`, `/agent-review:review`, `/agent-review:learn`) and the
 bundled `agent-review` CLI binary.
 
@@ -82,7 +82,7 @@ Actions → New repository secret`.
 ## Updating
 
 ```
-/plugin marketplace update dr-bizz
+/plugin marketplace update cruglobal
 ```
 
 Pulls the latest `agent-review` plugin release from this repo.

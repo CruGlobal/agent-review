@@ -4,7 +4,7 @@ on:
     types: [opened, synchronize, reopened]
 jobs:
   review:
-    uses: dr-bizz/agent-review/.github/workflows/review.yml@main
+    uses: CruGlobal/agent-review/.github/workflows/review.yml@main
     with:
       mode: standard
     secrets:

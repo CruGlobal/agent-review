@@ -1,6 +1,6 @@
 {
   "extraKnownMarketplaces": {
-    "dr-bizz": { "source": { "source": "github", "repo": "dr-bizz/agent-review" } }
+    "cruglobal": { "source": { "source": "github", "repo": "CruGlobal/agent-review" } }
   },
-  "enabledPlugins": { "agent-review@dr-bizz": true }
+  "enabledPlugins": { "agent-review@cruglobal": true }
 }

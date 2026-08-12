@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/dr-bizz/agent-review/schema/config.schema.json",
+  "$id": "https://github.com/CruGlobal/agent-review/schema/config.schema.json",
   "title": "Agent-Review Config",
   "type": "object",
   "additionalProperties": false,

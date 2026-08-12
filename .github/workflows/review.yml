@@ -35,6 +35,6 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          plugin_marketplaces: 'https://github.com/dr-bizz/agent-review.git'
-          plugins: 'agent-review@dr-bizz'
+          plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
+          plugins: 'agent-review@cruglobal'
           prompt: '/agent-review:review ${{ inputs.mode }} ci'
