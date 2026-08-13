@@ -9,8 +9,13 @@ on:
         type: boolean
         default: false
     secrets:
+      # Authentication: pass EXACTLY ONE of these. `claude_code_oauth_token` bills a
+      # Claude Pro/Max subscription (generate with `claude setup-token`);
+      # `anthropic_api_key` bills the metered API.
       anthropic_api_key:
-        required: true
+        required: false
+      claude_code_oauth_token:
+        required: false
 
 jobs:
   review:
@@ -21,6 +26,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      - name: Require exactly one auth secret
+        env:
+          HAS_KEY: ${{ secrets.anthropic_api_key != '' }}
+          HAS_OAUTH: ${{ secrets.claude_code_oauth_token != '' }}
+        run: |
+          if [ "$HAS_KEY" != "true" ] && [ "$HAS_OAUTH" != "true" ]; then
+            echo "::error::Pass anthropic_api_key or claude_code_oauth_token to the reusable workflow."
+            exit 1
+          fi
       - uses: anthropics/claude-code-action@v1
         env:
           AGENT_REVIEW_CI: '1'
@@ -34,6 +48,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'

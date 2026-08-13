@@ -1,6 +1,7 @@
 # 🤖 Multi-Agent Code Review Report
 
 **Generated**: [timestamp]
+[IF INCREMENTAL] **Scope**: Incremental — commits since previously reviewed [short SHA]. The previous full report is in this comment's edit history.
 **Agents**: [N] specialized reviewers ([list of launched agent titles])[ with debate rounds]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
