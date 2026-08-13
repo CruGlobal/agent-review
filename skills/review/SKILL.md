@@ -14,11 +14,19 @@ prose rule docs.
 ```
 /agent-review:review              # Standard mode (engine-selected agents, recommended)
 /agent-review:review quick        # Fast feedback for simple changes
-/agent-review:review deep         # Every enabled agent, maximum depth
+/agent-review:review deep        # Every enabled agent, maximum depth
+/agent-review:review auto         # Depth picked from the engine's risk score (see Stage 0)
 /agent-review:review standard ci  # Non-interactive CI run (posts to the PR)
+/agent-review:review auto ci      # CI run, right-sized: skips no-risk diffs, quick for LOW,
+                                  # standard for MEDIUM/HIGH, deep for CRITICAL
 ```
 
 **Rough cost** (varies with diff size): quick ~$0.50 · standard ~$2-4 · deep ~$6-10.
+`auto` costs whatever tier it resolves to — and $0 when it skips a no-risk diff.
+
+**Incremental CI re-reviews**: in CI mode the posted report records the reviewed head SHA.
+A later run on the same PR diffs only the commits since that SHA (falling back to a full
+review after a force-push, when the recorded SHA is no longer reachable from the new head).
 
 Everything repo-specific — risk globs, agent triggers, rule docs — comes from the consuming
 repo's `.claude/review/` directory. Never hardcode repo specifics in this skill.
@@ -48,7 +56,7 @@ The first argument selects the mode; the literal argument `ci` (in any position)
 
 ```bash
 MODE="${1:-standard}"
-case "$MODE" in quick|deep) ;; *) MODE="standard" ;; esac   # `ci` alone → standard mode
+case "$MODE" in quick|deep|auto) ;; *) MODE="standard" ;; esac   # `ci` alone → standard mode
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 case "$MODE" in
@@ -65,6 +73,13 @@ case "$MODE" in
     echo "• Model: Opus (maximum quality)"
     MODEL_OVERRIDE="opus"
     AGENT_MODE="deep"
+    ;;
+  auto)
+    echo "🎚️ AUTO REVIEW MODE"
+    echo "• Depth resolved from the engine's risk score after Stage 0 planning"
+    echo "• score 0 → skip · LOW → quick · MEDIUM/HIGH → standard · CRITICAL → deep"
+    MODEL_OVERRIDE=""
+    AGENT_MODE="auto"   # placeholder — resolved right after the plan is computed
     ;;
   standard)
     echo "⚡ STANDARD REVIEW MODE (Recommended)"
@@ -150,8 +165,16 @@ if [ -z "$PR_NUMBER" ]; then
   echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
 else
   REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-  { echo '<!-- agent-review -->'; echo; cat /tmp/agent_review_report.md; } \
-    > /tmp/agent_review_comment.md
+  # Line 2 records the head SHA this report covers — the next CI run reads it back to review
+  # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
+  # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
+  { echo '<!-- agent-review -->'
+    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+    [ -s /tmp/agent_review_ledger.json ] \
+      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+    echo
+    cat /tmp/agent_review_report.md
+  } > /tmp/agent_review_comment.md
 
   # `--paginate` runs `--jq` once PER PAGE, so a marker match on more than one page emits more
   # than one id. Take the first — the oldest marked comment is the one we keep updating.
@@ -208,7 +231,35 @@ Build the diff manifest the whole review runs on:
 BASE_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null)
 HEAD_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null)
 
-if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+# Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
+# inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
+# still an ancestor of the current head, review only the commits since it. A force-push
+# breaks ancestry, so the recorded SHA fails the checks below and we fall back to a full
+# review — the history we reviewed no longer exists, so the delta cannot be trusted.
+INCREMENTAL="" LAST_REVIEWED=""
+if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
+  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+  LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+    --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+    | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+  if [ -n "$LAST_REVIEWED" ] \
+     && git cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null \
+     && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
+    if [ "$(git rev-parse "$LAST_REVIEWED")" = "$(git rev-parse "$HEAD_REF")" ]; then
+      echo "✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting."
+      exit 0
+    fi
+    INCREMENTAL="true"
+  elif [ -n "$LAST_REVIEWED" ]; then
+    echo "⚠️  Recorded reviewed SHA $LAST_REVIEWED is not an ancestor of $HEAD_REF (force push?) — full review."
+    LAST_REVIEWED=""
+  fi
+fi
+
+if [ -n "$INCREMENTAL" ]; then
+  RANGE="$LAST_REVIEWED..$HEAD_REF"
+  echo "♻️  INCREMENTAL REVIEW — commits since previously reviewed $LAST_REVIEWED"
+elif [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   RANGE="$BASE_REF..$HEAD_REF"
 else
   # Fallback: merge-base against the repo's configured base branch.
@@ -236,13 +287,18 @@ git diff $RANGE --stat      > /tmp/diff_stat.txt
 git diff $RANGE             > /tmp/pr_diff.txt
 
 if [ ! -s /tmp/changed_files.txt ]; then
+  if [ -n "$INCREMENTAL" ]; then
+    echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
+    exit 0
+  fi
   echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
   exit 1
 fi
 wc -l < /tmp/changed_files.txt
 
 cat >> /tmp/review_env.sh <<EOF
-export BASE_REF="$BASE_REF" RANGE="$RANGE"
+export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE"
+export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
 EOF
 ```
 
@@ -301,6 +357,48 @@ or core infrastructure). The plan JSON has this shape:
   ]
 }
 ```
+
+### Auto Mode Resolution
+
+**Only when `MODE` is `auto`.** The placeholder mode is resolved here, from the engine's risk
+score — never from your own judgment of the diff:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+if [ "$MODE" = "auto" ]; then
+  SCORE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.score)' 2>/dev/null)
+  LEVEL=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
+  if [ "${SCORE:-1}" = "0" ]; then
+    # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
+    if [ -n "$CI_MODE" ]; then
+      # Post a minimal skip note. The CI posting step prepends the comment markers
+      # (including the reviewed-head marker, so the next run still diffs incrementally).
+      echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)." \
+        > /tmp/agent_review_report.md
+      echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
+    else
+      echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
+    fi
+    RESOLVED="skip"
+  else
+    case "$LEVEL" in
+      LOW)      RESOLVED="quick";    MODEL_OVERRIDE="haiku" ;;
+      CRITICAL) RESOLVED="deep";     MODEL_OVERRIDE="opus"  ;;
+      *)        RESOLVED="standard"; MODEL_OVERRIDE=""      ;;
+    esac
+    echo "🎚️ AUTO MODE resolved: $LEVEL risk → $RESOLVED"
+  fi
+  MODE="$RESOLVED" AGENT_MODE="$RESOLVED"
+  cat >> /tmp/review_env.sh <<EOF
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE"
+EOF
+fi
+```
+
+If auto resolved to `skip`: in CI, run the **[CI Mode posting step](#post-the-report-to-the-pr-create-or-update)**
+with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally,
+report the skip and stop. If it resolved to `quick`/`standard`/`deep`, continue exactly as if that
+mode had been passed on the command line.
 
 ### Risk Assessment
 
@@ -941,6 +1039,28 @@ findings (suppressed by approved learnings). Tell the user they can mark outcome
 `agent-review feedback <that file>` and `agent-review learn` to mine new proposed learnings, and
 `agent-review learnings` / `agent-review approve <id>` to ratify them.
 
+### Build the findings ledger
+
+The report's FINDINGS LEDGER section is the interactive surface devs work: each finding gets a
+stable number, severity ≥ 7 items get a checkbox, and `/agent-review:address` (locally or via
+`@claude fix/dismiss` PR comments) checks items off as **fixed** or **dismissed**. Build its
+machine state now from the kept findings in `/tmp/review_filtered.json` (they already carry the
+engine's `id` and `signature` from the emit step — keep both; the dismiss path writes them into
+the feedback store):
+
+- Order by severity descending; number 1..N.
+- Write `/tmp/agent_review_ledger.json`: a compact JSON array of
+  `{ "n", "id", "signature", "agent", "category", "severity", "file", "line", "message",
+  "status": "open" }`.
+- **Incremental runs**: fetch the previous comment's `<!-- agent-review-ledger: … -->` line
+  first. Carry every previous entry over VERBATIM — same numbers, same statuses (fixed and
+  dismissed items stay resolved; open items stay open unless this run's diff shows them fixed,
+  in which case mark them fixed) — and append genuinely new findings with the next numbers.
+  Dedupe new findings against carried ones by `signature`. Numbers are stable across the PR's
+  lifetime; never renumber.
+
+Render the ledger section of the report from this JSON, exactly per the skeleton's format.
+
 ### Write the report
 
 Read the plugin's report skeleton — `../../templates/report.md`, relative to this skill file — and
@@ -1044,8 +1164,13 @@ case "$choice" in
       echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
     else
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-      { echo '<!-- agent-review -->'; echo; cat /tmp/agent_review_report.md; } \
-        > /tmp/agent_review_comment.md
+      { echo '<!-- agent-review -->'
+        [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+        [ -s /tmp/agent_review_ledger.json ] \
+          && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+        echo
+        cat /tmp/agent_review_report.md
+      } > /tmp/agent_review_comment.md
       EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
         --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
         2>/dev/null | head -n1)

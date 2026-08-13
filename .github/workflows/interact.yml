@@ -1,0 +1,67 @@
+name: agent-review interact (reusable)
+# Executes a dev's fix/dismiss command against a PR's findings ledger.
+# Consumers call this from an issue_comment workflow after filtering for
+# `@claude fix|dismiss` comments from trusted authors — this workflow trusts
+# its caller's filtering and does no association checks of its own.
+#
+# Limitation: pushes go to the PR's head branch, so fork PRs can be dismissed
+# but not auto-fixed (the token cannot push to a fork).
+on:
+  workflow_call:
+    inputs:
+      command:
+        type: string
+        required: true # the comment body, passed via env only — never into a shell line
+      actor:
+        type: string
+        required: true
+      pr_number:
+        type: string
+        required: true
+    secrets:
+      anthropic_api_key:
+        required: false
+      claude_code_oauth_token:
+        required: false
+
+jobs:
+  address:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: Check out the PR head branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr checkout "${{ inputs.pr_number }}"
+      - uses: anthropics/claude-code-action@v1
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
+          ADDRESS_COMMAND: ${{ inputs.command }}
+          ADDRESS_ACTOR: ${{ inputs.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          anthropic_api_key: ${{ secrets.anthropic_api_key }}
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
+          plugins: 'agent-review@cruglobal'
+          prompt: '/agent-review:address ci'
+      - name: Approve when the ledger is fully addressed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ inputs.pr_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty')
+          [ -n "$BODY" ] || { echo "No report found — not approving."; exit 0; }
+          if printf '%s' "$BODY" | grep -q -- '- \[ \]'; then
+            echo "Ledger still has open items — not approving."
+            exit 0
+          fi
+          gh pr review "$PR" --repo "$REPO" --approve \
+            --body "Auto-approved: every agent-review finding is fixed or dismissed with a reason."
