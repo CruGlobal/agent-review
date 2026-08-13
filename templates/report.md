@@ -32,6 +32,28 @@
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+## 📋 FINDINGS LEDGER
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Every finding, numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
+dismissed** before this review counts as passed; lower severities are advisory. Interact from a
+PR comment — `@claude fix 1, 3` · `@claude dismiss 2: <one-line reason>` (a reason is
+required) — or locally with `/agent-review:address`. Details for each number are in the
+severity sections below.
+
+[FOR EACH FINDING, ordered by severity descending, numbered 1..N:]
+[IF severity >= 7 AND status open:]
+- [ ] **#[N]** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
+[IF severity >= 7 AND status fixed:]
+- [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]
+[IF severity >= 7 AND status dismissed:]
+- [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user]: [reason]
+[IF severity < 7:]
+- **#[N]** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[IF resolved: same ✅/🚫 suffix as above]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 ## 🔧 AUTOMATED FIXES AVAILABLE
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -291,29 +313,17 @@ senior maintainer should decide based on [considerations]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-**Critical Actions** (MUST fix before merge):
-[FOR EACH CRITICAL/HIGH PRIORITY BLOCKER:]
+Work the **FINDINGS LEDGER** at the top of this report — every severity ≥ 7 finding needs to be
+fixed or dismissed (with a reason) before the review passes. From a PR comment:
 
-- [ ] Fix [issue] at [file:line] (Severity: [X]/10)
+- `@claude fix 1, 3, 5` — AI applies those fixes on this branch and checks them off
+- `@claude dismiss 2: intentional, matches legacy import behavior` — checks it off with your
+  reason; repeated dismissals of the same finding class teach the review to stop raising it
 
-**Important Actions** (Should fix before merge):
-[FOR EACH IMPORTANT ISSUE:]
+Or locally: `/agent-review:address` pulls this ledger into a Claude Code session.
 
-- [ ] Address [concern] at [file:line] (Severity: [X]/10)
-
-**Human Review Needed**:
-[FOR EACH UNRESOLVED DEBATE:]
-
-- [ ] Senior developer to resolve: [debate topic] (Severity range: [X]-[Y]/10)
-
-**Medium Priority** (Consider addressing):
-
-- [List with severity scores]
-
-**Optional Improvements**:
-[FOR EACH SUGGESTION:]
-
-- Consider [suggestion] (Severity: [X]/10)
+[IF UNRESOLVED DEBATES: note that ledger items marked needs-human should be resolved by a senior
+developer, not dismissed reflexively.]
 
 ---
 

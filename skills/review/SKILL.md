@@ -166,9 +166,12 @@ if [ -z "$PR_NUMBER" ]; then
 else
   REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
   # Line 2 records the head SHA this report covers — the next CI run reads it back to review
-  # only the commits since (see the incremental block in Stage 0).
+  # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
+  # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
   { echo '<!-- agent-review -->'
     [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+    [ -s /tmp/agent_review_ledger.json ] \
+      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
     echo
     cat /tmp/agent_review_report.md
   } > /tmp/agent_review_comment.md
@@ -1036,6 +1039,28 @@ findings (suppressed by approved learnings). Tell the user they can mark outcome
 `agent-review feedback <that file>` and `agent-review learn` to mine new proposed learnings, and
 `agent-review learnings` / `agent-review approve <id>` to ratify them.
 
+### Build the findings ledger
+
+The report's FINDINGS LEDGER section is the interactive surface devs work: each finding gets a
+stable number, severity ≥ 7 items get a checkbox, and `/agent-review:address` (locally or via
+`@claude fix/dismiss` PR comments) checks items off as **fixed** or **dismissed**. Build its
+machine state now from the kept findings in `/tmp/review_filtered.json` (they already carry the
+engine's `id` and `signature` from the emit step — keep both; the dismiss path writes them into
+the feedback store):
+
+- Order by severity descending; number 1..N.
+- Write `/tmp/agent_review_ledger.json`: a compact JSON array of
+  `{ "n", "id", "signature", "agent", "category", "severity", "file", "line", "message",
+  "status": "open" }`.
+- **Incremental runs**: fetch the previous comment's `<!-- agent-review-ledger: … -->` line
+  first. Carry every previous entry over VERBATIM — same numbers, same statuses (fixed and
+  dismissed items stay resolved; open items stay open unless this run's diff shows them fixed,
+  in which case mark them fixed) — and append genuinely new findings with the next numbers.
+  Dedupe new findings against carried ones by `signature`. Numbers are stable across the PR's
+  lifetime; never renumber.
+
+Render the ledger section of the report from this JSON, exactly per the skeleton's format.
+
 ### Write the report
 
 Read the plugin's report skeleton — `../../templates/report.md`, relative to this skill file — and
@@ -1141,6 +1166,8 @@ case "$choice" in
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
       { echo '<!-- agent-review -->'
         [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+        [ -s /tmp/agent_review_ledger.json ] \
+          && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
         echo
         cat /tmp/agent_review_report.md
       } > /tmp/agent_review_comment.md
