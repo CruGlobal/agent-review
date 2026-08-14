@@ -172,6 +172,8 @@ else
     [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
     [ -s /tmp/agent_review_ledger.json ] \
       && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+    [ -s /tmp/agent_review_status.json ] \
+      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
     echo
     cat /tmp/agent_review_report.md
   } > /tmp/agent_review_comment.md
@@ -1061,6 +1063,49 @@ the feedback store):
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 
+### Assess reversibility & build the status marker
+
+Workflows gate auto-approval on a machine-readable status line — never on grepping the report's
+prose. Build it now.
+
+**Reversibility.** Judge from the diff whether the change contains operations that CANNOT be
+cleanly undone by reverting the commit and rolling back. The question is "if this ships broken,
+can we get back to the previous state?" — not how risky the change is. Classify as
+**irreversible** when the diff includes any of:
+
+- Destructive or mutating schema/data operations: `remove_column`, `drop_table`,
+  `change_column` (type changes), `rename_column`/`rename_table`, `update_all`, `delete_all`,
+  data backfills, raw `execute` SQL that writes
+- One-way external side effects: sending email/notifications, charging or moving money, calls
+  that create/mutate/delete records in external systems (MailChimp, S3 deletes, DonorHub)
+- Anything else where rollback cannot restore the prior state (purging caches whose content
+  can't be rebuilt, deleting files)
+
+Purely additive changes (new column, new table, new index, new code paths, config) are
+**reversible**. When genuinely uncertain, classify irreversible — the only cost is a human
+look. List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
+migration X"`), each traceable to a diff hunk.
+
+**Status JSON.** Write `/tmp/agent_review_status.json` (single compact object):
+
+```json
+{
+  "v": 1,
+  "head": "<HEAD_REF sha, when known>",
+  "risk": "<LOW|MEDIUM|HIGH|CRITICAL from the plan>",
+  "openBlockers": 0,
+  "pass": true,
+  "irreversible": false,
+  "irreversibleReasons": []
+}
+```
+
+`openBlockers` = count of ledger entries with severity ≥ 7 and `status: "open"`; `pass` =
+`openBlockers == 0`. The posting steps embed this as a `<!-- agent-review-status: … -->` line;
+`/agent-review:address` recomputes `openBlockers`/`pass` whenever it mutates the ledger.
+`irreversible` is a property of the reviewed diff, so address never changes it — only a
+re-review does.
+
 ### Write the report
 
 Read the plugin's report skeleton — `../../templates/report.md`, relative to this skill file — and
@@ -1168,6 +1213,8 @@ case "$choice" in
         [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
         [ -s /tmp/agent_review_ledger.json ] \
           && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+        [ -s /tmp/agent_review_status.json ] \
+          && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
         echo
         cat /tmp/agent_review_report.md
       } > /tmp/agent_review_comment.md
