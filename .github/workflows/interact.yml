@@ -23,10 +23,10 @@ on:
         type: boolean
         default: false
     secrets:
+      # Console API key only — subscription OAuth tokens are rejected for CI
+      # use (see the note in review.yml).
       anthropic_api_key:
-        required: false
-      claude_code_oauth_token:
-        required: false
+        required: true
 
 jobs:
   address:
@@ -49,7 +49,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
-          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'

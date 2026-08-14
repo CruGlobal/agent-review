@@ -13,13 +13,13 @@ on:
         type: string
         default: shadow
     secrets:
-      # Authentication: pass EXACTLY ONE of these. `claude_code_oauth_token` bills a
-      # Claude Pro/Max subscription (generate with `claude setup-token`);
-      # `anthropic_api_key` bills the metered API.
+      # Console API key (sk-ant-api03-…), metered billing. Subscription OAuth
+      # tokens (`claude setup-token`) are NOT accepted: Anthropic rejects them
+      # at the API for use outside Claude Code / claude.ai since Feb 2026 and
+      # the Consumer ToS prohibits it — see
+      # https://github.com/anthropics/claude-code/issues/28091
       anthropic_api_key:
-        required: false
-      claude_code_oauth_token:
-        required: false
+        required: true
       # Optional PAT/GitHub App token with contents:read on configured private
       # context repositories. The ordinary GITHUB_TOKEN usually has access only
       # to the consuming repository.
@@ -53,16 +53,10 @@ jobs:
           if git cat-file -e "$BASE_SHA:.claude/review/config.yml" 2>/dev/null; then
             git archive "$BASE_SHA" .claude/review | tar -x -C "$TRUSTED_DIR"
           fi
-      - name: Require exactly one auth secret
+      - name: Validate rollout mode
         env:
-          HAS_KEY: ${{ secrets.anthropic_api_key != '' }}
-          HAS_OAUTH: ${{ secrets.claude_code_oauth_token != '' }}
           ROLLOUT_MODE: ${{ inputs.rollout_mode }}
         run: |
-          if [ "$HAS_KEY" != "true" ] && [ "$HAS_OAUTH" != "true" ]; then
-            echo "::error::Pass anthropic_api_key or claude_code_oauth_token to the reusable workflow."
-            exit 1
-          fi
           case "$ROLLOUT_MODE" in
             shadow|advisory|enforce) ;;
             *) echo "::error::rollout_mode must be shadow, advisory, or enforce."; exit 1 ;;
@@ -233,7 +227,6 @@ jobs:
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
-          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: '--allowedTools "Bash,Task"'
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
