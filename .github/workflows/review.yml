@@ -308,6 +308,51 @@ jobs:
             echo "::error::Report postcondition failed: no trusted comment covers $EXPECTED_HEAD."
             exit 1
           fi
+      # Inline anchors: one review comment per open severity ≥ 7 finding at its
+      # file:line, so reviewers see each questioned location in context — and a
+      # later commit touching those lines flips the comment to "outdated", a
+      # visual cue the flagged code changed. Deterministic step: entries are
+      # validated against the published ledger, deduped by finding number, and
+      # failures (e.g. a line outside the diff) warn rather than fail the run.
+      - name: Publish inline finding anchors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          INLINE=/tmp/agent_review_inline.json
+          [ -s "$INLINE" ] || { echo "No inline anchors staged."; exit 0; }
+          COMMENT=/tmp/agent_review_comment.md
+          LEDGER=$(tr -d '\r' < "$COMMENT" | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1)
+          EXISTING_NS=$(gh api "repos/$REPO/pulls/$PR/comments" --paginate \
+            | jq -sr '[.[][] | .body | capture("<!-- agent-review-finding: (?<n>[0-9]+) -->").n] | join(" ")' 2>/dev/null || echo "")
+          export LEDGER_JSON="$LEDGER" EXISTING_NS="$EXISTING_NS"
+          node - "$INLINE" <<'NODE' > /tmp/inline_validated.json
+          const fs = require('fs');
+          const inline = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+          const ledger = JSON.parse(process.env.LEDGER_JSON || '[]');
+          const byN = new Map(ledger.map(e => [String(e.n), e]));
+          const seen = new Set((process.env.EXISTING_NS || '').split(/\s+/).filter(Boolean));
+          const out = inline.filter(f => {
+            const l = byN.get(String(f.n));
+            return l && l.severity >= 7 && !seen.has(String(f.n)) && f.file && f.line;
+          }).slice(0, 25);
+          console.log(JSON.stringify(out));
+          NODE
+          COUNT=$(jq 'length' /tmp/inline_validated.json)
+          echo "Posting $COUNT inline anchor(s)."
+          jq -c '.[]' /tmp/inline_validated.json | while read -r f; do
+            N=$(printf '%s' "$f" | jq -r .n)
+            BODY=$(printf '%s' "$f" | jq -r '"<!-- agent-review-finding: \(.n) -->\n**agent-review #\(.n)** · \(.severity)/10 — \(.message)\n\n_Resolution is tracked in the findings ledger: `@claude fix \(.n)` or `@claude dismiss \(.n) [code]: reason`._"')
+            gh api "repos/$REPO/pulls/$PR/comments" \
+              -f commit_id="$HEAD_SHA" \
+              -f path="$(printf '%s' "$f" | jq -r .file)" \
+              -F line="$(printf '%s' "$f" | jq -r .line)" \
+              -f side=RIGHT \
+              -f body="$BODY" >/dev/null 2>&1 \
+              || echo "::warning::Could not anchor finding #$N (line likely outside the diff)."
+          done
       - name: Preserve deterministic review artifacts
         if: always()
         uses: actions/upload-artifact@v4
