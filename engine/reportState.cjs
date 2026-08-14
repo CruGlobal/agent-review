@@ -76,6 +76,7 @@ function cleanPrevious(raw) {
     if (entry.status === 'dismissed') {
       if (entry.by) clean.by = String(entry.by);
       if (entry.reason) clean.reason = String(entry.reason);
+      if (entry.reasonCode) clean.reasonCode = String(entry.reasonCode);
     }
     return clean;
   });
@@ -105,7 +106,7 @@ function mergeLedger(previousInput, findingsInput) {
   return merged;
 }
 
-function buildStatus({ ledger, head, plan, safety }) {
+function buildStatus({ ledger, head, plan, safety, evidence }) {
   const clean = cleanPrevious(ledger || []);
   const risk = plan && plan.risk && plan.risk.level;
   if (!RISKS.has(risk)) throw new Error(`invalid gate-plan risk: ${risk}`);
@@ -119,6 +120,13 @@ function buildStatus({ ledger, head, plan, safety }) {
   const openBlockers = clean.filter(
     (entry) => entry.status === 'open' && entry.severity >= 7,
   ).length;
+  const ci = evidence && evidence.ci && evidence.ci.summary
+    ? Object.fromEntries(['total', 'success', 'failed', 'pending', 'neutral'].map((key) => {
+        const value = Number(evidence.ci.summary[key] || 0);
+        if (!Number.isInteger(value) || value < 0) throw new Error(`invalid CI summary count: ${key}`);
+        return [key, value];
+      }))
+    : null;
   return {
     v: 1,
     ...(head ? { head: String(head) } : {}),
@@ -127,6 +135,7 @@ function buildStatus({ ledger, head, plan, safety }) {
     pass: openBlockers === 0,
     irreversible,
     irreversibleReasons,
+    ...(ci ? { ci } : {}),
   };
 }
 

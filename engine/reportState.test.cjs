@@ -91,3 +91,15 @@ test('irreversible status fails closed without a concrete reason', () => {
     /requires at least one reason/,
   );
 });
+
+test('status carries the deterministic CI snapshot without changing review pass semantics', () => {
+  const status = buildStatus({
+    ledger: [],
+    head: 'abc',
+    plan: { risk: { level: 'LOW' } },
+    safety: { irreversible: false, reasons: [] },
+    evidence: { ci: { summary: { total: 2, success: 1, failed: 1, pending: 0, neutral: 0 } } },
+  });
+  assert.equal(status.pass, true);
+  assert.deepEqual(status.ci, { total: 2, success: 1, failed: 1, pending: 0, neutral: 0 });
+});

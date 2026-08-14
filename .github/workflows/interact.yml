@@ -18,6 +18,10 @@ on:
       pr_number:
         type: string
         required: true
+      auto_approve:
+        description: Disabled during shadow/advisory rollout; enable only after readiness gates pass
+        type: boolean
+        default: false
     secrets:
       anthropic_api_key:
         required: false
@@ -51,6 +55,7 @@ jobs:
           plugins: 'agent-review@cruglobal'
           prompt: '/agent-review:address ci'
       - name: Approve when the ledger is fully addressed and the change is reversible
+        if: inputs.auto_approve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ inputs.pr_number }}
@@ -62,6 +67,12 @@ jobs:
           BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
             | jq -sr '[.[][] | select(.body | startswith("<!-- agent-review -->"))] | last | .body // empty')
           [ -n "$BODY" ] || { echo "No report found — not approving."; exit 0; }
+          ROLLOUT=$(printf '%s' "$BODY" | tr -d '\r' \
+            | sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' | head -1)
+          if [ "$ROLLOUT" = "shadow" ] || [ -z "$ROLLOUT" ]; then
+            echo "Rollout is ${ROLLOUT:-unmarked} — shadow/unmarked reports never auto-approve."
+            exit 0
+          fi
           REPORT_HEAD=$(printf '%s' "$BODY" | tr -d '\r' \
             | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
           CURRENT_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)

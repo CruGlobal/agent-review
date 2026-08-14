@@ -9,6 +9,7 @@ const {
 const { join, dirname } = require('node:path');
 const YAML = require('yaml');
 const { signature } = require('./findingSignature.cjs');
+const { DISMISSAL_REASONS } = require('./evalSuite.cjs');
 const { mineLearnings } = require('./mineLearnings.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 
@@ -32,6 +33,10 @@ function parsePending(yamlText) {
   const out = [];
   for (const f of doc.findings || []) {
     if (f.outcome === 'accepted' || f.outcome === 'dismissed') {
+      const dismissalReason = f.dismissal_reason || f.dismissalReason || f.reason_code;
+      if (f.outcome === 'dismissed' && dismissalReason && !DISMISSAL_REASONS.has(dismissalReason)) {
+        throw new Error(`invalid dismissal reason: ${dismissalReason}`);
+      }
       out.push({
         reviewId: doc.reviewId,
         id: f.id,
@@ -42,6 +47,10 @@ function parsePending(yamlText) {
         file: f.file,
         message: f.message,
         outcome: f.outcome,
+        ...(dismissalReason
+          ? { dismissalReason }
+          : {}),
+        ...(f.reason ? { dismissalDetail: String(f.reason) } : {}),
       });
     }
   }
@@ -76,6 +85,8 @@ function emitFindings({ dir, reviewId, rawFindings }) {
       file: f.file,
       message: f.message,
       outcome: '',
+      dismissal_reason: '',
+      reason: '',
     })),
   };
   writeFileSync(join(dir, 'pending', `${reviewId}.yml`), YAML.stringify(pending));

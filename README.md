@@ -65,6 +65,60 @@ Approved `rule` learnings get injected into future review prompts; approved `sup
 filter matching findings out of future runs. Nothing is applied automatically — every proposal is
 approved or rejected by you.
 
+## Deterministic evidence
+
+The model is no longer the only source of findings. The reusable workflow can run SHA-pinned
+[ast-grep](https://ast-grep.github.io/) structural rules from the PR base, snapshot GitHub check
+runs plus annotations, and fetch bounded files from related repositories at immutable commit SHAs.
+The model receives those artifacts as evidence, but cannot silently remove a static finding: the
+publishing step verifies every static signature is present in the final ledger.
+
+Relevant config keys:
+
+```yaml
+static_analysis:
+  ast_grep: { enabled: true, config: static/sgconfig.yml, version: 0.45.0 }
+ci: { enabled: true, ignore_checks: [] }
+context: { enabled: true, manifest: context/repositories.json }
+```
+
+Copy `templates/static/` for an ast-grep starter. Context manifests accept only full 40-character
+commit SHAs, allowlisted path globs, and file/byte budgets. Public related repositories work with
+the normal token; private ones need an `AGENT_REVIEW_CONTEXT_TOKEN` secret with read-only access,
+passed to the reusable workflow as `context_token`.
+
+## Evaluation and rollout
+
+Do not enable paid reviews on every PR by intuition alone. A seeded suite introduces realistic,
+known bugs into disposable worktrees and mixes them with clean controls. Run each case repeatedly,
+adjudicate unexpected blockers, then score the result bundle:
+
+```bash
+agent-review eval validate --suite .claude/review/evals/suite.yml
+agent-review eval prepare --suite .claude/review/evals/suite.yml \
+  --case missing-policy --repo . --out ../eval-missing-policy --base <known-good-sha>
+agent-review eval score --suite .claude/review/evals/suite.yml \
+  --results .claude/review/evals/results --baseline previous-summary.json --fail-on-gate
+```
+
+The summary reports blocker recall/precision, clean-control false blockers, dismissal rates,
+per-category recall, and repeated-run detection stability. Dismissals use explicit reason codes:
+`false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
+`insufficient-evidence`, or `other`.
+
+After shadow PRs accumulate dispositions:
+
+```bash
+agent-review telemetry --in .claude/review/learnings/feedback.jsonl > telemetry.json
+agent-review rollout --eval evaluation.json --telemetry telemetry.json --fail-on-gate
+```
+
+`rollout` fails closed until the configured sample sizes, evaluation thresholds, and dismissal
+thresholds all pass. The generated consumer workflow is label-gated in `shadow` mode, which posts
+advice but never approves. `.github/workflows/readiness.yml` provides the same gate as a reusable,
+manual GitHub Actions check. Keep a private holdout suite; a benchmark committed beside every
+expected answer is useful for development but cannot protect against prompt overfitting.
+
 ## CI setup
 
 To run reviews automatically on pull requests, copy the workflow template into the consuming
@@ -78,6 +132,13 @@ It calls this repo's reusable workflow (`.github/workflows/review.yml`), which r
 `/agent-review:review <mode> ci` via `anthropics/claude-code-action`. Set the `ANTHROPIC_API_KEY`
 secret in the consuming repo before merging the workflow — `Settings → Secrets and variables →
 Actions → New repository secret`.
+
+The template starts label-gated with `rollout_mode: shadow`. Add the `agent-review` label to trial
+a PR. Removing the label gate or enabling approval is a separate maintainer decision after the
+readiness command passes; the tool never edits that policy automatically.
+Copy `templates/workflows/agent-review-interact.yml` as well to enable trusted collaborators to
+use `@claude fix …` and taxonomy-coded `@claude dismiss … [code]: reason` comments; its reusable
+workflow defaults `auto_approve` to false.
 
 ## Updating
 
@@ -103,12 +164,16 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   `require` statements. In a repo of any other language it indexes nothing, and reviews report an
   empty blast radius — which reads like "no dependents" rather than "not measured". Set
   `index: { enabled: false }` there.
+- **Cross-repository context is a pinned snapshot, not a dependency graph.** It exposes only the
+  manifest's allowlisted files and does not infer runtime compatibility by itself. Refresh pinned
+  SHAs deliberately and review those bumps like dependency updates.
 - **`new_dependency` and `critical_pkg_update` assume JSON manifests.** They diff the manifest as
   JSON, so they work for `package.json` and produce nothing for `Gemfile`, `pyproject.toml`,
   `go.mod`, or `Cargo.toml`. `lockfile_only_change` is path-based and works everywhere.
-- **The skills assume the default `.claude/review` directory.** A custom location via
-  `--review-dir` / `$AGENT_REVIEW_DIR` is honored by the CLI but not threaded through the skills'
-  bash blocks, which reference `.claude/review/...` paths directly.
+- **Use `$AGENT_REVIEW_DIR` for a custom review directory in a skill run.** The CLI also accepts
+  one-off `--review-dir` flags, but a flag passed to one command cannot carry into later skill
+  stages. CI sets `$AGENT_REVIEW_DIR` to a hashed base-branch snapshot so PR changes cannot replace
+  the active review policy or rule docs mid-review.
 - **Some config keys are accepted but not yet enforced.** `learning.scope`,
   `learning.approval_required`, and `enforcement.mode` pass validation and are reserved for future
   behavior; today promotion is always approval-gated and reviews never block a merge.
@@ -118,8 +183,9 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 
 CI report publication is deliberately split across trust boundaries: Claude may use Bash to build
 the review artifacts, but subprocess secrets are scrubbed and Claude receives no direct GitHub CLI
-token. A deterministic workflow step validates the reviewed-head marker, publishes the comment,
-and fails the check if the postcondition is not met.
+token. Its engine and rule lookups are forced to a hashed base-branch snapshot. A deterministic
+workflow step rechecks that snapshot and the evidence/context hashes, validates the reviewed-head
+marker, publishes the comment, and fails the check if any postcondition is not met.
 
 ## Repo layout
 
@@ -134,6 +200,8 @@ and fails the check if the postcondition is not met.
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
 | `schema/config.schema.json` | JSON Schema for `.claude/review/config.yml` |
 | `templates/` | Files `/agent-review:init` instantiates into a consuming repo: `config.yml` skeleton, `rules/*.md` starters, `archetype.md` + `report.md` prompt/report skeletons, `settings-snippet.json`, `workflows/agent-review.yml` |
+| `templates/evals/` | Seeded-bug suite format, example patch, and result-scoring workflow |
+| `templates/static/` | ast-grep configuration/rule starter for deterministic changed-line findings |
 | `fixtures/` | Fixture config used by engine tests |
 | `.github/workflows/test.yml` | This repo's own CI — `npm ci && npm test && npm run check-dist` |
 | `.github/workflows/review.yml` | Reusable workflow consuming repos call from their `agent-review.yml` |

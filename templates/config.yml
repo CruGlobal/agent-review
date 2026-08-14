@@ -159,6 +159,43 @@ excluded_paths:
   - 'package-lock.json'
   - 'pnpm-lock.yaml'
 
+# ── Deterministic evidence ────────────────────────────────────────────────────
+# ast-grep runs trusted, repo-authored AST rules before the model. Only matches
+# on added lines become ledger findings. Enable after creating the referenced
+# sgconfig + rule directory (see templates/static/README.md).
+static_analysis:
+  ast_grep:
+    enabled: false
+    config: static/sgconfig.yml
+    version: 0.45.0 # pin the CI binary; do not use "latest"
+    severity: { error: 8, warning: 6, info: 4, hint: 2 }
+    excluded_paths: []
+
+# Snapshot existing GitHub checks and their annotations into the review prompt.
+# This does not replace branch protection and does not turn a flaky test into a
+# model-authored blocker.
+ci:
+  enabled: true
+  ignore_checks: []
+
+# Optional SHA-pinned API/client/documentation repositories. Enable only after
+# creating context/repositories.json; cross-repo private access requires the
+# optional context_token secret in the consumer workflow.
+context:
+  enabled: false
+  manifest: context/repositories.json
+
+# Stay label-gated and non-approving until `agent-review rollout` says the
+# seeded suite and real PR dismissal telemetry meet these gates.
+rollout:
+  mode: shadow
+  label: agent-review
+  minimum_evaluated_runs: 50
+  minimum_dispositions: 30
+  thresholds:
+    dismissal_rate: 0.35
+    false_positive_dismissal_rate: 0.20
+
 # ── Index layer: file-level import graph for impact analysis ──────────────────
 index: { enabled: true, path: '.claude/review/index' }
 

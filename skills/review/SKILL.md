@@ -98,8 +98,9 @@ echo ""
 # computed, and every later block starts by sourcing that file. Keep this discipline or later
 # stages will silently operate on empty strings.
 : > /tmp/review_env.sh    # fresh state for this review
+REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
-export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE"
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE" REVIEW_DIR="$REVIEW_DIR"
 EOF
 ```
 
@@ -121,7 +122,7 @@ If `CI_MODE` is set, follow **[CI Mode](#ci-mode)** below — it changes what se
 
 ```bash
 agent-review config validate || {
-  echo "❌ No valid .claude/review/config.yml in this repo. Run /agent-review:init first."
+  echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
   exit 1
 }
 ```
@@ -132,7 +133,7 @@ agent-review config validate || {
 . /tmp/review_env.sh 2>/dev/null || true
 mkdir -p /tmp/automated_fixes
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
-[ -z "${CI_MODE:-}" ] && mkdir -p .claude/review/metrics/history
+[ -z "${CI_MODE:-}" ] && mkdir -p "$REVIEW_DIR/metrics/history"
 ```
 
 ---
@@ -169,6 +170,7 @@ else
   # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
   { echo '<!-- agent-review -->'
     [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
     [ -s /tmp/agent_review_ledger.json ] \
       && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
     [ -s /tmp/agent_review_status.json ] \
@@ -328,6 +330,7 @@ if [ ! -s /tmp/changed_files.txt ]; then
       # The commits cancel out to the already-reviewed tree. Advance only the
       # reviewed-head marker; all findings and safety state remain valid.
       sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
+        -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
         -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
         "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT"
     fi
@@ -384,6 +387,45 @@ fi
 cat /tmp/review_gate_plan.json
 ```
 
+### Load deterministic evidence and cross-repository context
+
+The reusable workflow creates these artifacts outside the model. Treat them as immutable inputs:
+
+```bash
+if [ -s "${AGENT_REVIEW_EVIDENCE:-}" ]; then
+  cp "$AGENT_REVIEW_EVIDENCE" /tmp/review_evidence.json
+else
+  echo '{"version":1,"staticFindings":[],"ci":null}' > /tmp/review_evidence.json
+fi
+if [ -s "${AGENT_REVIEW_CONTEXT_INVENTORY:-}" ]; then
+  cp "$AGENT_REVIEW_CONTEXT_INVENTORY" /tmp/review_context.json
+else
+  echo '{"version":1,"repositories":[]}' > /tmp/review_context.json
+fi
+node - <<'NODE'
+const evidence = require('/tmp/review_evidence.json');
+const context = require('/tmp/review_context.json');
+const ci = evidence.ci && evidence.ci.summary;
+console.log(`Deterministic AST findings: ${(evidence.staticFindings || []).length}`);
+console.log(ci ? `CI snapshot: ${ci.success} passed, ${ci.failed} failed, ${ci.pending} pending` : 'CI snapshot: unavailable');
+for (const repo of context.repositories || []) {
+  console.log(`Context ${repo.id}: ${repo.available ? `${repo.files.length} allowlisted files at ${repo.ref}` : 'unavailable'}`);
+}
+NODE
+```
+
+Every `staticFindings[]` entry is a trusted, changed-line-anchored finding and MUST be copied into
+`/tmp/consensus_findings.json` unchanged before Stage 6 emission. Agents may add corroborating
+context but may not suppress, downgrade, or duplicate it. CI failures are evidence to investigate,
+not automatic code-review blockers: distinguish a failure caused by this diff from a pending,
+flaky, or unrelated check. The workflow verifies the final ledger contains every deterministic
+static signature and rejects publication otherwise.
+
+`/tmp/review_context.json` contains only a bounded inventory. Repositories marked `available` are
+under `$AGENT_REVIEW_CONTEXT_DIR/<id>/`. Read only inventory-listed files relevant to the changed
+API/schema/contract. Cite the repository id, pinned SHA, and file when cross-repo evidence changes
+a finding. Never search outside those roots.
+
 `REVIEW_SCOPE` is the heuristic scope you set from the change footprint (default `single_feature`;
 use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature areas
 or core infrastructure). The plan JSON has this shape:
@@ -425,7 +467,8 @@ score — never from your own judgment of the diff:
 if [ "$MODE" = "auto" ]; then
   SCORE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.score)' 2>/dev/null)
   LEVEL=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
-  if [ "${SCORE:-1}" = "0" ]; then
+  STATIC_FINDINGS=$(node -e 'const e=require("/tmp/review_evidence.json"); console.log((e.staticFindings||[]).length)' 2>/dev/null || echo 0)
+  if [ "${SCORE:-1}" = "0" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
     if [ -n "$CI_MODE" ]; then
       # Post a minimal skip note. The CI posting step prepends the comment markers
@@ -455,6 +498,7 @@ if [ "$MODE" = "auto" ]; then
         --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
       agent-review status --ledger /tmp/agent_review_ledger.json \
         --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
+        --evidence /tmp/review_evidence.json \
         ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
     else
@@ -601,16 +645,18 @@ filled copy:
 | `{{EXPERTISE}}`         | The agent's `expertise` string. Fallback: empty (leave the line's value blank rather than inventing expertise).                                                                                                                                        |
 | `{{RISK_CONTEXT}}`      | A bullet block from the current review plan: `- Review-delta risk: <score> (<level>)`, `- Full-PR gate risk: <gate score> (<gate level>)`, `- Special patterns: <gate risk.special joined, or "none">`, `- Unmatched risk paths: <gate risk.factors.unmatchedFiles joined, or "none">`, `- Changed Files in this pass: <N>`, `- Lines Changed in this pass: +<X> -<Y>`, `- Selected because: <matchedBy>`. |
 | `{{PROFILE_INSTRUCTION}}` | From the plan's `profile`: `chill` → "Report only high-confidence, severity ≥ 7 findings; suppress nits." · `standard` → "Report findings at all severities per the output format above." · `assertive` → "Report all findings including low-severity suggestions." |
-| `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against the repo's review dir (`rules/security.md` → `.claude/review/rules/security.md`), each preceded by a `----- <path> -----` line. If a listed doc is missing, note it in your output and continue with the rest. |
+| `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against `$REVIEW_DIR` (`rules/security.md` → `$REVIEW_DIR/rules/security.md`), each preceded by a `----- <path> -----` line. In CI, `$AGENT_REVIEW_DIR` points to the immutable base-branch copy; never read rule docs from the PR checkout. If a listed doc is missing, note it in your output and continue with the rest. |
 | `{{LEARNINGS}}`         | Entries from `/tmp/review_rules.json` whose `agent` matches this agent's `id`, rendered as `APPROVED LEARNINGS (ratified from prior reviews — apply to files under <paths>):` followed by one bullet per `ruleText`. Empty string when there are none. |
 | `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only, and only when `/tmp/review_impact.json` exists: the **actual dependents, inlined** (see the block below). Empty string for every other agent, and when impact was not computed. |
+| `{{EVIDENCE}}`          | A compact rendering of `/tmp/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
+| `{{CONTEXT}}`           | A compact rendering of `/tmp/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
 begin with its own step number and read as a standalone step. Build it from
 `/tmp/review_impact.json` (Stage 1B), listing real file names rather than pointing at the JSON:
 
 ```
-6. BLAST RADIUS — this change has <blastRadius> transitive dependents. The changed files below
+7. BLAST RADIUS — this change has <blastRadius> transitive dependents. The changed files below
    are imported by these files; verify the change does not break them:
    - <changed file>: <its directDependents, comma-separated>
    - <changed file>: <its directDependents, comma-separated>
@@ -1003,16 +1049,16 @@ cat >> /tmp/review_env.sh <<EOF
 export PR_NUM="$PR_NUM" CURRENT_DATE="$CURRENT_DATE" CURRENT_SEVERITY="$CURRENT_SEVERITY"
 EOF
 
-if [ -f .claude/review/metrics/severity_history.txt ]; then
+if [ -f "$REVIEW_DIR/metrics/severity_history.txt" ]; then
   AVG_SEVERITY=$(awk '{sum+=$2; count++} END {printf "%.1f", sum/count}' \
-    .claude/review/metrics/severity_history.txt 2>/dev/null || echo "N/A")
-  LAST_10=$(tail -10 .claude/review/metrics/severity_history.txt | awk '{print $2}')
+    "$REVIEW_DIR/metrics/severity_history.txt" 2>/dev/null || echo "N/A")
+  LAST_10=$(tail -10 "$REVIEW_DIR/metrics/severity_history.txt" | awk '{print $2}')
 else
   AVG_SEVERITY="N/A"
   LAST_10=""
 fi
 
-cat > .claude/review/metrics/PR_${PR_NUM}_metrics.md << EOF
+cat > "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" << EOF
 # 📊 Code Quality Metrics Dashboard
 
 **PR**: #${PR_NUM}
@@ -1067,16 +1113,16 @@ ${LAST_10}
 _Generated by agent-review | Full report: /tmp/agent_review_report.md_
 EOF
 
-echo "✅ Metrics dashboard created: .claude/review/metrics/PR_${PR_NUM}_metrics.md"
+echo "✅ Metrics dashboard created: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"
 ```
 
 ### Update Review History
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
-echo "$PR_NUM $CURRENT_SEVERITY $CURRENT_DATE" >> .claude/review/metrics/severity_history.txt
+echo "$PR_NUM $CURRENT_SEVERITY $CURRENT_DATE" >> "$REVIEW_DIR/metrics/severity_history.txt"
 
-cat > .claude/review/metrics/history/${CURRENT_DATE}_${PR_NUM}.json << EOF
+cat > "$REVIEW_DIR/metrics/history/${CURRENT_DATE}_${PR_NUM}.json" << EOF
 {
   "date": "$CURRENT_DATE",
   "pr_number": "$PR_NUM",
@@ -1111,6 +1157,19 @@ apply approved learnings when that layer is enabled:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, set once in Stage 0
+# Deterministic AST matches are not subject to model consensus. Prepend them
+# unchanged; the trusted publishing step verifies all their signatures survive
+# filtering and ledger construction.
+node - <<'NODE'
+const fs = require('fs');
+const model = JSON.parse(fs.readFileSync('/tmp/consensus_findings.json', 'utf8'));
+const evidence = JSON.parse(fs.readFileSync('/tmp/review_evidence.json', 'utf8'));
+if (!Array.isArray(model)) throw new Error('consensus findings must be an array');
+fs.writeFileSync(
+  '/tmp/consensus_findings.json',
+  JSON.stringify([...(evidence.staticFindings || []), ...model], null, 2),
+);
+NODE
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
   # REVIEW_ID is "<pr-or-local>-<timestamp>", so two reviews of the same branch never write to the
   # same pending/<reviewId>.yml.
@@ -1128,6 +1187,10 @@ findings (suppressed by approved learnings). Tell the user they can mark outcome
 `pending/<reviewId>.yml` (set each finding's `outcome` to `accepted` or `dismissed`), then run
 `agent-review feedback <that file>` and `agent-review learn` to mine new proposed learnings, and
 `agent-review learnings` / `agent-review approve <id>` to ratify them.
+
+Render kept deterministic findings in the same severity sections and ledger as model findings,
+with `Flagged by: deterministic ast-grep rule <ruleId>` and the rule's evidence. Do not include
+them in agent agreement/debate counts; they are independently reproducible checks.
 
 ### Build the findings ledger
 
@@ -1212,6 +1275,7 @@ agent-review status \
   --ledger /tmp/agent_review_ledger.json \
   --plan /tmp/review_gate_plan.json \
   --safety /tmp/agent_review_safety.json \
+  --evidence /tmp/review_evidence.json \
   ${HEAD_REF:+--head "$HEAD_REF"} \
   > /tmp/agent_review_status.json
 ```
@@ -1226,7 +1290,8 @@ The resulting object is:
   "openBlockers": 0,
   "pass": true,
   "irreversible": false,
-  "irreversibleReasons": []
+  "irreversibleReasons": [],
+  "ci": { "total": 4, "success": 2, "failed": 0, "pending": 2, "neutral": 0 }
 }
 ```
 
@@ -1243,6 +1308,9 @@ fill it in from the consensus, risk assessment, impact analysis, and agent repor
 bracketed placeholders and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where.
 Honor its conditionals:
 
+- Set Rollout from `$AGENT_REVIEW_ROLLOUT_MODE` (default `advisory`). In `shadow`, say plainly that
+  the report cannot approve or block the PR. Fill deterministic evidence from
+  `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
 - Omit the debate-statistics block and the debate transcript entirely when debate rounds did not run.
 - Omit the learning-layer line when the learning layer is disabled.
@@ -1271,11 +1339,11 @@ straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
-if [ -f ".claude/review/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
+if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
   echo "📊 Committing quality metrics dashboard..."
-  git add .claude/review/metrics/PR_${PR_NUM}_metrics.md \
-          .claude/review/metrics/severity_history.txt \
-          .claude/review/metrics/history/${CURRENT_DATE}_${PR_NUM}.json
+  git add "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" \
+          "$REVIEW_DIR/metrics/severity_history.txt" \
+          "$REVIEW_DIR/metrics/history/${CURRENT_DATE}_${PR_NUM}.json"
 
   git commit -m "chore(review): add code review metrics
 
@@ -1336,7 +1404,7 @@ Handle the choice:
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, PR_NUMBER, FIX_COUNT
 case "$choice" in
-  1) cat .claude/review/metrics/PR_${PR_NUM}_metrics.md ;;
+  1) cat "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" ;;
   2)
     # Same create-or-update path as CI: the marker makes repeat posts update one comment instead
     # of stacking new ones, so an interactive re-post never duplicates the CI comment.
@@ -1346,6 +1414,7 @@ case "$choice" in
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
       { echo '<!-- agent-review -->'
         [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+        echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
         [ -s /tmp/agent_review_ledger.json ] \
           && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
         [ -s /tmp/agent_review_status.json ] \
@@ -1381,7 +1450,7 @@ case "$choice" in
   4) cat /tmp/review_impact.json ;;
   5)
     echo "Report saved to: /tmp/agent_review_report.md"
-    echo "Metrics saved to: .claude/review/metrics/PR_${PR_NUM}_metrics.md"
+    echo "Metrics saved to: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"
     ;;
   *) echo "Exiting..." ;;
 esac

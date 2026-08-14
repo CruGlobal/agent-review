@@ -24,9 +24,11 @@ const PLACEHOLDERS = [
   'RULES',
   'LEARNINGS',
   'IMPACT',
+  'EVIDENCE',
+  'CONTEXT',
 ];
 
-test('archetype.md uses exactly the seven documented placeholders', () => {
+test('archetype.md uses exactly the documented placeholders', () => {
   const text = readFileSync(ARCHETYPE, 'utf8');
   const found = new Set(
     [...text.matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]),

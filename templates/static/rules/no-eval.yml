@@ -1,0 +1,7 @@
+id: no-dynamic-eval
+language: TypeScript
+severity: error
+message: Dynamic eval executes data as code and is forbidden.
+note: Use a typed parser or an explicit dispatch table.
+rule:
+  pattern: eval($CODE)

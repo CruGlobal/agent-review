@@ -1,0 +1,27 @@
+version: 1
+name: repository-review-gate
+blocker_threshold: 7
+thresholds:
+  blocker_recall: 0.85
+  blocker_precision: 0.80
+  clean_false_blocker_rate: 0.05
+  false_positive_dismissal_rate: 0.20
+  category_recall: 0.70
+  minimum_runs: 50
+cases:
+  - id: example-authorization-bypass
+    kind: seeded_bug
+    category: security
+    patch: patches/example-authorization-bypass.patch
+    expected:
+      - id: missing-authorization
+        must_block: true
+        min_severity: 7
+        category: security
+        match:
+          paths: ['src/api/**']
+          categories: [security, authorization]
+          message_any: [authorize, authorization, access control]
+  - id: example-clean-control
+    kind: clean_control
+    expected: []

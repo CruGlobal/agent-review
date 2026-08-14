@@ -75,3 +75,32 @@ test('reference validation accepts existing agent and path rule docs', () => {
     [],
   );
 });
+
+test('reference validation checks enabled static analysis and context assets', () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-config-'));
+  const reviewDir = join(root, '.claude/review');
+  mkdirSync(join(reviewDir, 'static/rules'), { recursive: true });
+  mkdirSync(join(reviewDir, 'static/rule-tests'), { recursive: true });
+  mkdirSync(join(reviewDir, 'context'), { recursive: true });
+  writeFileSync(join(reviewDir, 'static/sgconfig.yml'), 'ruleDirs: [rules]\ntestConfigs: [{ testDir: rule-tests }]\n');
+  writeFileSync(join(reviewDir, 'context/repos.json'), JSON.stringify({
+    version: 1,
+    repositories: [{ id: 'client', repository: 'Org/client', ref: 'a'.repeat(40), paths: ['src/**'] }],
+  }));
+  const cfg = parseConfig(MINIMAL);
+  cfg.static_analysis = { ast_grep: { enabled: true, config: 'static/sgconfig.yml', version: '0.45.0' } };
+  cfg.context = { enabled: true, manifest: 'context/repos.json' };
+  assert.deepEqual(validateConfigReferences(cfg, join(reviewDir, 'config.yml')), []);
+
+  delete cfg.static_analysis.ast_grep.version;
+  assert.match(
+    validateConfigReferences(cfg, join(reviewDir, 'config.yml')).join('\n'),
+    /requires a pinned version/,
+  );
+  cfg.static_analysis.ast_grep.version = '0.45.0';
+
+  writeFileSync(join(reviewDir, 'static/sgconfig.yml'), 'ruleDirs: [missing]\n');
+  const errors = validateConfigReferences(cfg, join(reviewDir, 'config.yml'));
+  assert.ok(errors.some((e) => e.includes('requires testConfigs')));
+  assert.ok(errors.some((e) => e.includes('missing directory: missing')));
+});

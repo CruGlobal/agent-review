@@ -26,6 +26,17 @@ const {
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
 const {
+  readData,
+  validateSuite,
+  loadResultRuns,
+  scoreSuite,
+  compareEvaluation,
+  materializeCase,
+} = require('./evalSuite.cjs');
+const { buildEvidence, verifyEvidenceLedger } = require('./evidence.cjs');
+const { validateContextManifest, contextInventory, packContext } = require('./contextPack.cjs');
+const { readTelemetry, summarizeTelemetry, rolloutReadiness } = require('./telemetry.cjs');
+const {
   setLearningStatus,
   listLearnings,
   preflightSummary,
@@ -172,7 +183,13 @@ const USAGE = `usage: agent-review <command>
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
-  status --ledger <f> --plan <f> --safety <f> [--head <sha>]   compute approval status
+  status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
+  evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
+  context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
+  eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
+  eval prepare --suite <f> --case <id> --repo <d> --out <d>   create a seeded disposable worktree
+  telemetry --in <feedback.jsonl>   summarize review dispositions and dismissal reasons
+  rollout --eval <summary.json> --telemetry <summary.json>   check every-PR readiness gates
   rules                          list rules synthesized from approved learnings
   feedback <pendingFile>         ingest marked outcomes
   learn [--min-support N]        mine feedback into proposed learnings
@@ -317,12 +334,132 @@ function main(rawArgv) {
             plan: JSON.parse(readFileSync(planPath, 'utf8')),
             safety: JSON.parse(readFileSync(safetyPath, 'utf8')),
             head: flag(rest, '--head'),
+            evidence: flag(rest, '--evidence')
+              ? JSON.parse(readFileSync(flag(rest, '--evidence'), 'utf8'))
+              : null,
           }),
           null,
           2,
         ),
       );
       return 0;
+    }
+    case 'evidence': {
+      const verifyComment = flag(rest, '--verify-comment');
+      const evidencePath = flag(rest, '--evidence');
+      if (verifyComment || evidencePath) {
+        if (!verifyComment || !evidencePath) {
+          out('usage: agent-review evidence --verify-comment <f> --evidence <f>');
+          return 1;
+        }
+        out(JSON.stringify(verifyEvidenceLedger(
+          JSON.parse(readFileSync(evidencePath, 'utf8')),
+          readFileSync(verifyComment, 'utf8'),
+        ), null, 2));
+        return 0;
+      }
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const astConfig = cfg.static_analysis && cfg.static_analysis.ast_grep || {};
+      const result = buildEvidence({
+        diffPath: flag(rest, '--diff'),
+        astGrepPath: flag(rest, '--ast-grep'),
+        ciPath: flag(rest, '--ci'),
+        staticConfig: {
+          ...astConfig,
+          excluded_paths: [...(cfg.excluded_paths || []), ...(astConfig.excluded_paths || [])],
+        },
+        ciConfig: cfg.ci || {},
+      });
+      out(JSON.stringify(result, null, 2));
+      return 0;
+    }
+    case 'context': {
+      const action = rest[0];
+      const manifestPath = flag(rest, '--manifest');
+      if (!manifestPath || !['validate', 'inventory', 'pack'].includes(action)) {
+        out('usage: agent-review context validate|inventory|pack --manifest <f> [--dir <d>]');
+        return 1;
+      }
+      const manifest = validateContextManifest(JSON.parse(readFileSync(manifestPath, 'utf8')));
+      if (action === 'validate') out(`context OK (${manifest.repositories.length} repositories)`);
+      else if (action === 'inventory') {
+        const dir = flag(rest, '--dir');
+        if (!dir) {
+          out('usage: agent-review context inventory --manifest <f> --dir <d>');
+          return 1;
+        }
+        out(JSON.stringify(contextInventory(manifest, dir), null, 2));
+      } else {
+        const source = flag(rest, '--source');
+        const dir = flag(rest, '--dir');
+        if (!source || !dir) {
+          out('usage: agent-review context pack --manifest <f> --source <d> --dir <d>');
+          return 1;
+        }
+        out(JSON.stringify(packContext(manifest, source, dir), null, 2));
+      }
+      return 0;
+    }
+    case 'eval': {
+      const action = rest[0];
+      const suitePath = flag(rest, '--suite');
+      if (!suitePath || !['validate', 'score', 'prepare'].includes(action)) {
+        out('usage: agent-review eval validate|score|prepare --suite <f> [...]');
+        return 1;
+      }
+      const suite = validateSuite(readData(suitePath), { suitePath });
+      if (action === 'validate') {
+        out(`eval suite OK (${suite.cases.length} cases)`);
+        return 0;
+      }
+      if (action === 'prepare') {
+        const caseId = flag(rest, '--case');
+        const repo = flag(rest, '--repo');
+        const target = flag(rest, '--out');
+        if (!caseId || !repo || !target) {
+          out('usage: agent-review eval prepare --suite <f> --case <id> --repo <d> --out <d> [--base <ref>]');
+          return 1;
+        }
+        out(JSON.stringify(materializeCase({
+          suite, suitePath, caseId, repo, out: target, base: flag(rest, '--base') || 'HEAD',
+        }), null, 2));
+        return 0;
+      }
+      const resultsPath = flag(rest, '--results');
+      if (!resultsPath) {
+        out('usage: agent-review eval score --suite <f> --results <file-or-dir> [--baseline <f>] [--fail-on-gate]');
+        return 1;
+      }
+      const summary = scoreSuite(suite, loadResultRuns(resultsPath));
+      const baselinePath = flag(rest, '--baseline');
+      if (baselinePath) summary.comparison = compareEvaluation(summary, readData(baselinePath));
+      out(JSON.stringify(summary, null, 2));
+      return rest.includes('--fail-on-gate') && !summary.gate.pass ? 2 : 0;
+    }
+    case 'telemetry': {
+      const path = flag(rest, '--in');
+      if (!path) {
+        out('usage: agent-review telemetry --in <feedback.jsonl>');
+        return 1;
+      }
+      out(JSON.stringify(summarizeTelemetry(readTelemetry(path)), null, 2));
+      return 0;
+    }
+    case 'rollout': {
+      const evalPath = flag(rest, '--eval');
+      const telemetryPath = flag(rest, '--telemetry');
+      if (!evalPath || !telemetryPath) {
+        out('usage: agent-review rollout --eval <summary.json> --telemetry <summary.json>');
+        return 1;
+      }
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const readiness = rolloutReadiness({
+        evaluation: readData(evalPath),
+        telemetry: readData(telemetryPath),
+        rollout: cfg.rollout || {},
+      });
+      out(JSON.stringify(readiness, null, 2));
+      return rest.includes('--fail-on-gate') && !readiness.readyForEveryPr ? 2 : 0;
     }
     case 'rules': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });

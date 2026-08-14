@@ -8,6 +8,12 @@ other specialist agents are reviewing the same diff from their own angles.
 CONTEXT:
 {{RISK_CONTEXT}}
 
+DETERMINISTIC EVIDENCE (workflow-produced; do not suppress or duplicate static findings):
+{{EVIDENCE}}
+
+SHA-PINNED CROSS-REPOSITORY CONTEXT:
+{{CONTEXT}}
+
 INSTRUCTIONS:
 
 1. Read /tmp/pr_diff.txt for the diff
@@ -17,6 +23,8 @@ INSTRUCTIONS:
    SEARCH below) BEFORE flagging anything
 5. Read the project's agent/contributor guide (e.g. AGENTS.md / CLAUDE.md / CONTRIBUTING.md) if
    present, and treat it as authoritative for project conventions
+6. Inspect relevant CI failures/annotations and allowlisted cross-repository contract files from
+   the context above. A pending or unrelated CI check is not itself a blocker.
    {{IMPACT}}
 
 PROJECT-SPECIFIC RULES:
@@ -150,6 +158,8 @@ GUIDELINES:
 - Focus on practical risks, not theoretical ones
 - READ THE FULL FILES for context, not just the diff
 - Search the codebase before flagging to avoid false positives
+- Do not re-report deterministic static findings as a second model finding; reference their rule
+  id when corroborating them. They enter the final ledger independently of consensus.
 - If nothing in this change set falls within your expertise, say so plainly and skip to Confidence
 
 {{PROFILE_INSTRUCTION}}

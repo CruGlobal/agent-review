@@ -14496,111 +14496,6 @@ var require_upgradeConfig = __commonJS({
   }
 });
 
-// engine/loadConfig.cjs
-var require_loadConfig = __commonJS({
-  "engine/loadConfig.cjs"(exports2, module2) {
-    "use strict";
-    var { readFileSync, existsSync, statSync } = require("node:fs");
-    var { dirname, resolve, relative } = require("node:path");
-    var { parse } = require_dist();
-    var Ajv = require__();
-    var { upgradeConfig } = require_upgradeConfig();
-    function parseConfig(yamlText) {
-      return parse(yamlText);
-    }
-    function validateConfig(configObj, schemaObj) {
-      const ajv = new Ajv({ allErrors: true });
-      const validate = ajv.compile(schemaObj);
-      const valid = validate(configObj);
-      const errors = valid ? [] : (validate.errors || []).map(
-        (e) => `${e.instancePath || "(root)"} ${e.message}`
-      );
-      return { valid, errors };
-    }
-    function validateConfigReferences(configObj, configPath) {
-      const errors = [];
-      const ids = /* @__PURE__ */ new Set();
-      for (const agent of configObj.agents || []) {
-        if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
-        ids.add(agent.id);
-      }
-      const base = dirname(resolve(configPath));
-      const references = [];
-      for (const agent of configObj.agents || []) {
-        for (const rule of agent.rules || []) {
-          references.push({ owner: `agent ${agent.id}`, rule });
-        }
-      }
-      for (const [index, pathRule] of (configObj.path_rules || []).entries()) {
-        for (const rule of pathRule.rules || []) {
-          references.push({ owner: `path_rules[${index}]`, rule });
-        }
-      }
-      for (const { owner, rule } of references) {
-        const target = resolve(base, rule);
-        const rel = relative(base, target);
-        if (rel.startsWith("..") || rel === "") {
-          errors.push(`${owner} rule escapes the review directory: ${rule}`);
-          continue;
-        }
-        if (!existsSync(target) || !statSync(target).isFile()) {
-          errors.push(`${owner} references missing rule file: ${rule}`);
-        }
-      }
-      return errors;
-    }
-    function loadConfig({ configPath, schemaPath }) {
-      const configObj = parseConfig(readFileSync(configPath, "utf8"));
-      const schemaObj = JSON.parse(readFileSync(schemaPath, "utf8"));
-      const { valid, errors } = validateConfig(configObj, schemaObj);
-      if (!valid) {
-        throw new Error(
-          `Invalid review config (${configPath}):
-- ${errors.join("\n- ")}`
-        );
-      }
-      const referenceErrors = validateConfigReferences(configObj, configPath);
-      if (referenceErrors.length) {
-        throw new Error(
-          `Invalid review config (${configPath}):
-- ${referenceErrors.join("\n- ")}`
-        );
-      }
-      return upgradeConfig(configObj);
-    }
-    module2.exports = {
-      parseConfig,
-      validateConfig,
-      validateConfigReferences,
-      loadConfig
-    };
-  }
-});
-
-// engine/args.cjs
-var require_args = __commonJS({
-  "engine/args.cjs"(exports2, module2) {
-    "use strict";
-    function parseArgs(argv) {
-      const args = {};
-      for (let i = 0; i < argv.length; i++) {
-        const tok = argv[i];
-        if (!tok.startsWith("--")) continue;
-        const key = tok.slice(2);
-        const next = argv[i + 1];
-        if (next === void 0 || next.startsWith("--")) {
-          args[key] = true;
-        } else {
-          args[key] = next;
-          i++;
-        }
-      }
-      return args;
-    }
-    module2.exports = { parseArgs };
-  }
-});
-
 // node_modules/balanced-match/dist/commonjs/index.js
 var require_commonjs = __commonJS({
   "node_modules/balanced-match/dist/commonjs/index.js"(exports2) {
@@ -16547,6 +16442,344 @@ var require_commonjs3 = __commonJS({
   }
 });
 
+// engine/contextPack.cjs
+var require_contextPack = __commonJS({
+  "engine/contextPack.cjs"(exports2, module2) {
+    "use strict";
+    var {
+      existsSync,
+      copyFileSync,
+      lstatSync,
+      mkdirSync,
+      readFileSync,
+      readdirSync
+    } = require("node:fs");
+    var { join, relative, resolve, sep } = require("node:path");
+    var { Minimatch } = require_commonjs3();
+    function validateContextManifest(raw) {
+      if (!raw || raw.version !== 1) throw new Error("context manifest version must be 1");
+      if (!Array.isArray(raw.repositories)) throw new Error("context manifest requires repositories");
+      const ids = /* @__PURE__ */ new Set();
+      for (const repo of raw.repositories) {
+        if (!repo.id || !/^[a-z0-9][a-z0-9_-]*$/i.test(repo.id)) {
+          throw new Error(`invalid context repository id: ${repo.id || ""}`);
+        }
+        if (ids.has(repo.id)) throw new Error(`duplicate context repository id: ${repo.id}`);
+        ids.add(repo.id);
+        if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.repository || "")) {
+          throw new Error(`invalid GitHub repository for context ${repo.id}`);
+        }
+        if (!/^[0-9a-f]{40}$/.test(repo.ref || "")) {
+          throw new Error(`context ${repo.id} ref must be a full 40-character commit SHA`);
+        }
+        if (!Array.isArray(repo.paths) || repo.paths.length === 0) {
+          throw new Error(`context ${repo.id} requires at least one path glob`);
+        }
+        if (repo.max_files != null && (!Number.isInteger(repo.max_files) || repo.max_files < 1 || repo.max_files > 500)) {
+          throw new Error(`context ${repo.id} max_files must be 1..500`);
+        }
+        if (repo.max_bytes != null && (!Number.isInteger(repo.max_bytes) || repo.max_bytes < 1 || repo.max_bytes > 5e6)) {
+          throw new Error(`context ${repo.id} max_bytes must be 1..5000000`);
+        }
+      }
+      return raw;
+    }
+    function safeFiles(root) {
+      const out = [];
+      if (!existsSync(root)) return out;
+      const walk = (dir) => {
+        for (const name of readdirSync(dir).sort()) {
+          if (name === ".git") continue;
+          const path = join(dir, name);
+          const st = lstatSync(path);
+          if (st.isSymbolicLink()) continue;
+          if (st.isDirectory()) walk(path);
+          else if (st.isFile()) out.push({ path, size: st.size });
+        }
+      };
+      walk(root);
+      return out;
+    }
+    function within(root, path) {
+      const rel = relative(resolve(root), resolve(path));
+      return rel !== ".." && !rel.startsWith(`..${sep}`) && !resolve(path).startsWith(`${resolve(root)}${sep}..`);
+    }
+    function contextInventory(manifestInput, contextDir) {
+      const manifest = validateContextManifest(manifestInput);
+      const repositories = [];
+      for (const repo of manifest.repositories) {
+        const root = join(resolve(contextDir), repo.id);
+        if (!within(contextDir, root)) throw new Error(`context path escapes root: ${repo.id}`);
+        if (!existsSync(root)) {
+          if (repo.required) throw new Error(`required context repository was not fetched: ${repo.id}`);
+          repositories.push({
+            id: repo.id,
+            repository: repo.repository,
+            ref: repo.ref,
+            available: false,
+            required: Boolean(repo.required),
+            files: []
+          });
+          continue;
+        }
+        const include = repo.paths.map((p) => new Minimatch(p, { dot: true }));
+        const exclude = (repo.excluded_paths || []).map((p) => new Minimatch(p, { dot: true }));
+        const maxFiles = repo.max_files || 100;
+        const maxBytes = repo.max_bytes || 1e6;
+        let bytes = 0;
+        let truncated = false;
+        const files = [];
+        for (const item of safeFiles(root)) {
+          const rel = relative(root, item.path).split(sep).join("/");
+          if (!include.some((m) => m.match(rel)) || exclude.some((m) => m.match(rel))) continue;
+          if (files.length >= maxFiles || bytes + item.size > maxBytes) {
+            truncated = true;
+            continue;
+          }
+          files.push({ path: rel, size: item.size });
+          bytes += item.size;
+        }
+        let source = null;
+        const sourcePath = join(root, ".agent-review-source.json");
+        if (existsSync(sourcePath)) {
+          try {
+            source = JSON.parse(readFileSync(sourcePath, "utf8"));
+          } catch {
+            source = null;
+          }
+        }
+        repositories.push({
+          id: repo.id,
+          repository: repo.repository,
+          ref: repo.ref,
+          description: repo.description || "",
+          available: true,
+          required: Boolean(repo.required),
+          root,
+          files,
+          bytes,
+          truncated,
+          source
+        });
+      }
+      return { version: 1, repositories };
+    }
+    function packContext(manifestInput, sourceDir, outputDir) {
+      const manifest = validateContextManifest(manifestInput);
+      const output = resolve(outputDir);
+      const packStats = /* @__PURE__ */ new Map();
+      if (existsSync(output) && readdirSync(output).length > 0) {
+        throw new Error(`refusing to overwrite non-empty context pack: ${output}`);
+      }
+      mkdirSync(output, { recursive: true });
+      for (const repo of manifest.repositories) {
+        const sourceRoot = join(resolve(sourceDir), repo.id);
+        if (!existsSync(sourceRoot)) {
+          if (repo.required) throw new Error(`required context repository was not fetched: ${repo.id}`);
+          continue;
+        }
+        const include = repo.paths.map((p) => new Minimatch(p, { dot: true }));
+        const exclude = (repo.excluded_paths || []).map((p) => new Minimatch(p, { dot: true }));
+        const maxFiles = repo.max_files || 100;
+        const maxBytes = repo.max_bytes || 1e6;
+        let count = 0;
+        let bytes = 0;
+        let matchedFiles = 0;
+        let truncated = false;
+        for (const item of safeFiles(sourceRoot)) {
+          const rel = relative(sourceRoot, item.path).split(sep).join("/");
+          if (!include.some((m) => m.match(rel)) || exclude.some((m) => m.match(rel))) continue;
+          matchedFiles++;
+          if (count >= maxFiles || bytes + item.size > maxBytes) {
+            truncated = true;
+            continue;
+          }
+          const target = join(output, repo.id, rel);
+          if (!within(join(output, repo.id), target)) throw new Error(`context file escapes pack: ${rel}`);
+          mkdirSync(require("node:path").dirname(target), { recursive: true });
+          copyFileSync(item.path, target);
+          count++;
+          bytes += item.size;
+        }
+        const sourceMeta = join(sourceRoot, ".agent-review-source.json");
+        if (existsSync(sourceMeta)) {
+          mkdirSync(join(output, repo.id), { recursive: true });
+          copyFileSync(sourceMeta, join(output, repo.id, ".agent-review-source.json"));
+        }
+        packStats.set(repo.id, { matchedFiles, truncated });
+      }
+      const inventory = contextInventory(manifest, output);
+      for (const repo of inventory.repositories) {
+        const stats = packStats.get(repo.id);
+        if (!stats) continue;
+        repo.sourceMatchedFiles = stats.matchedFiles;
+        repo.truncated = repo.truncated || stats.truncated;
+      }
+      return inventory;
+    }
+    module2.exports = { validateContextManifest, safeFiles, contextInventory, packContext };
+  }
+});
+
+// engine/loadConfig.cjs
+var require_loadConfig = __commonJS({
+  "engine/loadConfig.cjs"(exports2, module2) {
+    "use strict";
+    var { readFileSync, existsSync, statSync } = require("node:fs");
+    var { dirname, resolve, relative } = require("node:path");
+    var { parse } = require_dist();
+    var Ajv = require__();
+    var { upgradeConfig } = require_upgradeConfig();
+    var { validateContextManifest } = require_contextPack();
+    function parseConfig(yamlText) {
+      return parse(yamlText);
+    }
+    function validateConfig(configObj, schemaObj) {
+      const ajv = new Ajv({ allErrors: true });
+      const validate = ajv.compile(schemaObj);
+      const valid = validate(configObj);
+      const errors = valid ? [] : (validate.errors || []).map(
+        (e) => `${e.instancePath || "(root)"} ${e.message}`
+      );
+      return { valid, errors };
+    }
+    function validateConfigReferences(configObj, configPath) {
+      const errors = [];
+      const ids = /* @__PURE__ */ new Set();
+      for (const agent of configObj.agents || []) {
+        if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
+        ids.add(agent.id);
+      }
+      const base = dirname(resolve(configPath));
+      const references = [];
+      for (const agent of configObj.agents || []) {
+        for (const rule of agent.rules || []) {
+          references.push({ owner: `agent ${agent.id}`, rule });
+        }
+      }
+      for (const [index, pathRule] of (configObj.path_rules || []).entries()) {
+        for (const rule of pathRule.rules || []) {
+          references.push({ owner: `path_rules[${index}]`, rule });
+        }
+      }
+      for (const { owner, rule } of references) {
+        const target = resolve(base, rule);
+        const rel = relative(base, target);
+        if (rel.startsWith("..") || rel === "") {
+          errors.push(`${owner} rule escapes the review directory: ${rule}`);
+          continue;
+        }
+        if (!existsSync(target) || !statSync(target).isFile()) {
+          errors.push(`${owner} references missing rule file: ${rule}`);
+        }
+      }
+      const extraFiles = [];
+      const astConfig = configObj.static_analysis && configObj.static_analysis.ast_grep;
+      if (astConfig && astConfig.enabled) {
+        if (!astConfig.config) errors.push("static_analysis.ast_grep.enabled requires config");
+        else extraFiles.push({ owner: "static_analysis.ast_grep", path: astConfig.config, astGrep: true });
+        if (!astConfig.version) errors.push("static_analysis.ast_grep.enabled requires a pinned version");
+      }
+      const context = configObj.context;
+      if (context && context.enabled) {
+        if (!context.manifest) errors.push("context.enabled requires manifest");
+        else extraFiles.push({ owner: "context", path: context.manifest, contextManifest: true });
+      }
+      for (const item of extraFiles) {
+        const target = resolve(base, item.path);
+        const rel = relative(base, target);
+        if (rel.startsWith("..") || rel === "") {
+          errors.push(`${item.owner} path escapes the review directory: ${item.path}`);
+          continue;
+        }
+        if (!existsSync(target) || !statSync(target).isFile()) {
+          errors.push(`${item.owner} references missing file: ${item.path}`);
+          continue;
+        }
+        if (item.contextManifest) {
+          try {
+            validateContextManifest(JSON.parse(readFileSync(target, "utf8")));
+          } catch (e) {
+            errors.push(`${item.owner} manifest is invalid: ${e.message}`);
+          }
+        }
+        if (item.astGrep) {
+          try {
+            const sg = parse(readFileSync(target, "utf8")) || {};
+            if (!Array.isArray(sg.ruleDirs) || sg.ruleDirs.length === 0) {
+              errors.push(`${item.owner} config requires ruleDirs`);
+            }
+            if (!Array.isArray(sg.testConfigs) || sg.testConfigs.length === 0) {
+              errors.push(`${item.owner} config requires testConfigs`);
+            }
+            for (const dir of [
+              ...sg.ruleDirs || [],
+              ...(sg.testConfigs || []).map((t) => t && t.testDir).filter(Boolean)
+            ]) {
+              const child = resolve(dirname(target), dir);
+              if (!existsSync(child) || !statSync(child).isDirectory()) {
+                errors.push(`${item.owner} references missing directory: ${dir}`);
+              }
+            }
+          } catch (e) {
+            errors.push(`${item.owner} config is invalid: ${e.message}`);
+          }
+        }
+      }
+      return errors;
+    }
+    function loadConfig({ configPath, schemaPath }) {
+      const configObj = parseConfig(readFileSync(configPath, "utf8"));
+      const schemaObj = JSON.parse(readFileSync(schemaPath, "utf8"));
+      const { valid, errors } = validateConfig(configObj, schemaObj);
+      if (!valid) {
+        throw new Error(
+          `Invalid review config (${configPath}):
+- ${errors.join("\n- ")}`
+        );
+      }
+      const referenceErrors = validateConfigReferences(configObj, configPath);
+      if (referenceErrors.length) {
+        throw new Error(
+          `Invalid review config (${configPath}):
+- ${referenceErrors.join("\n- ")}`
+        );
+      }
+      return upgradeConfig(configObj);
+    }
+    module2.exports = {
+      parseConfig,
+      validateConfig,
+      validateConfigReferences,
+      loadConfig
+    };
+  }
+});
+
+// engine/args.cjs
+var require_args = __commonJS({
+  "engine/args.cjs"(exports2, module2) {
+    "use strict";
+    function parseArgs(argv) {
+      const args = {};
+      for (let i = 0; i < argv.length; i++) {
+        const tok = argv[i];
+        if (!tok.startsWith("--")) continue;
+        const key = tok.slice(2);
+        const next = argv[i + 1];
+        if (next === void 0 || next.startsWith("--")) {
+          args[key] = true;
+        } else {
+          args[key] = next;
+          i++;
+        }
+      }
+      return args;
+    }
+    module2.exports = { parseArgs };
+  }
+});
+
 // engine/scoreRisk.cjs
 var require_scoreRisk = __commonJS({
   "engine/scoreRisk.cjs"(exports2, module2) {
@@ -17133,6 +17366,344 @@ var require_mineLearnings = __commonJS({
   }
 });
 
+// engine/evalSuite.cjs
+var require_evalSuite = __commonJS({
+  "engine/evalSuite.cjs"(exports2, module2) {
+    "use strict";
+    var {
+      existsSync,
+      readFileSync,
+      readdirSync,
+      statSync
+    } = require("node:fs");
+    var { execFileSync } = require("node:child_process");
+    var { basename, dirname, extname, join, resolve } = require("node:path");
+    var YAML = require_dist();
+    var { Minimatch } = require_commonjs3();
+    var DISMISSAL_REASONS = /* @__PURE__ */ new Set([
+      "false-positive",
+      "intentional",
+      "pre-existing",
+      "deferred",
+      "duplicate",
+      "insufficient-evidence",
+      "other"
+    ]);
+    function readData(path) {
+      const text = readFileSync(path, "utf8");
+      return /\.ya?ml$/i.test(path) ? YAML.parse(text) : JSON.parse(text);
+    }
+    function finiteRate(value, name) {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0 || n > 1) {
+        throw new Error(`${name} must be a number from 0 to 1`);
+      }
+      return n;
+    }
+    function validateSuite(raw, { suitePath } = {}) {
+      if (!raw || raw.version !== 1) throw new Error("evaluation suite version must be 1");
+      if (!raw.name) throw new Error("evaluation suite requires name");
+      if (!Array.isArray(raw.cases) || raw.cases.length === 0) {
+        throw new Error("evaluation suite requires at least one case");
+      }
+      const ids = /* @__PURE__ */ new Set();
+      const base = suitePath ? dirname(suitePath) : process.cwd();
+      for (const c of raw.cases) {
+        if (!c.id || !/^[a-z0-9][a-z0-9._-]*$/i.test(c.id)) {
+          throw new Error(`invalid evaluation case id: ${c.id || ""}`);
+        }
+        if (ids.has(c.id)) throw new Error(`duplicate evaluation case id: ${c.id}`);
+        ids.add(c.id);
+        if (!["seeded_bug", "clean_control"].includes(c.kind)) {
+          throw new Error(`case ${c.id} has invalid kind: ${c.kind}`);
+        }
+        if (c.patch && suitePath && !existsSync(join(base, c.patch))) {
+          throw new Error(`case ${c.id} references missing patch: ${c.patch}`);
+        }
+        const expected = c.expected || [];
+        if (c.kind === "seeded_bug" && expected.length === 0) {
+          throw new Error(`seeded case ${c.id} requires expected findings`);
+        }
+        if (c.kind === "clean_control" && expected.some((e) => e.must_block !== false)) {
+          throw new Error(`clean control ${c.id} cannot require a blocker`);
+        }
+        for (const e of expected) {
+          if (!e.id) throw new Error(`case ${c.id} has an expected finding without id`);
+          const min = Number(e.min_severity == null ? 7 : e.min_severity);
+          if (!Number.isFinite(min) || min < 1 || min > 10) {
+            throw new Error(`case ${c.id}/${e.id} has invalid min_severity`);
+          }
+          const match = e.match || {};
+          if (!Array.isArray(match.paths) || match.paths.length === 0) {
+            throw new Error(`case ${c.id}/${e.id} requires match.paths`);
+          }
+          for (const key of ["categories", "message_all", "message_any"]) {
+            if (match[key] != null && !Array.isArray(match[key])) {
+              throw new Error(`case ${c.id}/${e.id} match.${key} must be an array`);
+            }
+          }
+        }
+      }
+      const thresholds = raw.thresholds || {};
+      for (const key of [
+        "blocker_recall",
+        "blocker_precision",
+        "clean_false_blocker_rate",
+        "false_positive_dismissal_rate",
+        "category_recall"
+      ]) {
+        if (thresholds[key] != null) finiteRate(thresholds[key], `thresholds.${key}`);
+      }
+      return raw;
+    }
+    function normalizeRun(raw, fallbackId) {
+      const findings = raw.findings || raw.kept || (Array.isArray(raw) ? raw : []);
+      if (!Array.isArray(findings)) throw new Error("evaluation result findings must be an array");
+      const caseId = raw.case_id || raw.caseId || fallbackId;
+      const runId = raw.run_id || raw.runId || "run-1";
+      if (!caseId || typeof caseId !== "string") throw new Error("evaluation result requires case_id");
+      if (!runId || typeof runId !== "string") throw new Error(`evaluation result ${caseId} requires run_id`);
+      return {
+        case_id: caseId,
+        run_id: runId,
+        findings: findings.map((f, index) => {
+          const severity = Number(f.severity);
+          if (!Number.isFinite(severity) || severity < 1 || severity > 10) {
+            throw new Error(`evaluation result ${caseId}/${runId} finding ${index + 1} has invalid severity`);
+          }
+          if (f.outcome != null && !["accepted", "dismissed"].includes(f.outcome)) {
+            throw new Error(`evaluation result ${caseId}/${runId} finding ${index + 1} has invalid outcome`);
+          }
+          if (f.verdict != null && !["true_positive", "false_positive", "duplicate"].includes(f.verdict)) {
+            throw new Error(`evaluation result ${caseId}/${runId} finding ${index + 1} has invalid verdict`);
+          }
+          const reason = f.dismissal_reason || f.dismissalReason || f.reason_code;
+          if (f.outcome === "dismissed" && !DISMISSAL_REASONS.has(reason)) {
+            throw new Error(`evaluation result ${caseId}/${runId} finding ${index + 1} requires a valid dismissal reason`);
+          }
+          return { ...f, severity };
+        })
+      };
+    }
+    function loadResultRuns(path) {
+      if (!statSync(path).isDirectory()) {
+        const raw = readData(path);
+        if (Array.isArray(raw.runs)) return raw.runs.map((r) => normalizeRun(r));
+        return [normalizeRun(raw, basename(path, extname(path)))];
+      }
+      const runs = [];
+      const visit = (dir) => {
+        for (const name of readdirSync(dir).sort()) {
+          const child = join(dir, name);
+          if (statSync(child).isDirectory()) visit(child);
+          else if (/\.(json|ya?ml)$/i.test(name)) {
+            const raw = readData(child);
+            const fallback = basename(name, extname(name)).replace(/\.run-[^.]+$/, "");
+            if (Array.isArray(raw.runs)) runs.push(...raw.runs.map((r) => normalizeRun(r)));
+            else runs.push(normalizeRun(raw, fallback));
+          }
+        }
+      };
+      visit(path);
+      return runs;
+    }
+    function includesText(haystack, needle) {
+      return String(haystack || "").toLowerCase().includes(String(needle).toLowerCase());
+    }
+    function matchesExpected(finding, expected, blockerThreshold) {
+      const match = expected.match || {};
+      const minimum = Number(expected.min_severity == null ? blockerThreshold : expected.min_severity);
+      if (!Number.isFinite(finding.severity) || finding.severity < minimum) return false;
+      if (!(match.paths || []).some((p) => new Minimatch(p, { dot: true }).match(finding.file || ""))) {
+        return false;
+      }
+      if (match.categories && match.categories.length && !match.categories.some((c) => includesText(finding.category, c))) return false;
+      const text = [finding.message, finding.evidence, finding.detail].filter(Boolean).join(" ");
+      if ((match.message_all || []).some((term) => !includesText(text, term))) return false;
+      if (match.message_any && match.message_any.length && !match.message_any.some((term) => includesText(text, term))) return false;
+      return true;
+    }
+    function ratio(num, den) {
+      return den === 0 ? null : num / den;
+    }
+    function scoreSuite(suiteInput, runsInput) {
+      const suite = validateSuite(suiteInput);
+      const blockerThreshold = Number(suite.blocker_threshold || 7);
+      const cases = new Map(suite.cases.map((c) => [c.id, c]));
+      const seenRuns = /* @__PURE__ */ new Set();
+      const totals = {
+        expectedBlockers: 0,
+        truePositiveBlockers: 0,
+        validBlockerFindings: 0,
+        falsePositiveBlockers: 0,
+        cleanRuns: 0,
+        cleanRunsWithBlocker: 0,
+        accepted: 0,
+        dismissed: 0,
+        falsePositiveDismissals: 0
+      };
+      const category = /* @__PURE__ */ new Map();
+      const caseRuns = /* @__PURE__ */ new Map();
+      const details = [];
+      for (const rawRun of runsInput) {
+        const run = normalizeRun(rawRun);
+        const c = cases.get(run.case_id);
+        if (!c) throw new Error(`result references unknown case: ${run.case_id}`);
+        const key = `${run.case_id}/${run.run_id}`;
+        if (seenRuns.has(key)) throw new Error(`duplicate result run: ${key}`);
+        seenRuns.add(key);
+        const expected = (c.expected || []).filter((e) => e.must_block !== false);
+        const unmatchedActual = new Set(run.findings.map((_, i) => i));
+        const matched = [];
+        for (const e of expected) {
+          totals.expectedBlockers++;
+          const cat = String(e.category || c.category || "uncategorized");
+          const cs = category.get(cat) || { expected: 0, detected: 0 };
+          cs.expected++;
+          let index = run.findings.findIndex(
+            (f, i) => unmatchedActual.has(i) && f.verdict !== "false_positive" && matchesExpected(f, e, blockerThreshold)
+          );
+          if (index >= 0) {
+            totals.truePositiveBlockers++;
+            cs.detected++;
+            unmatchedActual.delete(index);
+            matched.push({ expected: e.id, finding: index });
+          }
+          category.set(cat, cs);
+        }
+        let falseBlockers = 0;
+        run.findings.forEach((finding, i) => {
+          if (finding.outcome === "accepted") totals.accepted++;
+          if (finding.outcome === "dismissed") {
+            totals.dismissed++;
+            const reason = finding.dismissal_reason || finding.dismissalReason || finding.reason_code;
+            if (reason === "false-positive" || reason === "insufficient-evidence") {
+              totals.falsePositiveDismissals++;
+            }
+          }
+          if (finding.severity < blockerThreshold || finding.verdict === "duplicate") return;
+          if (!unmatchedActual.has(i) && finding.verdict !== "false_positive" || finding.verdict === "true_positive") totals.validBlockerFindings++;
+          else falseBlockers++;
+        });
+        totals.falsePositiveBlockers += falseBlockers;
+        if (c.kind === "clean_control") {
+          totals.cleanRuns++;
+          if (run.findings.some((f) => f.severity >= blockerThreshold && f.verdict !== "duplicate")) {
+            totals.cleanRunsWithBlocker++;
+          }
+        }
+        const detected = c.kind === "clean_control" ? falseBlockers === 0 : matched.length === expected.length;
+        const cr = caseRuns.get(c.id) || { kind: c.kind, runs: 0, detected: 0 };
+        cr.runs++;
+        if (detected) cr.detected++;
+        caseRuns.set(c.id, cr);
+        details.push({
+          caseId: c.id,
+          runId: run.run_id,
+          expectedBlockers: expected.length,
+          detectedBlockers: matched.length,
+          falsePositiveBlockers: falseBlockers,
+          matched
+        });
+      }
+      const precisionDen = totals.validBlockerFindings + totals.falsePositiveBlockers;
+      const dispositioned = totals.accepted + totals.dismissed;
+      const metrics = {
+        blockerRecall: ratio(totals.truePositiveBlockers, totals.expectedBlockers),
+        blockerPrecision: ratio(totals.validBlockerFindings, precisionDen),
+        cleanFalseBlockerRate: ratio(totals.cleanRunsWithBlocker, totals.cleanRuns),
+        dismissalRate: ratio(totals.dismissed, dispositioned),
+        falsePositiveDismissalRate: ratio(totals.falsePositiveDismissals, dispositioned)
+      };
+      const categories = Object.fromEntries(
+        [...category.entries()].sort().map(([name, value]) => [name, { ...value, recall: ratio(value.detected, value.expected) }])
+      );
+      const stability = Object.fromEntries(
+        [...caseRuns.entries()].sort().map(([id, value]) => [id, {
+          ...value,
+          ...value.kind === "clean_control" ? { cleanPassRate: ratio(value.detected, value.runs) } : { detectionRate: ratio(value.detected, value.runs) }
+        }])
+      );
+      const t = suite.thresholds || {};
+      const gateChecks = {
+        blockerRecall: t.blocker_recall == null || metrics.blockerRecall != null && metrics.blockerRecall >= t.blocker_recall,
+        blockerPrecision: t.blocker_precision == null || metrics.blockerPrecision != null && metrics.blockerPrecision >= t.blocker_precision,
+        cleanFalseBlockerRate: t.clean_false_blocker_rate == null || metrics.cleanFalseBlockerRate != null && metrics.cleanFalseBlockerRate <= t.clean_false_blocker_rate,
+        falsePositiveDismissalRate: t.false_positive_dismissal_rate == null || metrics.falsePositiveDismissalRate != null && metrics.falsePositiveDismissalRate <= t.false_positive_dismissal_rate,
+        categoryRecall: t.category_recall == null || Object.keys(categories).length > 0 && Object.values(categories).every((v) => v.recall != null && v.recall >= t.category_recall),
+        minimumRuns: runsInput.length >= Number(t.minimum_runs || 1),
+        everyCaseCovered: suite.cases.every((c) => caseRuns.has(c.id))
+      };
+      return {
+        version: 1,
+        suite: suite.name,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        totals,
+        metrics,
+        categories,
+        stability,
+        gate: { pass: Object.values(gateChecks).every(Boolean), checks: gateChecks },
+        details
+      };
+    }
+    function compareEvaluation(current, baseline) {
+      const delta = {};
+      for (const key of Object.keys(current.metrics || {})) {
+        const a = current.metrics[key];
+        const b = baseline.metrics && baseline.metrics[key];
+        delta[key] = a == null || b == null ? null : a - b;
+      }
+      return { baselineSuite: baseline.suite || null, metricDelta: delta };
+    }
+    function materializeCase({ suite, suitePath, caseId, repo, out, base = "HEAD" }) {
+      const valid = validateSuite(suite, { suitePath });
+      const c = valid.cases.find((item) => item.id === caseId);
+      if (!c) throw new Error(`evaluation case not found: ${caseId}`);
+      if (!c.patch) throw new Error(`evaluation case ${caseId} has no patch`);
+      const target = resolve(out);
+      if (existsSync(target)) throw new Error(`refusing to overwrite existing eval worktree: ${target}`);
+      const root = resolve(repo);
+      const patch = resolve(dirname(suitePath), c.patch);
+      execFileSync("git", ["-C", root, "worktree", "add", "--detach", target, base], { stdio: "pipe" });
+      try {
+        const baseHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        execFileSync("git", ["-C", target, "apply", "--check", patch], { stdio: "pipe" });
+        execFileSync("git", ["-C", target, "apply", patch], { stdio: "pipe" });
+        execFileSync("git", ["-C", target, "add", "--all"], { stdio: "pipe" });
+        execFileSync("git", [
+          "-C",
+          target,
+          "-c",
+          "user.name=agent-review evaluation",
+          "-c",
+          "user.email=agent-review-eval@invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "--no-verify",
+          "--no-gpg-sign",
+          "-m",
+          `agent-review eval seed: ${caseId}`
+        ], { stdio: "pipe" });
+        const seededHead = execFileSync("git", ["-C", target, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        return { caseId, worktree: target, base, baseHead, seededHead, patch };
+      } catch (e) {
+        throw new Error(`seed preparation failed in ${target}; worktree was preserved for inspection: ${e.message.split("\n")[0]}`);
+      }
+    }
+    module2.exports = {
+      DISMISSAL_REASONS,
+      readData,
+      validateSuite,
+      loadResultRuns,
+      matchesExpected,
+      scoreSuite,
+      compareEvaluation,
+      materializeCase
+    };
+  }
+});
+
 // engine/applyLearnings.cjs
 var require_applyLearnings = __commonJS({
   "engine/applyLearnings.cjs"(exports2, module2) {
@@ -17190,6 +17761,7 @@ var require_learningsStore = __commonJS({
     var { join, dirname } = require("node:path");
     var YAML = require_dist();
     var { signature } = require_findingSignature();
+    var { DISMISSAL_REASONS } = require_evalSuite();
     var { mineLearnings } = require_mineLearnings();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     function mergeProposals(existing, proposals) {
@@ -17211,6 +17783,10 @@ var require_learningsStore = __commonJS({
       const out = [];
       for (const f of doc.findings || []) {
         if (f.outcome === "accepted" || f.outcome === "dismissed") {
+          const dismissalReason = f.dismissal_reason || f.dismissalReason || f.reason_code;
+          if (f.outcome === "dismissed" && dismissalReason && !DISMISSAL_REASONS.has(dismissalReason)) {
+            throw new Error(`invalid dismissal reason: ${dismissalReason}`);
+          }
           out.push({
             reviewId: doc.reviewId,
             id: f.id,
@@ -17220,7 +17796,9 @@ var require_learningsStore = __commonJS({
             severity: f.severity,
             file: f.file,
             message: f.message,
-            outcome: f.outcome
+            outcome: f.outcome,
+            ...dismissalReason ? { dismissalReason } : {},
+            ...f.reason ? { dismissalDetail: String(f.reason) } : {}
           });
         }
       }
@@ -17249,7 +17827,9 @@ var require_learningsStore = __commonJS({
           severity: f.severity,
           file: f.file,
           message: f.message,
-          outcome: ""
+          outcome: "",
+          dismissal_reason: "",
+          reason: ""
         }))
       };
       writeFileSync(join(dir, "pending", `${reviewId}.yml`), YAML.stringify(pending));
@@ -17424,6 +18004,7 @@ var require_reportState = __commonJS({
         if (entry.status === "dismissed") {
           if (entry.by) clean.by = String(entry.by);
           if (entry.reason) clean.reason = String(entry.reason);
+          if (entry.reasonCode) clean.reasonCode = String(entry.reasonCode);
         }
         return clean;
       });
@@ -17445,7 +18026,7 @@ var require_reportState = __commonJS({
       }
       return merged;
     }
-    function buildStatus({ ledger, head, plan, safety }) {
+    function buildStatus({ ledger, head, plan, safety, evidence }) {
       const clean = cleanPrevious(ledger || []);
       const risk = plan && plan.risk && plan.risk.level;
       if (!RISKS.has(risk)) throw new Error(`invalid gate-plan risk: ${risk}`);
@@ -17457,6 +18038,11 @@ var require_reportState = __commonJS({
       const openBlockers = clean.filter(
         (entry) => entry.status === "open" && entry.severity >= 7
       ).length;
+      const ci = evidence && evidence.ci && evidence.ci.summary ? Object.fromEntries(["total", "success", "failed", "pending", "neutral"].map((key) => {
+        const value = Number(evidence.ci.summary[key] || 0);
+        if (!Number.isInteger(value) || value < 0) throw new Error(`invalid CI summary count: ${key}`);
+        return [key, value];
+      })) : null;
       return {
         v: 1,
         ...head ? { head: String(head) } : {},
@@ -17464,10 +18050,279 @@ var require_reportState = __commonJS({
         openBlockers,
         pass: openBlockers === 0,
         irreversible,
-        irreversibleReasons
+        irreversibleReasons,
+        ...ci ? { ci } : {}
       };
     }
     module2.exports = { findingList, mergeLedger, buildStatus };
+  }
+});
+
+// engine/evidence.cjs
+var require_evidence = __commonJS({
+  "engine/evidence.cjs"(exports2, module2) {
+    "use strict";
+    var { readFileSync } = require("node:fs");
+    var { Minimatch } = require_commonjs3();
+    var { signature } = require_findingSignature();
+    var AST_SEVERITY = { error: 8, warning: 6, info: 4, hint: 2, off: 0 };
+    var FAILED = /* @__PURE__ */ new Set(["failure", "timed_out", "action_required", "startup_failure"]);
+    var PENDING = /* @__PURE__ */ new Set(["queued", "in_progress", "requested", "waiting", "pending"]);
+    function addedLines(diffText) {
+      const files = /* @__PURE__ */ new Map();
+      let path = null;
+      let line = 0;
+      for (const raw of String(diffText || "").split("\n")) {
+        if (raw.startsWith("+++ ")) {
+          const value = raw.slice(4).trim();
+          path = value === "/dev/null" ? null : value.replace(/^b\//, "");
+          if (path && !files.has(path)) files.set(path, /* @__PURE__ */ new Set());
+          continue;
+        }
+        const hunk = raw.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (hunk) {
+          line = Number(hunk[1]);
+          continue;
+        }
+        if (!path || raw.startsWith("diff --git")) continue;
+        if (raw.startsWith("+") && !raw.startsWith("+++")) {
+          files.get(path).add(line++);
+        } else if (!raw.startsWith("-") && !raw.startsWith("---")) {
+          line++;
+        }
+      }
+      return files;
+    }
+    function parseJsonOrStream(text) {
+      const trimmed = String(text || "").trim();
+      if (!trimmed) return [];
+      try {
+        const parsed = JSON.parse(trimmed);
+        return Array.isArray(parsed) ? parsed : parsed.matches || [parsed];
+      } catch {
+        return trimmed.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+      }
+    }
+    function staticFindings({ astGrep, diffText, severity = {}, excludedPaths = [] }) {
+      const changed = addedLines(diffText);
+      const severityMap = { ...AST_SEVERITY, ...severity };
+      const excluded = excludedPaths.map((p) => new Minimatch(p, { dot: true }));
+      const findings = [];
+      for (const match of parseJsonOrStream(astGrep)) {
+        const file = String(match.file || "").replace(/^\.\//, "");
+        const line = Number(match.range && match.range.start && match.range.start.line) + 1;
+        if (!file || !Number.isInteger(line)) continue;
+        if (excluded.some((m) => m.match(file))) continue;
+        if (!changed.has(file) || !changed.get(file).has(line)) continue;
+        const level = String(match.severity || "warning").toLowerCase();
+        const numeric = Number(severityMap[level]);
+        if (!Number.isFinite(numeric) || numeric < 1) continue;
+        const ruleId = String(match.ruleId || "ast-grep");
+        const message = String(match.message || match.note || `Structural rule ${ruleId} matched`);
+        const finding = {
+          agent: "static-analysis",
+          category: `static-analysis/${ruleId}`,
+          severity: numeric,
+          file,
+          line,
+          message,
+          confidence: "High",
+          evidence: `ast-grep rule ${ruleId} matched added line ${file}:${line}: ${String(match.lines || match.text || "").trim().slice(0, 500)}`,
+          recommendation: String(match.note || "Resolve the structural rule or document an intentional suppression."),
+          source: "ast-grep",
+          ruleId
+        };
+        finding.signature = signature(finding);
+        findings.push(finding);
+      }
+      return findings.sort(
+        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || a.line - b.line
+      );
+    }
+    function cleanCheck(check) {
+      const status = String(check.status || "");
+      const conclusion = check.conclusion == null ? null : String(check.conclusion);
+      let state = "neutral";
+      if (PENDING.has(status) || status !== "completed" && !conclusion) state = "pending";
+      else if (FAILED.has(conclusion)) state = "failed";
+      else if (conclusion === "success") state = "success";
+      return {
+        id: check.id,
+        name: String(check.name || "unnamed check"),
+        status,
+        conclusion,
+        state,
+        url: check.html_url || check.details_url || null,
+        title: check.output && check.output.title ? String(check.output.title).slice(0, 500) : null,
+        summary: check.output && check.output.summary ? String(check.output.summary).slice(0, 2e3) : null,
+        annotations: Array.isArray(check.annotations) ? check.annotations.slice(0, 100).map((a) => ({
+          path: a.path || null,
+          line: a.start_line || null,
+          level: a.annotation_level || null,
+          title: a.title || null,
+          message: String(a.message || "").slice(0, 1e3)
+        })) : []
+      };
+    }
+    function ciSummary(raw, { ignoreChecks = [] } = {}) {
+      const checks = raw && (raw.check_runs || raw.checks || raw) || [];
+      if (!Array.isArray(checks)) throw new Error("CI input must contain a check_runs array");
+      const ignored = ignoreChecks.map((p) => new Minimatch(p, { nocase: true }));
+      const clean = checks.map(cleanCheck).filter((c) => !/^agent-review(?:\b|\s|\/|$)/i.test(c.name)).filter((c) => !ignored.some((m) => m.match(c.name)));
+      const counts = { total: clean.length, success: 0, failed: 0, pending: 0, neutral: 0 };
+      for (const c of clean) counts[c.state]++;
+      return {
+        version: 1,
+        summary: counts,
+        checks: clean
+      };
+    }
+    function buildEvidence({ diffPath, astGrepPath, ciPath, staticConfig = {}, ciConfig = {} }) {
+      const diffText = diffPath ? readFileSync(diffPath, "utf8") : "";
+      return {
+        version: 1,
+        staticFindings: astGrepPath && staticConfig.enabled !== false ? staticFindings({
+          astGrep: readFileSync(astGrepPath, "utf8"),
+          diffText,
+          severity: staticConfig.severity,
+          excludedPaths: staticConfig.excluded_paths || []
+        }) : [],
+        ci: ciPath && ciConfig.enabled !== false ? ciSummary(JSON.parse(readFileSync(ciPath, "utf8")), ciConfig) : null
+      };
+    }
+    function verifyEvidenceLedger(evidence, commentText) {
+      const marker = String(commentText || "").replace(/\r/g, "").match(
+        /^<!-- agent-review-ledger: (.*) -->$/m
+      );
+      if (!marker) throw new Error("report has no findings ledger");
+      let ledger;
+      try {
+        ledger = JSON.parse(marker[1]);
+      } catch {
+        throw new Error("report findings ledger is invalid JSON");
+      }
+      if (!Array.isArray(ledger)) throw new Error("report findings ledger must be an array");
+      const present = new Set(ledger.map((entry) => entry.signature));
+      const missing = (evidence.staticFindings || []).map((finding) => finding.signature || signature(finding)).filter((value) => !present.has(value));
+      if (missing.length) {
+        throw new Error(`report omitted ${missing.length} deterministic static finding(s): ${missing.join(", ")}`);
+      }
+      return { required: (evidence.staticFindings || []).length, present: true };
+    }
+    module2.exports = {
+      AST_SEVERITY,
+      addedLines,
+      parseJsonOrStream,
+      staticFindings,
+      ciSummary,
+      buildEvidence,
+      verifyEvidenceLedger
+    };
+  }
+});
+
+// engine/telemetry.cjs
+var require_telemetry = __commonJS({
+  "engine/telemetry.cjs"(exports2, module2) {
+    "use strict";
+    var { readFileSync } = require("node:fs");
+    var { DISMISSAL_REASONS } = require_evalSuite();
+    function readTelemetry(path) {
+      const text = readFileSync(path, "utf8").trim();
+      if (!text) return [];
+      if (/\.json$/i.test(path)) {
+        const raw = JSON.parse(text);
+        return raw.entries || raw.feedback || (Array.isArray(raw) ? raw : [raw]);
+      }
+      return text.split("\n").filter(Boolean).map((line, i) => {
+        try {
+          return JSON.parse(line);
+        } catch (e) {
+          throw new Error(`invalid telemetry JSONL line ${i + 1}: ${e.message}`);
+        }
+      });
+    }
+    function rate(num, den) {
+      return den === 0 ? null : num / den;
+    }
+    function summarizeTelemetry(entries) {
+      const deduped = [];
+      const positions = /* @__PURE__ */ new Map();
+      for (const entry of entries) {
+        const identity = entry.reviewId && (entry.signature || entry.id) ? `${entry.reviewId}:${entry.signature || entry.id}` : null;
+        if (identity && positions.has(identity)) deduped[positions.get(identity)] = entry;
+        else {
+          if (identity) positions.set(identity, deduped.length);
+          deduped.push(entry);
+        }
+      }
+      const totals = {
+        dispositioned: 0,
+        accepted: 0,
+        dismissed: 0,
+        falsePositiveDismissals: 0,
+        blockerDispositioned: 0,
+        blockerDismissed: 0,
+        duplicatesIgnored: entries.length - deduped.length
+      };
+      const dismissalReasons = {};
+      const categories = {};
+      for (const entry of deduped) {
+        if (!["accepted", "dismissed"].includes(entry.outcome)) continue;
+        totals.dispositioned++;
+        totals[entry.outcome]++;
+        const blocker = Number(entry.severity) >= 7;
+        if (blocker) totals.blockerDispositioned++;
+        const category = String(entry.category || "uncategorized");
+        categories[category] ||= { dispositioned: 0, accepted: 0, dismissed: 0 };
+        categories[category].dispositioned++;
+        categories[category][entry.outcome]++;
+        if (entry.outcome === "dismissed") {
+          if (blocker) totals.blockerDismissed++;
+          const reason = entry.dismissalReason || entry.dismissal_reason || entry.reasonCode || entry.reason_code || "other";
+          if (!DISMISSAL_REASONS.has(reason)) throw new Error(`invalid dismissal reason: ${reason}`);
+          dismissalReasons[reason] = (dismissalReasons[reason] || 0) + 1;
+          if (reason === "false-positive" || reason === "insufficient-evidence") {
+            totals.falsePositiveDismissals++;
+          }
+        }
+      }
+      for (const value of Object.values(categories)) {
+        value.dismissalRate = rate(value.dismissed, value.dispositioned);
+      }
+      return {
+        version: 1,
+        totals,
+        metrics: {
+          dismissalRate: rate(totals.dismissed, totals.dispositioned),
+          falsePositiveDismissalRate: rate(totals.falsePositiveDismissals, totals.dispositioned),
+          blockerDismissalRate: rate(totals.blockerDismissed, totals.blockerDispositioned)
+        },
+        dismissalReasons,
+        categories
+      };
+    }
+    function rolloutReadiness({ evaluation, telemetry, rollout = {} }) {
+      const thresholds = rollout.thresholds || {};
+      const checks = {
+        evaluationGate: Boolean(evaluation && evaluation.gate && evaluation.gate.pass),
+        minimumEvaluatedRuns: Boolean(evaluation) && (evaluation.details || []).length >= Number(rollout.minimum_evaluated_runs || 50),
+        minimumDispositions: Boolean(telemetry) && telemetry.totals.dispositioned >= Number(rollout.minimum_dispositions || 30),
+        dismissalRate: Boolean(telemetry) && telemetry.metrics.dismissalRate != null && telemetry.metrics.dismissalRate <= Number(thresholds.dismissal_rate == null ? 0.35 : thresholds.dismissal_rate),
+        falsePositiveDismissalRate: Boolean(telemetry) && telemetry.metrics.falsePositiveDismissalRate != null && telemetry.metrics.falsePositiveDismissalRate <= Number(
+          thresholds.false_positive_dismissal_rate == null ? 0.2 : thresholds.false_positive_dismissal_rate
+        )
+      };
+      const blockers = Object.entries(checks).filter(([, pass]) => !pass).map(([name]) => name);
+      return {
+        version: 1,
+        readyForEveryPr: blockers.length === 0,
+        checks,
+        blockers,
+        recommendation: blockers.length === 0 ? "Evaluation and shadow telemetry gates pass; every-PR advisory rollout is eligible for human approval." : `Keep label-gated shadow mode; unresolved gates: ${blockers.join(", ")}.`
+      };
+    }
+    module2.exports = { readTelemetry, summarizeTelemetry, rolloutReadiness };
   }
 });
 
@@ -17550,6 +18405,17 @@ var require_cli = __commonJS({
     } = require_learningsStore();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
+    var {
+      readData,
+      validateSuite,
+      loadResultRuns,
+      scoreSuite,
+      compareEvaluation,
+      materializeCase
+    } = require_evalSuite();
+    var { buildEvidence, verifyEvidenceLedger } = require_evidence();
+    var { validateContextManifest, contextInventory, packContext } = require_contextPack();
+    var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
       setLearningStatus,
       listLearnings,
@@ -17671,7 +18537,13 @@ var require_cli = __commonJS({
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
-  status --ledger <f> --plan <f> --safety <f> [--head <sha>]   compute approval status
+  status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
+  evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
+  context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
+  eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
+  eval prepare --suite <f> --case <id> --repo <d> --out <d>   create a seeded disposable worktree
+  telemetry --in <feedback.jsonl>   summarize review dispositions and dismissal reasons
+  rollout --eval <summary.json> --telemetry <summary.json>   check every-PR readiness gates
   rules                          list rules synthesized from approved learnings
   feedback <pendingFile>         ingest marked outcomes
   learn [--min-support N]        mine feedback into proposed learnings
@@ -17801,13 +18673,136 @@ var require_cli = __commonJS({
                 ledger: JSON.parse(readFileSync(ledgerPath, "utf8")),
                 plan: JSON.parse(readFileSync(planPath, "utf8")),
                 safety: JSON.parse(readFileSync(safetyPath, "utf8")),
-                head: flag(rest, "--head")
+                head: flag(rest, "--head"),
+                evidence: flag(rest, "--evidence") ? JSON.parse(readFileSync(flag(rest, "--evidence"), "utf8")) : null
               }),
               null,
               2
             )
           );
           return 0;
+        }
+        case "evidence": {
+          const verifyComment = flag(rest, "--verify-comment");
+          const evidencePath = flag(rest, "--evidence");
+          if (verifyComment || evidencePath) {
+            if (!verifyComment || !evidencePath) {
+              out("usage: agent-review evidence --verify-comment <f> --evidence <f>");
+              return 1;
+            }
+            out(JSON.stringify(verifyEvidenceLedger(
+              JSON.parse(readFileSync(evidencePath, "utf8")),
+              readFileSync(verifyComment, "utf8")
+            ), null, 2));
+            return 0;
+          }
+          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const astConfig = cfg.static_analysis && cfg.static_analysis.ast_grep || {};
+          const result = buildEvidence({
+            diffPath: flag(rest, "--diff"),
+            astGrepPath: flag(rest, "--ast-grep"),
+            ciPath: flag(rest, "--ci"),
+            staticConfig: {
+              ...astConfig,
+              excluded_paths: [...cfg.excluded_paths || [], ...astConfig.excluded_paths || []]
+            },
+            ciConfig: cfg.ci || {}
+          });
+          out(JSON.stringify(result, null, 2));
+          return 0;
+        }
+        case "context": {
+          const action = rest[0];
+          const manifestPath = flag(rest, "--manifest");
+          if (!manifestPath || !["validate", "inventory", "pack"].includes(action)) {
+            out("usage: agent-review context validate|inventory|pack --manifest <f> [--dir <d>]");
+            return 1;
+          }
+          const manifest = validateContextManifest(JSON.parse(readFileSync(manifestPath, "utf8")));
+          if (action === "validate") out(`context OK (${manifest.repositories.length} repositories)`);
+          else if (action === "inventory") {
+            const dir = flag(rest, "--dir");
+            if (!dir) {
+              out("usage: agent-review context inventory --manifest <f> --dir <d>");
+              return 1;
+            }
+            out(JSON.stringify(contextInventory(manifest, dir), null, 2));
+          } else {
+            const source = flag(rest, "--source");
+            const dir = flag(rest, "--dir");
+            if (!source || !dir) {
+              out("usage: agent-review context pack --manifest <f> --source <d> --dir <d>");
+              return 1;
+            }
+            out(JSON.stringify(packContext(manifest, source, dir), null, 2));
+          }
+          return 0;
+        }
+        case "eval": {
+          const action = rest[0];
+          const suitePath = flag(rest, "--suite");
+          if (!suitePath || !["validate", "score", "prepare"].includes(action)) {
+            out("usage: agent-review eval validate|score|prepare --suite <f> [...]");
+            return 1;
+          }
+          const suite = validateSuite(readData(suitePath), { suitePath });
+          if (action === "validate") {
+            out(`eval suite OK (${suite.cases.length} cases)`);
+            return 0;
+          }
+          if (action === "prepare") {
+            const caseId = flag(rest, "--case");
+            const repo = flag(rest, "--repo");
+            const target = flag(rest, "--out");
+            if (!caseId || !repo || !target) {
+              out("usage: agent-review eval prepare --suite <f> --case <id> --repo <d> --out <d> [--base <ref>]");
+              return 1;
+            }
+            out(JSON.stringify(materializeCase({
+              suite,
+              suitePath,
+              caseId,
+              repo,
+              out: target,
+              base: flag(rest, "--base") || "HEAD"
+            }), null, 2));
+            return 0;
+          }
+          const resultsPath = flag(rest, "--results");
+          if (!resultsPath) {
+            out("usage: agent-review eval score --suite <f> --results <file-or-dir> [--baseline <f>] [--fail-on-gate]");
+            return 1;
+          }
+          const summary = scoreSuite(suite, loadResultRuns(resultsPath));
+          const baselinePath = flag(rest, "--baseline");
+          if (baselinePath) summary.comparison = compareEvaluation(summary, readData(baselinePath));
+          out(JSON.stringify(summary, null, 2));
+          return rest.includes("--fail-on-gate") && !summary.gate.pass ? 2 : 0;
+        }
+        case "telemetry": {
+          const path = flag(rest, "--in");
+          if (!path) {
+            out("usage: agent-review telemetry --in <feedback.jsonl>");
+            return 1;
+          }
+          out(JSON.stringify(summarizeTelemetry(readTelemetry(path)), null, 2));
+          return 0;
+        }
+        case "rollout": {
+          const evalPath = flag(rest, "--eval");
+          const telemetryPath = flag(rest, "--telemetry");
+          if (!evalPath || !telemetryPath) {
+            out("usage: agent-review rollout --eval <summary.json> --telemetry <summary.json>");
+            return 1;
+          }
+          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const readiness = rolloutReadiness({
+            evaluation: readData(evalPath),
+            telemetry: readData(telemetryPath),
+            rollout: cfg.rollout || {}
+          });
+          out(JSON.stringify(readiness, null, 2));
+          return rest.includes("--fail-on-gate") && !readiness.readyForEveryPr ? 2 : 0;
         }
         case "rules": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });

@@ -1,0 +1,47 @@
+name: agent-review readiness (reusable)
+on:
+  workflow_call:
+    inputs:
+      suite:
+        type: string
+        default: .claude/review/evals/suite.yml
+      results:
+        type: string
+        default: .claude/review/evals/results
+      feedback:
+        type: string
+        default: .claude/review/learnings/feedback.jsonl
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: CruGlobal/agent-review
+          ref: main
+          path: .agent-review-runtime
+      - name: Score evaluation and shadow telemetry
+        run: |
+          ENGINE=(node .agent-review-runtime/dist/agent-review.cjs)
+          "${ENGINE[@]}" eval score --suite "${{ inputs.suite }}" --results "${{ inputs.results }}" \
+            > /tmp/agent-review-evaluation.json
+          "${ENGINE[@]}" telemetry --in "${{ inputs.feedback }}" \
+            > /tmp/agent-review-telemetry.json
+          "${ENGINE[@]}" rollout --root "$GITHUB_WORKSPACE" \
+            --eval /tmp/agent-review-evaluation.json \
+            --telemetry /tmp/agent-review-telemetry.json --fail-on-gate \
+            > /tmp/agent-review-readiness.json
+      - name: Upload readiness evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-review-readiness-${{ github.sha }}
+          retention-days: 90
+          path: |
+            /tmp/agent-review-evaluation.json
+            /tmp/agent-review-telemetry.json
+            /tmp/agent-review-readiness.json

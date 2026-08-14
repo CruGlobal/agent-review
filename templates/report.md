@@ -1,6 +1,7 @@
 # 🤖 Multi-Agent Code Review Report
 
 **Generated**: [timestamp]
+**Rollout**: [shadow/advisory/enforce — shadow is advisory only and never auto-approves]
 [IF INCREMENTAL] **Scope**: Incremental — commits since previously reviewed [short SHA]. The previous full report is in this comment's edit history.
 **Agents**: [N] specialized reviewers ([list of launched agent titles])[ with debate rounds]
 
@@ -26,6 +27,12 @@
 **Risk Factors Detected**:
 [List specific factors]
 
+**Deterministic evidence**:
+
+- AST/static rules: [N findings, list rule ids or "none"]
+- CI snapshot: [N passed, N failed, N pending; name failed/pending checks with links]
+- Cross-repo context: [available repo ids + pinned short SHAs, or "none"]
+
 [IF IRREVERSIBLE]
 ⚠️ **IRREVERSIBLE CHANGES** — auto-approval is disabled for this PR; a human must approve.
 [FOR EACH IRREVERSIBLE REASON:]
@@ -43,8 +50,10 @@
 
 Every finding, numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
 dismissed** before this review counts as passed; lower severities are advisory. Interact from a
-PR comment — `@claude fix 1, 3` · `@claude dismiss 2: <one-line reason>` (a reason is
-required) — or locally with `/agent-review:address`. Details for each number are in the
+PR comment — `@claude fix 1, 3` · `@claude dismiss 2 [false-positive]: <one-line reason>`
+(a reason code and explanation are required) — or locally with `/agent-review:address`. Valid
+codes: `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
+`insufficient-evidence`, `other`. Details for each number are in the
 severity sections below.
 
 [FOR EACH FINDING, ordered by severity descending, numbered 1..N:]
@@ -53,7 +62,7 @@ severity sections below.
 [IF severity >= 7 AND status fixed:]
 - [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]
 [IF severity >= 7 AND status dismissed:]
-- [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user]: [reason]
+- [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]
 [IF severity < 7:]
 - **#[N]** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[IF resolved: same ✅/🚫 suffix as above]
 

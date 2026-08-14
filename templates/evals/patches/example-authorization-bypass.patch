@@ -1,0 +1,9 @@
+diff --git a/src/api/example.ts b/src/api/example.ts
+index 1111111..2222222 100644
+--- a/src/api/example.ts
++++ b/src/api/example.ts
+@@ -1,4 +1,3 @@
+ export async function updateExample(request: Request) {
+-  await authorize(request, 'update:example')
+   return persist(await request.json())
+ }

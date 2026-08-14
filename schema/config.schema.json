@@ -206,6 +206,72 @@
         "scope": { "type": "string", "enum": ["local", "global"] }
       }
     },
+    "static_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "ast_grep": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "config": {
+              "type": "string",
+              "pattern": "^static/[A-Za-z0-9._/-]+\\.ya?ml$"
+            },
+            "version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+            "severity": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "error": { "type": "integer", "minimum": 0, "maximum": 10 },
+                "warning": { "type": "integer", "minimum": 0, "maximum": 10 },
+                "info": { "type": "integer", "minimum": 0, "maximum": 10 },
+                "hint": { "type": "integer", "minimum": 0, "maximum": 10 }
+              }
+            },
+            "excluded_paths": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    },
+    "ci": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ignore_checks": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "manifest": {
+          "type": "string",
+          "pattern": "^context/[A-Za-z0-9._/-]+\\.json$"
+        }
+      }
+    },
+    "rollout": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "type": "string", "enum": ["shadow", "advisory", "enforce"] },
+        "label": { "type": "string" },
+        "minimum_evaluated_runs": { "type": "integer", "minimum": 1 },
+        "minimum_dispositions": { "type": "integer", "minimum": 1 },
+        "thresholds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "dismissal_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+            "false_positive_dismissal_rate": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      }
+    },
     "enforcement": {
       "type": "object",
       "additionalProperties": false,
