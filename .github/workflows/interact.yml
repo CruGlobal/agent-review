@@ -50,18 +50,33 @@ jobs:
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'
           prompt: '/agent-review:address ci'
-      - name: Approve when the ledger is fully addressed
+      - name: Approve when the ledger is fully addressed and the change is reversible
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ inputs.pr_number }}
           REPO: ${{ github.repository }}
+        # Prefer the machine-readable `<!-- agent-review-status -->` line (pass +
+        # irreversible flags); fall back to the `- [ ]` grep only for pre-status
+        # reports. Irreversible changes never auto-approve — a human must.
         run: |
-          BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty')
+          BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp \
+            --jq '[.[][] | select(.body | startswith("<!-- agent-review -->"))] | last | .body // empty')
           [ -n "$BODY" ] || { echo "No report found — not approving."; exit 0; }
-          if printf '%s' "$BODY" | grep -q -- '- \[ \]'; then
+          STATUS=$(printf '%s' "$BODY" | tr -d '\r' \
+            | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
+          if [ -n "$STATUS" ]; then
+            PASS=$(printf '%s' "$STATUS" | jq -r '.pass // false')
+            IRREVERSIBLE=$(printf '%s' "$STATUS" | jq -r '.irreversible // false')
+            [ "$PASS" = "true" ] || { echo "Status: not passing — not approving."; exit 0; }
+            if [ "$IRREVERSIBLE" = "true" ]; then
+              echo "Status: passing but irreversible — human approval required, not auto-approving."
+              exit 0
+            fi
+          elif printf '%s' "$BODY" | grep -q -- '- \[ \]'; then
             echo "Ledger still has open items — not approving."
             exit 0
           fi
-          gh pr review "$PR" --repo "$REPO" --approve \
-            --body "Auto-approved: every agent-review finding is fixed or dismissed with a reason."
+          if ! gh pr review "$PR" --repo "$REPO" --approve \
+            --body "Auto-approved: every agent-review finding is fixed or dismissed with a reason, and the change is reversible."; then
+            echo "::warning::Approval failed — enable 'Allow GitHub Actions to create and approve pull requests' in repo/org Actions settings."
+          fi

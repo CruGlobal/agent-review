@@ -132,10 +132,18 @@ commits — that is the verification loop, not a cost bug.
 
 Update `/tmp/address_ledger.json`: fixed items get `"status": "fixed", "sha": "<FIX_SHA>"`;
 dismissed items get `"status": "dismissed", "by": "<actor>", "reason": "<reason>"`. Then rewrite
-the comment — mutate ONLY the ledger state line and the ledger section's item lines, exactly per
-the report skeleton's fixed/dismissed line formats (`✅ fixed in <sha>` /
-`🚫 dismissed by @<user>: <reason>`, checked boxes, struck-through message). Leave every other
-byte of the comment untouched, then:
+the comment — mutate ONLY these three things, leaving every other byte untouched:
+
+1. The `<!-- agent-review-ledger: … -->` line (the updated JSON).
+2. The `<!-- agent-review-status: … -->` line: recompute `openBlockers` (ledger entries with
+   severity ≥ 7 still `open`) and `pass` (`openBlockers == 0`). Never touch `irreversible` /
+   `irreversibleReasons` — reversibility is a property of the reviewed diff; only a re-review
+   may change it.
+3. The ledger section's item lines, exactly per the report skeleton's fixed/dismissed formats
+   (`✅ fixed in <sha>` / `🚫 dismissed by @<user>: <reason>`, checked boxes, struck-through
+   message).
+
+Then:
 
 ```bash
 . /tmp/address_env.sh
@@ -173,7 +181,15 @@ it merges with the PR. Skip the commit if nothing was dismissed and no fix was a
 
 **CI**: reply on the PR (a NEW comment, not the ledger) summarizing what happened — fixed
 numbers with the commit link, dismissed numbers with their reasons, anything rejected and why.
-Then check the ledger for completion: if no unchecked `- [ ]` items remain in the updated
-comment, say so — the approve workflow keys on exactly that.
+**When fixes were pushed, the reply MUST open with an explicit review request to the dev,
+before anything else**, e.g.:
+
+> 🔎 @<actor> — I pushed commit `<FIX_SHA>` for findings #1, #3. **Please review that commit
+> before continuing** — these are unreviewed AI changes on your branch. Revert with
+> `git revert <FIX_SHA>` if anything looks wrong.
+
+Then note the ledger state: if `pass` is now true, say so — and if the status carries
+`irreversible: true`, remind that auto-approval stays off and a human approval is required
+regardless.
 
 **Local**: summarize the same in the session, and remind the user of anything still open.

@@ -26,6 +26,11 @@
 **Risk Factors Detected**:
 [List specific factors]
 
+[IF IRREVERSIBLE]
+⚠️ **IRREVERSIBLE CHANGES** — auto-approval is disabled for this PR; a human must approve.
+[FOR EACH IRREVERSIBLE REASON:]
+- [reason, tied to the diff hunk]
+
 [IF FRIDAY/WEEKEND]
 ⚠️ **[DAY] DEPLOYMENT WARNING**
 [Appropriate warning based on risk score]
