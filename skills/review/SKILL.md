@@ -1236,6 +1236,16 @@ agent-review ledger \
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 
+**Inline finding anchors.** Also write `/tmp/agent_review_inline.json`: an array of
+`{ "n", "file", "line", "severity", "message" }` for every ledger entry that is **open,
+severity ≥ 7, and anchored to a line present in this diff** (skip entries with no line, and
+cap at 25, highest severity first — inline anchors are a navigation aid, not a second report).
+The publication step posts one PR review comment per entry at `file:line`, so reviewers see
+each questioned location in context — and when a later commit changes those lines, GitHub
+marks the comment *outdated*, a visual cue that the flagged code was actually touched.
+Entries carried over from a previous incremental run keep their numbers; the publisher
+dedupes by number, so already-anchored findings are never re-posted.
+
 ### Assess reversibility & build the status marker
 
 Workflows gate auto-approval on a machine-readable status line — never on grepping the report's
