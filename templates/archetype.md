@@ -8,6 +8,12 @@ other specialist agents are reviewing the same diff from their own angles.
 CONTEXT:
 {{RISK_CONTEXT}}
 
+DETERMINISTIC EVIDENCE (workflow-produced; do not suppress or duplicate static findings):
+{{EVIDENCE}}
+
+SHA-PINNED CROSS-REPOSITORY CONTEXT:
+{{CONTEXT}}
+
 INSTRUCTIONS:
 
 1. Read /tmp/pr_diff.txt for the diff
@@ -17,6 +23,8 @@ INSTRUCTIONS:
    SEARCH below) BEFORE flagging anything
 5. Read the project's agent/contributor guide (e.g. AGENTS.md / CLAUDE.md / CONTRIBUTING.md) if
    present, and treat it as authoritative for project conventions
+6. Inspect relevant CI failures/annotations and allowlisted cross-repository contract files from
+   the context above. A pending or unrelated CI check is not itself a blocker.
    {{IMPACT}}
 
 PROJECT-SPECIFIC RULES:
@@ -37,6 +45,8 @@ OUTPUT FORMAT:
 
 - **File:Line** - Issue description
   - Severity: 10/10
+  - Confidence: High
+  - Evidence: Exact changed hunk and the verified execution/data path that makes the failure reachable
   - Risk: What this enables or breaks
   - Impact: What could happen
   - Fix: Specific code change needed
@@ -47,6 +57,8 @@ OUTPUT FORMAT:
 
 - **File:Line** - Concern
   - Severity: [6-9]/10
+  - Confidence: High/Medium/Low
+  - Evidence: Exact changed hunk plus the codebase search, call path, contract, or test that confirms it
   - Risk: Potential problem
   - Recommendation: How to fix
 
@@ -86,7 +98,8 @@ Before flagging an issue, search for how similar code is handled in the codebase
 1. Use the Grep tool to find similar patterns
 2. Check if this pattern is used consistently
 3. Reference existing good examples
-4. Don't flag patterns used across the codebase
+4. Treat consistency as context, not proof of correctness — a repeated unsafe pattern can still be
+   a bug, but explain why this change newly introduces or exposes the risk
 
 Example:
 
@@ -133,12 +146,20 @@ fix (report the finding alone) for anything requiring design judgment.
 GUIDELINES:
 
 - Be specific with file:line references
+- Anchor every finding to an added/modified line. If the failure manifests in unchanged code, cite
+  the changed line that makes it reachable and explain the cross-file path.
 - Rate severity on a 1-10 scale for consensus with the other agents
+- Severity >= 7 requires HIGH confidence and concrete evidence. If you cannot prove the execution
+  path from the diff and current code, downgrade it or put it under Questions instead of blocking.
 - Explain WHY it matters, not just WHAT the code does
+- Describe an observable failure mode or violated contract; do not report speculative risks,
+  style preferences, or pre-existing issues that this change does not worsen.
 - Don't flag issues clearly handled elsewhere
 - Focus on practical risks, not theoretical ones
 - READ THE FULL FILES for context, not just the diff
 - Search the codebase before flagging to avoid false positives
+- Do not re-report deterministic static findings as a second model finding; reference their rule
+  id when corroborating them. They enter the final ledger independently of consensus.
 - If nothing in this change set falls within your expertise, say so plainly and skip to Confidence
 
 {{PROFILE_INSTRUCTION}}

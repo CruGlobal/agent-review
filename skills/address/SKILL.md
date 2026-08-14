@@ -14,7 +14,7 @@ learning layer so repeat-dismissed finding classes stop being raised.
 **Usage**:
 
 ```
-/agent-review:address              # Local: pull the PR's ledger, then converse (fix 1,3 / dismiss 2: reason)
+/agent-review:address              # Local: converse (fix 1,3 / dismiss 2 [false-positive]: reason)
 /agent-review:address check        # Local: verify YOUR OWN rework against the open findings before pushing
 /agent-review:address ci          # CI: execute the command in $ADDRESS_COMMAND, non-interactively
 ```
@@ -82,7 +82,7 @@ findings are actually addressed. This mode judges; it does not edit code.
 ## Stage 1 — Get the instruction
 
 **Local**: show the open findings and ask what to do. Accept natural phrasing — "fix 1, 3 and 5",
-"dismiss 2 and 4, they're intentional because X", "fix the rest", "explain 7". `explain N` means
+"dismiss 2 and 4 [intentional]: legacy importer contract", "fix the rest", "explain 7". `explain N` means
 walk through the finding's reasoning from the report body — explaining costs nothing and often
 settles fix-vs-dismiss.
 
@@ -90,8 +90,11 @@ settles fix-vs-dismiss.
 `@claude` mention). Parse it for `fix <numbers>` and `dismiss <numbers>: <reason>` clauses. The
 comment author is in `$ADDRESS_ACTOR`. Rules:
 
-- A dismissal without a reason is **rejected**: reply on the PR asking for
-  `dismiss N: <one-line reason>` and stop. The reason is what feeds the learning loop.
+- A dismissal requires a taxonomy code and explanation: `dismiss N [code]: <one-line reason>`.
+  Valid codes are `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
+  `insufficient-evidence`, and `other`. Reject missing/unknown codes or an empty explanation and
+  show the valid syntax. The code drives rollout precision telemetry; the explanation drives the
+  learning loop.
 - One reason may cover a batch — `dismiss 2, 4, 6, 9: all pre-existing legacy-importer
   patterns` applies that reason to every listed number. Multiple `dismiss` clauses with
   different reasons are also fine.
@@ -105,7 +108,9 @@ comment author is in `$ADDRESS_ACTOR`. Rules:
 
 For each finding to fix (work in severity order):
 
-1. Read the finding's detail section in the report body and the current code at `file:line`.
+1. Read the finding's detail section in the report body and the current code at `file:line`. On an
+   incremental report, an older finding's visible detail may have been replaced; use its ledger
+`evidence`, `detail`, and `recommendation` fields as the authoritative fallback.
 2. Apply the minimal fix that resolves the finding. Follow the repo's conventions
    (CLAUDE.md etc.). If the finding is stale (code already changed) mark it fixed with the
    commit that changed it; if it's a false positive, don't force a fix — recommend dismissal
@@ -131,7 +136,8 @@ commits — that is the verification loop, not a cost bug.
 ## Stage 3 — Update the ledger
 
 Update `/tmp/address_ledger.json`: fixed items get `"status": "fixed", "sha": "<FIX_SHA>"`;
-dismissed items get `"status": "dismissed", "by": "<actor>", "reason": "<reason>"`. Then rewrite
+dismissed items get `"status": "dismissed", "by": "<actor>", "reasonCode": "<taxonomy-code>",
+`"reason": "<explanation>"`. Then rewrite
 the comment — mutate ONLY these three things, leaving every other byte untouched:
 
 1. The `<!-- agent-review-ledger: … -->` line (the updated JSON).
@@ -165,9 +171,12 @@ const lines = entries.map(f => ({
   id: f.id, signature: f.signature, agent: f.agent, category: f.category,
   severity: f.severity, file: f.file, message: f.message,
   outcome: f.status === "dismissed" ? "dismissed" : "accepted",
+  dismissalReason: f.reasonCode || "",
+  dismissalDetail: f.reason || "",
 }));
 const yaml = "reviewId: address-" + process.env.PR_NUMBER + "\nfindings:\n" + lines.map(l =>
-  "  - " + JSON.stringify({...l, outcome: l.outcome})).join("\n");
+  "  - " + JSON.stringify({...l, outcome: l.outcome,
+    dismissal_reason: l.dismissalReason || "", reason: l.dismissalDetail || ""})).join("\n");
 require("fs").writeFileSync("/tmp/address_pending.yml", yaml);
 '
 agent-review feedback /tmp/address_pending.yml

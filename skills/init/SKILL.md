@@ -32,6 +32,11 @@ THIS skill file — `skills/init/SKILL.md` — so the plugin root is two levels 
 - core rule-doc starters: `../../templates/rules/{architecture,data-integrity,security,standards,testing}.md`
 - settings keys to merge: `../../templates/settings-snippet.json`
 - consumer CI workflow: `../../templates/workflows/agent-review.yml`
+- fix/dismiss interaction workflow: `../../templates/workflows/agent-review-interact.yml`
+- rollout-readiness workflow: `../../templates/workflows/agent-review-readiness.yml`
+- structural-rule starter: `../../templates/static/`
+- seeded-evaluation format: `../../templates/evals/`
+- SHA-pinned context manifest format: `../../templates/context/repositories.json`
 
 (If `${CLAUDE_PLUGIN_ROOT}` is set in the environment, `$CLAUDE_PLUGIN_ROOT/templates/…` is the
 same file.) Read them with the Read tool. Bash blocks below refer to that directory as `$TPL` —
@@ -565,7 +570,19 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
 - `excluded_paths` — the skeleton's defaults plus this repo's generated/vendored directories.
 - `index` — `enabled: true` plus the derived `roots`/`aliases`/`extensions` for a JS/TS repo;
   `enabled: false` with the inline reason where the source language is not ES/CJS-import-based.
+- `static_analysis` — propose 2-5 narrow AST rules only where Phase 1/2 found a repeatable,
+  syntactic high-confidence invariant. Include positive/negative rule tests. Leave disabled rather
+  than encoding a broad pattern likely to false-block.
+- `ci` — enabled, retaining the repository's meaningful test/lint/security check names.
+- `context` — enable only when concrete API consumers or contract/documentation repositories were
+  identified. Pin each to a full commit SHA and allowlist only relevant paths; never use a branch.
+- `rollout` — leave in label-gated `shadow` mode with the skeleton's sample/quality thresholds.
 - `learning` and `enforcement` — leave at the skeleton's defaults.
+
+Draft a development evaluation suite in memory: at least five realistic seeded defects drawn from
+different mined categories plus two behavior-preserving clean controls. Each case needs a minimal
+patch that applies to the current head and a bounded expected matcher (path, category, message
+terms). Label it as a visible development set; recommend a separate private holdout.
 
 Keep the skeleton's comments; they are the documentation a human editing this file will read.
 
@@ -596,10 +613,15 @@ Present the complete proposal:
 4. **Phase 2 summary** — PRs mined, candidates found, how many cleared the threshold, and which
    rules came from which lens (call out the AI-usage findings explicitly — they are the ones the
    team is least likely to have written down anywhere).
-5. **CI workflow** — the contents of `$TPL/workflows/agent-review.yml` and where it lands.
-6. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
+5. **Deterministic evidence** — every proposed ast-grep rule plus its tests, CI ingestion, and any
+   related repositories with pinned SHAs/path budgets.
+6. **Evaluation + rollout** — all seeded/clean cases, threshold values, and the fact that shadow
+   mode cannot approve or block. Show the manual readiness workflow.
+7. **CI workflows** — the review, fix/dismiss interaction, and readiness workflow contents and
+   where they land. Call out that interaction auto-approval is disabled in shadow mode.
+8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
-7. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`.
+9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`.
 
 Then ask, plainly: *"Approve writing these files? (yes / edit <what> / no)"*
 
@@ -614,7 +636,8 @@ Only after explicit approval:
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
-mkdir -p .claude/review/rules .claude/review/learnings .github/workflows
+mkdir -p .claude/review/rules .claude/review/learnings \
+  .claude/review/evals/patches .claude/review/evals/results .github/workflows
 ```
 
 - Write `.claude/review/config.yml` and each `.claude/review/rules/<agent>.md` with the Write tool.
@@ -623,9 +646,18 @@ mkdir -p .claude/review/rules .claude/review/learnings .github/workflows
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
 cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
+cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
+cp "$TPL/workflows/agent-review-readiness.yml" .github/workflows/agent-review-readiness.yml
 printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/learnings/feedback.jsonl
+: > .claude/review/evals/results/.gitkeep
 ```
+
+- Write the approved repo-specific evaluation suite and patches. If structural analysis or
+  cross-repository context was approved, create their config/rules/tests or manifest exactly as
+  presented; do not copy placeholder repositories or generic patches into the live config.
+- Validate every seed with `git apply --check <patch>` and every structural rule with
+  `ast-grep test --skip-snapshot-tests` before continuing.
 
 - Merge — never clobber — the settings keys. The repo's `.claude/settings.json` may already carry
   permissions, hooks, and env the user cares about; this merges the two plugin keys into whatever
@@ -668,8 +700,9 @@ The cache regenerates on demand, so leave it out of the commit unless the team w
 ### 3E — Commit
 
 ```bash
-git add .claude/review/config.yml .claude/review/rules .claude/review/learnings \
-        .claude/settings.json .github/workflows/agent-review.yml
+git add .claude/review .claude/settings.json \
+        .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
+        .github/workflows/agent-review-readiness.yml
 git status --short
 git commit -m "chore: bootstrap agent-review"
 ```

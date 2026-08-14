@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "repositories": [
+    {
+      "id": "example-client",
+      "repository": "YOUR_ORG/YOUR_CLIENT_REPO",
+      "ref": "0000000000000000000000000000000000000000",
+      "description": "Client contracts affected by API changes",
+      "paths": ["src/api/**", "src/graphql/**"],
+      "excluded_paths": ["**/*.snap"],
+      "required": false,
+      "max_files": 100,
+      "max_bytes": 1000000
+    }
+  ]
+}

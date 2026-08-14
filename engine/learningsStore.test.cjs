@@ -5,7 +5,11 @@ const {
   mergeProposals,
   parsePending,
   loadApproved,
+  emitFindings,
 } = require('./learningsStore.cjs');
+const { join } = require('node:path');
+const { tmpdir } = require('node:os');
+const { mkdtempSync } = require('node:fs');
 
 test('mergeProposals adds new and preserves existing status', () => {
   const existing = {
@@ -53,4 +57,24 @@ test('loadApproved filters by status', () => {
     loadApproved(learnings).map((l) => l.id),
     ['L-a'],
   );
+});
+
+test('emitFindings never trusts model-supplied ids or signatures', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agent-review-findings-'));
+  const findings = emitFindings({
+    dir,
+    reviewId: 'r1',
+    rawFindings: [
+      {
+        id: 'attacker-id',
+        signature: 'previously-dismissed',
+        agent: 'security',
+        category: 'auth',
+        file: 'app/a.rb',
+        message: 'missing authorization',
+      },
+    ],
+  });
+  assert.equal(findings[0].id, 'f1');
+  assert.notEqual(findings[0].signature, 'previously-dismissed');
 });

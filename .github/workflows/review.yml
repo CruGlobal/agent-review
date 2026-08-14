@@ -8,6 +8,10 @@ on:
       debate:
         type: boolean
         default: false
+      rollout_mode:
+        description: shadow posts advisory reports and must never auto-approve
+        type: string
+        default: shadow
     secrets:
       # Authentication: pass EXACTLY ONE of these. `claude_code_oauth_token` bills a
       # Claude Pro/Max subscription (generate with `claude setup-token`);
@@ -16,40 +20,308 @@ on:
         required: false
       claude_code_oauth_token:
         required: false
+      # Optional PAT/GitHub App token with contents:read on configured private
+      # context repositories. The ordinary GITHUB_TOKEN usually has access only
+      # to the consuming repository.
+      context_token:
+        required: false
 
 jobs:
   review:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      checks: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
+      - name: Load the trusted engine runtime
+        uses: actions/checkout@v6
+        with:
+          repository: CruGlobal/agent-review
+          ref: main
+          path: .agent-review-runtime
+      - name: Isolate trusted base configuration and runtime
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          TRUSTED_DIR: ${{ runner.temp }}/agent-review-trusted
+        run: |
+          mv .agent-review-runtime "$RUNTIME_DIR"
+          mkdir -p "$TRUSTED_DIR"
+          if git cat-file -e "$BASE_SHA:.claude/review/config.yml" 2>/dev/null; then
+            git archive "$BASE_SHA" .claude/review | tar -x -C "$TRUSTED_DIR"
+          fi
       - name: Require exactly one auth secret
         env:
           HAS_KEY: ${{ secrets.anthropic_api_key != '' }}
           HAS_OAUTH: ${{ secrets.claude_code_oauth_token != '' }}
+          ROLLOUT_MODE: ${{ inputs.rollout_mode }}
         run: |
           if [ "$HAS_KEY" != "true" ] && [ "$HAS_OAUTH" != "true" ]; then
             echo "::error::Pass anthropic_api_key or claude_code_oauth_token to the reusable workflow."
             exit 1
           fi
-      - uses: anthropics/claude-code-action@v1
+          case "$ROLLOUT_MODE" in
+            shadow|advisory|enforce) ;;
+            *) echo "::error::rollout_mode must be shadow, advisory, or enforce."; exit 1 ;;
+          esac
+      - name: Enforce the trusted rollout policy
+        env:
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+          REQUESTED_MODE: ${{ inputs.rollout_mode }}
+        run: |
+          [ -f "$TRUSTED_REVIEW_DIR/config.yml" ] || exit 0
+          CONFIGURED_MODE=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
+            --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR" \
+            config get rollout.mode)
+          if [ "$CONFIGURED_MODE" != "undefined" ] && [ "$CONFIGURED_MODE" != "$REQUESTED_MODE" ]; then
+            echo "::error::Caller requested $REQUESTED_MODE but trusted base config requires $CONFIGURED_MODE. Merge the config policy first, then change the caller in a follow-up PR."
+            exit 1
+          fi
+      - name: Load the previous trusted report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .body // ""' \
+            > /tmp/agent_review_previous_comment.md
+      - name: Capture current CI checks and annotations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+            > /tmp/agent_review_checks_base.json
+          : > /tmp/agent_review_checks.jsonl
+          jq -c '.check_runs[]' /tmp/agent_review_checks_base.json | while IFS= read -r CHECK; do
+            ID=$(printf '%s' "$CHECK" | jq -r .id)
+            ANNOTATION_COUNT=$(printf '%s' "$CHECK" | jq -r '.output.annotations_count // 0')
+            if [ "$ANNOTATION_COUNT" -gt 0 ]; then
+              ANNOTATIONS=$(gh api "repos/$REPO/check-runs/$ID/annotations?per_page=100" --paginate \
+                | jq -sc 'add // []')
+            else
+              ANNOTATIONS='[]'
+            fi
+            printf '%s' "$CHECK" | jq -c --argjson annotations "$ANNOTATIONS" '. + {annotations: $annotations}' \
+              >> /tmp/agent_review_checks.jsonl
+          done
+          jq -sc '{check_runs: .}' /tmp/agent_review_checks.jsonl > /tmp/agent_review_checks.json
+      - name: Run trusted structural analysis
+        env:
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          echo '[]' > /tmp/agent_review_ast_grep.json
+          git diff "$BASE_SHA..$HEAD_SHA" > /tmp/agent_review_full_diff.txt
+          if [ ! -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
+            echo "No trusted base review config; structural analysis is unavailable on the bootstrap PR."
+            exit 0
+          fi
+          ENGINE=(node "$RUNTIME_DIR/dist/agent-review.cjs" --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR")
+          ENABLED=$("${ENGINE[@]}" config get static_analysis.ast_grep.enabled 2>/dev/null || true)
+          [ "$ENABLED" = "true" ] || exit 0
+          VERSION=$("${ENGINE[@]}" config get static_analysis.ast_grep.version)
+          CONFIG=$("${ENGINE[@]}" config get static_analysis.ast_grep.config)
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::static_analysis.ast_grep.version must be pinned to x.y.z"
+            exit 1
+          fi
+          npm install --global "@ast-grep/cli@$VERSION"
+          ast-grep test --config "$TRUSTED_REVIEW_DIR/$CONFIG" --skip-snapshot-tests
+          set +e
+          ast-grep scan --config "$TRUSTED_REVIEW_DIR/$CONFIG" --json=compact . \
+            > /tmp/agent_review_ast_grep.json
+          SG_STATUS=$?
+          set -e
+          if [ "$SG_STATUS" -gt 1 ] || ! jq empty /tmp/agent_review_ast_grep.json; then
+            echo "::error::ast-grep failed to produce valid JSON (exit $SG_STATUS)"
+            exit 1
+          fi
+      - name: Fetch SHA-pinned repository context
+        env:
+          GH_TOKEN: ${{ secrets.context_token || secrets.GITHUB_TOKEN }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+          CONTEXT_DIR: ${{ runner.temp }}/agent-review-context
+          CONTEXT_STAGING_DIR: ${{ runner.temp }}/agent-review-context-staging
+        run: |
+          echo '{"version":1,"repositories":[]}' > /tmp/agent_review_context.json
+          [ -f "$TRUSTED_REVIEW_DIR/config.yml" ] || exit 0
+          ENGINE=(node "$RUNTIME_DIR/dist/agent-review.cjs" --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR")
+          ENABLED=$("${ENGINE[@]}" config get context.enabled 2>/dev/null || true)
+          [ "$ENABLED" = "true" ] || exit 0
+          MANIFEST_REL=$("${ENGINE[@]}" config get context.manifest)
+          MANIFEST="$TRUSTED_REVIEW_DIR/$MANIFEST_REL"
+          "${ENGINE[@]}" context validate --manifest "$MANIFEST"
+          mkdir -p "$CONTEXT_STAGING_DIR"
+          jq -c '.repositories[]' "$MANIFEST" | while IFS= read -r ITEM; do
+            ID=$(printf '%s' "$ITEM" | jq -r .id)
+            REPOSITORY=$(printf '%s' "$ITEM" | jq -r .repository)
+            REF=$(printf '%s' "$ITEM" | jq -r .ref)
+            REQUIRED=$(printf '%s' "$ITEM" | jq -r '.required // false')
+            ARCHIVE="$RUNNER_TEMP/context-$ID.tar.gz"
+            if ! gh api "repos/$REPOSITORY/tarball/$REF" > "$ARCHIVE"; then
+              if [ "$REQUIRED" = "true" ]; then
+                echo "::error::Required context repository $REPOSITORY@$REF could not be fetched."
+                exit 1
+              fi
+              echo "::warning::Optional context repository $REPOSITORY@$REF was unavailable."
+              continue
+            fi
+            mkdir -p "$CONTEXT_STAGING_DIR/$ID"
+            tar -xzf "$ARCHIVE" --strip-components=1 -C "$CONTEXT_STAGING_DIR/$ID"
+            jq -n --arg repository "$REPOSITORY" --arg ref "$REF" \
+              '{repository:$repository,ref:$ref}' > "$CONTEXT_STAGING_DIR/$ID/.agent-review-source.json"
+          done
+          "${ENGINE[@]}" context pack --manifest "$MANIFEST" \
+            --source "$CONTEXT_STAGING_DIR" --dir "$CONTEXT_DIR" \
+            > /tmp/agent_review_context.json
+          rm -rf "$CONTEXT_STAGING_DIR"
+      - name: Normalize deterministic review evidence
+        id: evidence
+        env:
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+        run: |
+          if [ ! -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
+            echo '{"version":1,"staticFindings":[],"ci":null}' > /tmp/agent_review_evidence.json
+          else
+            node "$RUNTIME_DIR/dist/agent-review.cjs" evidence \
+              --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR" \
+              --diff /tmp/agent_review_full_diff.txt \
+              --ast-grep /tmp/agent_review_ast_grep.json \
+              --ci /tmp/agent_review_checks.json \
+              > /tmp/agent_review_evidence.json
+          fi
+          echo "evidence_sha=$(sha256sum /tmp/agent_review_evidence.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "context_sha=$(sha256sum /tmp/agent_review_context.json | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          if [ -d "$TRUSTED_REVIEW_DIR" ]; then
+            TRUSTED_SHA=$(find "$TRUSTED_REVIEW_DIR" -type f -print0 | sort -z \
+              | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          else
+            TRUSTED_SHA=absent
+          fi
+          echo "trusted_review_sha=$TRUSTED_SHA" >> "$GITHUB_OUTPUT"
+      - name: Run the review agents
+        uses: anthropics/claude-code-action@v1
         env:
           AGENT_REVIEW_CI: '1'
           AGENT_REVIEW_DEBATE: ${{ inputs.debate }}
+          AGENT_REVIEW_PREVIOUS_COMMENT: /tmp/agent_review_previous_comment.md
+          AGENT_REVIEW_COMMENT_OUT: /tmp/agent_review_comment.md
+          AGENT_REVIEW_EVIDENCE: /tmp/agent_review_evidence.json
+          AGENT_REVIEW_CONTEXT_INVENTORY: /tmp/agent_review_context.json
+          AGENT_REVIEW_CONTEXT_DIR: ${{ runner.temp }}/agent-review-context
+          # Every model-side engine call and rule lookup uses base-branch data,
+          # never the pull request's mutable .claude/review directory.
+          AGENT_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+          AGENT_REVIEW_ROLLOUT_MODE: ${{ inputs.rollout_mode }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          # gh CLI (invoked directly by the review skill's CI-mode steps
-          # for `gh pr view` / `gh pr comment` / `gh api`) needs its own
-          # auth in the process env — separate from the action's
-          # `github_token` input, which only governs the action's
-          # internal GitHub operations.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          # The review skill needs shell orchestration, but PR content is
+          # attacker-influenceable. Scrub API/GitHub secrets from every Bash
+          # subprocess; the deterministic post-step below owns GitHub writes.
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          claude_args: '--allowedTools "Bash,Task"'
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'
           prompt: '/agent-review:review ${{ inputs.mode }} ci'
+      - name: Publish and verify the current-head report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_ROLLOUT: ${{ inputs.rollout_mode }}
+          EXPECTED_EVIDENCE_SHA: ${{ steps.evidence.outputs.evidence_sha }}
+          EXPECTED_CONTEXT_SHA: ${{ steps.evidence.outputs.context_sha }}
+          EXPECTED_TRUSTED_REVIEW_SHA: ${{ steps.evidence.outputs.trusted_review_sha }}
+          TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+        run: |
+          COMMENT=/tmp/agent_review_comment.md
+          if [ "$(sha256sum /tmp/agent_review_evidence.json | cut -d' ' -f1)" != "$EXPECTED_EVIDENCE_SHA" ]; then
+            echo "::error::Deterministic evidence changed during the model step."
+            exit 1
+          fi
+          if [ "$(sha256sum /tmp/agent_review_context.json | cut -d' ' -f1)" != "$EXPECTED_CONTEXT_SHA" ]; then
+            echo "::error::Context inventory changed during the model step."
+            exit 1
+          fi
+          if [ -d "$TRUSTED_REVIEW_DIR" ]; then
+            ACTUAL_TRUSTED_REVIEW_SHA=$(find "$TRUSTED_REVIEW_DIR" -type f -print0 | sort -z \
+              | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)
+          else
+            ACTUAL_TRUSTED_REVIEW_SHA=absent
+          fi
+          if [ "$ACTUAL_TRUSTED_REVIEW_SHA" != "$EXPECTED_TRUSTED_REVIEW_SHA" ]; then
+            echo "::error::Trusted base-branch review configuration changed during the model step."
+            exit 1
+          fi
+          if [ ! -s "$COMMENT" ]; then
+            echo "::error::Claude exited without producing an agent-review report."
+            exit 1
+          fi
+          BYTES=$(wc -c < "$COMMENT")
+          if [ "$BYTES" -gt 65500 ]; then
+            echo "::error::Review comment is $BYTES bytes; GitHub's comment limit is 65,536."
+            exit 1
+          fi
+          REPORT_HEAD=$(tr -d '\r' < "$COMMENT" \
+            | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+          if [ "$REPORT_HEAD" != "$EXPECTED_HEAD" ]; then
+            echo "::error::Report covers '${REPORT_HEAD:-no head}' but current PR head is $EXPECTED_HEAD."
+            exit 1
+          fi
+          REPORT_ROLLOUT=$(tr -d '\r' < "$COMMENT" \
+            | sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' | head -1)
+          if [ "$REPORT_ROLLOUT" != "$EXPECTED_ROLLOUT" ]; then
+            echo "::error::Report rollout marker is '${REPORT_ROLLOUT:-missing}', expected $EXPECTED_ROLLOUT."
+            exit 1
+          fi
+          node - "$COMMENT" /tmp/agent_review_evidence.json <<'NODE'
+          const fs = require('fs');
+          const comment = fs.readFileSync(process.argv[2], 'utf8').replace(/\r/g, '');
+          const evidence = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+          const match = comment.match(/^<!-- agent-review-ledger: (.*) -->$/m);
+          if (!match) throw new Error('report has no findings ledger');
+          const ledger = JSON.parse(match[1]);
+          const present = new Set(ledger.map((entry) => entry.signature));
+          const missing = (evidence.staticFindings || []).filter((finding) => !present.has(finding.signature));
+          if (missing.length) throw new Error(`report omitted ${missing.length} deterministic static finding(s)`);
+          NODE
+          EXISTING=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .id // empty')
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@"$COMMENT" >/dev/null
+          else
+            gh pr comment "$PR" --repo "$REPO" --body-file "$COMMENT" >/dev/null
+          fi
+          PUBLISHED=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -sr --arg head "$EXPECTED_HEAD" '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | contains("<!-- agent-review-head: " + $head + " -->"))] | length')
+          if [ "$PUBLISHED" -lt 1 ]; then
+            echo "::error::Report postcondition failed: no trusted comment covers $EXPECTED_HEAD."
+            exit 1
+          fi
+      - name: Preserve deterministic review artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-review-evidence-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          if-no-files-found: ignore
+          retention-days: 30
+          path: |
+            /tmp/agent_review_evidence.json
+            /tmp/agent_review_context.json
