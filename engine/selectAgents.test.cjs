@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { selectAgents, codeDiff } = require('./selectAgents.cjs');
+const { selectAgents, codeDiff, contentMatches } = require('./selectAgents.cjs');
 
 const config = {
   excluded_paths: ['**/*.snap'],
@@ -64,4 +64,11 @@ test('codeDiff drops the reviewer config under a custom review dir', () => {
   const cfg = { excluded_paths: [], agents: [] };
   const diff = 'diff --git a/.review/config.yml b/.review/config.yml\n+content: [foo]\n';
   assert.strictEqual(codeDiff(diff, cfg, '.review'), '');
+});
+
+test('identifier content triggers do not match inside larger identifiers', () => {
+  assert.equal(contentMatches('+ concurrency:\n', 'currency'), false);
+  assert.equal(contentMatches('+ currency = donation.currency\n', 'currency'), true);
+  assert.equal(contentMatches('+ process.env.SECRET\n', 'process.env'), true);
+  assert.equal(contentMatches('+ total.round(2)\n', '.round('), true);
 });

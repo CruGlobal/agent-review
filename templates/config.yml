@@ -38,6 +38,12 @@ risk:
     # - { glob: '<shared-cross-feature-code>/**', points: 2, tier: high }
     # - { glob: 'src/**/*.{ts,tsx}', points: 1, tier: medium }
 
+  # Unknown paths are not zero-risk. Each non-excluded file that matches none of
+  # the patterns above gets this many points, preventing a newly introduced
+  # directory from being silently skipped by auto mode. Set to 0 only if your
+  # pattern map is intentionally exhaustive.
+  unmatched_file_points: 1
+
   # Dependency manifests and lockfiles, used by the special detections below.
   manifests: ['package.json']
   lockfiles: ['yarn.lock', 'package-lock.json', 'pnpm-lock.yaml']

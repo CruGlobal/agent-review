@@ -14500,7 +14500,8 @@ var require_upgradeConfig = __commonJS({
 var require_loadConfig = __commonJS({
   "engine/loadConfig.cjs"(exports2, module2) {
     "use strict";
-    var { readFileSync } = require("node:fs");
+    var { readFileSync, existsSync, statSync } = require("node:fs");
+    var { dirname, resolve, relative } = require("node:path");
     var { parse } = require_dist();
     var Ajv = require__();
     var { upgradeConfig } = require_upgradeConfig();
@@ -14516,6 +14517,38 @@ var require_loadConfig = __commonJS({
       );
       return { valid, errors };
     }
+    function validateConfigReferences(configObj, configPath) {
+      const errors = [];
+      const ids = /* @__PURE__ */ new Set();
+      for (const agent of configObj.agents || []) {
+        if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
+        ids.add(agent.id);
+      }
+      const base = dirname(resolve(configPath));
+      const references = [];
+      for (const agent of configObj.agents || []) {
+        for (const rule of agent.rules || []) {
+          references.push({ owner: `agent ${agent.id}`, rule });
+        }
+      }
+      for (const [index, pathRule] of (configObj.path_rules || []).entries()) {
+        for (const rule of pathRule.rules || []) {
+          references.push({ owner: `path_rules[${index}]`, rule });
+        }
+      }
+      for (const { owner, rule } of references) {
+        const target = resolve(base, rule);
+        const rel = relative(base, target);
+        if (rel.startsWith("..") || rel === "") {
+          errors.push(`${owner} rule escapes the review directory: ${rule}`);
+          continue;
+        }
+        if (!existsSync(target) || !statSync(target).isFile()) {
+          errors.push(`${owner} references missing rule file: ${rule}`);
+        }
+      }
+      return errors;
+    }
     function loadConfig({ configPath, schemaPath }) {
       const configObj = parseConfig(readFileSync(configPath, "utf8"));
       const schemaObj = JSON.parse(readFileSync(schemaPath, "utf8"));
@@ -14526,9 +14559,21 @@ var require_loadConfig = __commonJS({
 - ${errors.join("\n- ")}`
         );
       }
+      const referenceErrors = validateConfigReferences(configObj, configPath);
+      if (referenceErrors.length) {
+        throw new Error(
+          `Invalid review config (${configPath}):
+- ${referenceErrors.join("\n- ")}`
+        );
+      }
       return upgradeConfig(configObj);
     }
-    module2.exports = { parseConfig, validateConfig, loadConfig };
+    module2.exports = {
+      parseConfig,
+      validateConfig,
+      validateConfigReferences,
+      loadConfig
+    };
   }
 });
 
@@ -16511,12 +16556,20 @@ var require_scoreRisk = __commonJS({
     function isExcluded(file, config) {
       return (config.excluded_paths || []).some((g) => minimatch(file, g, OPTS));
     }
-    function patternPoints(file, config) {
+    function matchingPattern(file, config) {
+      let matched = false;
       let max = 0;
       for (const p of config.risk.patterns) {
-        if (minimatch(file, p.glob, OPTS)) max = Math.max(max, p.points);
+        if (minimatch(file, p.glob, OPTS)) {
+          matched = true;
+          max = Math.max(max, p.points);
+        }
       }
-      return max;
+      return { matched, points: max };
+    }
+    function patternPoints(file, config) {
+      const match = matchingPattern(file, config);
+      return match.matched ? match.points : config.risk.unmatched_file_points ?? 1;
     }
     function volumePoints(linesChanged, config) {
       for (const v of config.risk.volume_multiplier) {
@@ -16533,6 +16586,9 @@ var require_scoreRisk = __commonJS({
     }
     function scoreRisk({ files, linesChanged, scope = "single_feature", special = [] }, config) {
       const reviewed = files.filter((f) => !isExcluded(f, config));
+      const unmatchedFiles = reviewed.filter(
+        (f) => !matchingPattern(f, config).matched
+      );
       const patternScore = reviewed.reduce(
         (s, f) => s + patternPoints(f, config),
         0
@@ -16558,7 +16614,9 @@ var require_scoreRisk = __commonJS({
           volumeScore,
           specialScore,
           scopeMultiplier,
-          subtotal
+          subtotal,
+          unmatchedFiles,
+          unmatchedFilePoints: config.risk.unmatched_file_points ?? 1
         }
       };
     }
@@ -16566,6 +16624,7 @@ var require_scoreRisk = __commonJS({
       scoreRisk,
       isExcluded,
       patternPoints,
+      matchingPattern,
       volumePoints,
       levelFor
     };
@@ -16612,9 +16671,17 @@ var require_selectAgents = __commonJS({
         }
       }
       for (const c of t.content || []) {
-        if (contentText.includes(c)) return `content:${c}`;
+        if (contentMatches(contentText, c)) return `content:${c}`;
       }
       return null;
+    }
+    function contentMatches(contentText, trigger) {
+      const raw = String(trigger || "");
+      if (!raw) return false;
+      const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const left = /^[A-Za-z0-9_]/.test(raw) ? "(?:^|[^A-Za-z0-9_])" : "";
+      const right = /[A-Za-z0-9_]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
+      return new RegExp(left + escaped + right, "m").test(contentText);
     }
     function selectAgents({ files, diffText, reviewDirRel }, config) {
       const reviewed = files.filter((f) => !isExcluded(f, config));
@@ -16627,7 +16694,7 @@ var require_selectAgents = __commonJS({
       }
       return out;
     }
-    module2.exports = { selectAgents, agentMatches, codeDiff };
+    module2.exports = { selectAgents, agentMatches, codeDiff, contentMatches };
   }
 });
 
@@ -17161,9 +17228,11 @@ var require_learningsStore = __commonJS({
     }
     function emitFindings({ dir, reviewId, rawFindings }) {
       const findings = (rawFindings.findings || rawFindings).map((f, i) => ({
+        ...f,
+        // IDs and signatures are trusted engine state. Never let model/PR-authored
+        // JSON override them and collide with a previously dismissed finding.
         id: `f${i + 1}`,
-        signature: signature(f),
-        ...f
+        signature: signature(f)
       }));
       mkdirSync(join(dir, "pending"), { recursive: true });
       writeFileSync(
@@ -17288,6 +17357,120 @@ var require_learningsStore = __commonJS({
   }
 });
 
+// engine/reportState.cjs
+var require_reportState = __commonJS({
+  "engine/reportState.cjs"(exports2, module2) {
+    "use strict";
+    var { signature } = require_findingSignature();
+    var STATUSES = /* @__PURE__ */ new Set(["open", "fixed", "dismissed"]);
+    var RISKS = /* @__PURE__ */ new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
+    function findingList(input) {
+      if (Array.isArray(input)) return input;
+      if (input && Array.isArray(input.kept)) return input.kept;
+      if (input && Array.isArray(input.findings)) return input.findings;
+      throw new Error("findings must be an array or an object with kept/findings");
+    }
+    function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
+      const severity = Number(raw.severity);
+      if (!Number.isFinite(severity) || severity < 1 || severity > 10) {
+        throw new Error(`invalid finding severity: ${raw.severity}`);
+      }
+      if (!raw.file || !raw.message) {
+        throw new Error("each finding requires file and message");
+      }
+      const line = raw.line == null || raw.line === "" ? null : Number(raw.line);
+      if (line !== null && (!Number.isInteger(line) || line < 1)) {
+        throw new Error(`invalid finding line: ${raw.line}`);
+      }
+      if (requireBlockerEvidence && severity >= 7 && (line === null || String(raw.confidence || "").toLowerCase() !== "high" || !String(raw.evidence || "").trim())) {
+        throw new Error(
+          "severity >= 7 requires a line anchor, High confidence, and concrete evidence"
+        );
+      }
+      const clean = {
+        id: String(raw.id || ""),
+        signature: String(raw.signature || signature(raw)),
+        agent: String(raw.agent || ""),
+        category: String(raw.category || ""),
+        severity,
+        file: String(raw.file),
+        line,
+        message: String(raw.message)
+      };
+      for (const field of ["evidence", "recommendation", "detail", "confidence"]) {
+        if (raw[field]) clean[field] = String(raw[field]).slice(0, 2e3);
+      }
+      return clean;
+    }
+    function cleanPrevious(raw) {
+      if (!Array.isArray(raw)) throw new Error("previous ledger must be an array");
+      const numbers = /* @__PURE__ */ new Set();
+      const signatures = /* @__PURE__ */ new Set();
+      return raw.map((entry) => {
+        if (!Number.isInteger(entry.n) || entry.n < 1 || numbers.has(entry.n)) {
+          throw new Error(`invalid or duplicate ledger number: ${entry.n}`);
+        }
+        numbers.add(entry.n);
+        if (!entry.signature || signatures.has(entry.signature)) {
+          throw new Error(`missing or duplicate ledger signature: ${entry.signature || ""}`);
+        }
+        signatures.add(entry.signature);
+        if (!STATUSES.has(entry.status)) {
+          throw new Error(`invalid ledger status: ${entry.status}`);
+        }
+        const finding = cleanFinding(entry);
+        const clean = { n: entry.n, ...finding, status: entry.status };
+        if (entry.status === "fixed" && entry.sha) clean.sha = String(entry.sha);
+        if (entry.status === "dismissed") {
+          if (entry.by) clean.by = String(entry.by);
+          if (entry.reason) clean.reason = String(entry.reason);
+        }
+        return clean;
+      });
+    }
+    function mergeLedger(previousInput, findingsInput) {
+      const previous = cleanPrevious(previousInput || []);
+      const seen = new Set(previous.map((entry) => entry.signature));
+      let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
+      const additions = findingList(findingsInput).map(
+        (finding) => cleanFinding(finding, { requireBlockerEvidence: true })
+      ).sort(
+        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
+      );
+      const merged = [...previous];
+      for (const finding of additions) {
+        if (seen.has(finding.signature)) continue;
+        seen.add(finding.signature);
+        merged.push({ n: next++, ...finding, status: "open" });
+      }
+      return merged;
+    }
+    function buildStatus({ ledger, head, plan, safety }) {
+      const clean = cleanPrevious(ledger || []);
+      const risk = plan && plan.risk && plan.risk.level;
+      if (!RISKS.has(risk)) throw new Error(`invalid gate-plan risk: ${risk}`);
+      const irreversible = Boolean(safety && safety.irreversible);
+      const irreversibleReasons = irreversible ? (safety.reasons || safety.irreversibleReasons || []).map(String) : [];
+      if (irreversible && irreversibleReasons.length === 0) {
+        throw new Error("irreversible safety result requires at least one reason");
+      }
+      const openBlockers = clean.filter(
+        (entry) => entry.status === "open" && entry.severity >= 7
+      ).length;
+      return {
+        v: 1,
+        ...head ? { head: String(head) } : {},
+        risk,
+        openBlockers,
+        pass: openBlockers === 0,
+        irreversible,
+        irreversibleReasons
+      };
+    }
+    module2.exports = { findingList, mergeLedger, buildStatus };
+  }
+});
+
 // engine/cliCommands.cjs
 var require_cliCommands = __commonJS({
   "engine/cliCommands.cjs"(exports2, module2) {
@@ -17366,6 +17549,7 @@ var require_cli = __commonJS({
       emitFindings
     } = require_learningsStore();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
+    var { mergeLedger, buildStatus } = require_reportState();
     var {
       setLearningStatus,
       listLearnings,
@@ -17486,6 +17670,8 @@ var require_cli = __commonJS({
   plan --files <f> --diff <f> --stat <f> [--scope <s>]   compute a review plan (JSON)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
+  ledger --findings <f> [--previous <f>]   merge stable incremental finding state
+  status --ledger <f> --plan <f> --safety <f> [--head <sha>]   compute approval status
   rules                          list rules synthesized from approved learnings
   feedback <pendingFile>         ingest marked outcomes
   learn [--min-support N]        mine feedback into proposed learnings
@@ -17583,6 +17769,40 @@ var require_cli = __commonJS({
                 raw.findings || raw,
                 loadApproved(loadLearnings(LEARNINGS))
               ),
+              null,
+              2
+            )
+          );
+          return 0;
+        }
+        case "ledger": {
+          const findingsPath = flag(rest, "--findings");
+          if (!findingsPath) {
+            out("usage: agent-review ledger --findings <file> [--previous <file>]");
+            return 1;
+          }
+          const previousPath = flag(rest, "--previous");
+          const previous = previousPath ? JSON.parse(readFileSync(previousPath, "utf8")) : [];
+          const findings = JSON.parse(readFileSync(findingsPath, "utf8"));
+          out(JSON.stringify(mergeLedger(previous, findings), null, 2));
+          return 0;
+        }
+        case "status": {
+          const ledgerPath = flag(rest, "--ledger");
+          const planPath = flag(rest, "--plan");
+          const safetyPath = flag(rest, "--safety");
+          if (!ledgerPath || !planPath || !safetyPath) {
+            out("usage: agent-review status --ledger <f> --plan <f> --safety <f> [--head <sha>]");
+            return 1;
+          }
+          out(
+            JSON.stringify(
+              buildStatus({
+                ledger: JSON.parse(readFileSync(ledgerPath, "utf8")),
+                plan: JSON.parse(readFileSync(planPath, "utf8")),
+                safety: JSON.parse(readFileSync(safetyPath, "utf8")),
+                head: flag(rest, "--head")
+              }),
               null,
               2
             )

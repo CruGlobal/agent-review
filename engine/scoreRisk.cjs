@@ -7,12 +7,25 @@ function isExcluded(file, config) {
   return (config.excluded_paths || []).some((g) => minimatch(file, g, OPTS));
 }
 
-function patternPoints(file, config) {
+function matchingPattern(file, config) {
+  let matched = false;
   let max = 0;
   for (const p of config.risk.patterns) {
-    if (minimatch(file, p.glob, OPTS)) max = Math.max(max, p.points);
+    if (minimatch(file, p.glob, OPTS)) {
+      matched = true;
+      max = Math.max(max, p.points);
+    }
   }
-  return max;
+  return { matched, points: max };
+}
+
+function patternPoints(file, config) {
+  const match = matchingPattern(file, config);
+  // A path omitted from the risk map is an unknown, not proof of zero risk. Give
+  // unmatched reviewable files a conservative floor so auto mode cannot silently
+  // skip a newly introduced directory. Teams can still opt a path into zero risk
+  // explicitly with a 0-point pattern or exclude it entirely.
+  return match.matched ? match.points : (config.risk.unmatched_file_points ?? 1);
 }
 
 function volumePoints(linesChanged, config) {
@@ -35,6 +48,9 @@ function scoreRisk(
   config,
 ) {
   const reviewed = files.filter((f) => !isExcluded(f, config));
+  const unmatchedFiles = reviewed.filter(
+    (f) => !matchingPattern(f, config).matched,
+  );
   const patternScore = reviewed.reduce(
     (s, f) => s + patternPoints(f, config),
     0,
@@ -61,6 +77,8 @@ function scoreRisk(
       specialScore,
       scopeMultiplier,
       subtotal,
+      unmatchedFiles,
+      unmatchedFilePoints: config.risk.unmatched_file_points ?? 1,
     },
   };
 }
@@ -69,6 +87,7 @@ module.exports = {
   scoreRisk,
   isExcluded,
   patternPoints,
+  matchingPattern,
   volumePoints,
   levelFor,
 };

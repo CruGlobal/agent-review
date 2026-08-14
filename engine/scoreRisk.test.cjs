@@ -75,3 +75,23 @@ test('excluded files do not contribute to score', () => {
   assert.equal(r.factors.patternScore, 0);
   assert.equal(r.score, 0);
 });
+
+test('unmatched reviewable files get a conservative risk floor', () => {
+  const r = scoreRisk(
+    { files: ['new_subsystem/handler.ts'], linesChanged: 10 },
+    config,
+  );
+  assert.equal(r.factors.patternScore, 1);
+  assert.deepEqual(r.factors.unmatchedFiles, ['new_subsystem/handler.ts']);
+  assert.equal(r.score, 1);
+});
+
+test('an explicit zero-point pattern can still opt a path out of auto review', () => {
+  const r = scoreRisk(
+    { files: ['src/foo.test.ts'], linesChanged: 10 },
+    config,
+  );
+  assert.equal(r.factors.patternScore, 0);
+  assert.deepEqual(r.factors.unmatchedFiles, []);
+  assert.equal(r.score, 0);
+});

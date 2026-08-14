@@ -54,9 +54,11 @@ function parsePending(yamlText) {
 // the pending-file shape only has one place to change.
 function emitFindings({ dir, reviewId, rawFindings }) {
   const findings = (rawFindings.findings || rawFindings).map((f, i) => ({
+    ...f,
+    // IDs and signatures are trusted engine state. Never let model/PR-authored
+    // JSON override them and collide with a previously dismissed finding.
     id: `f${i + 1}`,
     signature: signature(f),
-    ...f,
   }));
   mkdirSync(join(dir, 'pending'), { recursive: true });
   writeFileSync(

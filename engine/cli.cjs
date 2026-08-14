@@ -24,6 +24,7 @@ const {
   emitFindings,
 } = require('./learningsStore.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
+const { mergeLedger, buildStatus } = require('./reportState.cjs');
 const {
   setLearningStatus,
   listLearnings,
@@ -170,6 +171,8 @@ const USAGE = `usage: agent-review <command>
   plan --files <f> --diff <f> --stat <f> [--scope <s>]   compute a review plan (JSON)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
+  ledger --findings <f> [--previous <f>]   merge stable incremental finding state
+  status --ledger <f> --plan <f> --safety <f> [--head <sha>]   compute approval status
   rules                          list rules synthesized from approved learnings
   feedback <pendingFile>         ingest marked outcomes
   learn [--min-support N]        mine feedback into proposed learnings
@@ -279,6 +282,42 @@ function main(rawArgv) {
             raw.findings || raw,
             loadApproved(loadLearnings(LEARNINGS)),
           ),
+          null,
+          2,
+        ),
+      );
+      return 0;
+    }
+    case 'ledger': {
+      const findingsPath = flag(rest, '--findings');
+      if (!findingsPath) {
+        out('usage: agent-review ledger --findings <file> [--previous <file>]');
+        return 1;
+      }
+      const previousPath = flag(rest, '--previous');
+      const previous = previousPath
+        ? JSON.parse(readFileSync(previousPath, 'utf8'))
+        : [];
+      const findings = JSON.parse(readFileSync(findingsPath, 'utf8'));
+      out(JSON.stringify(mergeLedger(previous, findings), null, 2));
+      return 0;
+    }
+    case 'status': {
+      const ledgerPath = flag(rest, '--ledger');
+      const planPath = flag(rest, '--plan');
+      const safetyPath = flag(rest, '--safety');
+      if (!ledgerPath || !planPath || !safetyPath) {
+        out('usage: agent-review status --ledger <f> --plan <f> --safety <f> [--head <sha>]');
+        return 1;
+      }
+      out(
+        JSON.stringify(
+          buildStatus({
+            ledger: JSON.parse(readFileSync(ledgerPath, 'utf8')),
+            plan: JSON.parse(readFileSync(planPath, 'utf8')),
+            safety: JSON.parse(readFileSync(safetyPath, 'utf8')),
+            head: flag(rest, '--head'),
+          }),
           null,
           2,
         ),

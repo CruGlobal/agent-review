@@ -94,6 +94,11 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **Fork PRs are silently skipped.** `secrets.ANTHROPIC_API_KEY` is not exposed to workflow runs
   triggered from a fork, so the CI review job fails to start and posts nothing. PRs from branches
   in the same repository work normally; forks currently get no review and no explanation comment.
+- **A repository's bootstrap PR cannot review its own new agent config.** Claude Code Action
+  restores `.claude/` from the PR's base branch as a prompt-injection boundary. Human-review the
+  bootstrap, merge it, then validate CI on a follow-up PR. The reusable workflow fails if Claude
+  exits without publishing a report for the current head, so this limitation is visible rather
+  than a misleading green review check.
 - **Impact analysis is JS/TS-only.** The import-graph index parses ES `import` and CommonJS
   `require` statements. In a repo of any other language it indexes nothing, and reviews report an
   empty blast radius — which reads like "no dependents" rather than "not measured". Set
@@ -104,15 +109,17 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **The skills assume the default `.claude/review` directory.** A custom location via
   `--review-dir` / `$AGENT_REVIEW_DIR` is honored by the CLI but not threaded through the skills'
   bash blocks, which reference `.claude/review/...` paths directly.
-- **`config validate` checks the schema only.** It does not verify that the rule docs named in
-  `agents[].rules` or `path_rules[].rules` actually exist on disk; a typo'd filename validates
-  clean and silently contributes no rules at review time.
 - **Some config keys are accepted but not yet enforced.** `learning.scope`,
   `learning.approval_required`, and `enforcement.mode` pass validation and are reserved for future
   behavior; today promotion is always approval-gated and reviews never block a merge.
 - **Consumer workflows track `@main`.** The generated `agent-review.yml` calls the reusable
   workflow at `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.
+
+CI report publication is deliberately split across trust boundaries: Claude may use Bash to build
+the review artifacts, but subprocess secrets are scrubbed and Claude receives no direct GitHub CLI
+token. A deterministic workflow step validates the reviewed-head marker, publishes the comment,
+and fails the check if the postcondition is not met.
 
 ## Repo layout
 

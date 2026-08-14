@@ -105,7 +105,9 @@ comment author is in `$ADDRESS_ACTOR`. Rules:
 
 For each finding to fix (work in severity order):
 
-1. Read the finding's detail section in the report body and the current code at `file:line`.
+1. Read the finding's detail section in the report body and the current code at `file:line`. On an
+   incremental report, an older finding's visible detail may have been replaced; use its ledger
+   `evidence`, `detail`, and `recommendation` fields as the authoritative fallback.
 2. Apply the minimal fix that resolves the finding. Follow the repo's conventions
    (CLAUDE.md etc.). If the finding is stale (code already changed) mark it fixed with the
    commit that changed it; if it's a false positive, don't force a fix — recommend dismissal

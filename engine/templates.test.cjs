@@ -8,6 +8,8 @@ const { execFileSync } = require('node:child_process');
 
 const ROOT = join(__dirname, '..');
 const ARCHETYPE = join(ROOT, 'templates/archetype.md');
+const REVIEW_WORKFLOW = join(ROOT, '.github/workflows/review.yml');
+const INTERACT_WORKFLOW = join(ROOT, '.github/workflows/interact.yml');
 // Every shipped skill is held to the same CLI/legacy-path contract.
 const SKILLS = ['review', 'init', 'learn'].map((name) => ({
   name,
@@ -110,4 +112,15 @@ test('every agent-review subcommand used in skill bash blocks exists in the CLI'
       );
     }
   }
+});
+
+test('CI workflows fail closed on missing/stale reports and use portable pagination', () => {
+  const review = readFileSync(REVIEW_WORKFLOW, 'utf8');
+  const interact = readFileSync(INTERACT_WORKFLOW, 'utf8');
+  assert.ok(review.includes('Claude exited without producing an agent-review report'));
+  assert.ok(review.includes('EXPECTED_HEAD'));
+  assert.ok(review.includes("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'"));
+  assert.ok(interact.includes('waiting for incremental re-review'));
+  assert.ok(!review.includes('--paginate --slurp'));
+  assert.ok(!interact.includes('--paginate --slurp'));
 });

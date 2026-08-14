@@ -1,7 +1,14 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { parseConfig, validateConfig } = require('./loadConfig.cjs');
+const { join } = require('node:path');
+const { tmpdir } = require('node:os');
+const { mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
+const {
+  parseConfig,
+  validateConfig,
+  validateConfigReferences,
+} = require('./loadConfig.cjs');
 const schema = require('../schema/config.schema.json');
 
 const MINIMAL = `
@@ -37,5 +44,34 @@ test('validateConfig rejects a bad profile enum', () => {
   assert.ok(
     errors.some((e) => e.includes('profile')),
     errors.join('; '),
+  );
+});
+
+test('reference validation rejects missing rule docs and duplicate agent ids', () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-config-'));
+  const reviewDir = join(root, '.claude/review');
+  mkdirSync(join(reviewDir, 'rules'), { recursive: true });
+  writeFileSync(join(reviewDir, 'rules/present.md'), '# Present\n');
+  const cfg = parseConfig(MINIMAL);
+  cfg.agents = [
+    { id: 'standards', rules: ['rules/present.md'] },
+    { id: 'standards', rules: ['rules/missing.md'] },
+  ];
+  const errors = validateConfigReferences(cfg, join(reviewDir, 'config.yml'));
+  assert.ok(errors.some((e) => e.includes('duplicate agent id: standards')));
+  assert.ok(errors.some((e) => e.includes('missing rule file: rules/missing.md')));
+});
+
+test('reference validation accepts existing agent and path rule docs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-config-'));
+  const reviewDir = join(root, '.claude/review');
+  mkdirSync(join(reviewDir, 'rules'), { recursive: true });
+  writeFileSync(join(reviewDir, 'rules/present.md'), '# Present\n');
+  const cfg = parseConfig(MINIMAL);
+  cfg.agents[0].rules = ['rules/present.md'];
+  cfg.path_rules = [{ paths: ['src/**'], rules: ['rules/present.md'] }];
+  assert.deepEqual(
+    validateConfigReferences(cfg, join(reviewDir, 'config.yml')),
+    [],
   );
 });

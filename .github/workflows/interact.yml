@@ -31,7 +31,7 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with: { fetch-depth: 0 }
       - name: Check out the PR head branch
         env:
@@ -59,9 +59,16 @@ jobs:
         # irreversible flags); fall back to the `- [ ]` grep only for pre-status
         # reports. Irreversible changes never auto-approve — a human must.
         run: |
-          BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate --slurp \
-            --jq '[.[][] | select(.body | startswith("<!-- agent-review -->"))] | last | .body // empty')
+          BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -sr '[.[][] | select(.body | startswith("<!-- agent-review -->"))] | last | .body // empty')
           [ -n "$BODY" ] || { echo "No report found — not approving."; exit 0; }
+          REPORT_HEAD=$(printf '%s' "$BODY" | tr -d '\r' \
+            | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+          CURRENT_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+          if [ -z "$REPORT_HEAD" ] || [ "$REPORT_HEAD" != "$CURRENT_HEAD" ]; then
+            echo "Report covers ${REPORT_HEAD:-no head} but current head is $CURRENT_HEAD — waiting for incremental re-review."
+            exit 0
+          fi
           STATUS=$(printf '%s' "$BODY" | tr -d '\r' \
             | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
           if [ -n "$STATUS" ]; then

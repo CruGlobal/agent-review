@@ -36,6 +36,11 @@
             }
           }
         },
+        "unmatched_file_points": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Risk points assigned to each non-excluded file that matches no risk pattern. Defaults to 1."
+        },
         "volume_multiplier": {
           "type": "array",
           "items": {

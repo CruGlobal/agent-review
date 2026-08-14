@@ -10,7 +10,7 @@
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-**Risk Score**: [X]/[max] - [LOW/MEDIUM/HIGH/CRITICAL]
+**Risk Score**: [X]/[max] - [LOW/MEDIUM/HIGH/CRITICAL] (full current PR)
 **Day**: [day of week]
 **Files Changed**: [N] (+[X] -[Y] lines)
 

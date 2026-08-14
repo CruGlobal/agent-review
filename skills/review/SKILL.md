@@ -164,7 +164,6 @@ PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 if [ -z "$PR_NUMBER" ]; then
   echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
 else
-  REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
   # Line 2 records the head SHA this report covers — the next CI run reads it back to review
   # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
   # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
@@ -178,18 +177,26 @@ else
     cat /tmp/agent_review_report.md
   } > /tmp/agent_review_comment.md
 
-  # `--paginate` runs `--jq` once PER PAGE, so a marker match on more than one page emits more
-  # than one id. Take the first — the oldest marked comment is the one we keep updating.
-  EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-    --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
-    2>/dev/null | head -n1)
-
-  if [ -n "$EXISTING" ]; then
-    gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md
-    echo "✅ Updated existing review comment ($EXISTING)"
+  # In the reusable workflow, the model never receives a GitHub token. It only
+  # stages a comment; a deterministic post-step validates the reviewed head and
+  # performs the write. Local CI-like runs retain the direct gh fallback.
+  if [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+    if [ "$AGENT_REVIEW_COMMENT_OUT" != /tmp/agent_review_comment.md ]; then
+      cp /tmp/agent_review_comment.md "$AGENT_REVIEW_COMMENT_OUT"
+    fi
+    echo "✅ Staged review comment for trusted workflow publication"
   else
-    gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md
-    echo "✅ Posted review comment"
+    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+    EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
+      2>/dev/null | head -n1)
+    if [ -n "$EXISTING" ]; then
+      gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md
+      echo "✅ Updated existing review comment ($EXISTING)"
+    else
+      gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md
+      echo "✅ Posted review comment"
+    fi
   fi
 fi
 ```
@@ -230,8 +237,8 @@ Build the diff manifest the whole review runs on:
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 
-BASE_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null)
-HEAD_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null)
+BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null)}"
+HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null)}"
 
 # Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
 # inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
@@ -240,14 +247,22 @@ HEAD_REF=$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOi
 # review — the history we reviewed no longer exists, so the delta cannot be trusted.
 INCREMENTAL="" LAST_REVIEWED=""
 if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
-  REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
-  LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-    --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
-    | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
+    LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+      | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+  else
+    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+    LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+      | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+  fi
   if [ -n "$LAST_REVIEWED" ] \
      && git cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null \
      && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
     if [ "$(git rev-parse "$LAST_REVIEWED")" = "$(git rev-parse "$HEAD_REF")" ]; then
+      if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+        cp "$AGENT_REVIEW_PREVIOUS_COMMENT" "$AGENT_REVIEW_COMMENT_OUT"
+      fi
       echo "✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting."
       exit 0
     fi
@@ -283,13 +298,39 @@ else
   RANGE="$MERGE_BASE..HEAD"
 fi
 
+# Review effort may be incremental, but approval metadata must always describe
+# the entire current PR. Otherwise a small follow-up commit can erase an earlier
+# destructive migration or downgrade the PR-wide required-reviewer level.
+if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+  FULL_RANGE="$BASE_REF..$HEAD_REF"
+else
+  FULL_RANGE="$MERGE_BASE..HEAD"
+fi
+
 echo "Diff range: $RANGE"
-git diff $RANGE --name-only > /tmp/changed_files.txt
-git diff $RANGE --stat      > /tmp/diff_stat.txt
-git diff $RANGE             > /tmp/pr_diff.txt
+echo "Full PR range: $FULL_RANGE"
+git diff "$RANGE" --name-only > /tmp/changed_files.txt
+git diff "$RANGE" --stat      > /tmp/diff_stat.txt
+git diff "$RANGE"             > /tmp/pr_diff.txt
+if [ "$FULL_RANGE" = "$RANGE" ]; then
+  cp /tmp/changed_files.txt /tmp/full_changed_files.txt
+  cp /tmp/diff_stat.txt /tmp/full_diff_stat.txt
+  cp /tmp/pr_diff.txt /tmp/pr_full_diff.txt
+else
+  git diff "$FULL_RANGE" --name-only > /tmp/full_changed_files.txt
+  git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
+  git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
+fi
 
 if [ ! -s /tmp/changed_files.txt ]; then
   if [ -n "$INCREMENTAL" ]; then
+    if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+      # The commits cancel out to the already-reviewed tree. Advance only the
+      # reviewed-head marker; all findings and safety state remain valid.
+      sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
+        -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
+        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT"
+    fi
     echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
     exit 0
   fi
@@ -299,7 +340,7 @@ fi
 wc -l < /tmp/changed_files.txt
 
 cat >> /tmp/review_env.sh <<EOF
-export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE"
+export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FULL_RANGE"
 export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
 EOF
 ```
@@ -327,6 +368,20 @@ agent-review plan \
   --scope "${REVIEW_SCOPE:-single_feature}" \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
+
+# A second plan covers the full PR and is the source of truth for governance:
+# displayed risk, required reviewer, and the machine-readable approval status.
+if [ "$FULL_RANGE" = "$RANGE" ]; then
+  cp /tmp/review_plan.json /tmp/review_gate_plan.json
+else
+  agent-review plan \
+    --files /tmp/full_changed_files.txt \
+    --stat /tmp/full_diff_stat.txt \
+    --diff /tmp/pr_full_diff.txt \
+    --scope "${REVIEW_SCOPE:-single_feature}" \
+    > /tmp/review_gate_plan.json
+fi
+cat /tmp/review_gate_plan.json
 ```
 
 `REVIEW_SCOPE` is the heuristic scope you set from the change footprint (default `single_feature`;
@@ -377,6 +432,30 @@ if [ "$MODE" = "auto" ]; then
       # (including the reviewed-head marker, so the next run still diffs incrementally).
       echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)." \
         > /tmp/agent_review_report.md
+      # A zero-risk incremental delta must not erase earlier open findings or
+      # irreversible state when the canonical comment is updated.
+      echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
+      echo '[]' > /tmp/previous_agent_review_ledger.json
+      echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
+      if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
+        tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+          | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+          > /tmp/previous_agent_review_ledger.json
+        [ -s /tmp/previous_agent_review_ledger.json ] \
+          || echo '[]' > /tmp/previous_agent_review_ledger.json
+        tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+          | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1 \
+          > /tmp/previous_agent_review_status.json
+        if [ -s /tmp/previous_agent_review_status.json ]; then
+          node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' \
+            > /tmp/agent_review_safety.json
+        fi
+      fi
+      agent-review ledger --findings /tmp/review_filtered.json \
+        --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
+      agent-review status --ledger /tmp/agent_review_ledger.json \
+        --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
+        ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
@@ -404,7 +483,8 @@ mode had been passed on the command line.
 
 ### Risk Assessment
 
-Read `risk.score`, `risk.level`, `risk.reviewer`, and `risk.special` from `/tmp/review_plan.json`
+Read `risk.score`, `risk.level`, `risk.reviewer`, and `risk.special` from
+`/tmp/review_gate_plan.json`
 (do NOT compute the score inline — the engine is the single source of truth). The classification
 comes from `risk.levels` in config; the shipped default is:
 
@@ -415,7 +495,9 @@ comes from `risk.levels` in config; the shipped default is:
 
 `risk.special[]` lists any special patterns that fired (e.g. `new_dependency`,
 `critical_pkg_update`, `lockfile_only_change`, `migration_change`, `config_security_change`) —
-surface these as risk factors.
+surface these as risk factors. Also surface `risk.factors.unmatchedFiles`: these are reviewable
+paths the repository's risk map does not know yet, so they received the conservative
+`unmatchedFilePoints` floor and should prompt a config follow-up.
 
 Display the summary:
 
@@ -424,7 +506,7 @@ Display the summary:
 📊 RISK ASSESSMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Risk Score: [risk.score]            ← from /tmp/review_plan.json
+Risk Score: [risk.score]            ← from /tmp/review_gate_plan.json (full PR)
 Risk Level: [risk.level]            ← LOW | MEDIUM | HIGH | CRITICAL
 Day: [DAY_OF_WEEK]
 
@@ -432,9 +514,9 @@ Files Changed: [N]
 Lines Changed: +[X] -[Y]
 
 Risk Factors Detected:
-• [risk.special[] entries, plus notable risk.factors highlights]
+• [risk.special[] entries, unmatchedFiles, plus notable risk.factors highlights]
 
-Required Reviewer: [risk.reviewer]  ← from /tmp/review_plan.json
+Required Reviewer: [risk.reviewer]  ← from /tmp/review_gate_plan.json
 
 💰 Estimated Review Cost: $[X.XX]
 
@@ -517,7 +599,7 @@ filled copy:
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{TITLE}}`             | The agent's `title`. Fallback when absent: the `id` with `-`/`_` turned into spaces and each word capitalized, plus `" Review Agent"` (e.g. `data-integrity` → `Data Integrity Review Agent`).                                                          |
 | `{{EXPERTISE}}`         | The agent's `expertise` string. Fallback: empty (leave the line's value blank rather than inventing expertise).                                                                                                                                        |
-| `{{RISK_CONTEXT}}`      | A bullet block from the plan: `- Risk Score: <score> (<level>)`, `- Special patterns: <risk.special joined, or "none">`, `- Changed Files: <N>`, `- Lines Changed: +<X> -<Y>`, `- Selected because: <matchedBy>`.                                       |
+| `{{RISK_CONTEXT}}`      | A bullet block from the current review plan: `- Review-delta risk: <score> (<level>)`, `- Full-PR gate risk: <gate score> (<gate level>)`, `- Special patterns: <gate risk.special joined, or "none">`, `- Unmatched risk paths: <gate risk.factors.unmatchedFiles joined, or "none">`, `- Changed Files in this pass: <N>`, `- Lines Changed in this pass: +<X> -<Y>`, `- Selected because: <matchedBy>`. |
 | `{{PROFILE_INSTRUCTION}}` | From the plan's `profile`: `chill` → "Report only high-confidence, severity ≥ 7 findings; suppress nits." · `standard` → "Report findings at all severities per the output format above." · `assertive` → "Report all findings including low-severity suggestions." |
 | `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against the repo's review dir (`rules/security.md` → `.claude/review/rules/security.md`), each preceded by a `----- <path> -----` line. If a listed doc is missing, note it in your output and continue with the rest. |
 | `{{LEARNINGS}}`         | Entries from `/tmp/review_rules.json` whose `agent` matches this agent's `id`, rendered as `APPROVED LEARNINGS (ratified from prior reviews — apply to files under <paths>):` followed by one bullet per `ruleText`. Empty string when there are none. |
@@ -1021,9 +1103,11 @@ echo "✅ Review history updated"
 
 ### Capture consensus for the learning layer
 
-Gated on the learning layer being enabled. Write the consensus findings as a JSON array to
-`/tmp/consensus_findings.json` — each entry shaped
-`{ agent, category, severity, file, line, message }` — then emit them and apply approved learnings:
+Write the consensus findings as a JSON array to `/tmp/consensus_findings.json`. Each entry is
+shaped `{ agent, category, severity, file, line, message, confidence, evidence, recommendation }`.
+For severity ≥ 7, `confidence` must be `High`, `line` must anchor to an added/modified line, and
+`evidence` must name the verified execution path or violated contract. Then emit the findings and
+apply approved learnings when that layer is enabled:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, set once in Stage 0
@@ -1032,6 +1116,10 @@ if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
   # same pending/<reviewId>.yml.
   agent-review emit --in /tmp/consensus_findings.json --review "${REVIEW_ID:-local}"
   agent-review filter > /tmp/review_filtered.json   # defaults to the just-emitted findings.json
+else
+  # Keep one downstream shape even when learnings are disabled.
+  node -e 'const f=require("/tmp/consensus_findings.json"); process.stdout.write(JSON.stringify({kept:f,suppressed:[]},null,2))' \
+    > /tmp/review_filtered.json
 fi
 ```
 
@@ -1051,15 +1139,37 @@ engine's `id` and `signature` from the emit step — keep both; the dismiss path
 the feedback store):
 
 - Order by severity descending; number 1..N.
-- Write `/tmp/agent_review_ledger.json`: a compact JSON array of
-  `{ "n", "id", "signature", "agent", "category", "severity", "file", "line", "message",
-  "status": "open" }`.
-- **Incremental runs**: fetch the previous comment's `<!-- agent-review-ledger: … -->` line
-  first. Carry every previous entry over VERBATIM — same numbers, same statuses (fixed and
-  dismissed items stay resolved; open items stay open unless this run's diff shows them fixed,
-  in which case mark them fixed) — and append genuinely new findings with the next numbers.
-  Dedupe new findings against carried ones by `signature`. Numbers are stable across the PR's
-  lifetime; never renumber.
+- The engine, not the model, owns ledger merging and numbering. Fetch the previous hidden ledger
+  on incremental runs, then call `agent-review ledger`. It preserves prior numbers/statuses,
+  appends only new signatures, and fails closed on malformed state. A finding's absence from an
+  incremental review does **not** prove it was fixed; only `/agent-review:address` may close it.
+- The ledger also carries bounded `evidence` and `recommendation` fields. This preserves enough
+  context to address an older open finding after the visible report is updated by a later run.
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+echo '[]' > /tmp/previous_agent_review_ledger.json
+if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
+  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
+    tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+      > /tmp/previous_agent_review_ledger.json
+  else
+    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
+      2>/dev/null | tr -d '\r' \
+      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+      > /tmp/previous_agent_review_ledger.json
+  fi
+  [ -s /tmp/previous_agent_review_ledger.json ] \
+    || echo '[]' > /tmp/previous_agent_review_ledger.json
+fi
+agent-review ledger \
+  --findings /tmp/review_filtered.json \
+  --previous /tmp/previous_agent_review_ledger.json \
+  > /tmp/agent_review_ledger.json
+```
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 
@@ -1068,7 +1178,8 @@ Render the ledger section of the report from this JSON, exactly per the skeleton
 Workflows gate auto-approval on a machine-readable status line — never on grepping the report's
 prose. Build it now.
 
-**Reversibility.** Judge from the diff whether the change contains operations that CANNOT be
+**Reversibility.** Judge from `/tmp/pr_full_diff.txt` — never the incremental-only
+`/tmp/pr_diff.txt` — whether the full current PR contains operations that CANNOT be
 cleanly undone by reverting the commit and rolling back. The question is "if this ships broken,
 can we get back to the previous state?" — not how risky the change is. Classify as
 **irreversible** when the diff includes any of:
@@ -1086,7 +1197,26 @@ Purely additive changes (new column, new table, new index, new code paths, confi
 look. List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
 
-**Status JSON.** Write `/tmp/agent_review_status.json` (single compact object):
+**Status JSON.** Write the safety judgment first as `/tmp/agent_review_safety.json`:
+
+```json
+{ "irreversible": false, "reasons": [] }
+```
+
+Then have the engine compute `/tmp/agent_review_status.json` from the ledger and the **full-PR**
+gate plan. Never hand-author `openBlockers`, `pass`, or `risk`:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+agent-review status \
+  --ledger /tmp/agent_review_ledger.json \
+  --plan /tmp/review_gate_plan.json \
+  --safety /tmp/agent_review_safety.json \
+  ${HEAD_REF:+--head "$HEAD_REF"} \
+  > /tmp/agent_review_status.json
+```
+
+The resulting object is:
 
 ```json
 {
@@ -1124,6 +1254,11 @@ Save the filled report to `/tmp/agent_review_report.md`.
 
 In CI mode, the "AUTOMATED FIXES AVAILABLE" section stays — but frame it as suggestions a human can
 apply locally after review, and never execute anything.
+
+GitHub issue comments are size-limited. In CI, keep `/tmp/agent_review_report.md` under 60,000
+bytes (`wc -c`): prioritize the ledger, blocker evidence, risk, and recommended actions. Omit the
+full raw-agent-report appendix first, then collapse advisory suggestions if more space is needed.
+Never truncate the hidden ledger or status markers.
 
 ---
 
