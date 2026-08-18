@@ -1,7 +1,14 @@
 'use strict';
 const { join, relative, dirname } = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { readFileSync, writeFileSync, existsSync, rmSync } = require('node:fs');
+const {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  rmSync,
+  mkdirSync,
+  statSync,
+} = require('node:fs');
 const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { loadConfig } = require('./loadConfig.cjs');
@@ -25,6 +32,13 @@ const {
 } = require('./learningsStore.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
+const {
+  MAX_RESULT_BYTES,
+  prepareAddressRequest,
+  validateAddressResult,
+  feedbackForAddress,
+  finalizeAddress,
+} = require('./addressState.cjs');
 const {
   readData,
   validateSuite,
@@ -182,6 +196,7 @@ const USAGE = `usage: agent-review <command>
   plan --files <f> --diff <f> --stat <f> [--scope <s>]   compute a review plan (JSON)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
+  address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
@@ -304,6 +319,96 @@ function main(rawArgv) {
         ),
       );
       return 0;
+    }
+    case 'address': {
+      const sub = rest[0];
+      if (sub === 'prepare') {
+        const commandPath = flag(rest, '--command');
+        const reportPath = flag(rest, '--report');
+        const actor = flag(rest, '--actor');
+        const pr = flag(rest, '--pr');
+        const commentId = flag(rest, '--comment-id');
+        const reportCommentId = flag(rest, '--report-comment-id');
+        const expectedHead = flag(rest, '--head');
+        if (!commandPath || !reportPath || !actor || !pr || !commentId || !reportCommentId || !expectedHead) {
+          out('usage: agent-review address prepare --command <f> --report <f> --actor <u> --pr <n> --comment-id <n> --report-comment-id <n> --head <sha>');
+          return 1;
+        }
+        out(JSON.stringify(prepareAddressRequest({
+          command: readFileSync(commandPath, 'utf8'),
+          report: readFileSync(reportPath, 'utf8'),
+          actor,
+          pr: Number(pr),
+          commentId: Number(commentId),
+          reportCommentId: Number(reportCommentId),
+          expectedHead,
+        }), null, 2));
+        return 0;
+      }
+      if (sub === 'validate') {
+        const requestPath = flag(rest, '--request');
+        const resultPath = flag(rest, '--result');
+        const changedFilesPath = flag(rest, '--changed-files');
+        const patchPath = flag(rest, '--patch');
+        if (!requestPath || !resultPath || !changedFilesPath || !patchPath) {
+          out('usage: agent-review address validate --request <f> --result <f> --changed-files <f> --patch <f>');
+          return 1;
+        }
+        if (statSync(resultPath).size > MAX_RESULT_BYTES) {
+          throw new Error(`address result exceeds ${MAX_RESULT_BYTES} bytes`);
+        }
+        out(JSON.stringify(validateAddressResult({
+          request: JSON.parse(readFileSync(requestPath, 'utf8')),
+          result: JSON.parse(readFileSync(resultPath, 'utf8')),
+          changedFiles: JSON.parse(readFileSync(changedFilesPath, 'utf8')),
+          patchBytes: statSync(patchPath).size,
+        }), null, 2));
+        return 0;
+      }
+      if (sub === 'feedback') {
+        const requestPath = flag(rest, '--request');
+        const resultPath = flag(rest, '--result');
+        if (!requestPath || !resultPath) {
+          out('usage: agent-review address feedback --request <f> --result <f>');
+          return 1;
+        }
+        const entries = feedbackForAddress(
+          JSON.parse(readFileSync(requestPath, 'utf8')),
+          JSON.parse(readFileSync(resultPath, 'utf8')),
+        );
+        process.stdout.write(entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''));
+        return 0;
+      }
+      if (sub === 'finalize') {
+        const requestPath = flag(rest, '--request');
+        const resultPath = flag(rest, '--result');
+        const reportPath = flag(rest, '--report');
+        const outDir = flag(rest, '--out-dir');
+        if (!requestPath || !resultPath || !reportPath || !outDir) {
+          out('usage: agent-review address finalize --request <f> --result <f> --report <f> --out-dir <d> [--fix-sha <sha>]');
+          return 1;
+        }
+        const finalized = finalizeAddress({
+          request: JSON.parse(readFileSync(requestPath, 'utf8')),
+          result: JSON.parse(readFileSync(resultPath, 'utf8')),
+          report: readFileSync(reportPath, 'utf8'),
+          fixSha: flag(rest, '--fix-sha') || '',
+        });
+        mkdirSync(outDir, { recursive: true });
+        writeFileSync(join(outDir, 'report.md'), finalized.report);
+        writeFileSync(join(outDir, 'summary.md'), finalized.summary + '\n');
+        writeFileSync(join(outDir, 'ledger.json'), JSON.stringify(finalized.ledger, null, 2) + '\n');
+        writeFileSync(join(outDir, 'status.json'), JSON.stringify(finalized.status, null, 2) + '\n');
+        out(JSON.stringify({
+          appliedFixes: finalized.appliedFixes,
+          dismissed: finalized.dismissed,
+          pass: finalized.status.pass,
+          openBlockers: finalized.status.openBlockers,
+        }));
+        return 0;
+      }
+      out('usage: agent-review address prepare|validate|feedback|finalize');
+      return 1;
     }
     case 'ledger': {
       const findingsPath = flag(rest, '--findings');

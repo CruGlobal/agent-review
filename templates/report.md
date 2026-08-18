@@ -331,8 +331,10 @@ Work the **FINDINGS LEDGER** at the top of this report — every severity ≥ 7 
 fixed or dismissed (with a reason) before the review passes. From a PR comment:
 
 - `@claude fix 1, 3, 5` — AI applies those fixes on this branch and checks them off
-- `@claude dismiss 2: intentional, matches legacy import behavior` — checks it off with your
+- `@claude dismiss 2 [intentional]: matches legacy import behavior` — checks it off with your
   reason; repeated dismissals of the same finding class teach the review to stop raising it
+- `@claude fix 1, 3; dismiss 2 [false-positive]: guarded by the caller` — mixed operations use a
+  semicolon between clauses
 
 Or locally: `/agent-review:address` pulls this ledger into a Claude Code session.
 

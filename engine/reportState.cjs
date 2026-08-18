@@ -139,4 +139,4 @@ function buildStatus({ ledger, head, plan, safety, evidence }) {
   };
 }
 
-module.exports = { findingList, mergeLedger, buildStatus };
+module.exports = { findingList, cleanPrevious, mergeLedger, buildStatus };

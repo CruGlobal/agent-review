@@ -1,20 +1,21 @@
 name: agent-review interact (reusable)
-# Executes a dev's fix/dismiss command against a PR's findings ledger.
-# Consumers call this from an issue_comment workflow after filtering for
-# `@claude fix|dismiss` comments from trusted authors — this workflow trusts
-# its caller's filtering and does no association checks of its own.
-#
-# Limitation: pushes go to the PR's head branch, so fork PRs can be dismissed
-# but not auto-fixed (the token cannot push to a fork).
+# Executes a maintainer's fix/dismiss command against a PR findings ledger.
+# The model job is read-only and secret-scrubbed. A separate trusted publisher
+# job validates its patch/result before receiving any write-capable token.
 on:
   workflow_call:
     inputs:
+      # command/actor remain accepted for compatibility with already-installed
+      # callers, but are never trusted. The workflow fetches the real comment.
       command:
         type: string
-        required: true # the comment body, passed via env only — never into a shell line
+        default: ''
       actor:
         type: string
-        required: true
+        default: ''
+      comment_id:
+        type: string
+        default: ''
       pr_number:
         type: string
         required: true
@@ -23,48 +24,451 @@ on:
         type: boolean
         default: false
     secrets:
-      # Console API key only — subscription OAuth tokens are rejected for CI
-      # use (see the note in review.yml).
       anthropic_api_key:
         required: true
 
 jobs:
-  address:
+  model:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
+      pull-requests: read
+    outputs:
+      artifact_id: ${{ steps.handoff.outputs.artifact-id }}
+      artifact_name: ${{ steps.prepare.outputs.artifact_name }}
+      actor: ${{ steps.prepare.outputs.actor }}
+      base_sha: ${{ steps.prepare.outputs.base_sha }}
+      comment_id: ${{ steps.prepare.outputs.comment_id }}
+      expected_head: ${{ steps.prepare.outputs.expected_head }}
+      failure_reason: ${{ steps.prepare.outputs.failure_reason }}
+      has_fixes: ${{ steps.prepare.outputs.has_fixes }}
+      head_ref: ${{ steps.prepare.outputs.head_ref }}
+      head_repo: ${{ steps.prepare.outputs.head_repo }}
+      is_fork: ${{ steps.prepare.outputs.is_fork }}
+      report_comment_id: ${{ steps.prepare.outputs.report_comment_id }}
+      report_sha: ${{ steps.prepare.outputs.report_sha }}
+      request_sha: ${{ steps.prepare.outputs.request_sha }}
     steps:
-      - uses: actions/checkout@v6
-        with: { fetch-depth: 0 }
-      - name: Check out the PR head branch
+      - name: Load the trusted address runtime
+        uses: actions/checkout@v6
+        with:
+          repository: CruGlobal/agent-review
+          ref: main
+          path: .agent-review-runtime
+          persist-credentials: false
+      - name: Isolate the trusted address runtime
+        env:
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+        run: mv .agent-review-runtime "$RUNTIME_DIR"
+      - name: Fetch and validate the address request
+        id: prepare
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr checkout "${{ inputs.pr_number }}"
-      - uses: anthropics/claude-code-action@v1
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          COMMENT_ID_INPUT: ${{ inputs.comment_id || github.event.comment.id }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          REQUEST_FILE: ${{ runner.temp }}/address-request.json
+          REPORT_FILE: ${{ runner.temp }}/address-report.md
+          COMMAND_FILE: ${{ runner.temp }}/address-command.txt
+        run: |
+          set -euo pipefail
+          [ -n "$COMMENT_ID_INPUT" ] || { echo "::error::The triggering comment id is required."; exit 1; }
+          gh api "repos/$REPO/issues/comments/$COMMENT_ID_INPUT" > "$RUNNER_TEMP/address-comment.json"
+          ACTOR=$(jq -r .user.login "$RUNNER_TEMP/address-comment.json")
+          ASSOCIATION=$(jq -r .author_association "$RUNNER_TEMP/address-comment.json")
+          ISSUE_NUMBER=$(jq -r '.issue_url | split("/") | last' "$RUNNER_TEMP/address-comment.json")
+          case "$ASSOCIATION" in OWNER|MEMBER|COLLABORATOR) ;; *) echo "::error::$ACTOR is not a trusted repository member."; exit 1 ;; esac
+          PERMISSION=$(gh api "repos/$REPO/collaborators/$ACTOR/permission" --jq .permission)
+          case "$PERMISSION" in admin|maintain|write) ;; *) echo "::error::$ACTOR does not have repository write permission."; exit 1 ;; esac
+          [ "$ISSUE_NUMBER" = "$PR" ] || { echo "::error::Comment does not belong to PR #$PR."; exit 1; }
+          jq -r .body "$RUNNER_TEMP/address-comment.json" > "$COMMAND_FILE"
+
+          gh api "repos/$REPO/pulls/$PR" > "$RUNNER_TEMP/address-pr.json"
+          EXPECTED_HEAD=$(jq -r .head.sha "$RUNNER_TEMP/address-pr.json")
+          HEAD_REPO=$(jq -r .head.repo.full_name "$RUNNER_TEMP/address-pr.json")
+          HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/address-pr.json")
+          BASE_SHA=$(jq -r .base.sha "$RUNNER_TEMP/address-pr.json")
+
+          gh api "repos/$REPO/issues/$PR/comments" --paginate \
+            | jq -s '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first // empty' \
+            > "$RUNNER_TEMP/address-report.json"
+          REPORT_COMMENT_ID=$(jq -r '.id // empty' "$RUNNER_TEMP/address-report.json")
+          [ -n "$REPORT_COMMENT_ID" ] || { echo "::error::No trusted agent-review report exists for PR #$PR."; exit 1; }
+          jq -r .body "$RUNNER_TEMP/address-report.json" > "$REPORT_FILE"
+
+          # A rejected command is the one failure a maintainer can act on, so its
+          # message is surfaced back to the PR by the report-failure job.
+          if ! node "$RUNTIME_DIR/dist/agent-review.cjs" address prepare \
+            --command "$COMMAND_FILE" --report "$REPORT_FILE" --actor "$ACTOR" \
+            --pr "$PR" --comment-id "$COMMENT_ID_INPUT" \
+            --report-comment-id "$REPORT_COMMENT_ID" --head "$EXPECTED_HEAD" \
+            > "$REQUEST_FILE" 2> "$RUNNER_TEMP/address-prepare-error.txt"; then
+            REASON=$(tr '\r\n' '  ' < "$RUNNER_TEMP/address-prepare-error.txt" | cut -c1-500)
+            echo "failure_reason=${REASON:-the address command could not be parsed}" >> "$GITHUB_OUTPUT"
+            echo "::error::$REASON"
+            exit 1
+          fi
+
+          REPORT_SHA=$(sha256sum "$REPORT_FILE" | cut -d' ' -f1)
+          REQUEST_SHA=$(sha256sum "$REQUEST_FILE" | cut -d' ' -f1)
+          HAS_FIXES=$(jq -r 'any(.operations[]; .action == "fix")' "$REQUEST_FILE")
+          if [ "$HEAD_REPO" = "$REPO" ]; then IS_FORK=false; else IS_FORK=true; fi
+          ARTIFACT_NAME="agent-review-address-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "actor=$ACTOR"
+            echo "artifact_name=$ARTIFACT_NAME"
+            echo "base_sha=$BASE_SHA"
+            echo "comment_id=$COMMENT_ID_INPUT"
+            echo "expected_head=$EXPECTED_HEAD"
+            echo "has_fixes=$HAS_FIXES"
+            echo "head_ref=$HEAD_REF"
+            echo "head_repo=$HEAD_REPO"
+            echo "is_fork=$IS_FORK"
+            echo "report_comment_id=$REPORT_COMMENT_ID"
+            echo "report_sha=$REPORT_SHA"
+            echo "request_sha=$REQUEST_SHA"
+          } >> "$GITHUB_OUTPUT"
+      - name: Check out the exact PR head without credentials
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ inputs.pr_number }}/head
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the checked-out PR head
         env:
-          PR_NUMBER: ${{ inputs.pr_number }}
-          ADDRESS_COMMAND: ${{ inputs.command }}
-          ADDRESS_ACTOR: ${{ inputs.actor }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_HEAD: ${{ steps.prepare.outputs.expected_head }}
+        run: |
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" ] \
+            || { echo "::error::PR head moved before the model step; rerun the address command."; exit 1; }
+      - name: Install bubblewrap
+        if: steps.prepare.outputs.has_fixes == 'true'
+        run: |
+          # Env scrubbing needs the Linux namespace sandbox. This workflow does
+          # not configure a sandbox network proxy, so socat is not required.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          if ! bwrap --dev-bind / / true; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+            bwrap --dev-bind / / true
+          fi
+      - name: Apply requested fixes without write credentials
+        if: steps.prepare.outputs.has_fixes == 'true'
+        uses: anthropics/claude-code-action@v1
+        env:
+          ADDRESS_REQUEST_FILE: ${{ runner.temp }}/address-request.json
+          ADDRESS_REPORT_FILE: ${{ runner.temp }}/address-report.md
+          ADDRESS_RESULT_OUT: ${{ runner.temp }}/address-result.json
+          CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'
+          claude_args: '--allowedTools "Read,Edit,Write,Bash,Task"'
           prompt: '/agent-review:address ci'
+      - name: Capture and validate the untrusted model handoff
+        env:
+          EXPECTED_HEAD: ${{ steps.prepare.outputs.expected_head }}
+          EXPECTED_REPORT_SHA: ${{ steps.prepare.outputs.report_sha }}
+          EXPECTED_REQUEST_SHA: ${{ steps.prepare.outputs.request_sha }}
+          HAS_FIXES: ${{ steps.prepare.outputs.has_fixes }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          REQUEST_FILE: ${{ runner.temp }}/address-request.json
+          REPORT_FILE: ${{ runner.temp }}/address-report.md
+          RESULT_FILE: ${{ runner.temp }}/address-result.json
+          PATCH_FILE: ${{ runner.temp }}/address.patch
+          CHANGED_FILES: ${{ runner.temp }}/address-changed-files.json
+        run: |
+          set -euo pipefail
+          [ "$(sha256sum "$REQUEST_FILE" | cut -d' ' -f1)" = "$EXPECTED_REQUEST_SHA" ] \
+            || { echo "::error::Address request changed during the model step."; exit 1; }
+          [ "$(sha256sum "$REPORT_FILE" | cut -d' ' -f1)" = "$EXPECTED_REPORT_SHA" ] \
+            || { echo "::error::Address report changed during the model step."; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" ] \
+            || { echo "::error::The model created or switched commits instead of leaving a patch."; exit 1; }
+          if [ "$HAS_FIXES" != "true" ]; then
+            jq -n --arg head "$EXPECTED_HEAD" '{version:1,expectedHead:$head,fixes:[],tests:[]}' > "$RESULT_FILE"
+          fi
+          [ -s "$RESULT_FILE" ] || { echo "::error::Claude did not write the required address result."; exit 1; }
+          git -c core.hooksPath=/dev/null add -A -- .
+          git diff --cached --binary --no-ext-diff "$EXPECTED_HEAD" -- . > "$PATCH_FILE"
+          if grep -Eq '^((new file mode|deleted file mode|old mode|new mode) (120000|160000)|index [0-9a-f]+\.\.[0-9a-f]+ (120000|160000))$' "$PATCH_FILE"; then
+            echo "::error::Address patches may not modify symlinks or submodules."
+            exit 1
+          fi
+          git diff --cached --name-only -z "$EXPECTED_HEAD" -- . \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s.split("\0").filter(Boolean))))' \
+            > "$CHANGED_FILES"
+          node "$RUNTIME_DIR/dist/agent-review.cjs" address validate \
+            --request "$REQUEST_FILE" --result "$RESULT_FILE" \
+            --changed-files "$CHANGED_FILES" --patch "$PATCH_FILE" \
+            > "$RUNNER_TEMP/address-result-validated.json"
+          mv "$RUNNER_TEMP/address-result-validated.json" "$RESULT_FILE"
+      - name: Upload the one-day handoff artifact
+        id: handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          retention-days: 1
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/address-request.json
+            ${{ runner.temp }}/address-result.json
+            ${{ runner.temp }}/address-changed-files.json
+            ${{ runner.temp }}/address.patch
+
+  publish:
+    needs: model
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Load a fresh trusted publisher runtime
+        uses: actions/checkout@v6
+        with:
+          repository: CruGlobal/agent-review
+          ref: main
+          path: .agent-review-runtime
+          persist-credentials: false
+      - name: Isolate the trusted publisher runtime
+        env:
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+        run: mv .agent-review-runtime "$RUNTIME_DIR"
+      - name: Check out a credential-free PR validation tree
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.repository }}
+          ref: refs/pull/${{ inputs.pr_number }}/head
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download the model handoff
+        uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.model.outputs.artifact_id }}
+          path: ${{ runner.temp }}/address-handoff
+      - name: Revalidate authoritative GitHub state and the handoff
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          COMMENT_ID: ${{ needs.model.outputs.comment_id }}
+          EXPECTED_ACTOR: ${{ needs.model.outputs.actor }}
+          EXPECTED_BASE_SHA: ${{ needs.model.outputs.base_sha }}
+          EXPECTED_HEAD: ${{ needs.model.outputs.expected_head }}
+          EXPECTED_HEAD_REF: ${{ needs.model.outputs.head_ref }}
+          EXPECTED_HEAD_REPO: ${{ needs.model.outputs.head_repo }}
+          EXPECTED_REPORT_SHA: ${{ needs.model.outputs.report_sha }}
+          EXPECTED_REQUEST_SHA: ${{ needs.model.outputs.request_sha }}
+          REPORT_COMMENT_ID: ${{ needs.model.outputs.report_comment_id }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          HANDOFF_DIR: ${{ runner.temp }}/address-handoff
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/issues/comments/$COMMENT_ID" > "$RUNNER_TEMP/address-comment-current.json"
+          CURRENT_ACTOR=$(jq -r .user.login "$RUNNER_TEMP/address-comment-current.json")
+          CURRENT_ASSOCIATION=$(jq -r .author_association "$RUNNER_TEMP/address-comment-current.json")
+          CURRENT_ISSUE=$(jq -r '.issue_url | split("/") | last' "$RUNNER_TEMP/address-comment-current.json")
+          [ "$CURRENT_ACTOR" = "$EXPECTED_ACTOR" ] \
+            || { echo "::error::The address comment author changed unexpectedly."; exit 1; }
+          case "$CURRENT_ASSOCIATION" in OWNER|MEMBER|COLLABORATOR) ;; *) echo "::error::$CURRENT_ACTOR is no longer a trusted repository member."; exit 1 ;; esac
+          CURRENT_PERMISSION=$(gh api "repos/$REPO/collaborators/$CURRENT_ACTOR/permission" --jq .permission)
+          case "$CURRENT_PERMISSION" in admin|maintain|write) ;; *) echo "::error::$CURRENT_ACTOR no longer has repository write permission."; exit 1 ;; esac
+          [ "$CURRENT_ISSUE" = "$PR" ] \
+            || { echo "::error::Address comment no longer belongs to PR #$PR."; exit 1; }
+          jq -r .body "$RUNNER_TEMP/address-comment-current.json" > "$RUNNER_TEMP/address-command-current.txt"
+
+          gh api "repos/$REPO/pulls/$PR" > "$RUNNER_TEMP/address-pr-current.json"
+          CURRENT_HEAD=$(jq -r .head.sha "$RUNNER_TEMP/address-pr-current.json")
+          CURRENT_HEAD_REPO=$(jq -r .head.repo.full_name "$RUNNER_TEMP/address-pr-current.json")
+          CURRENT_HEAD_REF=$(jq -r .head.ref "$RUNNER_TEMP/address-pr-current.json")
+          CURRENT_BASE_SHA=$(jq -r .base.sha "$RUNNER_TEMP/address-pr-current.json")
+          [ "$CURRENT_HEAD" = "$EXPECTED_HEAD" ] \
+            || { echo "::error::PR head moved from $EXPECTED_HEAD to $CURRENT_HEAD; rerun the address command."; exit 1; }
+          [ "$CURRENT_HEAD_REPO" = "$EXPECTED_HEAD_REPO" ] && [ "$CURRENT_HEAD_REF" = "$EXPECTED_HEAD_REF" ] \
+            || { echo "::error::The PR head repository or branch changed; rerun the address command."; exit 1; }
+          [ "$CURRENT_BASE_SHA" = "$EXPECTED_BASE_SHA" ] \
+            || { echo "::error::The PR base moved; rerun the address command."; exit 1; }
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" ] \
+            || { echo "::error::The validation checkout does not match the authorized PR head."; exit 1; }
+
+          gh api "repos/$REPO/issues/comments/$REPORT_COMMENT_ID" > "$RUNNER_TEMP/address-report-current.json"
+          REPORT_ACTOR=$(jq -r .user.login "$RUNNER_TEMP/address-report-current.json")
+          REPORT_ISSUE=$(jq -r '.issue_url | split("/") | last' "$RUNNER_TEMP/address-report-current.json")
+          [ "$REPORT_ACTOR" = "github-actions[bot]" ] && [ "$REPORT_ISSUE" = "$PR" ] \
+            || { echo "::error::The canonical report is no longer a trusted report for this PR."; exit 1; }
+          jq -e '.body | startswith("<!-- agent-review -->")' "$RUNNER_TEMP/address-report-current.json" >/dev/null \
+            || { echo "::error::The canonical report marker is missing."; exit 1; }
+          jq -r .body "$RUNNER_TEMP/address-report-current.json" > "$RUNNER_TEMP/address-report-current.md"
+          [ "$(sha256sum "$RUNNER_TEMP/address-report-current.md" | cut -d' ' -f1)" = "$EXPECTED_REPORT_SHA" ] \
+            || { echo "::error::The canonical report changed; rerun the address command."; exit 1; }
+
+          node "$RUNTIME_DIR/dist/agent-review.cjs" address prepare \
+            --command "$RUNNER_TEMP/address-command-current.txt" \
+            --report "$RUNNER_TEMP/address-report-current.md" --actor "$CURRENT_ACTOR" \
+            --pr "$PR" --comment-id "$COMMENT_ID" --report-comment-id "$REPORT_COMMENT_ID" \
+            --head "$CURRENT_HEAD" > "$RUNNER_TEMP/address-request-current.json"
+          [ "$(sha256sum "$RUNNER_TEMP/address-request-current.json" | cut -d' ' -f1)" = "$EXPECTED_REQUEST_SHA" ] \
+            || { echo "::error::The authoritative address request changed; rerun the command."; exit 1; }
+          [ "$(sha256sum "$HANDOFF_DIR/address-request.json" | cut -d' ' -f1)" = "$EXPECTED_REQUEST_SHA" ] \
+            || { echo "::error::The address request artifact does not match the prepared request."; exit 1; }
+          cmp -s "$RUNNER_TEMP/address-request-current.json" "$HANDOFF_DIR/address-request.json" \
+            || { echo "::error::The handoff request differs from the authoritative request."; exit 1; }
+          unset GH_TOKEN GITHUB_TOKEN
+          if grep -Eq '^((new file mode|deleted file mode|old mode|new mode) (120000|160000)|index [0-9a-f]+\.\.[0-9a-f]+ (120000|160000))$' "$HANDOFF_DIR/address.patch"; then
+            echo "::error::Address patches may not modify symlinks or submodules."
+            exit 1
+          fi
+          if [ -s "$HANDOFF_DIR/address.patch" ]; then
+            git apply --check "$HANDOFF_DIR/address.patch"
+            git apply "$HANDOFF_DIR/address.patch"
+          fi
+          git -c core.hooksPath=/dev/null add -A -- .
+          if git diff --cached --summary "$EXPECTED_HEAD" -- . | grep -Eq 'mode (120000|160000)'; then
+            echo "::error::Applied address patch creates a symlink or submodule."
+            exit 1
+          fi
+          git diff --cached --name-only -z "$EXPECTED_HEAD" -- . \
+            | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>process.stdout.write(JSON.stringify(s.split("\0").filter(Boolean))))' \
+            > "$RUNNER_TEMP/address-changed-files-current.json"
+          cmp -s "$RUNNER_TEMP/address-changed-files-current.json" "$HANDOFF_DIR/address-changed-files.json" \
+            || { echo "::error::The patch paths differ from the model handoff manifest."; exit 1; }
+          node "$RUNTIME_DIR/dist/agent-review.cjs" address validate \
+            --request "$HANDOFF_DIR/address-request.json" \
+            --result "$HANDOFF_DIR/address-result.json" \
+            --changed-files "$RUNNER_TEMP/address-changed-files-current.json" \
+            --patch "$HANDOFF_DIR/address.patch" \
+            > "$RUNNER_TEMP/address-result-validated.json"
+      - name: Convert fork fixes to an advisory result
+        if: needs.model.outputs.is_fork == 'true'
+        env:
+          RESULT_FILE: ${{ runner.temp }}/address-result-validated.json
+        run: |
+          jq '.fixes |= map(if .status == "applied" then {n:.n,status:"not-applied",files:[],reason:"fork PRs cannot be pushed with the base-repository token"} else . end)' \
+            "$RESULT_FILE" > "$RUNNER_TEMP/address-result-publish.json"
+      - name: Check out the exact writable PR head
+        if: needs.model.outputs.is_fork != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ needs.model.outputs.head_repo }}
+          ref: ${{ needs.model.outputs.expected_head }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply, commit, and push the validated handoff
+        if: needs.model.outputs.is_fork != 'true'
+        id: push
+        env:
+          EXPECTED_HEAD: ${{ needs.model.outputs.expected_head }}
+          BASE_SHA: ${{ needs.model.outputs.base_sha }}
+          HEAD_REF: ${{ needs.model.outputs.head_ref }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          HANDOFF_DIR: ${{ runner.temp }}/address-handoff
+          RESULT_FILE: ${{ runner.temp }}/address-result-validated.json
+        run: |
+          set -euo pipefail
+          [ "$(git rev-parse HEAD)" = "$EXPECTED_HEAD" ] || exit 1
+          if [ -s "$HANDOFF_DIR/address.patch" ]; then
+            git apply --check --index "$HANDOFF_DIR/address.patch"
+            git apply --index "$HANDOFF_DIR/address.patch"
+          fi
+
+          TRUSTED_REVIEW_DIR="$RUNNER_TEMP/agent-review-trusted/.claude/review"
+          mkdir -p "$TRUSTED_REVIEW_DIR"
+          if git cat-file -e "$BASE_SHA:.claude/review/config.yml" 2>/dev/null; then
+            git archive "$BASE_SHA" .claude/review | tar -x -C "$RUNNER_TEMP/agent-review-trusted"
+          fi
+          LEARNING_DIR=.claude/review/learnings
+          if [ -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
+            CONFIGURED=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
+              --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR" \
+              config get learning.path)
+            [ "$CONFIGURED" = "undefined" ] || LEARNING_DIR="$CONFIGURED"
+          fi
+          export LEARNING_DIR
+          FEEDBACK_FILE=$(node -e '
+            const path = require("node:path");
+            const root = path.resolve(process.env.GITHUB_WORKSPACE);
+            const value = process.env.LEARNING_DIR;
+            const target = value ? path.resolve(root, value, "feedback.jsonl") : "";
+            const gitDir = path.join(root, ".git");
+            if (!value || value.includes("\\") || !target.startsWith(root + path.sep) ||
+                target === gitDir || target.startsWith(gitDir + path.sep)) {
+              throw new Error("trusted learning.path must remain inside the repository");
+            }
+            process.stdout.write(path.relative(root, target));
+          ')
+          node "$RUNTIME_DIR/dist/agent-review.cjs" address feedback \
+            --request "$HANDOFF_DIR/address-request.json" --result "$RESULT_FILE" \
+            > "$RUNNER_TEMP/address-feedback.jsonl"
+          if [ -s "$RUNNER_TEMP/address-feedback.jsonl" ]; then
+            mkdir -p "$(dirname "$FEEDBACK_FILE")"
+            touch "$FEEDBACK_FILE"
+            cat "$RUNNER_TEMP/address-feedback.jsonl" >> "$FEEDBACK_FILE"
+          fi
+          git add -- .
+          # Advisory only: the patch is already validated, so a stray trailing
+          # space must not discard the run and leave the ledger un-updated.
+          git diff --cached --check || echo "::warning::The applied patch introduces whitespace errors."
+          APPLIED=$(jq -r '[.fixes[] | select(.status == "applied") | "#\(.n)"] | join(" ")' "$RESULT_FILE")
+          if git diff --cached --quiet; then
+            PUSHED_SHA=''
+          else
+            git config user.name 'claude[bot]'
+            git config user.email '41898282+claude[bot]@users.noreply.github.com'
+            if [ -n "$APPLIED" ]; then MESSAGE="fix: address agent-review findings $APPLIED"; else MESSAGE='chore(review): record finding outcomes'; fi
+            git -c core.hooksPath=/dev/null commit --no-verify -m "$MESSAGE"
+            git push origin "HEAD:refs/heads/$HEAD_REF"
+            PUSHED_SHA=$(git rev-parse HEAD)
+          fi
+          if [ -n "$APPLIED" ]; then FIX_SHA="$PUSHED_SHA"; else FIX_SHA=''; fi
+          echo "fix_sha=$FIX_SHA" >> "$GITHUB_OUTPUT"
+          echo "pushed_sha=$PUSHED_SHA" >> "$GITHUB_OUTPUT"
+      - name: Finalize and publish the trusted ledger update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          REPORT_COMMENT_ID: ${{ needs.model.outputs.report_comment_id }}
+          EXPECTED_REPORT_SHA: ${{ needs.model.outputs.report_sha }}
+          FIX_SHA: ${{ steps.push.outputs.fix_sha }}
+          IS_FORK: ${{ needs.model.outputs.is_fork }}
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          HANDOFF_DIR: ${{ runner.temp }}/address-handoff
+        run: |
+          set -euo pipefail
+          gh api "repos/$REPO/issues/comments/$REPORT_COMMENT_ID" --jq .body > "$RUNNER_TEMP/address-report-final.md"
+          [ "$(sha256sum "$RUNNER_TEMP/address-report-final.md" | cut -d' ' -f1)" = "$EXPECTED_REPORT_SHA" ] \
+            || { echo "::error::The report changed while publishing; refusing to overwrite it."; exit 1; }
+          if [ "$IS_FORK" = "true" ]; then
+            RESULT_FILE="$RUNNER_TEMP/address-result-publish.json"
+          else
+            RESULT_FILE="$RUNNER_TEMP/address-result-validated.json"
+          fi
+          FINALIZE_ARGS=(
+            address finalize
+            --request "$HANDOFF_DIR/address-request.json"
+            --result "$RESULT_FILE"
+            --report "$RUNNER_TEMP/address-report-final.md"
+            --out-dir "$RUNNER_TEMP/address-final"
+          )
+          [ -z "$FIX_SHA" ] || FINALIZE_ARGS+=(--fix-sha "$FIX_SHA")
+          node "$RUNTIME_DIR/dist/agent-review.cjs" "${FINALIZE_ARGS[@]}"
+          gh api -X PATCH "repos/$REPO/issues/comments/$REPORT_COMMENT_ID" \
+            -F body=@"$RUNNER_TEMP/address-final/report.md" >/dev/null
+          gh pr comment "$PR" --repo "$REPO" \
+            --body-file "$RUNNER_TEMP/address-final/summary.md" >/dev/null
       - name: Approve when the ledger is fully addressed and the change is reversible
         if: inputs.auto_approve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ inputs.pr_number }}
           REPO: ${{ github.repository }}
-        # Prefer the machine-readable `<!-- agent-review-status -->` line (pass +
-        # irreversible flags); fall back to the `- [ ]` grep only for pre-status
-        # reports. Irreversible changes never auto-approve — a human must.
         run: |
           BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            | jq -sr '[.[][] | select(.body | startswith("<!-- agent-review -->"))] | last | .body // empty')
+            | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .body // empty')
           [ -n "$BODY" ] || { echo "No report found — not approving."; exit 0; }
           ROLLOUT=$(printf '%s' "$BODY" | tr -d '\r' \
             | sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' | head -1)
@@ -97,3 +501,44 @@ jobs:
             --body "Auto-approved: every agent-review finding is fixed or dismissed with a reason, and the change is reversible."; then
             echo "::warning::Approval failed — enable 'Allow GitHub Actions to create and approve pull requests' in repo/org Actions settings."
           fi
+      - name: Delete the successful handoff artifact
+        if: success()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_ID: ${{ needs.model.outputs.artifact_id }}
+        run: |
+          gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+            || echo "::warning::Could not delete handoff artifact; it will expire automatically after one day."
+
+  # Every check in this workflow fails closed. Without this job those exits are
+  # invisible to the maintainer, whose comment would simply appear ignored.
+  report-failure:
+    needs: [model, publish]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Tell the maintainer the address command did not complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          REASON: ${{ needs.model.outputs.failure_reason }}
+          MODEL_RESULT: ${{ needs.model.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n\n' '⚠️ The agent-review address command did not complete — **nothing was changed**.'
+            if [ -n "$REASON" ]; then
+              printf '%s\n\n' "$REASON"
+              printf '%s\n' 'Use `@claude fix 1, 3` or `@claude dismiss 2 [false-positive]: reason`, separating mixed clauses with `;`.'
+            elif [ "$MODEL_RESULT" = 'failure' ]; then
+              printf '%s\n' 'The request could not be prepared or the produced patch failed validation.'
+            else
+              printf '%s\n' 'The request was authorized but publishing was refused — the PR head, base, or the report itself moved while the command ran. Re-issue the command to retry against current state.'
+            fi
+            printf '\n%s\n' "[View the run log]($RUN_URL)"
+          } > "$RUNNER_TEMP/address-failure.md"
+          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/address-failure.md" >/dev/null

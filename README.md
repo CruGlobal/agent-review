@@ -138,7 +138,18 @@ a PR. Removing the label gate or enabling approval is a separate maintainer deci
 readiness command passes; the tool never edits that policy automatically.
 Copy `templates/workflows/agent-review-interact.yml` as well to enable trusted collaborators to
 use `@claude fix …` and taxonomy-coded `@claude dismiss … [code]: reason` comments; its reusable
-workflow defaults `auto_approve` to false.
+workflow defaults `auto_approve` to false. Address runs split authority across two fresh jobs:
+Claude receives a read-only, credential-scrubbed workspace and produces a validated patch/result
+handoff; only the trusted publisher receives write permissions. The handoff artifact has one-day
+retention and is deleted immediately after a successful publish, so it is retained only long
+enough to diagnose a failed publish. Every check fails closed and reports back on the PR, so a
+rejected command never just goes quiet. Numbers that are unknown or already resolved are skipped
+and named in the reply; the remaining operations still run.
+
+Fixes on fork PRs remain advisory because the base repository token cannot push to a fork.
+Maintainer-authorized dismissals still update the canonical ledger, but they do not reach
+`learnings/feedback.jsonl` — that file is committed alongside the fix, so the learning loop
+records outcomes from same-repository PRs only.
 
 ## Updating
 
