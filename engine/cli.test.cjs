@@ -147,6 +147,69 @@ test('plan subcommand emits plan JSON', () => {
   assert.strictEqual(plan.agents[0].id, 'standards');
 });
 
+test('address subcommands prepare, validate, emit feedback, and finalize through the CLI', () => {
+  const { mkdirSync, readFileSync } = require('node:fs');
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-address-'));
+  try {
+    const files = Object.fromEntries(
+      ['command.txt', 'report.md', 'request.json', 'result.json', 'changed.json', 'address.patch']
+        .map((name) => [name, join(root, name)]),
+    );
+    const finding = {
+      n: 1, id: 'f1', signature: 'sig-1', agent: 'security', category: 'auth',
+      severity: 9, file: 'src/auth.js', line: 4, message: 'missing authorization', status: 'open',
+    };
+    const status = { v: 1, head: 'a'.repeat(40), risk: 'HIGH', openBlockers: 1, pass: false, irreversible: false, irreversibleReasons: [] };
+    const report = [
+      '<!-- agent-review -->',
+      `<!-- agent-review-ledger: ${JSON.stringify([finding])} -->`,
+      `<!-- agent-review-status: ${JSON.stringify(status)} -->`,
+      '- [ ] **#1** · 9/10 · `src/auth.js:4` — missing authorization _(security)_',
+      '',
+    ].join('\n');
+    writeFileSync(files['command.txt'], '@claude fix 1\n');
+    writeFileSync(files['report.md'], report);
+
+    const prepared = run([
+      'address', 'prepare', '--command', files['command.txt'], '--report', files['report.md'],
+      '--actor', 'maintainer', '--pr', '7', '--comment-id', '8', '--report-comment-id', '9',
+      '--head', 'a'.repeat(40), '--root', root,
+    ]);
+    assert.equal(prepared.code, 0);
+    writeFileSync(files['request.json'], prepared.s);
+    writeFileSync(files['result.json'], JSON.stringify({
+      version: 1,
+      expectedHead: 'a'.repeat(40),
+      fixes: [{ n: 1, status: 'applied', files: ['src/auth.js'], summary: 'added the guard' }],
+      tests: [{ command: 'npm test', status: 'passed' }],
+    }));
+    writeFileSync(files['changed.json'], JSON.stringify(['src/auth.js']));
+    writeFileSync(files['address.patch'], 'diff --git a/src/auth.js b/src/auth.js\n');
+
+    const validated = run([
+      'address', 'validate', '--request', files['request.json'], '--result', files['result.json'],
+      '--changed-files', files['changed.json'], '--patch', files['address.patch'], '--root', root,
+    ]);
+    assert.equal(JSON.parse(validated.s).fixes[0].status, 'applied');
+    const feedback = run([
+      'address', 'feedback', '--request', files['request.json'], '--result', files['result.json'],
+      '--root', root,
+    ]);
+    assert.equal(JSON.parse(feedback.s).outcome, 'accepted');
+
+    const output = join(root, 'final');
+    mkdirSync(output);
+    const finalized = run([
+      'address', 'finalize', '--request', files['request.json'], '--result', files['result.json'],
+      '--report', files['report.md'], '--out-dir', output, '--fix-sha', 'b'.repeat(40), '--root', root,
+    ]);
+    assert.equal(JSON.parse(finalized.s).pass, true);
+    assert.match(readFileSync(join(output, 'report.md'), 'utf8'), /fixed in bbbbbbb/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 // --- Regression coverage for the audit fixes (base_branch, min_support, tmp-file collision) ---
 
 // main <- release <- feature, one file added per branch, HEAD parked on `feature`.
