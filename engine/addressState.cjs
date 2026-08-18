@@ -414,7 +414,7 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
   const lines = [];
   if (appliedFixes.length) {
     lines.push(
-      `🔎 @${request.actor} — I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `#${n}`).join(', ')}. **Please review that commit before continuing** — these are unreviewed AI changes on your branch.`,
+      `🔎 @${request.actor} — I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `#${n}`).join(', ')}. **Please review that commit before continuing** — these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
       '',
     );
   } else {
@@ -433,6 +433,16 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       ? 'The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review.'
       : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`,
   );
+  // Reversibility is a property of the reviewed diff, so an irreversible change
+  // never auto-approves however the ledger ends up.
+  if (status.irreversible) {
+    const why = Array.isArray(status.irreversibleReasons) && status.irreversibleReasons.length
+      ? ` (${status.irreversibleReasons.map((reason) => String(reason).replace(/[\r\n]/g, ' ')).join('; ')})`
+      : '';
+    lines.push(
+      `⚠️ This change is marked irreversible${why} — auto-approval stays off and a human approval is required regardless of the ledger.`,
+    );
+  }
   return {
     report: updatedReport,
     ledger,

@@ -18434,7 +18434,7 @@ var require_addressState = __commonJS({
       const lines = [];
       if (appliedFixes.length) {
         lines.push(
-          `\u{1F50E} @${request.actor} \u2014 I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `#${n}`).join(", ")}. **Please review that commit before continuing** \u2014 these are unreviewed AI changes on your branch.`,
+          `\u{1F50E} @${request.actor} \u2014 I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `#${n}`).join(", ")}. **Please review that commit before continuing** \u2014 these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
           ""
         );
       } else {
@@ -18451,6 +18451,12 @@ var require_addressState = __commonJS({
       lines.push(
         nextStatus.pass ? "The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review." : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`
       );
+      if (status.irreversible) {
+        const why = Array.isArray(status.irreversibleReasons) && status.irreversibleReasons.length ? ` (${status.irreversibleReasons.map((reason) => String(reason).replace(/[\r\n]/g, " ")).join("; ")})` : "";
+        lines.push(
+          `\u26A0\uFE0F This change is marked irreversible${why} \u2014 auto-approval stays off and a human approval is required regardless of the ledger.`
+        );
+      }
       return {
         report: updatedReport,
         ledger,

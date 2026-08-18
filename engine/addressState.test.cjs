@@ -242,3 +242,38 @@ test('finalization leaves not-applied fixes open', () => {
   assert.equal(finalized.ledger[0].status, 'open');
   assert.match(finalized.summary, /Not applied: #1/);
 });
+
+test('the published summary carries the irreversible reminder and a revert hint', () => {
+  const ledger = [finding(), finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' })];
+  const status = { v: 1, head: 'a'.repeat(40), risk: 'HIGH', openBlockers: 2, pass: false, irreversible: true, irreversibleReasons: ['drops a column'] };
+  const body = [
+    '<!-- agent-review -->',
+    `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`,
+    `<!-- agent-review-status: ${JSON.stringify(status)} -->`,
+    '',
+    '- [ ] **#1** · 9/10 · `app/controller.js:12` — authorization is missing _(security)_',
+    '- [ ] **#2** · 9/10 · `app/model.js:12` — authorization is missing _(security)_',
+    '',
+  ].join('\n');
+  const req = prepareAddressRequest({
+    command: '@claude fix 1', actor: 'dr-bizz', pr: 1, commentId: 2,
+    reportCommentId: 3, expectedHead: 'a'.repeat(40), report: body,
+  });
+  const finalized = finalizeAddress({
+    request: req,
+    result: {
+      version: 1,
+      expectedHead: 'a'.repeat(40),
+      fixes: [{ n: 1, status: 'applied', summary: 'added the check', files: ['app/controller.js'] }],
+      tests: [],
+    },
+    report: body,
+    fixSha: 'c'.repeat(40),
+  });
+  assert.match(finalized.summary, /git revert ccccccc/);
+  assert.match(finalized.summary, /irreversible \(drops a column\)/);
+  assert.match(finalized.summary, /human approval is required/);
+  // Reversibility belongs to the reviewed diff — addressing findings never clears it.
+  assert.equal(finalized.status.irreversible, true);
+  assert.deepEqual(finalized.status.irreversibleReasons, ['drops a column']);
+});
