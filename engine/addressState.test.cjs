@@ -7,6 +7,7 @@ const {
   validateAddressResult,
   feedbackForAddress,
   finalizeAddress,
+  extractReportState,
 } = require('./addressState.cjs');
 
 function finding(overrides = {}) {
@@ -61,15 +62,57 @@ test('prepareAddressRequest normalizes strict fix and dismissal clauses', () => 
   assert.equal(value.operations[0].file, 'app/controller.js');
 });
 
-test('prepareAddressRequest rejects invalid, duplicate, missing, or resolved findings', () => {
+test('prepareAddressRequest rejects malformed commands', () => {
   assert.throws(() => request('@claude dismiss 2: no taxonomy'), /invalid address syntax/);
   assert.throws(() => request('@claude fix 1; fix 1'), /appears more than once/);
-  assert.throws(() => request('@claude fix 99'), /does not exist/);
-  const resolved = report([finding({ status: 'fixed', sha: 'b'.repeat(40) })]);
-  assert.throws(() => prepareAddressRequest({
-    command: '@claude fix 1', actor: 'dr-bizz', pr: 1, commentId: 2,
+  assert.throws(() => request('@claude frobnicate 1'), /invalid address syntax/);
+});
+
+test('prepareAddressRequest skips unknown or resolved numbers and runs the rest', () => {
+  const partial = request('@claude fix 1, 99');
+  assert.deepEqual(partial.operations.map((o) => o.n), [1]);
+  assert.deepEqual(partial.skipped, [{ n: 99, reason: 'not in the findings ledger' }]);
+
+  const resolved = report([
+    finding({ status: 'fixed', sha: 'b'.repeat(40) }),
+    finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' }),
+  ]);
+  const value = prepareAddressRequest({
+    command: '@claude fix 1, 2', actor: 'dr-bizz', pr: 1, commentId: 2,
     reportCommentId: 3, expectedHead: 'a'.repeat(40), report: resolved,
-  }), /already fixed/);
+  });
+  assert.deepEqual(value.operations.map((o) => o.n), [2]);
+  assert.deepEqual(value.skipped, [{ n: 1, reason: 'already fixed' }]);
+
+  // Nothing left to act on is still a hard failure, with every number explained.
+  assert.throws(() => request('@claude fix 99'), /no actionable findings — #99 is not in the findings ledger/);
+});
+
+test('prepareAddressRequest reads the command from a comment carrying prose', () => {
+  const value = request('@claude fix 1\r\n\r\nThanks — the rest looks good to me.');
+  assert.deepEqual(value.operations.map(({ n, action }) => ({ n, action })), [{ n: 1, action: 'fix' }]);
+});
+
+test('finalizeAddress survives $-substitution patterns in maintainer and report text', () => {
+  // `$&`/`$'`/`$1` are replacement patterns: expanding them would corrupt the
+  // ledger JSON and permanently brick the canonical report.
+  const ledger = [finding({ message: "regex uses $& and $` and $' unsafely" })];
+  const hostile = report(ledger);
+  const req = prepareAddressRequest({
+    command: "@claude dismiss 1 [intentional]: $& is quoted, see $1",
+    actor: 'dr-bizz', pr: 1, commentId: 2, reportCommentId: 3,
+    expectedHead: 'a'.repeat(40), report: hostile,
+  });
+  const finalized = finalizeAddress({
+    request: req,
+    result: { version: 1, expectedHead: 'a'.repeat(40), fixes: [], tests: [] },
+    report: hostile,
+    fixSha: '',
+  });
+  const reparsed = extractReportState(finalized.report);
+  assert.equal(reparsed.ledger[0].message, "regex uses $& and $` and $' unsafely");
+  assert.equal(reparsed.ledger[0].reason, '$& is quoted, see $1');
+  assert.equal(reparsed.ledger[0].status, 'dismissed');
 });
 
 test('validateAddressResult requires authorized fixes and accounts for every patch path', () => {

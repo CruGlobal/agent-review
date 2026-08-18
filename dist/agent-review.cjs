@@ -18127,9 +18127,10 @@ var require_addressState = __commonJS({
     }
     function parseCommand(body) {
       const raw = String(body || "");
-      if (!raw.trim() || raw.length > 2e3) throw new Error("address command is empty or too long");
-      const command = raw.replace(/^\s*@claude\b/i, "").trim();
+      if (!raw.trim() || raw.length > 1e4) throw new Error("address command is empty or too long");
+      const command = (raw.replace(/^\s*@claude\b/i, "").split(/\r?\n/).find((line) => line.trim()) || "").trim();
       if (!command) throw new Error("address command is empty");
+      if (command.length > 2e3) throw new Error("address command is too long");
       const operations = [];
       for (const clause of command.split(/\s*;\s*/)) {
         let match = clause.match(/^fix\s+(#?\d+(?:\s*,\s*#?\d+)*)$/i);
@@ -18220,6 +18221,12 @@ var require_addressState = __commonJS({
             operation.reason = singleLine(raw.reason, `finding #${n} dismissal reason`, 500);
           }
           return operation;
+        }),
+        // Informational only: numbers the maintainer named that carry no authority.
+        skipped: (Array.isArray(request.skipped) ? request.skipped : []).map((raw) => {
+          const n = Number(raw.n);
+          if (!Number.isInteger(n) || n < 1) throw new Error(`invalid skipped finding: ${raw.n}`);
+          return { n, reason: singleLine(raw.reason, `finding #${n} skip reason`, 200) };
         })
       };
     }
@@ -18234,12 +18241,23 @@ var require_addressState = __commonJS({
     }) {
       const { ledger } = extractReportState(report);
       const byNumber = new Map(ledger.map((entry) => [entry.n, entry]));
-      const operations = parseCommand(command).map((operation) => {
+      const operations = [];
+      const skipped = [];
+      for (const operation of parseCommand(command)) {
         const finding = byNumber.get(operation.n);
-        if (!finding) throw new Error(`finding #${operation.n} does not exist`);
-        if (finding.status !== "open") throw new Error(`finding #${operation.n} is already ${finding.status}`);
-        return { ...finding, ...operation };
-      });
+        if (!finding) {
+          skipped.push({ n: operation.n, reason: "not in the findings ledger" });
+        } else if (finding.status !== "open") {
+          skipped.push({ n: operation.n, reason: `already ${finding.status}` });
+        } else {
+          operations.push({ ...finding, ...operation });
+        }
+      }
+      if (operations.length === 0) {
+        throw new Error(
+          `no actionable findings \u2014 ${skipped.map(({ n, reason }) => `#${n} is ${reason}`).join("; ")}`
+        );
+      }
       return validateRequest({
         version: 1,
         pr: Number(pr),
@@ -18248,7 +18266,8 @@ var require_addressState = __commonJS({
         actor,
         expectedHead,
         reportSha: sha256(report),
-        operations
+        operations,
+        skipped
       });
     }
     function isSensitivePath(path) {
@@ -18403,10 +18422,10 @@ var require_addressState = __commonJS({
       nextStatus.pass = nextStatus.openBlockers === 0;
       let updatedReport = String(report).replace(
         /^<!-- agent-review-ledger: .* -->$/m,
-        `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`
+        () => `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`
       ).replace(
         /^<!-- agent-review-status: .* -->$/m,
-        `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`
+        () => `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`
       ).replace(/^- (?:\[[ x]\] )?\*\*#(\d+)\*\*.*$/gm, (line, n) => {
         const entry = byNumber.get(Number(n));
         return entry ? ledgerLine(entry) : line;
@@ -18425,6 +18444,9 @@ var require_addressState = __commonJS({
       const notApplied = (result.fixes || []).filter((fix) => fix.status === "not-applied");
       if (notApplied.length) {
         lines.push(`Not applied: ${notApplied.map((fix) => `#${fix.n} (${fix.reason})`).join("; ")}.`);
+      }
+      if (request.skipped.length) {
+        lines.push(`Skipped: ${request.skipped.map(({ n, reason }) => `#${n} (${reason})`).join("; ")}.`);
       }
       lines.push(
         nextStatus.pass ? "The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review." : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`

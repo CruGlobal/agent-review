@@ -83,9 +83,12 @@ function parseNumberList(value) {
 
 function parseCommand(body) {
   const raw = String(body || '');
-  if (!raw.trim() || raw.length > 2000) throw new Error('address command is empty or too long');
-  const command = raw.replace(/^\s*@claude\b/i, '').trim();
+  if (!raw.trim() || raw.length > 10000) throw new Error('address command is empty or too long');
+  // A PR comment usually carries prose after the instruction ("@claude fix 1\n\nThanks!"),
+  // so the command is the first non-empty line once the mention is stripped.
+  const command = (raw.replace(/^\s*@claude\b/i, '').split(/\r?\n/).find((line) => line.trim()) || '').trim();
   if (!command) throw new Error('address command is empty');
+  if (command.length > 2000) throw new Error('address command is too long');
   const operations = [];
   for (const clause of command.split(/\s*;\s*/)) {
     let match = clause.match(/^fix\s+(#?\d+(?:\s*,\s*#?\d+)*)$/i);
@@ -179,6 +182,12 @@ function validateRequest(request) {
       }
       return operation;
     }),
+    // Informational only: numbers the maintainer named that carry no authority.
+    skipped: (Array.isArray(request.skipped) ? request.skipped : []).map((raw) => {
+      const n = Number(raw.n);
+      if (!Number.isInteger(n) || n < 1) throw new Error(`invalid skipped finding: ${raw.n}`);
+      return { n, reason: singleLine(raw.reason, `finding #${n} skip reason`, 200) };
+    }),
   };
 }
 
@@ -193,12 +202,25 @@ function prepareAddressRequest({
 }) {
   const { ledger } = extractReportState(report);
   const byNumber = new Map(ledger.map((entry) => [entry.n, entry]));
-  const operations = parseCommand(command).map((operation) => {
+  // Unknown or already-resolved numbers are reported back rather than failing the
+  // whole command — the maintainer's other operations still run.
+  const operations = [];
+  const skipped = [];
+  for (const operation of parseCommand(command)) {
     const finding = byNumber.get(operation.n);
-    if (!finding) throw new Error(`finding #${operation.n} does not exist`);
-    if (finding.status !== 'open') throw new Error(`finding #${operation.n} is already ${finding.status}`);
-    return { ...finding, ...operation };
-  });
+    if (!finding) {
+      skipped.push({ n: operation.n, reason: 'not in the findings ledger' });
+    } else if (finding.status !== 'open') {
+      skipped.push({ n: operation.n, reason: `already ${finding.status}` });
+    } else {
+      operations.push({ ...finding, ...operation });
+    }
+  }
+  if (operations.length === 0) {
+    throw new Error(
+      `no actionable findings — ${skipped.map(({ n, reason }) => `#${n} is ${reason}`).join('; ')}`,
+    );
+  }
   return validateRequest({
     version: 1,
     pr: Number(pr),
@@ -208,6 +230,7 @@ function prepareAddressRequest({
     expectedHead,
     reportSha: sha256(report),
     operations,
+    skipped,
   });
 }
 
@@ -370,14 +393,17 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
     openBlockers: ledger.filter((entry) => entry.status === 'open' && entry.severity >= 7).length,
   };
   nextStatus.pass = nextStatus.openBlockers === 0;
+  // Marker bodies are JSON carrying maintainer- and model-authored text, so they
+  // must be inserted via a replacer function — a string replacement would expand
+  // `$&`/`$'`/`$1` inside a message or dismissal reason and corrupt the ledger.
   let updatedReport = String(report)
     .replace(
       /^<!-- agent-review-ledger: .* -->$/m,
-      `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`,
+      () => `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`,
     )
     .replace(
       /^<!-- agent-review-status: .* -->$/m,
-      `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`,
+      () => `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`,
     )
     .replace(/^- (?:\[[ x]\] )?\*\*#(\d+)\*\*.*$/gm, (line, n) => {
       const entry = byNumber.get(Number(n));
@@ -398,6 +424,9 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
   const notApplied = (result.fixes || []).filter((fix) => fix.status === 'not-applied');
   if (notApplied.length) {
     lines.push(`Not applied: ${notApplied.map((fix) => `#${fix.n} (${fix.reason})`).join('; ')}.`);
+  }
+  if (request.skipped.length) {
+    lines.push(`Skipped: ${request.skipped.map(({ n, reason }) => `#${n} (${reason})`).join('; ')}.`);
   }
   lines.push(
     nextStatus.pass

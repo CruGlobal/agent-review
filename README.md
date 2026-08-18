@@ -142,9 +142,14 @@ workflow defaults `auto_approve` to false. Address runs split authority across t
 Claude receives a read-only, credential-scrubbed workspace and produces a validated patch/result
 handoff; only the trusted publisher receives write permissions. The handoff artifact has one-day
 retention and is deleted immediately after a successful publish, so it is retained only long
-enough to diagnose a failed publish. Fixes on fork PRs remain advisory because the base
-repository token cannot push to a fork; maintainer-authorized dismissals can still update the
-canonical ledger.
+enough to diagnose a failed publish. Every check fails closed and reports back on the PR, so a
+rejected command never just goes quiet. Numbers that are unknown or already resolved are skipped
+and named in the reply; the remaining operations still run.
+
+Fixes on fork PRs remain advisory because the base repository token cannot push to a fork.
+Maintainer-authorized dismissals still update the canonical ledger, but they do not reach
+`learnings/feedback.jsonl` — that file is committed alongside the fix, so the learning loop
+records outcomes from same-repository PRs only.
 
 ## Updating
 

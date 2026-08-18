@@ -155,6 +155,22 @@ test('interact workflow separates the untrusted model from the write-capable pub
   assert.ok(!model.includes('inputs.actor }}'));
 });
 
+test('every fail-closed interact exit is reported back to the maintainer', () => {
+  const workflow = readFileSync(INTERACT_WORKFLOW, 'utf8');
+  const failure = workflow.slice(workflow.indexOf('  report-failure:'));
+  assert.ok(failure, 'interact workflow must define a report-failure job');
+  assert.match(failure, /needs: \[model, publish\]\n    if: failure\(\)/);
+  assert.match(failure, /permissions:\n      pull-requests: write/);
+  assert.ok(failure.includes('gh pr comment'));
+  // The parse error is the one failure a maintainer can act on, so it is carried
+  // out of the read-only model job rather than left in the run log.
+  assert.ok(failure.includes('needs.model.outputs.failure_reason'));
+  assert.ok(workflow.includes('failure_reason: ${{ steps.prepare.outputs.failure_reason }}'));
+  assert.ok(workflow.includes('echo "failure_reason='));
+  // A whitespace nit must not discard an already-validated patch.
+  assert.ok(!/git diff --cached --check\n/.test(workflow));
+});
+
 test('address CI skill is a structured patch-only contract', () => {
   const skill = readFileSync(ADDRESS_SKILL, 'utf8');
   const ci = skill.slice(skill.indexOf('## CI mode'), skill.indexOf('## Local mode'));
