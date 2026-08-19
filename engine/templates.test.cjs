@@ -5,6 +5,7 @@ const assert = require('node:assert');
 const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 const ROOT = join(__dirname, '..');
 const ARCHETYPE = join(ROOT, 'templates/archetype.md');
@@ -12,11 +13,13 @@ const REVIEW_WORKFLOW = join(ROOT, '.github/workflows/review.yml');
 const INTERACT_WORKFLOW = join(ROOT, '.github/workflows/interact.yml');
 const INTERACT_TEMPLATE = join(ROOT, 'templates/workflows/agent-review-interact.yml');
 const ADDRESS_SKILL = join(ROOT, 'skills/address/SKILL.md');
-// Every shipped skill is held to the same CLI/legacy-path contract.
+// Skills whose bash blocks invoke the agent-review CLI. update-files calls no
+// engine subcommands, so it is held only to the legacy-path contract below.
 const SKILLS = ['review', 'init', 'learn', 'address'].map((name) => ({
   name,
   path: join(ROOT, `skills/${name}/SKILL.md`),
 }));
+const ALL_SKILLS = [...SKILLS, { name: 'update-files', path: join(ROOT, 'skills/update-files/SKILL.md') }];
 
 const PLACEHOLDERS = [
   'TITLE',
@@ -43,7 +46,7 @@ test('archetype.md uses exactly the documented placeholders', () => {
 });
 
 test('skills reference the CLI, never legacy engine paths', () => {
-  for (const { name, path } of SKILLS) {
+  for (const { name, path } of ALL_SKILLS) {
     const text = readFileSync(path, 'utf8');
     for (const legacy of ['.claude/review/engine', 'cli.cjs']) {
       assert.ok(
@@ -188,4 +191,58 @@ test('interact caller passes comment identity and grants only required publish p
   assert.ok(!template.includes('command: ${{ github.event.comment.body }}'));
   assert.ok(!template.includes('actor: ${{ github.event.comment.user.login }}'));
   assert.match(template, /permissions:\n      actions: write\n      contents: write\n      pull-requests: write/);
+});
+
+test('the plugin version is the single source of truth and every surface agrees', () => {
+  const pluginVersion = JSON.parse(readFileSync(join(ROOT, '.claude-plugin/plugin.json'), 'utf8')).version;
+  assert.match(pluginVersion, /^\d+\.\d+\.\d+$/);
+  assert.equal(
+    JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version,
+    pluginVersion,
+    'package.json version must match .claude-plugin/plugin.json',
+  );
+  // Every copied workflow template carries a version marker equal to the plugin
+  // version. This deliberately forces a version bump whenever a template
+  // changes — the marker is what lets a review flag stale consumer copies.
+  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml']) {
+    const body = readFileSync(join(ROOT, 'templates/workflows', name), 'utf8');
+    const marker = body.match(/^# agent-review-template-version: (\d+\.\d+\.\d+)$/m);
+    assert.ok(marker, `${name} must carry an agent-review-template-version marker`);
+    assert.equal(marker[1], pluginVersion, `${name} marker must equal the plugin version`);
+  }
+  // The manifest pins each template's exact contents to the plugin version, so a
+  // template edit fails here until the version is bumped and the manifest
+  // restamped (npm run stamp-templates). Editing a released entry in place would
+  // evade this, but that act is loud in code review — unlike forgetting a bump.
+  const manifest = JSON.parse(readFileSync(join(ROOT, 'templates/workflows/template-manifest.json'), 'utf8'));
+  const entry = manifest[pluginVersion];
+  assert.ok(entry, `template-manifest.json has no entry for v${pluginVersion} — bump the version, then npm run stamp-templates`);
+  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml']) {
+    const hash = createHash('sha256').update(readFileSync(join(ROOT, 'templates/workflows', name))).digest('hex');
+    assert.equal(
+      entry[name],
+      hash,
+      `${name} changed without a version bump — bump plugin.json/package.json/template markers, then npm run stamp-templates`,
+    );
+  }
+});
+
+test('the review skill checks for stale consumer workflows and stale local plugins', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review-template-version'), 'review skill must read the template marker');
+  assert.ok(skill.includes('/agent-review:update-files'), 'stale workflow note must point at update-files');
+  assert.ok(skill.includes('plugin marketplace update cruglobal'), 'stale plugin note must point at the marketplace update');
+  assert.ok(skill.includes('is older than'), 'staleness must compare older-than, never mere difference — a dev branch ahead of main is not stale');
+  assert.ok(!skill.includes('differs from `PLUGIN_VERSION`'), 'the differs-from predicate misfires when local is ahead of main');
+  assert.ok(skill.includes('[IF the installed plugin is older'), 'the summary must gate the plugin line and the workflow-file line independently');
+});
+
+test('the update-files skill preserves consumer knobs and stamps the new marker', () => {
+  const skill = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review-template-version'));
+  assert.ok(skill.includes('auto_approve'), 'must carry over the consumer auto_approve choice');
+  assert.ok(skill.includes('anthropic_api_key'), 'must carry over the consumer secret mapping');
+  assert.ok(skill.includes('gh api "repos/CruGlobal/agent-review/contents'), 'must fetch templates from the source repo on GitHub');
+  assert.ok(!skill.includes('plugins/cache'), 'must fetch templates from GitHub, not the local plugin cache');
+  assert.ok(skill.includes('git diff'), 'must show the consumer the diff before anything is committed');
 });

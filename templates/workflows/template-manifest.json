@@ -1,0 +1,7 @@
+{
+  "0.3.0": {
+    "agent-review.yml": "b0596b7202140b66190b076a4a8454c7448fa70bffc143bdb7613415485a25ef",
+    "agent-review-interact.yml": "def0521ceb26b87a1fe7879b9d791990c877ee68a3cb993f91740ba2a6711e67",
+    "agent-review-readiness.yml": "91dc9404cf079a494b0171d9a90bb44d4260ba2c9f12fd1fe3d206b6225709fc"
+  }
+}

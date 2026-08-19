@@ -1,6 +1,6 @@
 {
   "name": "agent-review",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Multi-agent PR review with risk-scored agent selection, debate rounds, an interactive findings ledger (fix/dismiss from PR comments), per-repo bootstrapped rules, and a human-ratified learning loop.",
   "author": { "name": "Daniel Bisgrove" }
 }
