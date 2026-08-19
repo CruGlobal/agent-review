@@ -11,7 +11,8 @@
     "test": "node engine/run-tests.cjs",
     "build": "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review",
     "check-dist": "npm run build && git diff --exit-code dist/",
-    "stamp-templates": "node engine/stampTemplates.cjs"
+    "stamp-templates": "node engine/stampTemplates.cjs",
+    "test:e2e": "bash test/e2e-review.sh"
   },
   "dependencies": {
     "ajv": "^8.17.1",

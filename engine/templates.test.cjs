@@ -313,3 +313,15 @@ test('the update-files skill preserves consumer knobs and stamps the new marker'
   assert.ok(!skill.includes('plugins/cache'), 'must fetch templates from GitHub, not the local plugin cache');
   assert.ok(skill.includes('git diff'), 'must show the consumer the diff before anything is committed');
 });
+
+test('the local e2e harness exists and derives its contract from the CI workflow', () => {
+  const script = readFileSync(join(ROOT, 'test/e2e-review.sh'), 'utf8');
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkg.scripts['test:e2e'], 'bash test/e2e-review.sh');
+  // The harness must read allowedTools and sandbox settings out of review.yml —
+  // hardcoding them here would let the local test and real CI drift apart.
+  assert.ok(script.includes('--allowedTools'), 'harness must pass an allowlist');
+  assert.ok(script.includes('.github/workflows/review.yml'), 'harness must parse the CI workflow, not hardcode its contract');
+  assert.ok(script.includes('AGENT_REVIEW_COMMENT_OUT'), 'harness must stage the comment to a file, never post to GitHub');
+  assert.ok(script.includes('agent-review-ledger'), 'harness must apply the publish-step validation');
+});
