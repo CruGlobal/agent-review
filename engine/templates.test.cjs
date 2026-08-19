@@ -164,6 +164,18 @@ test('model steps can write the /tmp handoff despite forced sandbox isolation', 
       `${name} apt calls must time out and retry instead of hanging on a wedged mirror`,
     );
   }
+  // Subagents inherit the allowlist and need Read/Glob/Grep for rule docs and
+  // diffs (29 denials on mpdx run 32280550011), and the main thread needs
+  // TaskOutput to wait for background agents — without it the model ends its
+  // turn while agents run, which in non-interactive SDK mode kills the session.
+  assert.ok(
+    review.includes('--allowedTools "Bash,Task,TaskOutput,Read,Glob,Grep,Write"'),
+    'review.yml must allow the read tools and TaskOutput alongside Bash/Task',
+  );
+  assert.ok(
+    interact.includes('--allowedTools "Read,Edit,Write,Bash,Task,TaskOutput,Glob,Grep"'),
+    'interact.yml must allow the read tools and TaskOutput alongside its edit set',
+  );
 });
 
 test('CI workflows fail closed on missing/stale reports and use portable pagination', () => {
@@ -217,6 +229,12 @@ test('every fail-closed interact exit is reported back to the maintainer', () =>
   assert.ok(workflow.includes('echo "failure_reason='));
   // A whitespace nit must not discard an already-validated patch.
   assert.ok(!/git diff --cached --check\n/.test(workflow));
+});
+
+test('the review skill forbids ending the turn while agents are still running', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('never end your turn while launched agents are still running'));
+  assert.ok(skill.includes('TaskOutput'));
 });
 
 test('address CI skill is a structured patch-only contract', () => {
