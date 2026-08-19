@@ -152,8 +152,12 @@ test('model steps can write the /tmp handoff despite forced sandbox isolation', 
   // first and refresh only when that misses.
   for (const [name, body] of [['review.yml', review], ['interact.yml', interact]]) {
     assert.ok(
-      /install -y --no-install-recommends bubblewrap \\\n\s*\|\| \{ sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends bubblewrap; \}/.test(body),
+      /install -y --no-install-recommends bubblewrap \\\n\s*\|\| \{ sudo apt-get \$APT_OPTS update -qq; sudo apt-get \$APT_OPTS install -y --no-install-recommends bubblewrap; \}/.test(body),
       `${name} must try the bubblewrap install before paying for apt-get update`,
+    );
+    assert.ok(
+      body.includes("Acquire::Retries=3 -o Acquire::http::Timeout=15"),
+      `${name} apt calls must time out and retry instead of hanging on a wedged mirror`,
     );
   }
 });

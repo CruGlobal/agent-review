@@ -149,8 +149,12 @@ jobs:
           # not configure a sandbox network proxy, so socat is not required.
           # Try the image's baked-in package lists first — a full apt-get update
           # downloads every index and can take minutes on a slow mirror day.
-          sudo apt-get install -y --no-install-recommends bubblewrap \
-            || { sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends bubblewrap; }
+          # Apt has no client-side timeout by default, so a wedged mirror hangs
+          # the job (observed: 8+ minutes on mpdx_api run 32275138787); the
+          # Acquire options make the fallback fail fast and retry instead.
+          APT_OPTS='-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15'
+          sudo apt-get $APT_OPTS install -y --no-install-recommends bubblewrap \
+            || { sudo apt-get $APT_OPTS update -qq; sudo apt-get $APT_OPTS install -y --no-install-recommends bubblewrap; }
           if ! bwrap --dev-bind / / true; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
             bwrap --dev-bind / / true
