@@ -10,8 +10,12 @@ Consumer repos carry copies of the `templates/workflows/` files (`agent-review.y
 templates change upstream. This skill replaces them with the latest templates while carrying
 over the repo's own choices, shows the diff, and offers to open a PR.
 
-Run it inside the consumer repo (e.g. `mpdx_api`), not inside agent-review itself — if the
-current repo's remote IS `CruGlobal/agent-review`, say so and stop.
+Run it inside the consumer repo (e.g. `mpdx_api`), never inside agent-review itself or a fork of
+it. Refuse and stop if either check trips: any `git remote -v` entry points at an
+`agent-review` repo, or the working tree contains `.claude-plugin/plugin.json` declaring
+`"name": "agent-review"` alongside a `templates/workflows/` directory — that's the plugin
+source, and overwriting its templates with themselves (or a consumer caller) would be wrong
+either way.
 
 ## Stage 1 — Fetch the latest templates from GitHub
 

@@ -1348,7 +1348,7 @@ file) skips the note — it must never block or fail a review.
 **In CI** the plugin is pulled fresh every run, so the plugin itself is current — but the repo's
 copied workflow files can be stale. Read the `# agent-review-template-version: X.Y.Z` marker from
 each `.github/workflows/agent-review*.yml` in the repo under review. If any marker is missing or
-older than the plugin version, append one footer line to the report (after the visible body,
+older than the plugin version, append a short footer note to the report (after the visible body,
 never inside the hidden markers):
 
 > ⬆️ This repo's agent-review workflow files are from v[OLDEST or "pre-0.3.0"] (latest:
@@ -1363,10 +1363,14 @@ LATEST=$(gh api repos/CruGlobal/agent-review/contents/.claude-plugin/plugin.json
   2>/dev/null || echo "")
 ```
 
-If `LATEST` is non-empty and differs from `PLUGIN_VERSION`, note it in the Stage 8 summary:
+If `LATEST` is non-empty and `PLUGIN_VERSION` is older than it (semver comparison — never flag a
+mere difference, a dev install ahead of main is not stale), note it in the Stage 8 summary:
 "You are on agent-review v[PLUGIN_VERSION]; the latest is v[LATEST] — run
 `/plugin marketplace update cruglobal` to update." Also run the CI-style template-marker check
-against the local repo's workflow files and add the `/agent-review:update-files` note if they lag.
+against the local repo's workflow files and add the `/agent-review:update-files` note if they
+lag. If the repo has no `.github/workflows/agent-review*.yml` files at all, it doesn't use CI
+review — skip the workflow-file note entirely rather than nagging about files that were never
+installed.
 
 ---
 
@@ -1543,9 +1547,12 @@ Display:
 2. Review [FIX_COUNT] suggested fixes before applying any
 3. Check [N] high-impact dependency changes
 4. Mark finding outcomes and run `agent-review learn` to grow the learning layer
-[IF the Stage 6 version check found a stale plugin or stale workflow files:]
+[IF the installed plugin is older than main (local runs only):]
 ⬆️  agent-review update available: you are on v[PLUGIN_VERSION], latest is v[LATEST]
-   → `/plugin marketplace update cruglobal` (plugin) · `/agent-review:update-files` (workflow files)
+   → run `/plugin marketplace update cruglobal`
+[IF this repo's workflow files carry an older or missing template marker:]
+⬆️  agent-review workflow files are out of date (v[oldest marker, or "pre-0.3.0"] → v[PLUGIN_VERSION])
+   → run `/agent-review:update-files`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 

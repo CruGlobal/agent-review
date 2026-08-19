@@ -170,12 +170,14 @@ installed plugin is behind the latest version.
 ## Versioning & releases
 
 `.claude-plugin/plugin.json` is the single source of truth for the version; `package.json` and
-the `# agent-review-template-version:` marker in every `templates/workflows/*.yml` must match it
-(`npm test` enforces this, which deliberately forces a bump whenever a template changes). To cut
-a release:
+the `# agent-review-template-version:` marker in every `templates/workflows/*.yml` must match it,
+and `templates/workflows/template-manifest.json` pins each template's exact contents to that
+version (`npm test` enforces all of it — editing a template fails the suite until the version is
+bumped and the manifest restamped; rewriting a released manifest entry in place would evade the
+test, but that edit is loud in code review, unlike a forgotten bump). To cut a release:
 
 1. Bump the version in `.claude-plugin/plugin.json`, `package.json`, and the three template
-   markers; run `npm test`.
+   markers; run `npm run stamp-templates`, then `npm test`.
 2. Merge to `main`, then tag it: `git tag v<version> && git push origin v<version>`.
 
 Pre-1.0 versions are beta: minor bumps may change behavior. 1.0.0 marks the first
