@@ -121,6 +121,34 @@ test('every agent-review subcommand used in skill bash blocks exists in the CLI'
   }
 });
 
+test('model steps can write the /tmp handoff despite forced sandbox isolation', () => {
+  // CLAUDE_CODE_SUBPROCESS_ENV_SCRUB forces bubblewrap filesystem isolation on,
+  // which only allows writes to the working directory and session temp dir. The
+  // skill contract and the handoff files live in /tmp, so each model step must
+  // grant it back via sandbox settings — without it Claude silently produces no
+  // report (mpdx_api PR 3548).
+  const review = readFileSync(REVIEW_WORKFLOW, 'utf8');
+  const interact = readFileSync(INTERACT_WORKFLOW, 'utf8');
+  for (const [name, body] of [['review.yml', review], ['interact.yml', interact]]) {
+    assert.ok(
+      body.includes('"allowWrite": ["/tmp"]'),
+      `${name} model step must grant sandbox write access to /tmp`,
+    );
+    assert.ok(
+      !body.includes('allowWrite: ["/tmp", '),
+      `${name} must not widen sandbox writes beyond /tmp`,
+    );
+  }
+  // The model transcript must be preserved for failed runs — this failure was
+  // undiagnosable without it.
+  assert.ok(review.includes('claude-execution-output.json'), 'review.yml must preserve the model transcript');
+  assert.ok(interact.includes('claude-execution-output.json'), 'interact.yml must preserve the model transcript');
+  // The address result handoff must be written where the sandbox permits (/tmp),
+  // never under runner.temp, which stays write-protected for the trusted runtime.
+  assert.ok(interact.includes('ADDRESS_RESULT_OUT: /tmp/address-result.json'), 'address result must be staged in /tmp');
+  assert.ok(!interact.includes('ADDRESS_RESULT_OUT: ${{ runner.temp }}'), 'address result must not point at runner.temp');
+});
+
 test('CI workflows fail closed on missing/stale reports and use portable pagination', () => {
   const review = readFileSync(REVIEW_WORKFLOW, 'utf8');
   const interact = readFileSync(INTERACT_WORKFLOW, 'utf8');

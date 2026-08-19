@@ -159,11 +159,17 @@ jobs:
         env:
           ADDRESS_REQUEST_FILE: ${{ runner.temp }}/address-request.json
           ADDRESS_REPORT_FILE: ${{ runner.temp }}/address-report.md
-          ADDRESS_RESULT_OUT: ${{ runner.temp }}/address-result.json
+          # The sandbox (forced on by env scrubbing) only permits writes under
+          # the working directory, the session temp dir, and the /tmp grant
+          # below — never runner.temp, where the trusted runtime and the
+          # SHA-pinned request live. The model stages its result in /tmp and the
+          # trusted capture step relocates it.
+          ADDRESS_RESULT_OUT: /tmp/address-result.json
           CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          settings: '{"sandbox": {"filesystem": {"allowWrite": ["/tmp"]}}}'
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'
           claude_args: '--allowedTools "Read,Edit,Write,Bash,Task"'
@@ -177,6 +183,7 @@ jobs:
           RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
           REQUEST_FILE: ${{ runner.temp }}/address-request.json
           REPORT_FILE: ${{ runner.temp }}/address-report.md
+          MODEL_RESULT_FILE: /tmp/address-result.json
           RESULT_FILE: ${{ runner.temp }}/address-result.json
           PATCH_FILE: ${{ runner.temp }}/address.patch
           CHANGED_FILES: ${{ runner.temp }}/address-changed-files.json
@@ -190,6 +197,10 @@ jobs:
             || { echo "::error::The model created or switched commits instead of leaving a patch."; exit 1; }
           if [ "$HAS_FIXES" != "true" ]; then
             jq -n --arg head "$EXPECTED_HEAD" '{version:1,expectedHead:$head,fixes:[],tests:[]}' > "$RESULT_FILE"
+          elif [ -s "$MODEL_RESULT_FILE" ]; then
+            # Relocate the sandbox-staged result into the trusted handoff dir so
+            # the artifact upload keeps a single root.
+            cp "$MODEL_RESULT_FILE" "$RESULT_FILE"
           fi
           [ -s "$RESULT_FILE" ] || { echo "::error::Claude did not write the required address result."; exit 1; }
           git -c core.hooksPath=/dev/null add -A -- .
@@ -218,6 +229,7 @@ jobs:
             ${{ runner.temp }}/address-result.json
             ${{ runner.temp }}/address-changed-files.json
             ${{ runner.temp }}/address.patch
+            ${{ runner.temp }}/claude-execution-output.json
 
   publish:
     needs: model
