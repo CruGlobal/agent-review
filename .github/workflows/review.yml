@@ -249,7 +249,7 @@ jobs:
         with:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          claude_args: '--allowedTools "Bash,Task,TaskOutput,Read,Glob,Grep,Write"'
+          claude_args: '--allowedTools "Bash,Task,TaskOutput,Read,Glob,Grep,Write,Edit"'
           # Env scrubbing forces bubblewrap filesystem isolation on, which only
           # permits writes under the working directory and session temp dir. The
           # review contract stages everything in /tmp, so grant exactly that path

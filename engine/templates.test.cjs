@@ -169,7 +169,7 @@ test('model steps can write the /tmp handoff despite forced sandbox isolation', 
   // TaskOutput to wait for background agents — without it the model ends its
   // turn while agents run, which in non-interactive SDK mode kills the session.
   assert.ok(
-    review.includes('--allowedTools "Bash,Task,TaskOutput,Read,Glob,Grep,Write"'),
+    review.includes('--allowedTools "Bash,Task,TaskOutput,Read,Glob,Grep,Write,Edit"'),
     'review.yml must allow the read tools and TaskOutput alongside Bash/Task',
   );
   assert.ok(
