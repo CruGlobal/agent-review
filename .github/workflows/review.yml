@@ -243,6 +243,13 @@ jobs:
           anthropic_api_key: ${{ secrets.anthropic_api_key }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: '--allowedTools "Bash,Task"'
+          # Env scrubbing forces bubblewrap filesystem isolation on, which only
+          # permits writes under the working directory and session temp dir. The
+          # review contract stages everything in /tmp, so grant exactly that path
+          # back. The trusted runtime and request state live under runner.temp,
+          # which stays write-protected, and the publish step SHA-verifies every
+          # /tmp input it consumes after the model step.
+          settings: '{"sandbox": {"filesystem": {"allowWrite": ["/tmp"]}}}'
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'
           prompt: '/agent-review:review ${{ inputs.mode }} ci'
@@ -377,3 +384,4 @@ jobs:
           path: |
             /tmp/agent_review_evidence.json
             /tmp/agent_review_context.json
+            ${{ runner.temp }}/claude-execution-output.json
