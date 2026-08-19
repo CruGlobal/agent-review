@@ -152,8 +152,12 @@ test('model steps can write the /tmp handoff despite forced sandbox isolation', 
   // first and refresh only when that misses.
   for (const [name, body] of [['review.yml', review], ['interact.yml', interact]]) {
     assert.ok(
-      /install -y --no-install-recommends bubblewrap \\\n\s*\|\| \{ sudo apt-get \$APT_OPTS update -qq; sudo apt-get \$APT_OPTS install -y --no-install-recommends bubblewrap; \}/.test(body),
-      `${name} must try the bubblewrap install before paying for apt-get update`,
+      /install -y --no-install-recommends bubblewrap socat \\\n\s*\|\| \{ sudo apt-get \$APT_OPTS update -qq; sudo apt-get \$APT_OPTS install -y --no-install-recommends bubblewrap socat; \}/.test(body),
+      // The Linux sandbox needs BOTH: bwrap for isolation and socat for its
+      // network proxy. Without socat every Bash call fails with "Sandbox is
+      // required but failed to initialize" and the model can run nothing
+      // (mpdx_api runs 32265870681 and 32276309565).
+      `${name} must install socat alongside bubblewrap — the sandbox cannot initialize without it`,
     );
     assert.ok(
       body.includes("Acquire::Retries=3 -o Acquire::http::Timeout=15"),
