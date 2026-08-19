@@ -85,7 +85,7 @@ test('prepareAddressRequest skips unknown or resolved numbers and runs the rest'
   assert.deepEqual(value.skipped, [{ n: 1, reason: 'already fixed' }]);
 
   // Nothing left to act on is still a hard failure, with every number explained.
-  assert.throws(() => request('@claude fix 99'), /no actionable findings — #99 is not in the findings ledger/);
+  assert.throws(() => request('@claude fix 99'), /no actionable findings — `#99` is not in the findings ledger/);
 });
 
 test('prepareAddressRequest reads the command from a comment carrying prose', () => {
@@ -240,7 +240,7 @@ test('finalization leaves not-applied fixes open', () => {
   };
   const finalized = finalizeAddress({ request: req, result, report: report(), fixSha: '' });
   assert.equal(finalized.ledger[0].status, 'open');
-  assert.match(finalized.summary, /Not applied: #1/);
+  assert.match(finalized.summary, /Not applied: `#1`/);
 });
 
 test('the published summary carries the irreversible reminder and a revert hint', () => {
@@ -276,4 +276,33 @@ test('the published summary carries the irreversible reminder and a revert hint'
   // Reversibility belongs to the reviewed diff — addressing findings never clears it.
   assert.equal(finalized.status.irreversible, true);
   assert.deepEqual(finalized.status.irreversibleReasons, ['drops a column']);
+});
+
+test('finding numbers never render as bare #N — GitHub autolinks them to unrelated PRs', () => {
+  // The fixture report uses the OLD bare format, proving the rewriter still
+  // matches lines in already-posted reports and normalizes them.
+  const req = request('@claude fix 1; dismiss 2 [false-positive]: guarded by the caller');
+  const finalized = finalizeAddress({
+    request: req,
+    result: {
+      version: 1,
+      expectedHead: 'a'.repeat(40),
+      fixes: [{ n: 1, status: 'applied', summary: 'added the check', files: ['app/controller.js'] }],
+      tests: [],
+    },
+    report: report(),
+    fixSha: 'c'.repeat(40),
+  });
+  assert.match(finalized.report, /- \[x\] \*\*`#1`\*\*/);
+  assert.match(finalized.report, /- \[x\] \*\*`#2`\*\*/);
+  assert.ok(!/\*\*#\d/.test(finalized.report), 'rewritten ledger lines must not carry bare #N');
+  // The reply comment is GitHub-visible too.
+  assert.ok(finalized.summary.includes('`#1`'));
+  assert.ok(finalized.summary.includes('`#2`'));
+  assert.ok(!/(^|[^`])#\d/.test(finalized.summary), 'summary must never carry bare #N');
+});
+
+test('prepare errors that reach the PR wrap finding numbers in code spans', () => {
+  assert.throws(() => request('@claude fix 99'), /`#99` is not in the findings ledger/);
+  assert.throws(() => request('@claude fix 1; fix 1'), /finding `#1` appears more than once/);
 });

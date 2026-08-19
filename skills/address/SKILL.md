@@ -199,7 +199,7 @@ Then commit and push once for the batch:
 ```bash
 . /tmp/address_env.sh
 git add -A
-git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}"   # e.g. "#1 #3 #5"
+git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}"   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
 git push
 FIX_SHA=$(git rev-parse --short HEAD)
 echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh

@@ -432,7 +432,9 @@ jobs:
           # Advisory only: the patch is already validated, so a stray trailing
           # space must not discard the run and leave the ledger un-updated.
           git diff --cached --check || echo "::warning::The applied patch introduces whitespace errors."
-          APPLIED=$(jq -r '[.fixes[] | select(.status == "applied") | "#\(.n)"] | join(" ")' "$RESULT_FILE")
+          # Plain numbers: a commit message containing #N creates cross-reference
+          # notifications on those unrelated PRs on every push.
+          APPLIED=$(jq -r '[.fixes[] | select(.status == "applied") | "\(.n)"] | join(" ")' "$RESULT_FILE")
           if git diff --cached --quiet; then
             PUSHED_SHA=''
           else

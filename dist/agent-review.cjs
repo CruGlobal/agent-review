@@ -18158,7 +18158,7 @@ var require_addressState = __commonJS({
       }
       const seen = /* @__PURE__ */ new Set();
       for (const operation of operations) {
-        if (seen.has(operation.n)) throw new Error(`finding #${operation.n} appears more than once`);
+        if (seen.has(operation.n)) throw new Error(`finding \`#${operation.n}\` appears more than once`);
         seen.add(operation.n);
       }
       if (operations.length === 0) throw new Error("address command contains no operations");
@@ -18255,7 +18255,7 @@ var require_addressState = __commonJS({
       }
       if (operations.length === 0) {
         throw new Error(
-          `no actionable findings \u2014 ${skipped.map(({ n, reason }) => `#${n} is ${reason}`).join("; ")}`
+          `no actionable findings \u2014 ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join("; ")}`
         );
       }
       return validateRequest({
@@ -18322,7 +18322,7 @@ var require_addressState = __commonJS({
       });
       if (seen.size !== authorizedFixes.size) {
         const missing = [...authorizedFixes.keys()].filter((n) => !seen.has(n));
-        throw new Error(`address result omitted requested fixes: ${missing.map((n) => `#${n}`).join(", ")}`);
+        throw new Error(`address result omitted requested fixes: ${missing.map((n) => `\`#${n}\``).join(", ")}`);
       }
       const changedSet = new Set(cleanFiles);
       for (const path of declaredFiles) {
@@ -18376,13 +18376,13 @@ var require_addressState = __commonJS({
       const prefix = entry.severity >= 7 ? "- [ ]" : "-";
       if (entry.status === "fixed") {
         const fixedPrefix = entry.severity >= 7 ? "- [x]" : "-";
-        return `${fixedPrefix} **#${entry.n}** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u2705 fixed in ${String(entry.sha).slice(0, 7)}`;
+        return `${fixedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u2705 fixed in ${String(entry.sha).slice(0, 7)}`;
       }
       if (entry.status === "dismissed") {
         const dismissedPrefix = entry.severity >= 7 ? "- [x]" : "-";
-        return `${dismissedPrefix} **#${entry.n}** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
+        return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
       }
-      return `${prefix} **#${entry.n}** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_`;
+      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_`;
     }
     function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       const request = validateRequest(requestInput);
@@ -18426,7 +18426,7 @@ var require_addressState = __commonJS({
       ).replace(
         /^<!-- agent-review-status: .* -->$/m,
         () => `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`
-      ).replace(/^- (?:\[[ x]\] )?\*\*#(\d+)\*\*.*$/gm, (line, n) => {
+      ).replace(/^- (?:\[[ x]\] )?\*\*`?#(\d+)`?\*\*.*$/gm, (line, n) => {
         const entry = byNumber.get(Number(n));
         return entry ? ledgerLine(entry) : line;
       });
@@ -18434,19 +18434,19 @@ var require_addressState = __commonJS({
       const lines = [];
       if (appliedFixes.length) {
         lines.push(
-          `\u{1F50E} @${request.actor} \u2014 I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `#${n}`).join(", ")}. **Please review that commit before continuing** \u2014 these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
+          `\u{1F50E} @${request.actor} \u2014 I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(", ")}. **Please review that commit before continuing** \u2014 these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
           ""
         );
       } else {
         lines.push(`@${request.actor} \u2014 the agent-review address request completed.`, "");
       }
-      if (dismissed.length) lines.push(`Dismissed: ${dismissed.map((n) => `#${n}`).join(", ")} using the maintainer-provided reasons.`);
+      if (dismissed.length) lines.push(`Dismissed: ${dismissed.map((n) => `\`#${n}\``).join(", ")} using the maintainer-provided reasons.`);
       const notApplied = (result.fixes || []).filter((fix) => fix.status === "not-applied");
       if (notApplied.length) {
-        lines.push(`Not applied: ${notApplied.map((fix) => `#${fix.n} (${fix.reason})`).join("; ")}.`);
+        lines.push(`Not applied: ${notApplied.map((fix) => `\`#${fix.n}\` (${fix.reason})`).join("; ")}.`);
       }
       if (request.skipped.length) {
-        lines.push(`Skipped: ${request.skipped.map(({ n, reason }) => `#${n} (${reason})`).join("; ")}.`);
+        lines.push(`Skipped: ${request.skipped.map(({ n, reason }) => `\`#${n}\` (${reason})`).join("; ")}.`);
       }
       lines.push(
         nextStatus.pass ? "The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review." : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`
