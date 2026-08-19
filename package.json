@@ -1,6 +1,6 @@
 {
   "name": "agent-review",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
   "license": "MIT",

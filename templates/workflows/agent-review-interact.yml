@@ -1,3 +1,4 @@
+# agent-review-template-version: 0.3.0
 name: agent-review interact
 on:
   issue_comment:

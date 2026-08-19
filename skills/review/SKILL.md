@@ -1338,6 +1338,36 @@ bytes (`wc -c`): prioritize the ledger, blocker evidence, risk, and recommended 
 full raw-agent-report appendix first, then collapse advisory suggestions if more space is needed.
 Never truncate the hidden ledger or status markers.
 
+### Version check — flag stale installs
+
+The running plugin's version is the `version` field of `../../.claude-plugin/plugin.json`,
+relative to this skill file (the same way the report skeleton is located). Read it into
+`PLUGIN_VERSION`. Best-effort only: any failure in this whole subsection (no network, missing
+file) skips the note — it must never block or fail a review.
+
+**In CI** the plugin is pulled fresh every run, so the plugin itself is current — but the repo's
+copied workflow files can be stale. Read the `# agent-review-template-version: X.Y.Z` marker from
+each `.github/workflows/agent-review*.yml` in the repo under review. If any marker is missing or
+older than the plugin version, append one footer line to the report (after the visible body,
+never inside the hidden markers):
+
+> ⬆️ This repo's agent-review workflow files are from v[OLDEST or "pre-0.3.0"] (latest:
+> v[PLUGIN_VERSION]). Run `/agent-review:update-files` in a Claude Code session to refresh them.
+
+**Locally** the opposite can be stale: compare the installed plugin against main —
+
+```bash
+LATEST=$(gh api repos/CruGlobal/agent-review/contents/.claude-plugin/plugin.json \
+  --jq .content 2>/dev/null | base64 -d | node -e \
+  'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))' \
+  2>/dev/null || echo "")
+```
+
+If `LATEST` is non-empty and differs from `PLUGIN_VERSION`, note it in the Stage 8 summary:
+"You are on agent-review v[PLUGIN_VERSION]; the latest is v[LATEST] — run
+`/plugin marketplace update cruglobal` to update." Also run the CI-style template-marker check
+against the local repo's workflow files and add the `/agent-review:update-files` note if they lag.
+
 ---
 
 ## Stage 7 — Commit Metrics & Interactive Actions
@@ -1513,6 +1543,9 @@ Display:
 2. Review [FIX_COUNT] suggested fixes before applying any
 3. Check [N] high-impact dependency changes
 4. Mark finding outcomes and run `agent-review learn` to grow the learning layer
+[IF the Stage 6 version check found a stale plugin or stale workflow files:]
+⬆️  agent-review update available: you are on v[PLUGIN_VERSION], latest is v[LATEST]
+   → `/plugin marketplace update cruglobal` (plugin) · `/agent-review:update-files` (workflow files)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 

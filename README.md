@@ -153,11 +153,33 @@ records outcomes from same-repository PRs only.
 
 ## Updating
 
+Two things can go stale in a consumer repo, and each has its own update path:
+
 ```
-/plugin marketplace update cruglobal
+/plugin marketplace update cruglobal      # the plugin itself (local Claude Code sessions)
+/agent-review:update-files                # the copied .github/workflows/agent-review*.yml files
 ```
 
-Pulls the latest `agent-review` plugin release from this repo.
+CI never needs the first — the workflows pull the plugin fresh from this repo on every run. The
+second refreshes the repo's copied caller workflows to the latest templates while preserving the
+repo's own settings (`auto_approve`, secret names, label gates, pinned refs), shows the diff, and
+offers a PR. Reviews flag both automatically: the report gains a footer when a repo's workflow
+files carry an older `# agent-review-template-version:` marker, and local runs note when the
+installed plugin is behind the latest version.
+
+## Versioning & releases
+
+`.claude-plugin/plugin.json` is the single source of truth for the version; `package.json` and
+the `# agent-review-template-version:` marker in every `templates/workflows/*.yml` must match it
+(`npm test` enforces this, which deliberately forces a bump whenever a template changes). To cut
+a release:
+
+1. Bump the version in `.claude-plugin/plugin.json`, `package.json`, and the three template
+   markers; run `npm test`.
+2. Merge to `main`, then tag it: `git tag v<version> && git push origin v<version>`.
+
+Pre-1.0 versions are beta: minor bumps may change behavior. 1.0.0 marks the first
+production-ready release.
 
 ## Known limitations
 

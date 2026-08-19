@@ -189,3 +189,38 @@ test('interact caller passes comment identity and grants only required publish p
   assert.ok(!template.includes('actor: ${{ github.event.comment.user.login }}'));
   assert.match(template, /permissions:\n      actions: write\n      contents: write\n      pull-requests: write/);
 });
+
+test('the plugin version is the single source of truth and every surface agrees', () => {
+  const pluginVersion = JSON.parse(readFileSync(join(ROOT, '.claude-plugin/plugin.json'), 'utf8')).version;
+  assert.match(pluginVersion, /^\d+\.\d+\.\d+$/);
+  assert.equal(
+    JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).version,
+    pluginVersion,
+    'package.json version must match .claude-plugin/plugin.json',
+  );
+  // Every copied workflow template carries a version marker equal to the plugin
+  // version. This deliberately forces a version bump whenever a template
+  // changes — the marker is what lets a review flag stale consumer copies.
+  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml']) {
+    const body = readFileSync(join(ROOT, 'templates/workflows', name), 'utf8');
+    const marker = body.match(/^# agent-review-template-version: (\d+\.\d+\.\d+)$/m);
+    assert.ok(marker, `${name} must carry an agent-review-template-version marker`);
+    assert.equal(marker[1], pluginVersion, `${name} marker must equal the plugin version`);
+  }
+});
+
+test('the review skill checks for stale consumer workflows and stale local plugins', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review-template-version'), 'review skill must read the template marker');
+  assert.ok(skill.includes('/agent-review:update-files'), 'stale workflow note must point at update-files');
+  assert.ok(skill.includes('plugin marketplace update cruglobal'), 'stale plugin note must point at the marketplace update');
+});
+
+test('the update-files skill preserves consumer knobs and stamps the new marker', () => {
+  const skill = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review-template-version'));
+  assert.ok(skill.includes('auto_approve'), 'must carry over the consumer auto_approve choice');
+  assert.ok(skill.includes('anthropic_api_key'), 'must carry over the consumer secret mapping');
+  assert.ok(!skill.includes('plugins/cache'), 'must fetch templates from GitHub, not the local plugin cache');
+  assert.ok(skill.includes('git diff'), 'must show the consumer the diff before anything is committed');
+});
