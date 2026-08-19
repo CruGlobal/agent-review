@@ -147,8 +147,10 @@ jobs:
         run: |
           # Env scrubbing needs the Linux namespace sandbox. This workflow does
           # not configure a sandbox network proxy, so socat is not required.
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap
+          # Try the image's baked-in package lists first — a full apt-get update
+          # downloads every index and can take minutes on a slow mirror day.
+          sudo apt-get install -y --no-install-recommends bubblewrap \
+            || { sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends bubblewrap; }
           if ! bwrap --dev-bind / / true; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
             bwrap --dev-bind / / true

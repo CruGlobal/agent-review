@@ -210,8 +210,10 @@ jobs:
         # Installing it (rather than setting CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0)
         # keeps secrets out of the Bash subprocesses this review runs.
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends bubblewrap
+          # Try the image's baked-in package lists first — a full apt-get update
+          # downloads every index and can take minutes on a slow mirror day.
+          sudo apt-get install -y --no-install-recommends bubblewrap \
+            || { sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends bubblewrap; }
           # Ubuntu 24.04 restricts the unprivileged user namespaces bwrap needs;
           # lift the AppArmor restriction only if the sandbox smoke test fails.
           if ! bwrap --dev-bind / / true; then

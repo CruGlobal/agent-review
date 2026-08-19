@@ -147,6 +147,15 @@ test('model steps can write the /tmp handoff despite forced sandbox isolation', 
   // never under runner.temp, which stays write-protected for the trusted runtime.
   assert.ok(interact.includes('ADDRESS_RESULT_OUT: /tmp/address-result.json'), 'address result must be staged in /tmp');
   assert.ok(!interact.includes('ADDRESS_RESULT_OUT: ${{ runner.temp }}'), 'address result must not point at runner.temp');
+  // apt-get update downloads the full package index set (minutes on a slow
+  // mirror) and runs on every review; install from the image's baked-in lists
+  // first and refresh only when that misses.
+  for (const [name, body] of [['review.yml', review], ['interact.yml', interact]]) {
+    assert.ok(
+      /install -y --no-install-recommends bubblewrap \\\n\s*\|\| \{ sudo apt-get update -qq; sudo apt-get install -y --no-install-recommends bubblewrap; \}/.test(body),
+      `${name} must try the bubblewrap install before paying for apt-get update`,
+    );
+  }
 });
 
 test('CI workflows fail closed on missing/stale reports and use portable pagination', () => {
