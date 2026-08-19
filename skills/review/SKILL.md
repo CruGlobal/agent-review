@@ -154,6 +154,16 @@ Active when the invocation includes the `ci` argument or `$AGENT_REVIEW_CI` is s
 When debate is skipped, say so in the report ("Debate rounds: 0 (skipped in CI)") and omit the
 debate transcript and debate-statistics blocks from the report entirely.
 
+Two CI-sandbox behaviors to expect (both harmless if handled):
+
+- A Bash call may fail with `bwrap: Can't find source path ... No such file or directory`
+  naming a transient file (usually a git lockfile). That is a sandbox bind race, not a real
+  error — rerun the same command; it succeeds on retry.
+- **The run has succeeded ONLY when `$AGENT_REVIEW_COMMENT_OUT` exists and is non-empty.** As
+  your final action, verify it: `wc -c "$AGENT_REVIEW_COMMENT_OUT"` and confirm the head,
+  rollout, ledger, and status markers are present. If that file is missing when you end your
+  turn, the workflow fails and the whole review is discarded — whatever else you accomplished.
+
 ### Post the report to the PR (create-or-update)
 
 Always embed the `<!-- agent-review -->` marker so subsequent runs update the same comment

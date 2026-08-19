@@ -235,6 +235,10 @@ test('the review skill forbids ending the turn while agents are still running', 
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('never end your turn while launched agents are still running'));
   assert.ok(skill.includes('TaskOutput'));
+  // Observed in run 32280550011: transient bwrap bind races and no final
+  // verification that the comment handoff actually exists.
+  assert.ok(skill.includes('sandbox bind race'), 'skill must teach the bwrap retry');
+  assert.ok(skill.includes('succeeded ONLY when `$AGENT_REVIEW_COMMENT_OUT` exists'), 'skill must require the final handoff self-check');
 });
 
 test('address CI skill is a structured patch-only contract', () => {
