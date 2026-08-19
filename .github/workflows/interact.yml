@@ -180,7 +180,7 @@ jobs:
           settings: '{"sandbox": {"filesystem": {"allowWrite": ["/tmp"]}}}'
           plugin_marketplaces: 'https://github.com/CruGlobal/agent-review.git'
           plugins: 'agent-review@cruglobal'
-          claude_args: '--allowedTools "Read,Edit,Write,Bash,Task"'
+          claude_args: '--allowedTools "Read,Edit,Write,Bash,Task,TaskOutput,Glob,Grep"'
           prompt: '/agent-review:address ci'
       - name: Capture and validate the untrusted model handoff
         env:

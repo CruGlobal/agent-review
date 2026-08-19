@@ -151,6 +151,20 @@ Maintainer-authorized dismissals still update the canonical ledger, but they do 
 `learnings/feedback.jsonl` — that file is committed alongside the fix, so the learning loop
 records outcomes from same-repository PRs only.
 
+## Testing CI changes locally
+
+```
+npm run test:e2e            # full model-step run with your working copy (~5-15 min, one model call)
+npm run test:e2e -- --keep  # keep the scratch repo and transcript for debugging
+```
+
+Fails fast, before a CI round-trip: it seeds a scratch consumer repo with a known-vulnerable
+diff, generates the trusted artifacts with the real engine exactly as `review.yml` does, runs
+your local plugin in CI mode with the allowlist and sandbox settings **parsed from the workflow
+file** (so the test cannot drift from CI), and applies the publish step's validation to the
+staged report. It never talks to GitHub. Not covered: the trusted workflow steps themselves and
+Linux-only sandbox behavior — those still need one real Actions run to confirm.
+
 ## Updating
 
 Two things can go stale in a consumer repo, and each has its own update path:

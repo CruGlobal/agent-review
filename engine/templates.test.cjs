@@ -164,6 +164,18 @@ test('model steps can write the /tmp handoff despite forced sandbox isolation', 
       `${name} apt calls must time out and retry instead of hanging on a wedged mirror`,
     );
   }
+  // Subagents inherit the allowlist and need Read/Glob/Grep for rule docs and
+  // diffs (29 denials on mpdx run 32280550011), and the main thread needs
+  // TaskOutput to wait for background agents — without it the model ends its
+  // turn while agents run, which in non-interactive SDK mode kills the session.
+  assert.ok(
+    review.includes('--allowedTools "Bash,Task,TaskOutput,Read,Glob,Grep,Write,Edit"'),
+    'review.yml must allow the read tools and TaskOutput alongside Bash/Task',
+  );
+  assert.ok(
+    interact.includes('--allowedTools "Read,Edit,Write,Bash,Task,TaskOutput,Glob,Grep"'),
+    'interact.yml must allow the read tools and TaskOutput alongside its edit set',
+  );
 });
 
 test('CI workflows fail closed on missing/stale reports and use portable pagination', () => {
@@ -217,6 +229,16 @@ test('every fail-closed interact exit is reported back to the maintainer', () =>
   assert.ok(workflow.includes('echo "failure_reason='));
   // A whitespace nit must not discard an already-validated patch.
   assert.ok(!/git diff --cached --check\n/.test(workflow));
+});
+
+test('the review skill forbids ending the turn while agents are still running', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('never end your turn while launched agents are still running'));
+  assert.ok(skill.includes('TaskOutput'));
+  // Observed in run 32280550011: transient bwrap bind races and no final
+  // verification that the comment handoff actually exists.
+  assert.ok(skill.includes('sandbox bind race'), 'skill must teach the bwrap retry');
+  assert.ok(skill.includes('succeeded ONLY when `$AGENT_REVIEW_COMMENT_OUT` exists'), 'skill must require the final handoff self-check');
 });
 
 test('address CI skill is a structured patch-only contract', () => {
@@ -290,4 +312,16 @@ test('the update-files skill preserves consumer knobs and stamps the new marker'
   assert.ok(skill.includes('gh api "repos/CruGlobal/agent-review/contents'), 'must fetch templates from the source repo on GitHub');
   assert.ok(!skill.includes('plugins/cache'), 'must fetch templates from GitHub, not the local plugin cache');
   assert.ok(skill.includes('git diff'), 'must show the consumer the diff before anything is committed');
+});
+
+test('the local e2e harness exists and derives its contract from the CI workflow', () => {
+  const script = readFileSync(join(ROOT, 'test/e2e-review.sh'), 'utf8');
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  assert.equal(pkg.scripts['test:e2e'], 'bash test/e2e-review.sh');
+  // The harness must read allowedTools and sandbox settings out of review.yml —
+  // hardcoding them here would let the local test and real CI drift apart.
+  assert.ok(script.includes('--allowedTools'), 'harness must pass an allowlist');
+  assert.ok(script.includes('.github/workflows/review.yml'), 'harness must parse the CI workflow, not hardcode its contract');
+  assert.ok(script.includes('AGENT_REVIEW_COMMENT_OUT'), 'harness must stage the comment to a file, never post to GitHub');
+  assert.ok(script.includes('agent-review-ledger'), 'harness must apply the publish-step validation');
 });

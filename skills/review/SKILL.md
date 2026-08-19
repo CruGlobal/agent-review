@@ -154,6 +154,16 @@ Active when the invocation includes the `ci` argument or `$AGENT_REVIEW_CI` is s
 When debate is skipped, say so in the report ("Debate rounds: 0 (skipped in CI)") and omit the
 debate transcript and debate-statistics blocks from the report entirely.
 
+Two CI-sandbox behaviors to expect (both harmless if handled):
+
+- A Bash call may fail with `bwrap: Can't find source path ... No such file or directory`
+  naming a transient file (usually a git lockfile). That is a sandbox bind race, not a real
+  error — rerun the same command; it succeeds on retry.
+- **The run has succeeded ONLY when `$AGENT_REVIEW_COMMENT_OUT` exists and is non-empty.** As
+  your final action, verify it: `wc -c "$AGENT_REVIEW_COMMENT_OUT"` and confirm the head,
+  rollout, ledger, and status markers are present. If that file is missing when you end your
+  turn, the workflow fails and the whole review is discarded — whatever else you accomplished.
+
 ### Post the report to the PR (create-or-update)
 
 Always embed the `<!-- agent-review -->` marker so subsequent runs update the same comment
@@ -615,6 +625,14 @@ Launch the selected agents in parallel with the Task tool.
 
 **IMPORTANT:** Use a SINGLE message with multiple Task tool invocations so they run in parallel.
 
+**CRITICAL (applies doubly in CI): never end your turn while launched agents are still running.**
+Agents may run in the background and notify you later — but a non-interactive run has no later:
+the session terminates the moment you end your turn, the pending agents are killed, and the
+review is abandoned with no report (the workflow then fails). If agent results have not arrived
+in your context yet, retrieve them with TaskOutput — polling repeatedly is fine — and only
+proceed once every launched agent's report is in hand. Saying "I'll continue when the reports
+land" and stopping IS the failure mode; do not do it.
+
 Display: "🚀 Launching [N] specialized review agents in parallel..."
 
 ### Approved learnings (learning layer)
@@ -731,7 +749,9 @@ you do not inline is invisible to them.
 
 ## Stage 2 — Collect Agent Reports
 
-Wait for all agents to complete and display progress, one line per launched agent:
+Wait for all agents to complete and display progress, one line per launched agent. Waiting means
+actively collecting inside this same turn (TaskOutput per pending agent) — never ending the turn
+to "wait" for notifications; in CI that kills the run:
 
 ```
 Agent Reviews Complete:
