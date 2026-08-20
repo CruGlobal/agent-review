@@ -58,13 +58,13 @@ severity sections below.
 
 [FOR EACH FINDING, ordered by severity descending, numbered 1..N:]
 [IF severity >= 7 AND status open:]
-- [ ] **#[N]** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
+- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
 [IF severity >= 7 AND status fixed:]
-- [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]
+- [x] **`#[N]`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]
 [IF severity >= 7 AND status dismissed:]
-- [x] **#[N]** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]
+- [x] **`#[N]`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]
 [IF severity < 7:]
-- **#[N]** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[IF resolved: same ✅/🚫 suffix as above]
+- **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[IF resolved: same ✅/🚫 suffix as above]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

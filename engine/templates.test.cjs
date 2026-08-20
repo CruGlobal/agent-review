@@ -325,3 +325,14 @@ test('the local e2e harness exists and derives its contract from the CI workflow
   assert.ok(script.includes('AGENT_REVIEW_COMMENT_OUT'), 'harness must stage the comment to a file, never post to GitHub');
   assert.ok(script.includes('agent-review-ledger'), 'harness must apply the publish-step validation');
 });
+
+test('the report skeleton and commit message never emit bare #N', () => {
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(!report.includes('**#[N]**'), 'ledger skeleton lines must use the code-span form **`#[N]`**');
+  assert.ok(report.includes('**`#[N]`**'));
+  const interact = readFileSync(INTERACT_WORKFLOW, 'utf8');
+  // A commit message containing #N creates cross-reference notifications on
+  // those unrelated PRs every time a fix is pushed.
+  assert.ok(!interact.includes('"#\\(.n)"'), 'commit-message numbers must be plain, never #N');
+  assert.ok(interact.includes('"\\(.n)"'));
+});
