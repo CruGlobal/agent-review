@@ -336,3 +336,24 @@ test('the report skeleton and commit message never emit bare #N', () => {
   assert.ok(!interact.includes('"#\\(.n)"'), 'commit-message numbers must be plain, never #N');
   assert.ok(interact.includes('"\\(.n)"'));
 });
+
+test('the report skeleton is the approved verdict+blockers caveman layout', () => {
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  // One verdict line up top, right after the hidden markers.
+  assert.ok(report.includes('🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL]'));
+  // Visible blocks: blockers with evidence sub-lines, then one-liner findings.
+  assert.ok(report.includes('## BLOCKERS — fix or dismiss to pass'));
+  assert.ok(report.includes('↳ evidence:'));
+  assert.ok(report.includes('## OTHER FINDINGS'));
+  // Everything else collapses.
+  for (const section of ['Fix suggestions', 'Dependency impact', 'Review detail & stats', 'How to act on this review']) {
+    assert.ok(new RegExp(`<details>\\s*<summary>[^<]*${section}`).test(report), `${section} must be a <details> section`);
+  }
+  // The duplication is gone: no severity-section restatement, no raw-agent appendix.
+  assert.ok(!report.includes('Full Agent Reports'), 'raw-agent appendix must be removed');
+  assert.ok(!/## 🚫 Critical/.test(report), 'severity sections must not restate ledger findings');
+  // Machine contracts survive byte-identical.
+  assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_'));
+  assert.ok(report.includes('<!-- agent-review-ledger:'));
+  assert.ok(report.includes('<!-- agent-review-status:'));
+});
