@@ -1,11 +1,13 @@
-<!-- This skeleton is filled by skills/review/SKILL.md, then wrapped by the posting step in the
-hidden state markers below before the comment is published. They never render and must stay
-byte-exact — addressState and the publish-step validation parse them with anchored regexes. -->
-<!-- agent-review -->
-<!-- agent-review-head: [HEAD_REF sha, when known] -->
-<!-- agent-review-rollout: [shadow/advisory/enforce] -->
-<!-- agent-review-ledger: [JSON array of every finding, open/fixed/dismissed] -->
-<!-- agent-review-status: [JSON: v/head/risk/openBlockers/pass/irreversible/irreversibleReasons/ci] -->
+<!-- This skeleton is filled by skills/review/SKILL.md. The CI posting step then prepends the
+real hidden state markers before the comment is published — see skills/review/SKILL.md's posting
+step for the exact format. Once posted they must stay byte-exact: addressState and the
+publish-step validation parse them with anchored per-line regexes, each expecting exactly one
+match. -->
+
+[DO NOT write literal agent-review-head, agent-review-rollout, agent-review-ledger, or
+agent-review-status HTML comment lines anywhere in the filled report body — the CI posting step
+prepends its own single copy of each after this skeleton is filled, and a duplicate line breaks
+address parsing ("report must contain exactly one findings ledger/status marker").]
 
 🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL][ · ⚠️ irreversible]
 [one-line: rollout mode ($AGENT_REVIEW_ROLLOUT_MODE, default advisory — in shadow, say plainly
@@ -37,7 +39,7 @@ this report cannot approve or block the PR) · [N] agents run ([list of launched
 ## OTHER FINDINGS ([N])
 
 [FOR EACH severity <7 ledger entry, ordered by severity descending, ONE line, no sub-bullets:]
-[IF status open or entry has no resolution:]
+[IF status open:]
 
 - **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
 

@@ -341,19 +341,45 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
   const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
   // One verdict line up top, right after the hidden markers.
   assert.ok(report.includes('🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL]'));
-  // Visible blocks: blockers with evidence sub-lines, then one-liner findings.
+  // Visible blocks: blockers with evidence + fix sub-lines, then one-liner findings.
   assert.ok(report.includes('## BLOCKERS — fix or dismiss to pass'));
   assert.ok(report.includes('↳ evidence:'));
+  assert.ok(report.includes('↳ fix:'));
   assert.ok(report.includes('## OTHER FINDINGS'));
-  // Everything else collapses.
-  for (const section of ['Fix suggestions', 'Dependency impact', 'Review detail & stats', 'How to act on this review']) {
-    assert.ok(new RegExp(`<details>\\s*<summary>[^<]*${section}`).test(report), `${section} must be a <details> section`);
+  // Everything else collapses, in the brief's order.
+  const sections = ['Fix suggestions', 'Dependency impact', 'Review detail & stats', 'How to act on this review'];
+  const sectionIndexes = sections.map((section) => {
+    const match = new RegExp(`<details>\\s*<summary>[^<]*${section}`).exec(report);
+    assert.ok(match, `${section} must be a <details> section`);
+    return match.index;
+  });
+  for (let i = 1; i < sectionIndexes.length; i += 1) {
+    assert.ok(sectionIndexes[i] > sectionIndexes[i - 1], `${sections[i]} must come after ${sections[i - 1]}`);
   }
   // The duplication is gone: no severity-section restatement, no raw-agent appendix.
   assert.ok(!report.includes('Full Agent Reports'), 'raw-agent appendix must be removed');
-  assert.ok(!/## 🚫 Critical/.test(report), 'severity sections must not restate ledger findings');
+  for (const heading of [
+    '## 🚫 Critical',
+    '## 🔴 HIGH PRIORITY BLOCKERS',
+    '## ⚠️ IMPORTANT ISSUES',
+    '## 💡 MEDIUM PRIORITY',
+    '## 💭 SUGGESTIONS',
+    '## 🤔 UNRESOLVED DEBATES',
+  ]) {
+    assert.ok(!report.includes(heading), `legacy severity/debate section "${heading}" must not restate ledger findings`);
+  }
   // Machine contracts survive byte-identical.
   assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_'));
-  assert.ok(report.includes('<!-- agent-review-ledger:'));
-  assert.ok(report.includes('<!-- agent-review-status:'));
+  // The skeleton may document the hidden markers in prose, but must never itself contain a
+  // marker-shaped line — the CI posting step prepends the one real copy of each, and a
+  // duplicate breaks addressState's "exactly one ledger/status marker" parsing.
+  assert.ok(report.includes('agent-review-ledger'), 'the skeleton should document the ledger marker by name');
+  assert.ok(report.includes('agent-review-status'), 'the skeleton should document the status marker by name');
+  for (const name of ['agent-review-head', 'agent-review-rollout', 'agent-review-ledger', 'agent-review-status']) {
+    assert.ok(
+      !new RegExp(`^<!-- ${name}: .* -->$`, 'm').test(report),
+      `the skeleton must not itself contain a live "${name}" marker line`,
+    );
+  }
+  assert.ok(!/^<!-- agent-review -->$/m.test(report), 'the skeleton must not itself contain the live bare review marker line');
 });
