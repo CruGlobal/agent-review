@@ -390,3 +390,11 @@ test('the review skill fills the caveman report and enforces the soft byte targe
   assert.ok(skill.includes('state each finding exactly once'), 'fill rules must forbid restating findings across sections');
   assert.ok(skill.includes('BLOCKERS — fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
 });
+
+test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(archetype.includes('severity ≥ 7: evidence ≤ 8 lines (600 chars max'), 'blocker evidence tier missing');
+  assert.ok(archetype.includes('severity < 7: evidence ≤ 2 lines'), 'minor evidence tier missing');
+  assert.ok(archetype.includes('report only the checklist items that FAIL'), 'checklists must be violations-only');
+  assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
+});
