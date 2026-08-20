@@ -79,8 +79,21 @@ has always inherited the main-thread model.
 - C2. CI mode: no automated-fix heredoc scripts (never executed in CI — pure
   waste); local mode keeps them. Rule checklists: violations only.
 - C3. The raw-agent-report appendix is dropped in CI always. Ledger, status, inline
-  anchors, blocker detail blocks (with per-agent perspectives from the findings
-  JSON): unchanged.
+  anchors: unchanged.
+- C4. Report layout redesign (user-approved "verdict + blockers" mock):
+  - Visible uncollapsed: one verdict line (pass/blockers count/risk/irreversible
+    flag), the blocker entries with their evidence lines, the irreversibility
+    warning, and the lesser findings as strict one-liners. Target ~40-60 visible
+    lines.
+  - Everything else collapses into <details>: fix suggestions, dependency impact,
+    per-agent perspectives, review stats, debate summaries, usage help.
+  - Findings are stated ONCE each: blockers in the visible block, lesser findings
+    as ledger one-liners; the severity-section restatement and blocker-detail
+    duplication are removed. Total report target ~20-25KB (from ~60KB) — an
+    output-token saving in itself.
+  - The hidden machine markers, ledger checkbox semantics, and the `@claude fix /
+    dismiss` usage line survive unchanged; the address-flow line rewriter already
+    matches the one-liner format.
 
 ## Pillar P — Ponytail: files not prose, engine not model
 
@@ -137,9 +150,10 @@ requires slices failing AND turn discipline collapsing simultaneously.
 
 ## Rollout order (each lands green before the next)
 
-1. O (routing + effort) — biggest risk (undocumented agent loading), canaried
-   first, degrades safely.
-2. C + report changes — pure output savings, no discovery risk.
+1. C + report redesign — zero discovery risk, immediate visible value, pure
+   output savings.
+2. O (routing + effort) — biggest risk (undocumented agent loading), canaried on
+   a LOW-risk PR, degrades safely.
 3. P1/P2 (files + consensus split) — the structural change, behind full unit
    coverage.
 4. R (slicing + reading contract) + P4 — the context/turn cuts, measured last so
