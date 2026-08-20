@@ -383,3 +383,10 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
   }
   assert.ok(!/^<!-- agent-review -->$/m.test(report), 'the skeleton must not itself contain the live bare review marker line');
 });
+
+test('the review skill fills the caveman report and enforces the soft byte target', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('soft target 25,000 bytes'), 'Stage 6 must state the new soft size target');
+  assert.ok(skill.includes('state each finding exactly once'), 'fill rules must forbid restating findings across sections');
+  assert.ok(skill.includes('BLOCKERS — fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
+});

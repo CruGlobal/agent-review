@@ -1348,6 +1348,15 @@ Honor its conditionals:
   `truncated`) — that is the only impact artifact this skill produces. State "index disabled" there
   when Stage 1B was skipped, and drop the breaking-changes subsection when nothing was detected.
 
+Fill the skeleton top-down and state each finding exactly once: open blockers in
+"BLOCKERS — fix or dismiss to pass" (with their evidence and fix lines), every
+other ledger entry as a single line in "OTHER FINDINGS". Never restate a finding
+in another section — per-agent perspectives inside "Review detail & stats" refer
+to findings by `#N`, they do not repeat the message. Everything below OTHER
+FINDINGS lives in the four <details> sections from the skeleton; add nothing
+outside them; soft target 25,000 bytes; the 60,000-byte hard cap and its trim
+order still apply.
+
 Save the filled report to `/tmp/agent_review_report.md`.
 
 In CI mode, the "AUTOMATED FIXES AVAILABLE" section stays — but frame it as suggestions a human can
