@@ -2,6 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { buildPlan } = require('./plan.cjs');
+const { resolveTiers } = require('./resolveTiers.cjs');
 
 const config = {
   profile: 'standard',
@@ -51,4 +52,41 @@ test('buildPlan assembles risk + agents + resolved rules', () => {
   // path_rules attach to any selected agent (per design spec §4.4): the changed
   // .tsx file matches the path_rule, so architecture also resolves rules/ux.md.
   assert.deepEqual(arch.rules, ['rules/architecture.md', 'rules/ux.md']);
+});
+
+test('resolveTiers routes smart lanes by escalation and risk', () => {
+  const agents = [
+    { id: 'security', model: 'smart', escalates: true },
+    { id: 'standards', model: 'smart', escalates: false },
+    { id: 'perf', model: 'haiku', escalates: false },
+  ];
+  const high = resolveTiers({ agents, riskLevel: 'CRITICAL', mode: 'standard' });
+  assert.deepEqual(high.map((a) => a.tier), ['opus', 'sonnet', 'haiku']);
+  const low = resolveTiers({ agents, riskLevel: 'LOW', mode: 'quick' });
+  assert.deepEqual(low.map((a) => a.tier), ['sonnet', 'haiku', 'haiku']);
+});
+
+test('plan resolves auto mode from the risk score and stamps tiers', () => {
+  // Same fixture path as "buildPlan assembles risk + agents + resolved rules":
+  // a single .tsx change scores LOW (non-zero), so auto resolves to quick.
+  const plan = buildPlan(
+    {
+      files: ['src/components/Tasks/TaskRow.tsx'],
+      diffText: '+x',
+      linesChanged: 20,
+      scope: 'single_feature',
+      mode: 'auto',
+    },
+    config,
+  );
+  assert.equal(plan.risk.level, 'LOW');
+  assert.notEqual(plan.risk.score, 0);
+  assert.deepEqual(plan.mode, { requested: 'auto', resolved: 'quick' });
+  assert.ok(plan.agents.length > 0, 'agents selected');
+  for (const a of plan.agents) {
+    assert.ok(
+      ['opus', 'sonnet', 'haiku'].includes(a.tier),
+      `agent ${a.id} has a valid tier, got ${a.tier}`,
+    );
+  }
 });

@@ -193,7 +193,7 @@ const USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
-  plan --files <f> --diff <f> --stat <f> [--scope <s>]   compute a review plan (JSON)
+  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -277,6 +277,7 @@ function main(rawArgv) {
       const diffPath = flag(rest, '--diff');
       const statPath = flag(rest, '--stat');
       const scope = flag(rest, '--scope') || 'single_feature';
+      const mode = flag(rest, '--mode') || 'standard';
       const files = readFileSync(filesPath, 'utf8')
         .split('\n')
         .map((s) => s.trim())
@@ -286,7 +287,7 @@ function main(rawArgv) {
         ? linesChangedFromStat(readFileSync(statPath, 'utf8'))
         : 0;
       const plan = buildPlan(
-        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel },
+        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode },
         cfg,
       );
       out(JSON.stringify(plan, null, 2));
