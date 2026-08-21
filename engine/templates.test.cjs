@@ -336,3 +336,91 @@ test('the report skeleton and commit message never emit bare #N', () => {
   assert.ok(!interact.includes('"#\\(.n)"'), 'commit-message numbers must be plain, never #N');
   assert.ok(interact.includes('"\\(.n)"'));
 });
+
+test('the report skeleton is the approved verdict+blockers caveman layout', () => {
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  // One verdict line up top, right after the hidden markers.
+  assert.ok(report.includes('🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL]'));
+  // Visible blocks: blockers with evidence + fix sub-lines, then one-liner findings.
+  assert.ok(report.includes('## BLOCKERS — fix or dismiss to pass'));
+  assert.ok(report.includes('↳ evidence:'));
+  assert.ok(report.includes('↳ fix:'));
+  assert.ok(report.includes('## OTHER FINDINGS'));
+  // Everything else collapses, in the brief's order.
+  const sections = ['Fix suggestions', 'Dependency impact', 'Review detail & stats', 'How to act on this review'];
+  const sectionIndexes = sections.map((section) => {
+    const match = new RegExp(`<details>\\s*<summary>[^<]*${section}`).exec(report);
+    assert.ok(match, `${section} must be a <details> section`);
+    return match.index;
+  });
+  for (let i = 1; i < sectionIndexes.length; i += 1) {
+    assert.ok(sectionIndexes[i] > sectionIndexes[i - 1], `${sections[i]} must come after ${sections[i - 1]}`);
+  }
+  // The duplication is gone: no severity-section restatement, no raw-agent appendix.
+  assert.ok(!report.includes('Full Agent Reports'), 'raw-agent appendix must be removed');
+  for (const heading of [
+    '## 🚫 Critical',
+    '## 🔴 HIGH PRIORITY BLOCKERS',
+    '## ⚠️ IMPORTANT ISSUES',
+    '## 💡 MEDIUM PRIORITY',
+    '## 💭 SUGGESTIONS',
+    '## 🤔 UNRESOLVED DEBATES',
+  ]) {
+    assert.ok(!report.includes(heading), `legacy severity/debate section "${heading}" must not restate ledger findings`);
+  }
+  // Machine contracts survive byte-identical.
+  assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_'));
+  // The skeleton may document the hidden markers in prose, but must never itself contain a
+  // marker-shaped line — the CI posting step prepends the one real copy of each, and a
+  // duplicate breaks addressState's "exactly one ledger/status marker" parsing.
+  assert.ok(report.includes('agent-review-ledger'), 'the skeleton should document the ledger marker by name');
+  assert.ok(report.includes('agent-review-status'), 'the skeleton should document the status marker by name');
+  for (const name of ['agent-review-head', 'agent-review-rollout', 'agent-review-ledger', 'agent-review-status']) {
+    assert.ok(
+      !new RegExp(`^<!-- ${name}: .* -->$`, 'm').test(report),
+      `the skeleton must not itself contain a live "${name}" marker line`,
+    );
+  }
+  assert.ok(!/^<!-- agent-review -->$/m.test(report), 'the skeleton must not itself contain the live bare review marker line');
+});
+
+test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-format definition lines', () => {
+  // finalizeAddress rewrites ANY line matching this regex to the current ledger state for its
+  // `#N` — a stray match (e.g. a bolded `#N` reference in prose) gets silently clobbered into a
+  // bogus ledger line. Prove report.md carries the regex's intended matches only.
+  const { LEDGER_LINE_REGEX } = require('./addressState.cjs');
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  // Only "#[N]" (the ledger reference placeholder) needs a real digit to be regex-eligible —
+  // every other bracketed placeholder is irrelevant to this regex.
+  const realized = report.replace(/#\[N\]/g, '#7');
+  const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
+  const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
+  assert.deepEqual(matchedLines, [
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
+    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
+    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
+  ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
+});
+
+test('the review skill fills the caveman report and enforces the soft byte target', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('soft target 25,000 bytes'), 'Stage 6 must state the new soft size target');
+  assert.ok(skill.includes('state each finding exactly once'), 'fill rules must forbid restating findings across sections');
+  assert.ok(skill.includes('BLOCKERS — fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
+  // Stale instructions from the pre-caveman layout must not survive: they contradict the
+  // verdict+blockers skeleton and would mislead the model filling it.
+  assert.ok(!skill.includes('AUTOMATED FIXES AVAILABLE'), 'the old AUTOMATED FIXES AVAILABLE section name must not survive');
+  assert.ok(!/debate transcript/.test(skill), 'there is no separate debate transcript section — only the Debate summary block');
+  assert.ok(!/raw-agent-report appendix/.test(skill), 'the caveman layout has no raw-agent-report appendix to trim');
+});
+
+test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(archetype.includes('severity ≥ 7: evidence ≤ 8 lines (600 chars max'), 'blocker evidence tier missing');
+  assert.ok(archetype.includes('severity < 7: evidence ≤ 2 lines'), 'minor evidence tier missing');
+  assert.ok(archetype.includes('report only the checklist items that FAIL'), 'checklists must be violations-only');
+  assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
+});

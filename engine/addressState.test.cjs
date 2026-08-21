@@ -34,6 +34,8 @@ function report(ledger = [finding(), finding({ n: 2, id: 'f2', signature: 'sig-2
     `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`,
     `<!-- agent-review-status: ${JSON.stringify(status)} -->`,
     '',
+    '🤖 agent-review · ❌ 2 blockers open · risk HIGH',
+    '',
     '- [ ] **#1** · 9/10 · `app/controller.js:12` — authorization is missing _(security)_',
     '- [ ] **#2** · 9/10 · `app/model.js:12` — authorization is missing _(security)_',
     '',
@@ -113,6 +115,65 @@ test('finalizeAddress survives $-substitution patterns in maintainer and report 
   assert.equal(reparsed.ledger[0].message, "regex uses $& and $` and $' unsafely");
   assert.equal(reparsed.ledger[0].reason, '$& is quoted, see $1');
   assert.equal(reparsed.ledger[0].status, 'dismissed');
+  // The verdict line must also be rewritten from $-hostile ledger/dismissal text
+  // without $-substitution corrupting it — it must land on the plain, correct text,
+  // not have $&/$1 from the dismissed finding's message spliced into it.
+  const verdictLine = finalized.report.split('\n').find((line) => line.startsWith('🤖 agent-review · '));
+  assert.equal(verdictLine, '🤖 agent-review · ✅ no blockers · risk HIGH');
+});
+
+test('finalizeAddress rewrites the verdict line to reflect the ledger after dismissing every blocker', () => {
+  const req = request('@claude dismiss 1 [intentional]: known limitation; dismiss 2 [intentional]: known limitation');
+  const finalized = finalizeAddress({
+    request: req,
+    result: { version: 1, expectedHead: 'a'.repeat(40), fixes: [], tests: [] },
+    report: report(),
+    fixSha: '',
+  });
+  assert.equal(finalized.status.openBlockers, 0);
+  assert.equal(finalized.status.pass, true);
+  assert.match(finalized.report, /^🤖 agent-review · ✅ no blockers · risk HIGH$/m);
+  assert.ok(!/❌ \d+ blockers open/.test(finalized.report));
+});
+
+test('finalizeAddress drops a fixed blocker\'s ↳ evidence/fix sub-lines from the report', () => {
+  const withSubLines = [
+    '<!-- agent-review -->',
+    `<!-- agent-review-head: ${'a'.repeat(40)} -->`,
+    `<!-- agent-review-ledger: ${JSON.stringify([finding(), finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' })])} -->`,
+    `<!-- agent-review-status: ${JSON.stringify({ v: 1, head: 'a'.repeat(40), risk: 'HIGH', openBlockers: 2, pass: false, irreversible: false, irreversibleReasons: [] })} -->`,
+    '',
+    '🤖 agent-review · ❌ 2 blockers open · risk HIGH',
+    '',
+    '- [ ] **#1** · 9/10 · `app/controller.js:12` — authorization is missing _(security)_',
+    '      ↳ evidence: request handler never checks the session role before mutating state',
+    '      ↳ fix: add a role check before the mutation',
+    '- [ ] **#2** · 9/10 · `app/model.js:12` — authorization is missing _(security)_',
+    '      ↳ evidence: same gap in the model layer',
+    '      ↳ fix: reuse the shared authorization helper',
+    '',
+  ].join('\n');
+  const req = prepareAddressRequest({
+    command: '@claude fix 1',
+    actor: 'dr-bizz', pr: 42, commentId: 100, reportCommentId: 200,
+    expectedHead: 'a'.repeat(40), report: withSubLines,
+  });
+  const finalized = finalizeAddress({
+    request: req,
+    result: {
+      version: 1,
+      expectedHead: 'a'.repeat(40),
+      fixes: [{ n: 1, status: 'applied', summary: 'added the check', files: ['app/controller.js'] }],
+      tests: [],
+    },
+    report: withSubLines,
+    fixSha: 'c'.repeat(40),
+  });
+  assert.match(finalized.report, /✅ fixed in ccccccc/);
+  assert.ok(!finalized.report.includes('↳ evidence: request handler never checks'), 'fixed finding must lose its ↳ sub-lines');
+  assert.ok(!finalized.report.includes('↳ fix: add a role check'), 'fixed finding must lose its ↳ sub-lines');
+  // #2 is untouched and stays open — its evidence/fix sub-lines must survive.
+  assert.match(finalized.report, /- \[ \] \*\*`#2`\*\*.*\n\s+↳ evidence: same gap in the model layer\n\s+↳ fix: reuse the shared authorization helper/);
 });
 
 test('validateAddressResult requires authorized fixes and accounts for every patch path', () => {

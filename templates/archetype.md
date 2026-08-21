@@ -39,28 +39,38 @@ OUTPUT FORMAT:
 
 ## {{TITLE}} — Findings
 
+Keep every finding tight — the report states it once, so write it once, well:
+- message: ≤ 2 sentences naming the defect and its consequence
+- severity < 7: evidence ≤ 2 lines
+- severity ≥ 7: evidence ≤ 8 lines (600 chars max), including at most one hunk
+  excerpt — blockers are engine-rejected without a line anchor, High confidence,
+  and concrete evidence, so spend the lines on the execution/data path, never on
+  restating the diff
+- fix: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
+- Rule Checklist Results: report only the checklist items that FAIL, one line
+  each; if all pass, write "all pass"
+
 ### Critical Issues (BLOCKING) - Severity: 10/10
 
 [Issues that MUST be fixed - be specific with file:line]
 
-- **File:Line** - Issue description
+- **File:Line** - Issue description (≤ 2 sentences: the defect and its consequence — what it
+  enables or breaks and what could happen — folded into this line, no separate Risk/Impact lines)
   - Severity: 10/10
   - Confidence: High
   - Evidence: Exact changed hunk and the verified execution/data path that makes the failure reachable
-  - Risk: What this enables or breaks
-  - Impact: What could happen
   - Fix: Specific code change needed
 
 ### Concerns (IMPORTANT) - Severity: 6-9/10
 
 [Issues that should be fixed]
 
-- **File:Line** - Concern
+- **File:Line** - Concern (≤ 2 sentences: the defect and its consequence — folded into this line,
+  no separate Risk line)
   - Severity: [6-9]/10
   - Confidence: High/Medium/Low
   - Evidence: Exact changed hunk plus the codebase search, call path, contract, or test that confirms it
-  - Risk: Potential problem
-  - Recommendation: How to fix
+  - Fix: How to fix
 
 ### Suggestions - Severity: 3-5/10
 
@@ -76,12 +86,13 @@ OUTPUT FORMAT:
 i.e. `- [ ]` items or numbered/bulleted groups the rules say must be reported per item. OMIT the
 heading entirely otherwise.]
 
-Report one line per checklist group, using the group's own heading:
+Report only the checklist items that FAIL, one line each, using the item's own heading. If every
+item passes, write "all pass" instead of listing each group.
 
-- **[Checklist group name]**: ✅ / ⚠️ / ❌ / N/A — [what passed, or which item failed and where]
+- **[Checklist group name]**: ❌ — [which item failed and where]
 
-Items marked ⚠️ or ❌ must also appear as a finding above, at the severity their impact warrants —
-this section is a compliance summary, not a substitute for reporting the issue.
+Every line here must also appear as a finding above, at the severity its impact warrants — this
+section is a compliance summary, not a substitute for reporting the issue.
 
 ### Questions for Other Agents
 
@@ -109,6 +120,10 @@ Example:
 - Decision: Check whether this file also uses it before flagging
 
 AUTOMATED FIX GENERATION:
+
+In CI mode do NOT write fix scripts or heredocs — CI never executes or offers them; give the
+≤10-line diff in your findings instead. Local mode keeps the script blocks below.
+
 When you find fixable issues, provide automated fixes:
 
 Format:
