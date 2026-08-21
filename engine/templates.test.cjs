@@ -443,9 +443,12 @@ test('the review skill routes agents by plan tier and degrades safely', () => {
   assert.ok(skill.includes('plan.mode.resolved') || skill.includes('mode.resolved'), 'auto resolution comes from the plan');
 });
 
-test('a score-0 skip posts a deterministic pass status', () => {
+test('a score-0 skip computes status from carried-forward state and surfaces open blockers', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const skip = skill.slice(skill.indexOf('skip note'), skill.indexOf('skip note') + 2500);
+  const start = skill.indexOf('### Auto Mode Resolution');
+  const skip = skill.slice(start, skill.indexOf('If auto resolved to', start));
   assert.ok(/agent-review-status/.test(skip), 'the skip path must stage a status marker');
-  assert.ok(/"pass":\s*true|pass:true|"pass":true/.test(skip), 'skip status must be pass:true with zero blockers');
+  assert.ok(/agent-review status --ledger/.test(skip), 'skip status must be COMPUTED via the engine, never hand-authored');
+  assert.ok(!/"pass":\s*true/.test(skip), 'skip status must not hardcode a pass:true literal');
+  assert.ok(/previously-found blocker\(s\) remain open/.test(skip), 'carried-forward open blockers must be surfaced in the skip note');
 });

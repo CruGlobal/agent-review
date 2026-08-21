@@ -134,7 +134,7 @@ expose them yet. Launch exactly one Task:
 - **subagent_type**: `"agent-review:reviewer-haiku"`
 - **prompt**: `"Reply with exactly: OK"`
 
-If the Task tool errors (unknown subagent type) or otherwise fails to come back cleanly, degrade
+If the Task tool errors (unknown subagent type) or the reply is not exactly `OK`, degrade
 rather than fail the review — set `ROUTING="degraded"` below; every later launch table then falls
 back to `subagent_type: "general-purpose"` for every agent, and Stage 6 notes the degradation in
 `Review detail & stats`. On success, leave `ROUTING` unset.
@@ -503,10 +503,6 @@ if [ "$MODE" = "auto" ]; then
   if [ "$RESOLVED" = "skip" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
     if [ -n "$CI_MODE" ]; then
-      # Post a minimal skip note. The CI posting step prepends the comment markers
-      # (including the reviewed-head marker, so the next run still diffs incrementally).
-      echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)." \
-        > /tmp/agent_review_report.md
       # A zero-risk incremental delta must not erase earlier open findings or
       # irreversible state when the canonical comment is updated.
       echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
@@ -528,12 +524,22 @@ if [ "$MODE" = "auto" ]; then
       fi
       agent-review ledger --findings /tmp/review_filtered.json \
         --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
-      # The review passed — nothing to review: score 0 and zero static findings guarantee zero
-      # open blockers, so write the status deterministically rather than invoking `agent-review
-      # status`. The posting step's `[ -s ... ]` guard still picks this file up and embeds it as
-      # the <!-- agent-review-status: ... --> marker automatically.
-      echo '{"v":1,"head":"'"$HEAD_REF"'","risk":"NONE","openBlockers":0,"pass":true,"irreversible":false,"irreversibleReasons":[],"ci":null}' \
-        > /tmp/agent_review_status.json
+      # Status is always COMPUTED, never hand-authored — a zero-risk delta carries forward
+      # whatever the ledger already holds, so an incremental skip with prior open blockers must
+      # still report pass:false. Only a truly clean carried-forward ledger yields pass:true.
+      agent-review status --ledger /tmp/agent_review_ledger.json \
+        --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
+        --evidence /tmp/review_evidence.json \
+        ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+      # Post a minimal skip note. The CI posting step prepends the comment markers
+      # (including the reviewed-head marker, so the next run still diffs incrementally). A
+      # carried-forward open blocker from a prior run still blocks, so surface it here rather
+      # than letting a zero-risk delta read as silently clean.
+      OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
+      { echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)."
+        [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null \
+          && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
+      } > /tmp/agent_review_report.md
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
