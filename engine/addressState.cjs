@@ -19,6 +19,13 @@ const SENSITIVE_PATHS = [
   'docs/CODEOWNERS',
 ];
 
+// The ledger-line rewrite regex: any report line matching this gets clobbered
+// by finalizeAddress with the current ledger state for its `#N`. Exported so
+// templates.test.cjs can assert no OTHER report.md line accidentally matches
+// it (see the "perspectives" bullet regression: a bolded `#N` reference
+// outside the four ledger-format definition lines was silently destroyed).
+const LEDGER_LINE_REGEX = /^- (?:\[[ x]\] )?\*\*`?#(?<n>\d+)`?\*\*.*$(?<tail>(?:\n[ \t]+↳ .*)*)/gm;
+
 function sha256(text) {
   return createHash('sha256').update(text).digest('hex');
 }
@@ -405,9 +412,29 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       /^<!-- agent-review-status: .* -->$/m,
       () => `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`,
     )
-    .replace(/^- (?:\[[ x]\] )?\*\*`?#(\d+)`?\*\*.*$/gm, (line, n) => {
-      const entry = byNumber.get(Number(n));
-      return entry ? ledgerLine(entry) : line;
+    // A ledger entry's evidence/fix detail lives in indented `↳ ` sub-lines
+    // directly under its bullet. Once the entry leaves `open` status those
+    // sub-lines are dead weight (ledgerLine's fixed/dismissed forms already
+    // fold the outcome into the bullet itself), so consume and drop them here.
+    .replace(
+      LEDGER_LINE_REGEX,
+      (block, ...rest) => {
+        const { n, tail } = rest[rest.length - 1];
+        const entry = byNumber.get(Number(n));
+        if (!entry) return block;
+        if (entry.status === 'open') return ledgerLine(entry) + tail;
+        return ledgerLine(entry);
+      },
+    )
+    // The verdict line is the report's headline and must track the ledger
+    // after every address action — a stale "blockers open" after the last
+    // dismissal/fix would mislead anyone skimming the PR.
+    .replace(/^🤖 agent-review · .*$/m, () => {
+      const blockersText = nextStatus.pass
+        ? '✅ no blockers'
+        : `❌ ${nextStatus.openBlockers} blockers open`;
+      const irreversibleText = nextStatus.irreversible ? ' · ⚠️ irreversible' : '';
+      return `🤖 agent-review · ${blockersText} · risk ${nextStatus.risk}${irreversibleText}`;
     });
   if (Buffer.byteLength(updatedReport) > 65500) throw new Error('updated report exceeds GitHub comment limit');
 
@@ -457,6 +484,7 @@ module.exports = {
   MAX_PATCH_BYTES,
   MAX_RESULT_BYTES,
   MAX_CHANGED_FILES,
+  LEDGER_LINE_REGEX,
   sha256,
   safeRepoPath,
   extractReportState,

@@ -18079,6 +18079,7 @@ var require_addressState = __commonJS({
       ".github/CODEOWNERS",
       "docs/CODEOWNERS"
     ];
+    var LEDGER_LINE_REGEX = /^- (?:\[[ x]\] )?\*\*`?#(?<n>\d+)`?\*\*.*$(?<tail>(?:\n[ \t]+↳ .*)*)/gm;
     function sha256(text) {
       return createHash("sha256").update(text).digest("hex");
     }
@@ -18426,9 +18427,19 @@ var require_addressState = __commonJS({
       ).replace(
         /^<!-- agent-review-status: .* -->$/m,
         () => `<!-- agent-review-status: ${JSON.stringify(nextStatus)} -->`
-      ).replace(/^- (?:\[[ x]\] )?\*\*`?#(\d+)`?\*\*.*$/gm, (line, n) => {
-        const entry = byNumber.get(Number(n));
-        return entry ? ledgerLine(entry) : line;
+      ).replace(
+        LEDGER_LINE_REGEX,
+        (block, ...rest) => {
+          const { n, tail } = rest[rest.length - 1];
+          const entry = byNumber.get(Number(n));
+          if (!entry) return block;
+          if (entry.status === "open") return ledgerLine(entry) + tail;
+          return ledgerLine(entry);
+        }
+      ).replace(/^🤖 agent-review · .*$/m, () => {
+        const blockersText = nextStatus.pass ? "\u2705 no blockers" : `\u274C ${nextStatus.openBlockers} blockers open`;
+        const irreversibleText = nextStatus.irreversible ? " \xB7 \u26A0\uFE0F irreversible" : "";
+        return `\u{1F916} agent-review \xB7 ${blockersText} \xB7 risk ${nextStatus.risk}${irreversibleText}`;
       });
       if (Buffer.byteLength(updatedReport) > 65500) throw new Error("updated report exceeds GitHub comment limit");
       const lines = [];
@@ -18470,6 +18481,7 @@ var require_addressState = __commonJS({
       MAX_PATCH_BYTES,
       MAX_RESULT_BYTES,
       MAX_CHANGED_FILES,
+      LEDGER_LINE_REGEX,
       sha256,
       safeRepoPath,
       extractReportState,
