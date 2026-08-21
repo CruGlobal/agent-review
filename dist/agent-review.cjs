@@ -16729,7 +16729,12 @@ var require_loadConfig = __commonJS({
       return errors;
     }
     var ESCALATING_LANE_IDS = /* @__PURE__ */ new Set(["security", "data-integrity", "architecture"]);
-    var ESCALATING_SPECIALS = /* @__PURE__ */ new Set(["migration_change", "config_security_change"]);
+    var ESCALATING_SPECIALS = /* @__PURE__ */ new Set([
+      "migration_change",
+      "config_security_change",
+      "supabase_migration_change",
+      "next_config_security_change"
+    ]);
     function referencesEscalatingSpecial(agent) {
       const specials = agent.triggers && Array.isArray(agent.triggers.specials) ? agent.triggers.specials : [];
       return specials.some((name) => ESCALATING_SPECIALS.has(name));

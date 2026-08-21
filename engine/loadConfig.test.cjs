@@ -172,6 +172,21 @@ test('escalates falls back to special-pattern triggers when no named lane exists
   assert.equal(byId.style, false);
 });
 
+test('escalates fallback also recognizes the framework-specific migration/config-security specials', () => {
+  // supabase_migration_change and next_config_security_change are part of the same
+  // migration/config-security family as migration_change/config_security_change in the
+  // schema's special-pattern enum — the fallback must treat them the same way.
+  const cfg = loadFixtureWith({ agents: [
+    { id: 'db', triggers: { specials: ['supabase_migration_change'] } },
+    { id: 'web-config', triggers: { specials: ['next_config_security_change'] } },
+    { id: 'style', triggers: { always: true } },
+  ]});
+  const byId = Object.fromEntries(cfg.agents.map((a) => [a.id, a.escalates]));
+  assert.equal(byId.db, true);
+  assert.equal(byId['web-config'], true);
+  assert.equal(byId.style, false);
+});
+
 test('schema accepts an explicit escalates boolean', () => {
   // config validate must not reject a consumer writing escalates: true
   const cfg = loadFixtureWith({ agents: [{ id: 'security', escalates: true, triggers: { always: true } }] });

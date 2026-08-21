@@ -116,8 +116,14 @@ function validateConfigReferences(configObj, configPath) {
 const ESCALATING_LANE_IDS = new Set(['security', 'data-integrity', 'architecture']);
 // Special-pattern names whose triggers imply an agent deserves escalation
 // (matched against agent.triggers.specials) when none of the named lanes above
-// exist in the config.
-const ESCALATING_SPECIALS = new Set(['migration_change', 'config_security_change']);
+// exist in the config. Superset of the schema's migration/config-security
+// family: the generic names plus their framework-specific siblings.
+const ESCALATING_SPECIALS = new Set([
+  'migration_change',
+  'config_security_change',
+  'supabase_migration_change',
+  'next_config_security_change',
+]);
 
 function referencesEscalatingSpecial(agent) {
   const specials = agent.triggers && Array.isArray(agent.triggers.specials)
