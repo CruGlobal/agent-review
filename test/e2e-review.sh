@@ -121,6 +121,11 @@ REPORT_HEAD=$(tr -d '\r' < "$COMMENT" \
 REPORT_ROLLOUT=$(tr -d '\r' < "$COMMENT" \
   | sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' | head -1)
 [ "$REPORT_ROLLOUT" = "shadow" ] || FAIL "rollout marker is '${REPORT_ROLLOUT:-missing}', expected shadow"
+# Layout gate — catches a regression back toward the old always-expanded report.
+DETAILS_COUNT=$(grep -c '^<details>' "$COMMENT" || true)
+[ "$DETAILS_COUNT" -ge 4 ] || FAIL "report has $DETAILS_COUNT <details> sections; expected at least 4 (Fix suggestions, Dependency impact, Review detail & stats, How to act on this review)"
+grep -q '^🤖 agent-review · ' "$COMMENT" || FAIL "report is missing the verdict line"
+! grep -q 'Full Agent Reports' "$COMMENT" || FAIL "report still emits the old always-expanded Full Agent Reports section"
 node - "$COMMENT" /tmp/agent_review_evidence.json "$ROOT" <<'NODE' || FAIL "report state validation"
 const fs = require('fs');
 const path = require('path');

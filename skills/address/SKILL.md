@@ -5,11 +5,12 @@ description: Work the findings ledger of an agent-review report — fix findings
 
 # Address agent-review findings
 
-Turns a posted agent-review report into a conversation. The report's PR comment carries a
-FINDINGS LEDGER (numbered findings; severity ≥ 7 items have checkboxes) plus a hidden machine
-state line (`<!-- agent-review-ledger: [...] -->`). This skill fixes findings, dismisses them
-with a required one-line reason, updates the ledger comment, and records outcomes into the
-learning layer so repeat-dismissed finding classes stop being raised.
+Turns a posted agent-review report into a conversation. The report's PR comment carries the
+report's blocker checklist and findings list (numbered findings; severity ≥ 7 items have
+checkboxes) — a hidden ledger marker carries the machine state behind them
+(`<!-- agent-review-ledger: [...] -->`). This skill fixes findings, dismisses them with a
+required one-line reason, updates the ledger comment, and records outcomes into the learning
+layer so repeat-dismissed finding classes stop being raised.
 
 **Usage**:
 

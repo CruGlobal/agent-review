@@ -248,7 +248,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `bin/agent-review` | Thin shim that requires the bundled `dist/agent-review.cjs` |
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
 | `schema/config.schema.json` | JSON Schema for `.claude/review/config.yml` |
-| `templates/` | Files `/agent-review:init` instantiates into a consuming repo: `config.yml` skeleton, `rules/*.md` starters, `archetype.md` + `report.md` prompt/report skeletons, `settings-snippet.json`, `workflows/agent-review.yml` |
+| `templates/` | Files `/agent-review:init` instantiates into a consuming repo (`config.yml` skeleton, `rules/*.md` starters, `settings-snippet.json`, `workflows/agent-review*.yml`), plus `archetype.md` and `report.md` — the agent-prompt and report skeletons ship inside the plugin and are read directly by `skills/review/SKILL.md`, never copied out |
 | `templates/evals/` | Seeded-bug suite format, example patch, and result-scoring workflow |
 | `templates/static/` | ast-grep configuration/rule starter for deterministic changed-line findings |
 | `fixtures/` | Fixture config used by engine tests |

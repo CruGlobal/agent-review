@@ -148,11 +148,11 @@ Active when the invocation includes the `ci` argument or `$AGENT_REVIEW_CI` is s
 | Stage 5B (metrics dashboard) | **Skipped entirely** — nothing written under `.claude/review/metrics/` |
 | Stage 6 (report)             | Runs; fixes are described but presented as suggestions only           |
 | Stage 7 (metrics commit)     | **Skipped entirely** — no commits, no pushes, no interactive menu     |
-| Fix scripts                  | **Never executed.** Not even offered. They appear in the report only  |
+| Fix scripts                  | **Never written or executed in CI.** Suggestions appear only as ≤10-line diffs in the report's 🔧 Fix suggestions section |
 | Ending                       | Post the report to the PR (below) instead of the interactive menu      |
 
-When debate is skipped, say so in the report ("Debate rounds: 0 (skipped in CI)") and omit the
-debate transcript and debate-statistics blocks from the report entirely.
+When debate is skipped, omit the **Debate summary** block from `Review detail & stats` entirely,
+per the skeleton's own instruction — that block is the only place debate output ever appears.
 
 Two CI-sandbox behaviors to expect (both harmless if handled):
 
@@ -1208,14 +1208,17 @@ findings (suppressed by approved learnings). Tell the user they can mark outcome
 `agent-review feedback <that file>` and `agent-review learn` to mine new proposed learnings, and
 `agent-review learnings` / `agent-review approve <id>` to ratify them.
 
-Render kept deterministic findings in the same severity sections and ledger as model findings,
-with `Flagged by: deterministic ast-grep rule <ruleId>` and the rule's evidence. Do not include
-them in agent agreement/debate counts; they are independently reproducible checks.
+Deterministic findings merge into the ledger alongside model findings (via `agent-review ledger`)
+and render as normal BLOCKERS/OTHER FINDINGS lines — there is no separate section for them. Carry
+the rule id in the ledger entry's `agent` field and the rule's evidence in `evidence` so the
+rendered line still shows its origin. Do not include them in agent agreement/debate counts; they
+are independently reproducible checks.
 
 ### Build the findings ledger
 
-The report's FINDINGS LEDGER section is the interactive surface devs work: each finding gets a
-stable number, severity ≥ 7 items get a checkbox, and `/agent-review:address` (locally or via
+The report's blocker checklist and findings list are the interactive surface devs work — a
+hidden ledger marker carries the machine state behind them: each finding gets a stable number,
+severity ≥ 7 items get a checkbox, and `/agent-review:address` (locally or via
 `@claude fix/dismiss` PR comments) checks items off as **fixed** or **dismissed**. Build its
 machine state now from the kept findings in `/tmp/review_filtered.json` (they already carry the
 engine's `id` and `signature` from the emit step — keep both; the dismiss path writes them into
@@ -1342,7 +1345,8 @@ Honor its conditionals:
   the report cannot approve or block the PR. Fill deterministic evidence from
   `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
-- Omit the debate-statistics block and the debate transcript entirely when debate rounds did not run.
+- Omit the **Debate summary** block from `Review detail & stats` entirely when debate rounds did
+  not run. That block is the only place debate output ever appears in the report.
 - Omit the learning-layer line when the learning layer is disabled.
 - Fill the DEPENDENCY IMPACT section from `/tmp/review_impact.json` (`blastRadius`, `topImpacted`,
   `truncated`) — that is the only impact artifact this skill produces. State "index disabled" there
@@ -1359,13 +1363,14 @@ order still apply.
 
 Save the filled report to `/tmp/agent_review_report.md`.
 
-In CI mode, the "AUTOMATED FIXES AVAILABLE" section stays — but frame it as suggestions a human can
-apply locally after review, and never execute anything.
+In CI mode, the `🔧 Fix suggestions` details section stays — but frame it as suggestions a human
+can apply locally after review, and never execute anything.
 
 GitHub issue comments are size-limited. In CI, keep `/tmp/agent_review_report.md` under 60,000
-bytes (`wc -c`): prioritize the ledger, blocker evidence, risk, and recommended actions. Omit the
-full raw-agent-report appendix first, then collapse advisory suggestions if more space is needed.
-Never truncate the hidden ledger or status markers.
+bytes (`wc -c`): prioritize the verdict line, the ledger, and blocker evidence. If still over
+budget, trim in this order: drop the `📊 Review detail & stats` details section first, then the
+`🔧 Fix suggestions` diffs, then non-blocker findings' `↳ evidence` lines. Never touch the hidden
+markers or ledger lines.
 
 ### Version check — flag stale installs
 

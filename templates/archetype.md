@@ -54,24 +54,23 @@ Keep every finding tight — the report states it once, so write it once, well:
 
 [Issues that MUST be fixed - be specific with file:line]
 
-- **File:Line** - Issue description
+- **File:Line** - Issue description (≤ 2 sentences: the defect and its consequence — what it
+  enables or breaks and what could happen — folded into this line, no separate Risk/Impact lines)
   - Severity: 10/10
   - Confidence: High
   - Evidence: Exact changed hunk and the verified execution/data path that makes the failure reachable
-  - Risk: What this enables or breaks
-  - Impact: What could happen
   - Fix: Specific code change needed
 
 ### Concerns (IMPORTANT) - Severity: 6-9/10
 
 [Issues that should be fixed]
 
-- **File:Line** - Concern
+- **File:Line** - Concern (≤ 2 sentences: the defect and its consequence — folded into this line,
+  no separate Risk line)
   - Severity: [6-9]/10
   - Confidence: High/Medium/Low
   - Evidence: Exact changed hunk plus the codebase search, call path, contract, or test that confirms it
-  - Risk: Potential problem
-  - Recommendation: How to fix
+  - Fix: How to fix
 
 ### Suggestions - Severity: 3-5/10
 

@@ -384,11 +384,37 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
   assert.ok(!/^<!-- agent-review -->$/m.test(report), 'the skeleton must not itself contain the live bare review marker line');
 });
 
+test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-format definition lines', () => {
+  // finalizeAddress rewrites ANY line matching this regex to the current ledger state for its
+  // `#N` — a stray match (e.g. a bolded `#N` reference in prose) gets silently clobbered into a
+  // bogus ledger line. Prove report.md carries the regex's intended matches only.
+  const { LEDGER_LINE_REGEX } = require('./addressState.cjs');
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  // Only "#[N]" (the ledger reference placeholder) needs a real digit to be regex-eligible —
+  // every other bracketed placeholder is irrelevant to this regex.
+  const realized = report.replace(/#\[N\]/g, '#7');
+  const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
+  const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
+  assert.deepEqual(matchedLines, [
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
+    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
+    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
+  ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
+});
+
 test('the review skill fills the caveman report and enforces the soft byte target', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('soft target 25,000 bytes'), 'Stage 6 must state the new soft size target');
   assert.ok(skill.includes('state each finding exactly once'), 'fill rules must forbid restating findings across sections');
   assert.ok(skill.includes('BLOCKERS — fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
+  // Stale instructions from the pre-caveman layout must not survive: they contradict the
+  // verdict+blockers skeleton and would mislead the model filling it.
+  assert.ok(!skill.includes('AUTOMATED FIXES AVAILABLE'), 'the old AUTOMATED FIXES AVAILABLE section name must not survive');
+  assert.ok(!/debate transcript/.test(skill), 'there is no separate debate transcript section — only the Debate summary block');
+  assert.ok(!/raw-agent-report appendix/.test(skill), 'the caveman layout has no raw-agent-report appendix to trim');
 });
 
 test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () => {

@@ -16,7 +16,8 @@ this report cannot approve or block the PR) · [N] agents run ([list of launched
 
 ## BLOCKERS — fix or dismiss to pass
 
-[FOR EACH severity ≥7 ledger entry, ordered by severity descending, numbered 1..N:]
+[FOR EACH severity ≥7 ledger entry, ordered by severity descending — use the ledger's own `n`,
+NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve the wrong finding:]
 [IF status open:]
 
 - [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
@@ -38,7 +39,9 @@ this report cannot approve or block the PR) · [N] agents run ([list of launched
 
 ## OTHER FINDINGS ([N])
 
-[FOR EACH severity <7 ledger entry, ordered by severity descending, ONE line, no sub-bullets:]
+[FOR EACH severity <7 ledger entry, ordered by severity descending, ONE line, no sub-bullets —
+use the ledger's own `n`, NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve
+the wrong finding:]
 [IF status open:]
 
 - **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
@@ -98,7 +101,7 @@ breaking changes as reported by the agents]
 
 **Per-agent perspectives on blockers** [FOR EACH blocker, the agents that flagged it]:
 
-- **`#[N]`**: [Agent 1] (Severity: [X]/10): [their specific concern] · [Agent 2] (Severity:
+- `#[N]` — [Agent 1] (Severity: [X]/10): [their specific concern] · [Agent 2] (Severity:
   [Y]/10): [their specific concern]
 
 **Debate summary** (omit this whole block if debate rounds were not run):
