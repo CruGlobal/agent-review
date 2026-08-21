@@ -102,6 +102,7 @@ agents:
     enabled: true
     model: smart # smart | opus | sonnet | haiku
     always: false
+    escalates: true # deserves Opus on HIGH/CRITICAL PRs
     # Empty triggers mean this agent never runs — add the repo's auth, API,
     # migration, and CI paths plus content markers (secret env names, raw-HTML
     # sinks, redirect helpers) so security review fires when it matters.
@@ -115,6 +116,7 @@ agents:
     expertise: System design, patterns, technical debt, maintainability, scalability.
     enabled: true
     always: true
+    escalates: true # deserves Opus on HIGH/CRITICAL PRs
     rules: ['rules/architecture.md']
 
   - id: data-integrity
@@ -122,6 +124,7 @@ agents:
     expertise: Data flow, persistence, caching, input validation, type safety, data consistency.
     enabled: true
     always: false
+    escalates: true # deserves Opus on HIGH/CRITICAL PRs
     # Add the repo's data-layer paths and content markers (query/mutation
     # helpers, cache invalidation calls, schema parse calls).
     triggers:

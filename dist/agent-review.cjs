@@ -16728,6 +16728,28 @@ var require_loadConfig = __commonJS({
       }
       return errors;
     }
+    var ESCALATING_LANE_IDS = /* @__PURE__ */ new Set(["security", "data-integrity", "architecture"]);
+    var ESCALATING_SPECIALS = /* @__PURE__ */ new Set(["migration_change", "config_security_change"]);
+    function referencesEscalatingSpecial(agent) {
+      const specials = agent.triggers && Array.isArray(agent.triggers.specials) ? agent.triggers.specials : [];
+      return specials.some((name) => ESCALATING_SPECIALS.has(name));
+    }
+    function normalizeAgents(cfg) {
+      const agents = cfg.agents || [];
+      const hasNamedLane = agents.some((agent) => ESCALATING_LANE_IDS.has(agent.id));
+      const needsFallback = !hasNamedLane && agents.some((agent) => typeof agent.escalates !== "boolean");
+      if (needsFallback) {
+        console.warn(
+          "agent-review: no security/data-integrity/architecture agent id found; defaulting escalates from migration_change/config_security_change trigger references."
+        );
+      }
+      const normalizedAgents = agents.map((agent) => {
+        if (typeof agent.escalates === "boolean") return agent;
+        const escalates = hasNamedLane ? ESCALATING_LANE_IDS.has(agent.id) : referencesEscalatingSpecial(agent);
+        return { ...agent, escalates };
+      });
+      return { ...cfg, agents: normalizedAgents };
+    }
     function loadConfig({ configPath, schemaPath }) {
       const configObj = parseConfig(readFileSync(configPath, "utf8"));
       const schemaObj = JSON.parse(readFileSync(schemaPath, "utf8"));
@@ -16745,12 +16767,13 @@ var require_loadConfig = __commonJS({
 - ${referenceErrors.join("\n- ")}`
         );
       }
-      return upgradeConfig(configObj);
+      return normalizeAgents(upgradeConfig(configObj));
     }
     module2.exports = {
       parseConfig,
       validateConfig,
       validateConfigReferences,
+      normalizeAgents,
       loadConfig
     };
   }

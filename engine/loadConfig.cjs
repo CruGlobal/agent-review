@@ -111,6 +111,49 @@ function validateConfigReferences(configObj, configPath) {
   return errors;
 }
 
+// Lanes that default to escalates:true by id. Kept for backward-compat when a
+// consumer renames/removes these ids: see referencesEscalatingSpecial below.
+const ESCALATING_LANE_IDS = new Set(['security', 'data-integrity', 'architecture']);
+// Special-pattern names whose triggers imply an agent deserves escalation
+// (matched against agent.triggers.specials) when none of the named lanes above
+// exist in the config.
+const ESCALATING_SPECIALS = new Set(['migration_change', 'config_security_change']);
+
+function referencesEscalatingSpecial(agent) {
+  const specials = agent.triggers && Array.isArray(agent.triggers.specials)
+    ? agent.triggers.specials
+    : [];
+  return specials.some((name) => ESCALATING_SPECIALS.has(name));
+}
+
+// Always-run normalization: every agent gets an explicit boolean `escalates`.
+// Explicit config values are kept as-is. Otherwise: the three named lanes
+// (security/data-integrity/architecture) default to true, everything else to
+// false — unless NONE of those named lanes exist in the config, in which case
+// we fall back to defaulting true for agents whose triggers reference the
+// migration_change/config_security_change specials, so a repo that renamed
+// those lanes doesn't silently lose Opus escalation.
+function normalizeAgents(cfg) {
+  const agents = cfg.agents || [];
+  const hasNamedLane = agents.some((agent) => ESCALATING_LANE_IDS.has(agent.id));
+  const needsFallback = !hasNamedLane
+    && agents.some((agent) => typeof agent.escalates !== 'boolean');
+  if (needsFallback) {
+    console.warn(
+      'agent-review: no security/data-integrity/architecture agent id found; '
+        + 'defaulting escalates from migration_change/config_security_change trigger references.',
+    );
+  }
+  const normalizedAgents = agents.map((agent) => {
+    if (typeof agent.escalates === 'boolean') return agent;
+    const escalates = hasNamedLane
+      ? ESCALATING_LANE_IDS.has(agent.id)
+      : referencesEscalatingSpecial(agent);
+    return { ...agent, escalates };
+  });
+  return { ...cfg, agents: normalizedAgents };
+}
+
 function loadConfig({ configPath, schemaPath }) {
   const configObj = parseConfig(readFileSync(configPath, 'utf8'));
   const schemaObj = JSON.parse(readFileSync(schemaPath, 'utf8'));
@@ -126,12 +169,13 @@ function loadConfig({ configPath, schemaPath }) {
       `Invalid review config (${configPath}):\n- ${referenceErrors.join('\n- ')}`,
     );
   }
-  return upgradeConfig(configObj);
+  return normalizeAgents(upgradeConfig(configObj));
 }
 
 module.exports = {
   parseConfig,
   validateConfig,
   validateConfigReferences,
+  normalizeAgents,
   loadConfig,
 };

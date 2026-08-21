@@ -127,6 +127,7 @@
           "expertise": { "type": "string" },
           "enabled": { "type": "boolean" },
           "always": { "type": "boolean" },
+          "escalates": { "type": "boolean" },
           "model": {
             "type": "string",
             "enum": ["smart", "opus", "sonnet", "haiku"]
@@ -136,7 +137,8 @@
             "additionalProperties": false,
             "properties": {
               "paths": { "type": "array", "items": { "type": "string" } },
-              "content": { "type": "array", "items": { "type": "string" } }
+              "content": { "type": "array", "items": { "type": "string" } },
+              "specials": { "type": "array", "items": { "type": "string" } }
             }
           },
           "rules": {
