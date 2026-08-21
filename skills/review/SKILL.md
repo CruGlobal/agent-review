@@ -21,7 +21,8 @@ prose rule docs.
                                   # standard for MEDIUM/HIGH, deep for CRITICAL
 ```
 
-**Rough cost** (varies with diff size): quick ~$0.50 · standard ~$2-4 · deep ~$6-10.
+**Rough cost** (varies with diff size): quick ~$0.50 · standard ~$2-4 · deep varies with
+escalating-lane count.
 `auto` costs whatever tier it resolves to — and $0 when it skips a no-risk diff.
 
 **Incremental CI re-reviews**: in CI mode the posted report records the reviewed head SHA.
@@ -63,29 +64,25 @@ case "$MODE" in
   quick)
     echo "🏃 QUICK REVIEW MODE"
     echo "• 3 agents (testing, standards + the first triggered agent)"
-    echo "• Model: Haiku (fast, cost-effective)"
-    MODEL_OVERRIDE="haiku"
+    echo "• Model tiers: per-agent (see plan)"
     AGENT_MODE="quick"
     ;;
   deep)
     echo "🔬 DEEP REVIEW MODE"
     echo "• Every enabled agent in config.yml"
-    echo "• Model: Opus (maximum quality)"
-    MODEL_OVERRIDE="opus"
+    echo "• Model tiers: per-agent (see plan)"
     AGENT_MODE="deep"
     ;;
   auto)
     echo "🎚️ AUTO REVIEW MODE"
     echo "• Depth resolved from the engine's risk score after Stage 0 planning"
     echo "• score 0 → skip · LOW → quick · MEDIUM/HIGH → standard · CRITICAL → deep"
-    MODEL_OVERRIDE=""
     AGENT_MODE="auto"   # placeholder — resolved right after the plan is computed
     ;;
   standard)
     echo "⚡ STANDARD REVIEW MODE (Recommended)"
     echo "• Agents selected by the review engine from the diff"
     echo "• Model: per-agent, from config.yml"
-    MODEL_OVERRIDE=""
     AGENT_MODE="standard"
     ;;
 esac
@@ -100,7 +97,7 @@ echo ""
 : > /tmp/review_env.sh    # fresh state for this review
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
-export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE" REVIEW_DIR="$REVIEW_DIR"
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
 EOF
 ```
 
@@ -374,11 +371,13 @@ Risk scoring, agent selection, special-pattern detection, and rule resolution ar
 declarative review core (`.claude/review/config.yml`) — never computed inline here:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
 agent-review plan \
   --files /tmp/changed_files.txt \
   --stat /tmp/diff_stat.txt \
   --diff /tmp/pr_diff.txt \
   --scope "${REVIEW_SCOPE:-single_feature}" \
+  --mode "$MODE" \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
 
@@ -392,6 +391,7 @@ else
     --stat /tmp/full_diff_stat.txt \
     --diff /tmp/pr_full_diff.txt \
     --scope "${REVIEW_SCOPE:-single_feature}" \
+    --mode "$MODE" \
     > /tmp/review_gate_plan.json
 fi
 cat /tmp/review_gate_plan.json
@@ -456,10 +456,13 @@ or core infrastructure). The plan JSON has this shape:
     },
     "special": ["..."]
   },
+  "mode": { "requested": "auto", "resolved": "quick" },
   "agents": [
     {
       "id": "standards",
       "model": "smart",
+      "escalates": false,
+      "tier": "sonnet",
       "matchedBy": "always",
       "rules": ["rules/standards.md"]
     }
@@ -475,16 +478,13 @@ score — never from your own judgment of the diff:
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 if [ "$MODE" = "auto" ]; then
-  SCORE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.score)' 2>/dev/null)
   LEVEL=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
+  RESOLVED=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.mode.resolved)' 2>/dev/null)
+  RESOLVED="${RESOLVED:-standard}"
   STATIC_FINDINGS=$(node -e 'const e=require("/tmp/review_evidence.json"); console.log((e.staticFindings||[]).length)' 2>/dev/null || echo 0)
-  if [ "${SCORE:-1}" = "0" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
+  if [ "$RESOLVED" = "skip" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
     if [ -n "$CI_MODE" ]; then
-      # Post a minimal skip note. The CI posting step prepends the comment markers
-      # (including the reviewed-head marker, so the next run still diffs incrementally).
-      echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)." \
-        > /tmp/agent_review_report.md
       # A zero-risk incremental delta must not erase earlier open findings or
       # irreversible state when the canonical comment is updated.
       echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
@@ -506,26 +506,33 @@ if [ "$MODE" = "auto" ]; then
       fi
       agent-review ledger --findings /tmp/review_filtered.json \
         --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
+      # Status is always COMPUTED, never hand-authored — a zero-risk delta carries forward
+      # whatever the ledger already holds, so an incremental skip with prior open blockers must
+      # still report pass:false. Only a truly clean carried-forward ledger yields pass:true.
       agent-review status --ledger /tmp/agent_review_ledger.json \
         --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
         --evidence /tmp/review_evidence.json \
         ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+      # Post a minimal skip note. The CI posting step prepends the comment markers
+      # (including the reviewed-head marker, so the next run still diffs incrementally). A
+      # carried-forward open blocker from a prior run still blocks, so surface it here rather
+      # than letting a zero-risk delta read as silently clean.
+      OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
+      { echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)."
+        [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null \
+          && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
+      } > /tmp/agent_review_report.md
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
     fi
-    RESOLVED="skip"
   else
-    case "$LEVEL" in
-      LOW)      RESOLVED="quick";    MODEL_OVERRIDE="haiku" ;;
-      CRITICAL) RESOLVED="deep";     MODEL_OVERRIDE="opus"  ;;
-      *)        RESOLVED="standard"; MODEL_OVERRIDE=""      ;;
-    esac
+    [ "$RESOLVED" = "skip" ] && RESOLVED="standard"   # static findings exist — deterministic evidence outranks a 0-risk skip
     echo "🎚️ AUTO MODE resolved: $LEVEL risk → $RESOLVED"
   fi
   MODE="$RESOLVED" AGENT_MODE="$RESOLVED"
   cat >> /tmp/review_env.sh <<EOF
-export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE"
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE"
 EOF
 fi
 ```
@@ -588,6 +595,7 @@ plan's `agents[]` has:
 
 - `id` — the agent identifier as configured (e.g. `security`, `architecture`, `testing`)
 - `model` — `smart` | `opus` | `sonnet` | `haiku`
+- `tier` — the engine-resolved `opus`/`sonnet`/`haiku` subagent tier (see Stage 1's launch table)
 - `matchedBy` — why it was selected (`always`, `path:<glob>`, or `content:<substring>`)
 - `rules` — rule docs to load into that agent's prompt, relative to `.claude/review/`
 
@@ -615,6 +623,32 @@ Announce the selection, including each agent's `matchedBy` reason, e.g.:
 ✅ standards      — always
 ✅ security       — path:src/app/api/**
 ✅ data-integrity — content:createClient
+```
+
+### Smoke-Test Tier Routing
+
+The launch table (Stage 1) selects a subagent type per agent's tier (`agent-review:reviewer-opus`
+/ `-sonnet` / `-haiku`). Confirm those plugin subagent types actually resolve in this environment
+before committing every later launch to them — a stale or partially-installed plugin might not
+expose them yet. Run this only once a review is actually about to launch agents (the resolved
+mode reached this point instead of exiting at a Stage 0 skip) — that keeps a score-0 auto skip at
+$0. Launch exactly one Task:
+
+- **description**: `"routing smoke test"`
+- **subagent_type**: `"agent-review:reviewer-haiku"`
+- **prompt**: `"Reply with exactly: OK"`
+
+If the Task tool errors (unknown subagent type) or the reply is not exactly `OK`, degrade
+rather than fail the review — set `ROUTING="degraded"` below; every later launch table then falls
+back to `subagent_type: "general-purpose"` for every agent, and Stage 6 notes the degradation in
+`Review detail & stats`. On success, leave `ROUTING` unset.
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+ROUTING=""   # ← change to "degraded" if the smoke-test Task above errored
+cat >> /tmp/review_env.sh <<EOF
+export ROUTING="$ROUTING"
+EOF
 ```
 
 ---
@@ -689,10 +723,12 @@ placeholder entirely (empty string) if `blastRadius` is 0.
 Then launch each one with the Task tool:
 
 - **description**: `"<title> review"`
-- **subagent_type**: `"general-purpose"`
-- **model**: `MODEL_OVERRIDE` if set by the mode (quick → `haiku`, deep → `opus`); otherwise the
-  agent's `model` from the plan, where `smart` resolves to `sonnet` — or `opus` when `risk.level`
-  is `HIGH` or `CRITICAL`.
+- **subagent_type**: `"agent-review:reviewer-<tier>"` where `<tier>` is that agent's `tier` from
+  the plan (`opus`/`sonnet`/`haiku` — already resolved by the engine from mode, risk, and
+  config). Deep mode's config-only entries (agents with no plan entry, added per Stage 0B) carry
+  no engine-resolved `tier`: derive one as `opus` when `escalates` is true and the gate risk level
+  is HIGH or CRITICAL, else `sonnet`. If `$ROUTING` is `degraded` (the Stage 0B smoke test failed),
+  use `"general-purpose"` for every agent instead.
 - **prompt**: the filled archetype text
 
 The rule docs are authoritative for what each agent checks; they carry all repo-specific focus
@@ -848,15 +884,16 @@ findings.
 
 ### Debate Prompt Template
 
-Debate reuses each agent's Stage-1 model — a deliberate deviation from the in-repo review system
+Debate reuses each agent's Stage-1 tier — a deliberate deviation from the in-repo review system
 this skill was extracted from, which pinned every debate round to the largest model. A cheap agent
 therefore stays cheap through debate and rebuttal.
 
 Use the Task tool for each agent with:
 
 - **description**: "[Agent title] cross-examination"
-- **subagent_type**: "general-purpose"
-- **model**: same model that agent used in Stage 1
+- **subagent_type**: `"agent-review:reviewer-<tier>"` where `<tier>` is that agent's `tier` from
+  the plan (same resolution as Stage 1). If `$ROUTING` is `degraded`, use `"general-purpose"`
+  instead, same as Stage 1.
 - **prompt**:
 
 ```
@@ -938,8 +975,9 @@ Display: "🔄 Starting rebuttal round..."
 Use the Task tool with:
 
 - **description**: "[Agent title] rebuttal"
-- **subagent_type**: "general-purpose"
-- **model**: same model that agent used in Stage 1
+- **subagent_type**: `"agent-review:reviewer-<tier>"` where `<tier>` is that agent's `tier` from
+  the plan (same resolution as Stage 1). If `$ROUTING` is `degraded`, use `"general-purpose"`
+  instead, same as Stage 1.
 - **prompt**:
 
 ```
@@ -1351,6 +1389,10 @@ Honor its conditionals:
 - Fill the DEPENDENCY IMPACT section from `/tmp/review_impact.json` (`blastRadius`, `topImpacted`,
   `truncated`) — that is the only impact artifact this skill produces. State "index disabled" there
   when Stage 1B was skipped, and drop the breaking-changes subsection when nothing was detected.
+- Fill the skeleton's `[IF routing degraded:]` line inside `Review detail & stats` when
+  `$ROUTING` is `degraded` (the Stage 0B smoke test failed and every agent launched on
+  `general-purpose` instead of its tier subagent type). Omit it entirely otherwise — never
+  freestyle this note; the skeleton in `templates/report.md` owns its exact wording.
 
 Fill the skeleton top-down and state each finding exactly once: open blockers in
 "BLOCKERS — fix or dismiss to pass" (with their evidence and fix lines), every
@@ -1606,18 +1648,19 @@ Display:
 **Cross-stage state**
 
 Every bash block runs in its own shell. `/tmp/review_env.sh` is the only carrier between stages:
-Stage 0A truncates it and writes `MODE`/`AGENT_MODE`/`MODEL_OVERRIDE`, then `CI_MODE`; Stage 0 adds
-`DAY_OF_WEEK`, `BASE_REF`, `RANGE`; Stage 2B adds `FIX_COUNT`; Stage 5B adds `PR_NUM`,
-`CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute itself begins with
-`. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the discipline.
+Stage 0A truncates it and writes `MODE`/`AGENT_MODE`, then `CI_MODE`; Stage 0 adds `DAY_OF_WEEK`,
+`BASE_REF`, `RANGE`; the Stage 0B smoke test adds `ROUTING`; Stage 2B adds `FIX_COUNT`; Stage 5B
+adds `PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute
+itself begins with `. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the
+discipline.
 
 **Modes**
 
-| Mode     | Agents                                          | Model                     | Use for                        |
-| -------- | ----------------------------------------------- | ------------------------- | ------------------------------ |
-| quick    | up to 3 (testing, standards, first triggered)    | Haiku                     | small, low-risk changes        |
-| standard | engine selection from the diff                  | per-agent (`smart`→Sonnet) | normal feature work            |
-| deep     | every enabled agent                             | Opus                      | high-risk or critical changes  |
+| Mode     | Agents                                          | Model                                             | Use for                        |
+| -------- | ----------------------------------------------- | -------------------------------------------------- | ------------------------------ |
+| quick    | up to 3 (testing, standards, first triggered)    | per-agent tier (non-escalating `smart` → haiku)    | small, low-risk changes        |
+| standard | engine selection from the diff                  | per-agent tier (see plan)                          | normal feature work            |
+| deep     | every enabled agent                             | per-agent tier (escalating on HIGH/CRITICAL → opus) | high-risk or critical changes  |
 
 **Security posture**
 

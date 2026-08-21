@@ -244,6 +244,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `skills/init/` | `/agent-review:init` — bootstrap skill (stack scan + PR-history mining) |
 | `skills/review/` | `/agent-review:review` — review orchestrator skill |
 | `skills/learn/` | `/agent-review:learn` — learning-loop ratification skill |
+| `agents/` | Thin per-tier subagent shells (`reviewer-opus`/`-sonnet`/`-haiku`) that the review skill's launch table selects by plan-resolved tier |
 | `engine/` | Node engine: risk scoring, agent selection, import-graph index, learnings store, CLI commands, unit tests (`*.test.cjs`) |
 | `bin/agent-review` | Thin shim that requires the bundled `dist/agent-review.cjs` |
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
