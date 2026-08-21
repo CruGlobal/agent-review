@@ -64,28 +64,24 @@ case "$MODE" in
     echo "🏃 QUICK REVIEW MODE"
     echo "• 3 agents (testing, standards + the first triggered agent)"
     echo "• Model: Haiku (fast, cost-effective)"
-    MODEL_OVERRIDE="haiku"
     AGENT_MODE="quick"
     ;;
   deep)
     echo "🔬 DEEP REVIEW MODE"
     echo "• Every enabled agent in config.yml"
     echo "• Model: Opus (maximum quality)"
-    MODEL_OVERRIDE="opus"
     AGENT_MODE="deep"
     ;;
   auto)
     echo "🎚️ AUTO REVIEW MODE"
     echo "• Depth resolved from the engine's risk score after Stage 0 planning"
     echo "• score 0 → skip · LOW → quick · MEDIUM/HIGH → standard · CRITICAL → deep"
-    MODEL_OVERRIDE=""
     AGENT_MODE="auto"   # placeholder — resolved right after the plan is computed
     ;;
   standard)
     echo "⚡ STANDARD REVIEW MODE (Recommended)"
     echo "• Agents selected by the review engine from the diff"
     echo "• Model: per-agent, from config.yml"
-    MODEL_OVERRIDE=""
     AGENT_MODE="standard"
     ;;
 esac
@@ -100,7 +96,7 @@ echo ""
 : > /tmp/review_env.sh    # fresh state for this review
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
-export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE" REVIEW_DIR="$REVIEW_DIR"
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
 EOF
 ```
 
@@ -125,6 +121,30 @@ agent-review config validate || {
   echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
   exit 1
 }
+```
+
+### Smoke-Test Tier Routing
+
+The launch table (Stage 1) selects a subagent type per agent's tier (`agent-review:reviewer-opus`
+/ `-sonnet` / `-haiku`). Confirm those plugin subagent types actually resolve in this environment
+before committing every later launch to them — a stale or partially-installed plugin might not
+expose them yet. Launch exactly one Task:
+
+- **description**: `"routing smoke test"`
+- **subagent_type**: `"agent-review:reviewer-haiku"`
+- **prompt**: `"Reply with exactly: OK"`
+
+If the Task tool errors (unknown subagent type) or otherwise fails to come back cleanly, degrade
+rather than fail the review — set `ROUTING="degraded"` below; every later launch table then falls
+back to `subagent_type: "general-purpose"` for every agent, and Stage 6 notes the degradation in
+`Review detail & stats`. On success, leave `ROUTING` unset.
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+ROUTING="${ROUTING:-}"   # set to "degraded" above only if the smoke-test Task errored
+cat >> /tmp/review_env.sh <<EOF
+export ROUTING="$ROUTING"
+EOF
 ```
 
 ### Initialize Directories
@@ -379,6 +399,7 @@ agent-review plan \
   --stat /tmp/diff_stat.txt \
   --diff /tmp/pr_diff.txt \
   --scope "${REVIEW_SCOPE:-single_feature}" \
+  --mode "$MODE" \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
 
@@ -392,6 +413,7 @@ else
     --stat /tmp/full_diff_stat.txt \
     --diff /tmp/pr_full_diff.txt \
     --scope "${REVIEW_SCOPE:-single_feature}" \
+    --mode "$MODE" \
     > /tmp/review_gate_plan.json
 fi
 cat /tmp/review_gate_plan.json
@@ -475,10 +497,10 @@ score — never from your own judgment of the diff:
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 if [ "$MODE" = "auto" ]; then
-  SCORE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.score)' 2>/dev/null)
   LEVEL=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
+  RESOLVED=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.mode.resolved)' 2>/dev/null)
   STATIC_FINDINGS=$(node -e 'const e=require("/tmp/review_evidence.json"); console.log((e.staticFindings||[]).length)' 2>/dev/null || echo 0)
-  if [ "${SCORE:-1}" = "0" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
+  if [ "$RESOLVED" = "skip" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
     if [ -n "$CI_MODE" ]; then
       # Post a minimal skip note. The CI posting step prepends the comment markers
@@ -506,26 +528,23 @@ if [ "$MODE" = "auto" ]; then
       fi
       agent-review ledger --findings /tmp/review_filtered.json \
         --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
-      agent-review status --ledger /tmp/agent_review_ledger.json \
-        --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
-        --evidence /tmp/review_evidence.json \
-        ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+      # The review passed — nothing to review: score 0 and zero static findings guarantee zero
+      # open blockers, so write the status deterministically rather than invoking `agent-review
+      # status`. The posting step's `[ -s ... ]` guard still picks this file up and embeds it as
+      # the <!-- agent-review-status: ... --> marker automatically.
+      echo '{"v":1,"head":"'"$HEAD_REF"'","risk":"NONE","openBlockers":0,"pass":true,"irreversible":false,"irreversibleReasons":[],"ci":null}' \
+        > /tmp/agent_review_status.json
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
     fi
-    RESOLVED="skip"
   else
-    case "$LEVEL" in
-      LOW)      RESOLVED="quick";    MODEL_OVERRIDE="haiku" ;;
-      CRITICAL) RESOLVED="deep";     MODEL_OVERRIDE="opus"  ;;
-      *)        RESOLVED="standard"; MODEL_OVERRIDE=""      ;;
-    esac
+    [ "$RESOLVED" = "skip" ] && RESOLVED="standard"   # static findings exist — deterministic evidence outranks a 0-risk skip
     echo "🎚️ AUTO MODE resolved: $LEVEL risk → $RESOLVED"
   fi
   MODE="$RESOLVED" AGENT_MODE="$RESOLVED"
   cat >> /tmp/review_env.sh <<EOF
-export MODE="$MODE" AGENT_MODE="$AGENT_MODE" MODEL_OVERRIDE="$MODEL_OVERRIDE"
+export MODE="$MODE" AGENT_MODE="$AGENT_MODE"
 EOF
 fi
 ```
@@ -689,10 +708,10 @@ placeholder entirely (empty string) if `blastRadius` is 0.
 Then launch each one with the Task tool:
 
 - **description**: `"<title> review"`
-- **subagent_type**: `"general-purpose"`
-- **model**: `MODEL_OVERRIDE` if set by the mode (quick → `haiku`, deep → `opus`); otherwise the
-  agent's `model` from the plan, where `smart` resolves to `sonnet` — or `opus` when `risk.level`
-  is `HIGH` or `CRITICAL`.
+- **subagent_type**: `"agent-review:reviewer-<tier>"` where `<tier>` is that agent's `tier` from
+  the plan (`opus`/`sonnet`/`haiku` — already resolved by the engine from mode, risk, and
+  config). If `$ROUTING` is `degraded` (the Stage 0 smoke test failed), use
+  `"general-purpose"` for every agent instead.
 - **prompt**: the filled archetype text
 
 The rule docs are authoritative for what each agent checks; they carry all repo-specific focus
@@ -1351,6 +1370,9 @@ Honor its conditionals:
 - Fill the DEPENDENCY IMPACT section from `/tmp/review_impact.json` (`blastRadius`, `topImpacted`,
   `truncated`) — that is the only impact artifact this skill produces. State "index disabled" there
   when Stage 1B was skipped, and drop the breaking-changes subsection when nothing was detected.
+- Add the line `⚠️ routing degraded — ran on the default model` inside `Review detail & stats`
+  when `$ROUTING` is `degraded` (the Stage 0 smoke test failed and every agent launched on
+  `general-purpose` instead of its tier subagent type). Omit it entirely otherwise.
 
 Fill the skeleton top-down and state each finding exactly once: open blockers in
 "BLOCKERS — fix or dismiss to pass" (with their evidence and fix lines), every
@@ -1606,10 +1628,10 @@ Display:
 **Cross-stage state**
 
 Every bash block runs in its own shell. `/tmp/review_env.sh` is the only carrier between stages:
-Stage 0A truncates it and writes `MODE`/`AGENT_MODE`/`MODEL_OVERRIDE`, then `CI_MODE`; Stage 0 adds
-`DAY_OF_WEEK`, `BASE_REF`, `RANGE`; Stage 2B adds `FIX_COUNT`; Stage 5B adds `PR_NUM`,
-`CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute itself begins with
-`. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the discipline.
+Stage 0A truncates it and writes `MODE`/`AGENT_MODE`, then `CI_MODE`; the Stage 0 smoke test adds
+`ROUTING`; Stage 0 adds `DAY_OF_WEEK`, `BASE_REF`, `RANGE`; Stage 2B adds `FIX_COUNT`; Stage 5B adds
+`PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute itself
+begins with `. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the discipline.
 
 **Modes**
 

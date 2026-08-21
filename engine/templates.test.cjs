@@ -433,3 +433,19 @@ test('the plugin ships one thin reviewer agent per model tier', () => {
     assert.ok(body.length < 2000, 'tier agents are thin shells — the real prompt arrives via Task');
   }
 });
+
+test('the review skill routes agents by plan tier and degrades safely', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review:reviewer-'), 'launch table must select tier subagent types');
+  assert.ok(!skill.includes('or `opus` when `risk.level`'), 'the blanket smart→opus escalation must be gone');
+  assert.ok(!skill.includes('MODEL_OVERRIDE'), 'mode overrides are engine-resolved now — no model prose logic');
+  assert.ok(skill.includes('routing degraded'), 'unknown subagent type must fall back with a report note');
+  assert.ok(skill.includes('plan.mode.resolved') || skill.includes('mode.resolved'), 'auto resolution comes from the plan');
+});
+
+test('a score-0 skip posts a deterministic pass status', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const skip = skill.slice(skill.indexOf('skip note'), skill.indexOf('skip note') + 2500);
+  assert.ok(/agent-review-status/.test(skip), 'the skip path must stage a status marker');
+  assert.ok(/"pass":\s*true|pass:true|"pass":true/.test(skip), 'skip status must be pass:true with zero blockers');
+});
