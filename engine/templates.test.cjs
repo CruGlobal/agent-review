@@ -424,3 +424,12 @@ test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () 
   assert.ok(archetype.includes('report only the checklist items that FAIL'), 'checklists must be violations-only');
   assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
 });
+
+test('the plugin ships one thin reviewer agent per model tier', () => {
+  for (const tier of ['opus', 'sonnet', 'haiku']) {
+    const body = readFileSync(join(ROOT, `agents/reviewer-${tier}.md`), 'utf8');
+    assert.match(body, new RegExp(`^model: ${tier}$`, 'm'), `reviewer-${tier} must pin model: ${tier}`);
+    assert.ok(/^name: reviewer-/m.test(body));
+    assert.ok(body.length < 2000, 'tier agents are thin shells — the real prompt arrives via Task');
+  }
+});
