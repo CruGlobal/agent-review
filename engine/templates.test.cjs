@@ -443,6 +443,32 @@ test('the review skill routes agents by plan tier and degrades safely', () => {
   assert.ok(skill.includes('plan.mode.resolved') || skill.includes('mode.resolved'), 'auto resolution comes from the plan');
 });
 
+test('the Build the Review Plan block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
+  // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note) — this
+  // block reads $MODE (for --mode) and $RANGE/$FULL_RANGE (for the gate-plan aliasing check),
+  // none of which it computes itself, so it must source review_env.sh as its first statement.
+  // Skipping this silently sends `--mode ''` (auto mode never resolves) and aliases an empty
+  // $FULL_RANGE to an empty $RANGE (wrongly treating every re-review as the full PR).
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Build the Review Plan');
+  const end = skill.indexOf('### Load deterministic evidence', start);
+  assert.ok(start !== -1 && end !== -1, 'Build the Review Plan / Load deterministic evidence anchors not found');
+  const section = skill.slice(start, end);
+  const fenceStart = section.indexOf('```bash');
+  const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
+  assert.ok(fenceStart !== -1 && fenceEnd !== -1, 'no ```bash fence found in the Build the Review Plan section');
+  const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
+  const firstLine = block
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line !== '' && !line.startsWith('#'));
+  assert.strictEqual(
+    firstLine,
+    '. /tmp/review_env.sh 2>/dev/null || true',
+    'the plan-invocation block must source review_env.sh as its first non-comment line',
+  );
+});
+
 test('a score-0 skip computes status from carried-forward state and surfaces open blockers', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const start = skill.indexOf('### Auto Mode Resolution');
