@@ -138,7 +138,22 @@
             "properties": {
               "paths": { "type": "array", "items": { "type": "string" } },
               "content": { "type": "array", "items": { "type": "string" } },
-              "specials": { "type": "array", "items": { "type": "string" } }
+              "specials": {
+                "type": "array",
+                "description": "Special-pattern names (from risk.special[].when) this lane owns. Does NOT gate agent selection \u2014 selectAgents ignores it; it only marks lane ownership so loadConfig's escalates fallback can default safely when the security/data-integrity/architecture lane ids are renamed or removed.",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "new_dependency",
+                    "critical_pkg_update",
+                    "lockfile_only_change",
+                    "migration_change",
+                    "config_security_change",
+                    "supabase_migration_change",
+                    "next_config_security_change"
+                  ]
+                }
+              }
             }
           },
           "rules": {

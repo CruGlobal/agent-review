@@ -95,6 +95,10 @@ risk:
 # `always: true` runs the agent on every review. Otherwise the agent runs only
 # when a changed file matches `triggers.paths` or the diff contains one of
 # `triggers.content`. `rules[]` paths resolve against `.claude/review/`.
+# `triggers.specials` (optional) does NOT trigger the agent — it only records
+# which risk.special[].when detections this lane owns, so loadConfig's
+# `escalates` default can still find the right lane if you rename/remove the
+# security/data-integrity/architecture ids below.
 agents:
   - id: security
     title: Security Review Agent

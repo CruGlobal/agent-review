@@ -177,3 +177,36 @@ test('schema accepts an explicit escalates boolean', () => {
   const cfg = loadFixtureWith({ agents: [{ id: 'security', escalates: true, triggers: { always: true } }] });
   assert.equal(cfg.agents[0].escalates, true);
 });
+
+test('schema rejects a typo\'d triggers.specials value', () => {
+  // triggers.specials is a closed vocabulary (same enum as risk.special[].when) —
+  // a typo like 'migraton_change' must fail validation, not silently resolve
+  // the escalates fallback to false.
+  assert.throws(() => {
+    loadFixtureWith({ agents: [
+      { id: 'database', triggers: { specials: ['migraton_change'] } },
+    ]});
+  }, /Invalid review config/);
+});
+
+test('escalates fallback warns exactly once; named-lane path never warns', () => {
+  const calls = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => { calls.push(args); };
+  try {
+    loadFixtureWith({ agents: [
+      { id: 'security', triggers: { always: true } },
+      { id: 'ux', triggers: { always: true } },
+    ]});
+    assert.equal(calls.length, 0, 'a config with a named lane must not warn');
+
+    calls.length = 0;
+    loadFixtureWith({ agents: [
+      { id: 'database', triggers: { specials: ['migration_change'] } },
+      { id: 'style', triggers: { always: true } },
+    ]});
+    assert.equal(calls.length, 1, 'the no-named-lane fallback must warn exactly once');
+  } finally {
+    console.warn = originalWarn;
+  }
+});
