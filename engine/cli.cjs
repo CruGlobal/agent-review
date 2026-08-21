@@ -87,6 +87,7 @@ function ctx(argv) {
   };
 }
 const MODES = ['quick', 'standard', 'deep'];
+const PLAN_MODES = ['auto', 'quick', 'standard', 'deep'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
 function learningPaths(cfg, C) {
@@ -278,6 +279,10 @@ function main(rawArgv) {
       const statPath = flag(rest, '--stat');
       const scope = flag(rest, '--scope') || 'single_feature';
       const mode = flag(rest, '--mode') || 'standard';
+      if (!PLAN_MODES.includes(mode)) {
+        out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join('/')})`);
+        return 1;
+      }
       const files = readFileSync(filesPath, 'utf8')
         .split('\n')
         .map((s) => s.trim())

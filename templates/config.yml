@@ -99,6 +99,9 @@ risk:
 # which risk.special[].when detections this lane owns, so loadConfig's
 # `escalates` default can still find the right lane if you rename/remove the
 # security/data-integrity/architecture ids below.
+# `model` picks the review tier: an explicit `model:` (opus/sonnet/haiku) is
+# honored in every review mode; `smart` lanes are the ones quick mode may
+# downgrade to haiku, and only when `escalates` is false.
 agents:
   - id: security
     title: Security Review Agent

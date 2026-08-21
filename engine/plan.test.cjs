@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { buildPlan } = require('./plan.cjs');
+const { buildPlan, resolveMode } = require('./plan.cjs');
 const { resolveTiers } = require('./resolveTiers.cjs');
 
 const config = {
@@ -89,4 +89,43 @@ test('plan resolves auto mode from the risk score and stamps tiers', () => {
       `agent ${a.id} has a valid tier, got ${a.tier}`,
     );
   }
+});
+
+test('resolveTiers: an explicit model always wins, even in quick mode', () => {
+  const explicit = resolveTiers({
+    agents: [{ id: 'perf', model: 'opus', escalates: false }],
+    riskLevel: 'LOW',
+    mode: 'quick',
+  });
+  assert.equal(explicit[0].tier, 'opus', 'explicit model is never downgraded by quick mode');
+
+  const smart = resolveTiers({
+    agents: [{ id: 'standards', model: 'smart', escalates: false }],
+    riskLevel: 'LOW',
+    mode: 'quick',
+  });
+  assert.equal(smart[0].tier, 'haiku', 'quick mode still downgrades non-escalating smart lanes');
+});
+
+test('resolveTiers matrix: deep mode adds nothing beyond escalation; MEDIUM risk never escalates', () => {
+  const deepLow = resolveTiers({
+    agents: [{ id: 'security', model: 'smart', escalates: true }],
+    riskLevel: 'LOW',
+    mode: 'deep',
+  });
+  assert.equal(deepLow[0].tier, 'sonnet', 'deep mode does not itself force opus on LOW risk');
+
+  const mediumEscalating = resolveTiers({
+    agents: [{ id: 'security', model: 'smart', escalates: true }],
+    riskLevel: 'MEDIUM',
+    mode: 'standard',
+  });
+  assert.equal(mediumEscalating[0].tier, 'sonnet', 'escalation requires HIGH/CRITICAL risk, not just escalates:true');
+});
+
+test('resolveMode maps risk score/level to a resolved mode under auto', () => {
+  assert.equal(resolveMode('auto', { score: 0, level: 'LOW' }), 'skip');
+  assert.equal(resolveMode('auto', { score: 5, level: 'MEDIUM' }), 'standard');
+  assert.equal(resolveMode('auto', { score: 8, level: 'HIGH' }), 'standard');
+  assert.equal(resolveMode('auto', { score: 12, level: 'CRITICAL' }), 'deep');
 });

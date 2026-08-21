@@ -17038,14 +17038,13 @@ var require_resolveTiers = __commonJS({
     "use strict";
     var EXPLICIT_TIERS = /* @__PURE__ */ new Set(["opus", "sonnet", "haiku"]);
     var ESCALATING_RISK_LEVELS = /* @__PURE__ */ new Set(["HIGH", "CRITICAL"]);
-    function baseTier(agent, riskLevel) {
-      if (EXPLICIT_TIERS.has(agent.model)) return agent.model;
+    function smartTier(agent, riskLevel) {
       return agent.escalates && ESCALATING_RISK_LEVELS.has(riskLevel) ? "opus" : "sonnet";
     }
     function tierFor(agent, riskLevel, mode) {
-      const tier = baseTier(agent, riskLevel);
+      if (EXPLICIT_TIERS.has(agent.model)) return agent.model;
       if (mode === "quick" && !agent.escalates) return "haiku";
-      return tier;
+      return smartTier(agent, riskLevel);
     }
     function resolveTiers({ agents, riskLevel, mode }) {
       return agents.map((agent) => ({
@@ -18978,6 +18977,7 @@ var require_cli = __commonJS({
       };
     }
     var MODES = ["quick", "standard", "deep"];
+    var PLAN_MODES = ["auto", "quick", "standard", "deep"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
@@ -19142,6 +19142,10 @@ var require_cli = __commonJS({
           const statPath = flag(rest, "--stat");
           const scope = flag(rest, "--scope") || "single_feature";
           const mode = flag(rest, "--mode") || "standard";
+          if (!PLAN_MODES.includes(mode)) {
+            out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join("/")})`);
+            return 1;
+          }
           const files = readFileSync(filesPath, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
           const diffText = diffPath ? readFileSync(diffPath, "utf8") : "";
           const linesChanged = statPath ? linesChangedFromStat(readFileSync(statPath, "utf8")) : 0;

@@ -147,6 +147,33 @@ test('plan subcommand emits plan JSON', () => {
   assert.strictEqual(plan.agents[0].id, 'standards');
 });
 
+test('plan subcommand rejects an unknown --mode', () => {
+  const os = require('node:os');
+  const { mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
+  const { join } = require('node:path');
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-'));
+  mkdirSync(join(root, 'rd'), { recursive: true });
+  writeFileSync(join(root, 'rd', 'config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', '',
+  ].join('\n'));
+  const f = join(root, 'files.txt'); writeFileSync(f, 'src/a.ts\n');
+  const d = join(root, 'diff.txt'); writeFileSync(d, '');
+  const s = join(root, 'stat.txt'); writeFileSync(s, ' 1 file changed, 3 insertions(+)\n');
+  const { code, s: text } = run([
+    'plan', '--files', f, '--diff', d, '--stat', s,
+    '--root', root, '--review-dir', 'rd', '--mode', 'bananas',
+  ]);
+  assert.strictEqual(code, 1);
+  assert.match(text, /unknown mode "bananas"/);
+});
+
 test('address subcommands prepare, validate, emit feedback, and finalize through the CLI', () => {
   const { mkdirSync, readFileSync } = require('node:fs');
   const root = mkdtempSync(join(os.tmpdir(), 'ar-address-'));
