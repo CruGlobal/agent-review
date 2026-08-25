@@ -48,6 +48,7 @@ const {
   materializeCase,
 } = require('./evalSuite.cjs');
 const { buildEvidence, verifyEvidenceLedger } = require('./evidence.cjs');
+const { consensusFrom } = require('./consensus.cjs');
 const { validateContextManifest, contextInventory, packContext } = require('./contextPack.cjs');
 const { readTelemetry, summarizeTelemetry, rolloutReadiness } = require('./telemetry.cjs');
 const {
@@ -195,6 +196,7 @@ const USAGE = `usage: agent-review <command>
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -296,6 +298,35 @@ function main(rawArgv) {
         cfg,
       );
       out(JSON.stringify(plan, null, 2));
+      return 0;
+    }
+    case 'consensus': {
+      const planPath = flag(rest, '--plan');
+      const dirPath = flag(rest, '--dir');
+      if (!planPath || !dirPath) {
+        out('usage: agent-review consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]');
+        return 1;
+      }
+      const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+      const profile = flag(rest, '--profile') || plan.profile || 'standard';
+      const findingsByAgent = {};
+      for (const agent of plan.agents || []) {
+        const lanePath = join(dirPath, `${agent.id}.json`);
+        findingsByAgent[agent.id] = existsSync(lanePath)
+          ? readFileSync(lanePath, 'utf8')
+          : undefined;
+      }
+      const decisionsPath = flag(rest, '--decisions');
+      const decisions = decisionsPath
+        ? JSON.parse(readFileSync(decisionsPath, 'utf8'))
+        : undefined;
+      out(
+        JSON.stringify(
+          consensusFrom({ plan, findingsByAgent, profile, decisions }),
+          null,
+          2,
+        ),
+      );
       return 0;
     }
     case 'emit': {
