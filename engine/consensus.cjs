@@ -12,6 +12,18 @@
 // from engine/findingSignature.cjs — that hash is per-agent, persisted, and
 // untouchable. This key is cross-agent, recomputed fresh every call, and never
 // leaves this module as a "signature".
+//
+// CLIQUE SEMANTICS (controller ruling): automatic grouping only merges a set of
+// findings when EVERY pair in the set satisfies `sameGroup` — a clique, not
+// merely a connected component. A -> B and B -> C does not imply A -> C
+// (Jaccard/line-proximity isn't transitive), so union-find over pairwise
+// matches can silently fold together two genuinely distinct findings, diluting
+// severity and hiding one behind the surviving message. A false split is much
+// cheaper: it just yields two entries and, when they're still close (same file,
+// line distance <= 10), a `candidates` pair that the bounded model pass can
+// merge explicitly via `decisions`. Cliques are built deterministically (see
+// `buildCliques`) so the same input always groups the same way regardless of
+// input ordering (e.g. which agent's lane file was read first).
 
 const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
 
@@ -90,6 +102,36 @@ function normalizeFinding(raw, laneId) {
   };
 }
 
+// Canonical order for deterministic clique construction: agent id, then file,
+// then line (nulls first), then message. Sorting on this before greedily
+// assigning findings to cliques guarantees the same grouping regardless of
+// which order the lane files were read/flattened in.
+function canonicalOrder(a, b) {
+  return (
+    a.agent.localeCompare(b.agent) ||
+    a.file.localeCompare(b.file) ||
+    (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) ||
+    a.message.localeCompare(b.message)
+  );
+}
+
+// Deterministic maximal-clique-ish partition: process findings in canonical
+// order and greedily assign each one to the FIRST existing clique where it
+// matches (via sameGroup) EVERY current member; otherwise start a new clique.
+// This is a clique cover, not necessarily the maximum clique for pathological
+// inputs, but it is total, deterministic, and matches the controller ruling's
+// prescribed algorithm exactly.
+function buildCliques(findings) {
+  const ordered = [...findings].sort(canonicalOrder);
+  const cliques = [];
+  for (const finding of ordered) {
+    const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
+    if (clique) clique.push(finding);
+    else cliques.push([finding]);
+  }
+  return cliques;
+}
+
 // A singleton "group" of one raw finding, shaped like a combined entry so
 // downstream logic (profile cutoff, candidates, decision merges) never has to
 // special-case group size 1.
@@ -118,14 +160,22 @@ function toEntry(m) {
 // per field), line/category/message = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
+//
+// Deterministic tie-break: when two members tie on the selection criterion
+// (severity for `primary`, confidence rank for `bestConfidence`, string length
+// for `longestField`), the member with the alphabetically earlier `agent`
+// wins. reduce() with a strict `>` comparison always keeps the first member it
+// saw on a tie, so sorting a local copy of `members` by agent id ascending
+// first is sufficient to make every tie-break deterministic.
 function combineMembers(members) {
-  const primary = members.reduce(
+  const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
+  const primary = ordered.reduce(
     (best, m) => (m.severity > best.severity ? m : best),
-    members[0],
+    ordered[0],
   );
   const agents = [
     ...new Set(
-      members.flatMap((m) =>
+      ordered.flatMap((m) =>
         String(m.agent || '')
           .split(',')
           .map((s) => s.trim())
@@ -133,31 +183,31 @@ function combineMembers(members) {
       ),
     ),
   ].sort();
-  const bestConfidence = members.reduce(
+  const bestConfidence = ordered.reduce(
     (best, m) =>
       confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
-    members[0],
+    ordered[0],
   );
   const longestField = (field) =>
-    members.reduce(
+    ordered.reduce(
       (best, m) =>
         String(m[field] || '').length > String(best[field] || '').length
           ? m
           : best,
-      members[0],
+      ordered[0],
     )[field];
-  const corroboration = members.reduce(
+  const corroboration = ordered.reduce(
     (sum, m) => sum + (m.corroboration || 1),
     0,
   );
   const minSeverity = Math.min(
-    ...members.map((m) => (m._minSeverity != null ? m._minSeverity : m.severity)),
+    ...ordered.map((m) => (m._minSeverity != null ? m._minSeverity : m.severity)),
   );
   const maxSeverity = Math.max(
-    ...members.map((m) => (m._maxSeverity != null ? m._maxSeverity : m.severity)),
+    ...ordered.map((m) => (m._maxSeverity != null ? m._maxSeverity : m.severity)),
   );
   const meanSeverity =
-    members.reduce((sum, m) => sum + m.severity, 0) / members.length;
+    ordered.reduce((sum, m) => sum + m.severity, 0) / ordered.length;
   return {
     agent: agents.join(','),
     category: primary.category,
@@ -214,7 +264,9 @@ function lineDistance(a, b) {
 }
 
 // Ungrouped pairs sharing a file with line distance <= 10, over the output
-// findings array, for the skill's bounded model pass.
+// findings array, for the skill's bounded model pass. This is also how
+// cross-clique pairs (findings that were connected-but-not-clique, per the
+// controller ruling) resurface for the model to merge explicitly if it agrees.
 function buildCandidates(entries) {
   const candidates = [];
   for (let i = 0; i < entries.length; i++) {
@@ -234,6 +286,10 @@ function buildCandidates(entries) {
   return candidates;
 }
 
+// decisions are explicit, model-authored merges (not automatic grouping), so
+// they stay union-find: a `merge` decision is a deliberate instruction to
+// combine those two entries (and, transitively, anything else a decision also
+// merges them with), unlike the clique-restricted automatic pass above.
 function applyDecisions(entries, decisions) {
   if (!Array.isArray(decisions)) {
     throw new Error('consensus: decisions must be an array');
@@ -307,19 +363,11 @@ function consensusFrom({
     }
   }
 
-  const { find, union } = unionFind(all.length);
-  for (let i = 0; i < all.length; i++) {
-    for (let j = i + 1; j < all.length; j++) {
-      if (sameGroup(all[i], all[j])) union(i, j);
-    }
-  }
-  const groupsByRoot = new Map();
-  for (let i = 0; i < all.length; i++) {
-    const root = find(i);
-    if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
-    groupsByRoot.get(root).push(all[i]);
-  }
-  let entries = [...groupsByRoot.values()].map((members) =>
+  // Clique-restricted automatic grouping (controller ruling) — see
+  // buildCliques/canonicalOrder above. Grouping outcome is independent of the
+  // order findings were flattened in (laneIds order, dict key order, etc.)
+  // because buildCliques re-sorts canonically before assigning.
+  let entries = buildCliques(all).map((members) =>
     members.length === 1 ? toEntry(members[0]) : combineMembers(members),
   );
 

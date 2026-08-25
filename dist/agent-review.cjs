@@ -18803,6 +18803,19 @@ var require_consensus = __commonJS({
         recommendation: raw.recommendation != null ? String(raw.recommendation) : ""
       };
     }
+    function canonicalOrder(a, b) {
+      return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
+    }
+    function buildCliques(findings) {
+      const ordered = [...findings].sort(canonicalOrder);
+      const cliques = [];
+      for (const finding of ordered) {
+        const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
+        if (clique) clique.push(finding);
+        else cliques.push([finding]);
+      }
+      return cliques;
+    }
     function toEntry(m) {
       return {
         agent: m.agent,
@@ -18821,36 +18834,37 @@ var require_consensus = __commonJS({
       };
     }
     function combineMembers(members) {
-      const primary = members.reduce(
+      const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
+      const primary = ordered.reduce(
         (best, m) => m.severity > best.severity ? m : best,
-        members[0]
+        ordered[0]
       );
       const agents = [
         ...new Set(
-          members.flatMap(
+          ordered.flatMap(
             (m) => String(m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
           )
         )
       ].sort();
-      const bestConfidence = members.reduce(
+      const bestConfidence = ordered.reduce(
         (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
-        members[0]
+        ordered[0]
       );
-      const longestField = (field) => members.reduce(
+      const longestField = (field) => ordered.reduce(
         (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
-        members[0]
+        ordered[0]
       )[field];
-      const corroboration = members.reduce(
+      const corroboration = ordered.reduce(
         (sum, m) => sum + (m.corroboration || 1),
         0
       );
       const minSeverity = Math.min(
-        ...members.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
+        ...ordered.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
       );
       const maxSeverity = Math.max(
-        ...members.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
+        ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
-      const meanSeverity = members.reduce((sum, m) => sum + m.severity, 0) / members.length;
+      const meanSeverity = ordered.reduce((sum, m) => sum + m.severity, 0) / ordered.length;
       return {
         agent: agents.join(","),
         category: primary.category,
@@ -18970,19 +18984,7 @@ var require_consensus = __commonJS({
           all.push(normalizeFinding(raw, laneId));
         }
       }
-      const { find, union } = unionFind(all.length);
-      for (let i = 0; i < all.length; i++) {
-        for (let j = i + 1; j < all.length; j++) {
-          if (sameGroup(all[i], all[j])) union(i, j);
-        }
-      }
-      const groupsByRoot = /* @__PURE__ */ new Map();
-      for (let i = 0; i < all.length; i++) {
-        const root = find(i);
-        if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
-        groupsByRoot.get(root).push(all[i]);
-      }
-      let entries = [...groupsByRoot.values()].map(
+      let entries = buildCliques(all).map(
         (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
       );
       const beforeCutoff = entries.length;
