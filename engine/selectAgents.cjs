@@ -70,7 +70,13 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
   for (const a of config.agents) {
     if (a.enabled === false) continue;
     const matchedBy = agentMatches(a, reviewed, contentText);
-    if (matchedBy) out.push({ id: a.id, model: a.model || 'smart', matchedBy });
+    if (matchedBy)
+      out.push({
+        id: a.id,
+        model: a.model || 'smart',
+        escalates: a.escalates || false,
+        matchedBy,
+      });
   }
   return out;
 }

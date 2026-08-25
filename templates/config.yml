@@ -95,6 +95,13 @@ risk:
 # `always: true` runs the agent on every review. Otherwise the agent runs only
 # when a changed file matches `triggers.paths` or the diff contains one of
 # `triggers.content`. `rules[]` paths resolve against `.claude/review/`.
+# `triggers.specials` (optional) does NOT trigger the agent — it only records
+# which risk.special[].when detections this lane owns, so loadConfig's
+# `escalates` default can still find the right lane if you rename/remove the
+# security/data-integrity/architecture ids below.
+# `model` picks the review tier: an explicit `model:` (opus/sonnet/haiku) is
+# honored in every review mode; `smart` lanes are the ones quick mode may
+# downgrade to haiku, and only when `escalates` is false.
 agents:
   - id: security
     title: Security Review Agent
@@ -102,6 +109,7 @@ agents:
     enabled: true
     model: smart # smart | opus | sonnet | haiku
     always: false
+    escalates: true # deserves Opus on HIGH/CRITICAL PRs
     # Empty triggers mean this agent never runs — add the repo's auth, API,
     # migration, and CI paths plus content markers (secret env names, raw-HTML
     # sinks, redirect helpers) so security review fires when it matters.
@@ -115,6 +123,7 @@ agents:
     expertise: System design, patterns, technical debt, maintainability, scalability.
     enabled: true
     always: true
+    escalates: true # deserves Opus on HIGH/CRITICAL PRs
     rules: ['rules/architecture.md']
 
   - id: data-integrity
@@ -122,6 +131,7 @@ agents:
     expertise: Data flow, persistence, caching, input validation, type safety, data consistency.
     enabled: true
     always: false
+    escalates: true # deserves Opus on HIGH/CRITICAL PRs
     # Add the repo's data-layer paths and content markers (query/mutation
     # helpers, cache invalidation calls, schema parse calls).
     triggers:

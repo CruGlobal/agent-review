@@ -16728,6 +16728,33 @@ var require_loadConfig = __commonJS({
       }
       return errors;
     }
+    var ESCALATING_LANE_IDS = /* @__PURE__ */ new Set(["security", "data-integrity", "architecture"]);
+    var ESCALATING_SPECIALS = /* @__PURE__ */ new Set([
+      "migration_change",
+      "config_security_change",
+      "supabase_migration_change",
+      "next_config_security_change"
+    ]);
+    function referencesEscalatingSpecial(agent) {
+      const specials = agent.triggers && Array.isArray(agent.triggers.specials) ? agent.triggers.specials : [];
+      return specials.some((name) => ESCALATING_SPECIALS.has(name));
+    }
+    function normalizeAgents(cfg) {
+      const agents = cfg.agents || [];
+      const hasNamedLane = agents.some((agent) => ESCALATING_LANE_IDS.has(agent.id));
+      const needsFallback = !hasNamedLane && agents.some((agent) => typeof agent.escalates !== "boolean");
+      if (needsFallback) {
+        console.warn(
+          "agent-review: no security/data-integrity/architecture agent id found; defaulting escalates from migration_change/config_security_change trigger references."
+        );
+      }
+      const normalizedAgents = agents.map((agent) => {
+        if (typeof agent.escalates === "boolean") return agent;
+        const escalates = hasNamedLane ? ESCALATING_LANE_IDS.has(agent.id) : referencesEscalatingSpecial(agent);
+        return { ...agent, escalates };
+      });
+      return { ...cfg, agents: normalizedAgents };
+    }
     function loadConfig({ configPath, schemaPath }) {
       const configObj = parseConfig(readFileSync(configPath, "utf8"));
       const schemaObj = JSON.parse(readFileSync(schemaPath, "utf8"));
@@ -16745,12 +16772,13 @@ var require_loadConfig = __commonJS({
 - ${referenceErrors.join("\n- ")}`
         );
       }
-      return upgradeConfig(configObj);
+      return normalizeAgents(upgradeConfig(configObj));
     }
     module2.exports = {
       parseConfig,
       validateConfig,
       validateConfigReferences,
+      normalizeAgents,
       loadConfig
     };
   }
@@ -16923,7 +16951,13 @@ var require_selectAgents = __commonJS({
       for (const a of config.agents) {
         if (a.enabled === false) continue;
         const matchedBy = agentMatches(a, reviewed, contentText);
-        if (matchedBy) out.push({ id: a.id, model: a.model || "smart", matchedBy });
+        if (matchedBy)
+          out.push({
+            id: a.id,
+            model: a.model || "smart",
+            escalates: a.escalates || false,
+            matchedBy
+          });
       }
       return out;
     }
@@ -17003,6 +17037,30 @@ var require_detectSpecial = __commonJS({
   }
 });
 
+// engine/resolveTiers.cjs
+var require_resolveTiers = __commonJS({
+  "engine/resolveTiers.cjs"(exports2, module2) {
+    "use strict";
+    var EXPLICIT_TIERS = /* @__PURE__ */ new Set(["opus", "sonnet", "haiku"]);
+    var ESCALATING_RISK_LEVELS = /* @__PURE__ */ new Set(["HIGH", "CRITICAL"]);
+    function smartTier(agent, riskLevel) {
+      return agent.escalates && ESCALATING_RISK_LEVELS.has(riskLevel) ? "opus" : "sonnet";
+    }
+    function tierFor(agent, riskLevel, mode) {
+      if (EXPLICIT_TIERS.has(agent.model)) return agent.model;
+      if (mode === "quick" && !agent.escalates) return "haiku";
+      return smartTier(agent, riskLevel);
+    }
+    function resolveTiers({ agents, riskLevel, mode }) {
+      return agents.map((agent) => ({
+        ...agent,
+        tier: tierFor(agent, riskLevel, mode)
+      }));
+    }
+    module2.exports = { resolveTiers };
+  }
+});
+
 // engine/plan.cjs
 var require_plan = __commonJS({
   "engine/plan.cjs"(exports2, module2) {
@@ -17014,15 +17072,35 @@ var require_plan = __commonJS({
     var { selectAgents } = require_selectAgents();
     var { resolveRules } = require_resolveRules();
     var { detectSpecial } = require_detectSpecial();
-    function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel }, config) {
+    var { resolveTiers } = require_resolveTiers();
+    function resolveMode(requested, risk) {
+      if (requested !== "auto") return requested;
+      if (risk.score === 0) return "skip";
+      if (risk.level === "LOW") return "quick";
+      if (risk.level === "MEDIUM" || risk.level === "HIGH") return "standard";
+      if (risk.level === "CRITICAL") return "deep";
+      return "standard";
+    }
+    function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel, mode = "standard" }, config) {
       const special = detectSpecial(diffText, files, config);
       const risk = scoreRisk({ files, linesChanged, scope, special }, config);
       const selected = selectAgents({ files, diffText, reviewDirRel }, config);
-      const agents = selected.map((a) => ({
+      const resolved = resolveMode(mode, risk);
+      const tiered = resolveTiers({
+        agents: selected,
+        riskLevel: risk.level,
+        mode: resolved
+      });
+      const agents = tiered.map((a) => ({
         ...a,
         rules: resolveRules(a.id, files, config)
       }));
-      return { profile: config.profile, risk: { ...risk, special }, agents };
+      return {
+        profile: config.profile,
+        risk: { ...risk, special },
+        mode: { requested: mode, resolved },
+        agents
+      };
     }
     function linesChangedFromStat(statText) {
       const ins = statText.match(/(\d+) insertions?\(\+\)/);
@@ -17036,12 +17114,18 @@ var require_plan = __commonJS({
       const diffText = a.diff ? readFileSync(a.diff, "utf8") : "";
       const linesChanged = a.stat ? linesChangedFromStat(readFileSync(a.stat, "utf8")) : 0;
       const plan = buildPlan(
-        { files, diffText, linesChanged, scope: a.scope || "single_feature" },
+        {
+          files,
+          diffText,
+          linesChanged,
+          scope: a.scope || "single_feature",
+          mode: a.mode || "standard"
+        },
         config
       );
       process.stdout.write(JSON.stringify(plan, null, 2) + "\n");
     }
-    module2.exports = { buildPlan, parseArgs, linesChangedFromStat };
+    module2.exports = { buildPlan, parseArgs, linesChangedFromStat, resolveMode };
   }
 });
 
@@ -18898,6 +18982,7 @@ var require_cli = __commonJS({
       };
     }
     var MODES = ["quick", "standard", "deep"];
+    var PLAN_MODES = ["auto", "quick", "standard", "deep"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
@@ -18984,7 +19069,7 @@ var require_cli = __commonJS({
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
-  plan --files <f> --diff <f> --stat <f> [--scope <s>]   compute a review plan (JSON)
+  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -19061,11 +19146,16 @@ var require_cli = __commonJS({
           const diffPath = flag(rest, "--diff");
           const statPath = flag(rest, "--stat");
           const scope = flag(rest, "--scope") || "single_feature";
+          const mode = flag(rest, "--mode") || "standard";
+          if (!PLAN_MODES.includes(mode)) {
+            out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join("/")})`);
+            return 1;
+          }
           const files = readFileSync(filesPath, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
           const diffText = diffPath ? readFileSync(diffPath, "utf8") : "";
           const linesChanged = statPath ? linesChangedFromStat(readFileSync(statPath, "utf8")) : 0;
           const plan = buildPlan(
-            { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel },
+            { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode },
             cfg
           );
           out(JSON.stringify(plan, null, 2));

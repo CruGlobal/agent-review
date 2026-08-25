@@ -92,6 +92,8 @@ breaking changes as reported by the agents]
 - CI snapshot: [N passed, N failed, N pending; name failed/pending checks with links]
 - Cross-repo context: [available repo ids + pinned short SHAs, or "none"]
 
+[IF routing degraded:] ⚠️ routing degraded — ran on the default model
+
 **Agent summary** [one row per launched agent, using each agent's `title`, in launch order]:
 
 | Agent         | Critical | High    | Important | Suggestions | Confidence |

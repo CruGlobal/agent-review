@@ -424,3 +424,57 @@ test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () 
   assert.ok(archetype.includes('report only the checklist items that FAIL'), 'checklists must be violations-only');
   assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
 });
+
+test('the plugin ships one thin reviewer agent per model tier', () => {
+  for (const tier of ['opus', 'sonnet', 'haiku']) {
+    const body = readFileSync(join(ROOT, `agents/reviewer-${tier}.md`), 'utf8');
+    assert.match(body, new RegExp(`^model: ${tier}$`, 'm'), `reviewer-${tier} must pin model: ${tier}`);
+    assert.ok(/^name: reviewer-/m.test(body));
+    assert.ok(body.length < 2000, 'tier agents are thin shells — the real prompt arrives via Task');
+  }
+});
+
+test('the review skill routes agents by plan tier and degrades safely', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review:reviewer-'), 'launch table must select tier subagent types');
+  assert.ok(!skill.includes('or `opus` when `risk.level`'), 'the blanket smart→opus escalation must be gone');
+  assert.ok(!skill.includes('MODEL_OVERRIDE'), 'mode overrides are engine-resolved now — no model prose logic');
+  assert.ok(skill.includes('routing degraded'), 'unknown subagent type must fall back with a report note');
+  assert.ok(skill.includes('plan.mode.resolved') || skill.includes('mode.resolved'), 'auto resolution comes from the plan');
+});
+
+test('the Build the Review Plan block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
+  // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note) — this
+  // block reads $MODE (for --mode) and $RANGE/$FULL_RANGE (for the gate-plan aliasing check),
+  // none of which it computes itself, so it must source review_env.sh as its first statement.
+  // Skipping this silently sends `--mode ''` (auto mode never resolves) and aliases an empty
+  // $FULL_RANGE to an empty $RANGE (wrongly treating every re-review as the full PR).
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Build the Review Plan');
+  const end = skill.indexOf('### Load deterministic evidence', start);
+  assert.ok(start !== -1 && end !== -1, 'Build the Review Plan / Load deterministic evidence anchors not found');
+  const section = skill.slice(start, end);
+  const fenceStart = section.indexOf('```bash');
+  const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
+  assert.ok(fenceStart !== -1 && fenceEnd !== -1, 'no ```bash fence found in the Build the Review Plan section');
+  const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
+  const firstLine = block
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line !== '' && !line.startsWith('#'));
+  assert.strictEqual(
+    firstLine,
+    '. /tmp/review_env.sh 2>/dev/null || true',
+    'the plan-invocation block must source review_env.sh as its first non-comment line',
+  );
+});
+
+test('a score-0 skip computes status from carried-forward state and surfaces open blockers', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Auto Mode Resolution');
+  const skip = skill.slice(start, skill.indexOf('If auto resolved to', start));
+  assert.ok(/agent-review-status/.test(skip), 'the skip path must stage a status marker');
+  assert.ok(/agent-review status --ledger/.test(skip), 'skip status must be COMPUTED via the engine, never hand-authored');
+  assert.ok(!/"pass":\s*true/.test(skip), 'skip status must not hardcode a pass:true literal');
+  assert.ok(/previously-found blocker\(s\) remain open/.test(skip), 'carried-forward open blockers must be surfaced in the skip note');
+});

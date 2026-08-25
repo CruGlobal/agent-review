@@ -6,7 +6,7 @@ const { selectAgents, codeDiff, contentMatches } = require('./selectAgents.cjs')
 const config = {
   excluded_paths: ['**/*.snap'],
   agents: [
-    { id: 'architecture', always: true },
+    { id: 'architecture', always: true, escalates: true },
     { id: 'testing', always: true },
     { id: 'standards', always: true },
     {
@@ -38,6 +38,7 @@ test('UI-only change selects always-on agents + ux', () => {
     'ux',
   ]);
   assert.equal(sel.find((a) => a.id === 'ux').model, 'opus');
+  assert.equal(sel.find((a) => a.id === 'architecture').escalates, true);
 });
 
 test('content trigger selects security via process.env', () => {

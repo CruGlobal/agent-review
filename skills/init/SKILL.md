@@ -565,7 +565,9 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
 - `risk.manifests`, `risk.lockfiles`, `risk.special[*].packages/paths/files/keywords` — as derived.
 - `agents` — the five core agents with `title`/`expertise` kept from the skeleton, `triggers`
   filled for `security` and `data-integrity`, plus each selected specialist with its own
-  `id`/`title`/`expertise`/`triggers`/`rules`.
+  `id`/`title`/`expertise`/`triggers`/`rules`. Add `escalates: true` when a proposed lane owns
+  migration or security-config risk (it does not need to already be one of the three named
+  escalating lanes).
 - `path_rules` — only if a rule doc genuinely applies to every agent touching some path.
 - `excluded_paths` — the skeleton's defaults plus this repo's generated/vendored directories.
 - `index` — `enabled: true` plus the derived `roots`/`aliases`/`extensions` for a JS/TS repo;
