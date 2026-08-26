@@ -889,3 +889,21 @@ test('the archetype pins an explicit severity rubric with anti-sandbagging teeth
     'the severity rubric must anchor exploitable injections at 9-10',
   );
 });
+
+test('the CI posting block self-checks the marker JSON before it reaches the trusted post-job', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const postSection = skill.slice(
+    skill.indexOf('### Post the report to the PR'),
+    skill.indexOf('### Post the report to the PR') + 4000,
+  );
+  assert.ok(
+    postSection.includes(
+      'The marker lines are emitted ONLY by the node commands below — never type or edit them by hand; hand-transcribed JSON mangles escapes.',
+    ),
+    'the posting block preamble must warn against hand-transcribing marker lines',
+  );
+  assert.ok(
+    postSection.includes('console.log("marker self-check OK")'),
+    'the posting block must self-check the ledger/status marker JSON after assembling the comment',
+  );
+});

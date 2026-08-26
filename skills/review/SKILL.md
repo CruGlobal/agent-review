@@ -414,6 +414,7 @@ Two CI-sandbox behaviors to expect (both harmless if handled):
 
 Always embed the `<!-- agent-review -->` marker so subsequent runs update the same comment
 instead of stacking new ones.
+The marker lines are emitted ONLY by the node commands below — never type or edit them by hand; hand-transcribed JSON mangles escapes.
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
@@ -434,6 +435,20 @@ else
     echo
     cat /tmp/agent_review_report.md
   } > /tmp/agent_review_comment.md
+
+  # SELF-CHECK — catches hand-transcribed marker lines (mangled escapes) before they ever reach
+  # the trusted post-job. Reads the just-assembled file itself (not $AGENT_REVIEW_COMMENT_OUT,
+  # which may still hold a stale file from a prior run at this point). The marker lines above
+  # MUST come only from the node commands; never hand-write or hand-edit them.
+  node -e '
+const fs = require("fs");
+const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+for (const name of ["ledger", "status"]) {
+  const m = c.match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
+  if (m) JSON.parse(m[1]);
+}
+console.log("marker self-check OK");
+' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
 
   # In the reusable workflow, the model never receives a GitHub token. It only
   # stages a comment; a deterministic post-step validates the reviewed head and
