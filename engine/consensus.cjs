@@ -103,6 +103,31 @@ function normalizeFinding(raw, laneId) {
   };
 }
 
+// Per-finding validation, run after normalizeFinding, mirroring reportState.cjs's
+// cleanFinding/blocker rules so a finding that would later throw inside cleanFinding
+// (invalid severity, or a severity >= 7 "blocker" missing the evidence bar) is caught
+// here instead — where it can be dropped with a warning rather than detonating deep in
+// the pipeline with no lane attribution. This is fail-OPEN per finding: the lane DID
+// report, so one bad entry drops silently rather than failing the whole run the way a
+// missing lane file does (parseLane above stays fail-closed for that).
+function validateFinding(f) {
+  if (!f.file) return 'missing file';
+  if (!f.message) return 'missing message';
+  if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
+    return `invalid severity: ${f.severity}`;
+  }
+  if (f.severity >= 7) {
+    if (f.line === null) return 'severity >= 7 requires a line anchor';
+    if (String(f.confidence || '').toLowerCase() !== 'high') {
+      return 'severity >= 7 requires High confidence';
+    }
+    if (!String(f.evidence || '').trim()) {
+      return 'severity >= 7 requires concrete evidence';
+    }
+  }
+  return null;
+}
+
 // Canonical order for deterministic clique construction: agent id, then file,
 // then line (nulls first), then message. Sorting on this before greedily
 // assigning findings to cliques guarantees the same grouping regardless of
@@ -175,10 +200,15 @@ function combineMembers(members) {
     (best, m) => (m.severity > best.severity ? m : best),
     ordered[0],
   );
+  // Full corroborating lane set for display — collected from each member's own
+  // `agents` (if it is itself an already-combined entry from a prior merge) or
+  // its single-lane `agent` otherwise. NOT used for `agent` below: that stays
+  // the primary member's single lane id so the ledger signature (which hashes
+  // `agent`) never shifts with how many lanes corroborated.
   const agents = [
     ...new Set(
       ordered.flatMap((m) =>
-        String(m.agent || '')
+        String(m.agents || m.agent || '')
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
@@ -208,10 +238,17 @@ function combineMembers(members) {
   const maxSeverity = Math.max(
     ...ordered.map((m) => (m._maxSeverity != null ? m._maxSeverity : m.severity)),
   );
-  const meanSeverity =
-    ordered.reduce((sum, m) => sum + m.severity, 0) / ordered.length;
+  // Weighted by each member's own corroboration count (default 1 for a raw/singleton
+  // member) — otherwise re-merging an already-corroborated group with a singleton via
+  // `decisions` silently discounts the group's weight down to a single vote.
+  const weightedSum = ordered.reduce(
+    (sum, m) => sum + m.severity * (m.corroboration || 1),
+    0,
+  );
+  const meanSeverity = weightedSum / corroboration;
   return {
-    agent: agents.join(','),
+    agent: primary.agent,
+    agents: agents.join(','),
     category: primary.category,
     severity: Math.round(meanSeverity),
     file: primary.file,
@@ -360,9 +397,20 @@ function consensusFrom({
   }
 
   const all = [];
+  const droppedInvalid = [];
   for (const laneId of laneIds) {
     for (const raw of perLane[laneId]) {
-      all.push(normalizeFinding(raw, laneId));
+      const finding = normalizeFinding(raw, laneId);
+      const reason = validateFinding(finding);
+      if (reason) {
+        const messageSlice = String(finding.message || '').slice(0, 200);
+        droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
+        console.warn(
+          `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`,
+        );
+        continue;
+      }
+      all.push(finding);
     }
   }
 
@@ -391,6 +439,7 @@ function consensusFrom({
     groups: findings.filter((e) => e.corroboration > 1).length,
     singletons: findings.filter((e) => e.corroboration === 1).length,
     droppedByProfile,
+    droppedInvalid,
     needsHumanReview: findings.filter((e) => e.needsHumanReview).length,
   };
 

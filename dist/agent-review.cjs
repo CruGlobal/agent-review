@@ -18061,9 +18061,10 @@ var require_reportState = __commonJS({
         line,
         message: String(raw.message)
       };
-      for (const field of ["evidence", "recommendation", "detail", "confidence", "fix"]) {
+      for (const field of ["evidence", "recommendation", "detail", "confidence", "fix", "agents"]) {
         if (raw[field]) clean[field] = String(raw[field]).slice(0, 2e3);
       }
+      if (raw.needsHumanReview) clean.needsHumanReview = true;
       return clean;
     }
     function cleanPrevious(raw) {
@@ -18804,6 +18805,23 @@ var require_consensus = __commonJS({
         fix: raw.fix != null ? String(raw.fix) : ""
       };
     }
+    function validateFinding(f) {
+      if (!f.file) return "missing file";
+      if (!f.message) return "missing message";
+      if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
+        return `invalid severity: ${f.severity}`;
+      }
+      if (f.severity >= 7) {
+        if (f.line === null) return "severity >= 7 requires a line anchor";
+        if (String(f.confidence || "").toLowerCase() !== "high") {
+          return "severity >= 7 requires High confidence";
+        }
+        if (!String(f.evidence || "").trim()) {
+          return "severity >= 7 requires concrete evidence";
+        }
+      }
+      return null;
+    }
     function canonicalOrder(a, b) {
       return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
     }
@@ -18844,7 +18862,7 @@ var require_consensus = __commonJS({
       const agents = [
         ...new Set(
           ordered.flatMap(
-            (m) => String(m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
+            (m) => String(m.agents || m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
           )
         )
       ].sort();
@@ -18866,9 +18884,14 @@ var require_consensus = __commonJS({
       const maxSeverity = Math.max(
         ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
-      const meanSeverity = ordered.reduce((sum, m) => sum + m.severity, 0) / ordered.length;
+      const weightedSum = ordered.reduce(
+        (sum, m) => sum + m.severity * (m.corroboration || 1),
+        0
+      );
+      const meanSeverity = weightedSum / corroboration;
       return {
-        agent: agents.join(","),
+        agent: primary.agent,
+        agents: agents.join(","),
         category: primary.category,
         severity: Math.round(meanSeverity),
         file: primary.file,
@@ -18982,9 +19005,20 @@ var require_consensus = __commonJS({
         throw new Error(`consensus: ${errors.join("; ")}`);
       }
       const all = [];
+      const droppedInvalid = [];
       for (const laneId of laneIds) {
         for (const raw of perLane[laneId]) {
-          all.push(normalizeFinding(raw, laneId));
+          const finding = normalizeFinding(raw, laneId);
+          const reason = validateFinding(finding);
+          if (reason) {
+            const messageSlice = String(finding.message || "").slice(0, 200);
+            droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
+            console.warn(
+              `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`
+            );
+            continue;
+          }
+          all.push(finding);
         }
       }
       let entries = buildCliques(all).map(
@@ -19004,6 +19038,7 @@ var require_consensus = __commonJS({
         groups: findings.filter((e) => e.corroboration > 1).length,
         singletons: findings.filter((e) => e.corroboration === 1).length,
         droppedByProfile,
+        droppedInvalid,
         needsHumanReview: findings.filter((e) => e.needsHumanReview).length
       };
       return { findings, candidates, stats };

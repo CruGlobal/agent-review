@@ -38,7 +38,8 @@ test('(a) paraphrased findings from two agents on nearby lines group into one, c
   assert.equal(candidates.length, 0);
   const f = findings[0];
   assert.equal(f.corroboration, 2);
-  assert.equal(f.agent, 'agentA,agentB');
+  assert.equal(f.agent, 'agentB'); // primary (highest-severity member) — signature-stable
+  assert.equal(f.agents, 'agentA,agentB'); // full corroborating set, display/corroboration field
   assert.equal(f.severity, 7); // rounded mean of 6 and 8
   assert.equal(f.line, 122); // highest-severity member's line (agentB, severity 8)
   assert.equal(f.confidence, 'High');
@@ -88,6 +89,7 @@ test('(c) severity spread >= 4 within a group sets needsHumanReview', () => {
         severity: 9,
         category: 'security',
         confidence: 'High',
+        evidence: 'raw string interpolation of order id into the SQL query builder call',
         message: 'SQL injection risk from unsanitized order id in raw query',
       },
     ],
@@ -176,7 +178,8 @@ test('(g) decisions merge combines two candidates into a group', () => {
 
   assert.equal(second.findings.length, 1);
   assert.equal(second.findings[0].corroboration, 2);
-  assert.equal(second.findings[0].agent, 'agentA,agentC');
+  assert.equal(second.findings[0].agent, 'agentA'); // primary: severity 5 > agentC's 4
+  assert.equal(second.findings[0].agents, 'agentA,agentC');
 });
 
 test('unknown decision index throws', () => {
@@ -237,7 +240,7 @@ test('(clique) A-B and B-C match but A-C does not: NOT one group of 3 -- A+B mer
   const findingsByAgent = {
     agentA: [{ file: 'app/models/user.rb', line: 10, severity: 5, message: 'apple banana cherry', agent: 'agentA' }],
     agentB: [{ file: 'app/models/user.rb', line: 11, severity: 6, message: 'apple banana date', agent: 'agentB' }],
-    agentC: [{ file: 'app/models/user.rb', line: 12, severity: 7, message: 'banana date elderberry', agent: 'agentC' }],
+    agentC: [{ file: 'app/models/user.rb', line: 12, severity: 7, confidence: 'High', evidence: 'concrete verified path', message: 'banana date elderberry', agent: 'agentC' }],
   };
 
   const { findings, candidates } = consensusFrom({ findingsByAgent, profile: 'standard' });
@@ -253,7 +256,8 @@ test('(clique) A-B and B-C match but A-C does not: NOT one group of 3 -- A+B mer
   const merged = findings.find((f) => f.corroboration === 2);
   const singleton = findings.find((f) => f.corroboration === 1);
   assert.ok(merged, 'expected an A+B group with corroboration 2');
-  assert.equal(merged.agent, 'agentA,agentB');
+  assert.equal(merged.agent, 'agentB'); // primary: severity 6 > agentA's 5
+  assert.equal(merged.agents, 'agentA,agentB');
   assert.equal(merged.message, 'apple banana date'); // highest-severity member (agentB, sev 6)
   assert.equal(merged.line, 11);
   assert.ok(singleton, 'expected agentC to remain its own singleton');
@@ -264,7 +268,7 @@ test('(clique) A-B and B-C match but A-C does not: NOT one group of 3 -- A+B mer
   // so they surface as a candidate pair for the bounded model pass.
   assert.equal(candidates.length, 1);
   const [i, j] = [candidates[0].a, candidates[0].b];
-  const pair = [findings[i].agent, findings[j].agent].sort();
+  const pair = [findings[i].agents || findings[i].agent, findings[j].agents || findings[j].agent].sort();
   assert.deepEqual(pair, ['agentA,agentB', 'agentC']);
 });
 
@@ -293,7 +297,7 @@ test('(clique) a genuine 3-clique (every pair matches) still merges into one gro
   const findingsByAgent = {
     agentA: [{ file: 'svc/order.rb', line: 40, severity: 5, message: 'apple banana cherry date', agent: 'agentA' }],
     agentB: [{ file: 'svc/order.rb', line: 41, severity: 6, message: 'apple banana cherry elderberry', agent: 'agentB' }],
-    agentC: [{ file: 'svc/order.rb', line: 42, severity: 7, message: 'apple banana date elderberry', agent: 'agentC' }],
+    agentC: [{ file: 'svc/order.rb', line: 42, severity: 7, confidence: 'High', evidence: 'concrete verified path', message: 'apple banana date elderberry', agent: 'agentC' }],
   };
 
   // Sanity: every pair meets the threshold -- a genuine clique.
@@ -305,7 +309,8 @@ test('(clique) a genuine 3-clique (every pair matches) still merges into one gro
 
   assert.equal(findings.length, 1);
   assert.equal(findings[0].corroboration, 3);
-  assert.equal(findings[0].agent, 'agentA,agentB,agentC');
+  assert.equal(findings[0].agent, 'agentC'); // primary: highest severity (7)
+  assert.equal(findings[0].agents, 'agentA,agentB,agentC');
   assert.equal(candidates.length, 0);
 });
 
@@ -372,6 +377,8 @@ test('(fix) automatic clique merge picks the highest-severity member\'s fix, sam
         file: 'app/models/user.rb',
         line: 122,
         severity: 8,
+        confidence: 'High',
+        evidence: 'params[:name] used directly in user.save without validation',
         message: 'user input is missing a null check before saving',
         fix: 'agentB fix: raise ArgumentError when name is blank',
       },
@@ -418,4 +425,180 @@ test('(fix) decisions merge also carries the higher-severity member\'s fix', () 
 
   assert.equal(second.findings.length, 1);
   assert.equal(second.findings[0].fix, 'agentA fix: add a nil guard'); // agentA severity 5 > agentC severity 4
+});
+
+// --- I3: `agent` (the primary lane, signature-stable) vs `agents` (full corroborating set) ---
+
+test('(agent-signature) findingSignature on the output entry is identical whether corroboration is 1 or 3 for the same primary', () => {
+  const { signature } = require('./findingSignature.cjs');
+
+  const singletonOnly = {
+    agentA: [
+      {
+        file: 'svc/order.rb',
+        line: 10,
+        severity: 9,
+        category: 'security',
+        confidence: 'High',
+        evidence: 'concrete verified execution path',
+        message: 'apple banana cherry date',
+      },
+    ],
+  };
+  const corroboratedTrio = {
+    agentA: [
+      {
+        file: 'svc/order.rb',
+        line: 10,
+        severity: 9,
+        category: 'security',
+        confidence: 'High',
+        evidence: 'concrete verified execution path',
+        message: 'apple banana cherry date',
+      },
+    ],
+    agentB: [
+      { file: 'svc/order.rb', line: 11, severity: 6, category: 'security', message: 'apple banana cherry elderberry' },
+    ],
+    agentC: [
+      { file: 'svc/order.rb', line: 12, severity: 5, category: 'security', message: 'apple banana date elderberry' },
+    ],
+  };
+
+  const singleton = consensusFrom({ findingsByAgent: singletonOnly, profile: 'standard' }).findings[0];
+  const trio = consensusFrom({ findingsByAgent: corroboratedTrio, profile: 'standard' }).findings[0];
+
+  assert.equal(singleton.corroboration, 1);
+  assert.equal(trio.corroboration, 3);
+  // Same primary (agentA, highest severity) and identical message/category/file in both cases.
+  assert.equal(singleton.agent, 'agentA');
+  assert.equal(trio.agent, 'agentA');
+  assert.equal(trio.message, singleton.message);
+  assert.equal(signature(trio), signature(singleton), 'signature must not shift with corroboration count');
+
+  // The display field still carries the full corroborating set.
+  assert.equal(trio.agents, 'agentA,agentB,agentC');
+});
+
+// --- M1: decisions merges weight the severity mean by each member's corroboration ---
+
+test('(weighted-mean) decisions merge weights severity mean by corroboration, not a flat member average', () => {
+  const findingsByAgent = {
+    agentA: [
+      {
+        file: 'a.rb', line: 10, severity: 9, confidence: 'High',
+        evidence: 'concrete verified execution path',
+        message: 'apple banana cherry date elderberry fig',
+      },
+    ],
+    agentB: [
+      {
+        file: 'a.rb', line: 11, severity: 7, confidence: 'High',
+        evidence: 'concrete verified execution path',
+        message: 'apple banana cherry date elderberry grape',
+      },
+    ],
+    agentC: [
+      { file: 'a.rb', line: 30, severity: 4, message: 'totally unrelated finding about something else' },
+    ],
+  };
+
+  // First pass: agentA (9) + agentB (7) auto-merge into one clique (corroboration 2, severity
+  // round((9+7)/2) = 8). agentC (severity 4, unrelated message) stays a singleton, far enough
+  // away (line 30 vs 11) that it is not even a candidate.
+  const first = consensusFrom({ findingsByAgent, profile: 'standard' });
+  const pairEntry = first.findings.find((f) => f.corroboration === 2);
+  const singletonEntry = first.findings.find((f) => f.corroboration === 1);
+  assert.ok(pairEntry && singletonEntry);
+  assert.equal(pairEntry.severity, 8);
+  assert.equal(singletonEntry.severity, 4);
+
+  const pairIndex = first.findings.indexOf(pairEntry);
+  const singletonIndex = first.findings.indexOf(singletonEntry);
+
+  // Force-merge the (severity 8, corroboration 2) group with the (severity 4, corroboration 1)
+  // singleton via a decision. Weighted mean: (8*2 + 4*1) / 3 = 6.67 -> rounds to 7, not the flat
+  // (8+4)/2 = 6.
+  const second = consensusFrom({
+    findingsByAgent,
+    profile: 'standard',
+    decisions: [{ merge: [pairIndex, singletonIndex] }],
+  });
+
+  assert.equal(second.findings.length, 1);
+  assert.equal(second.findings[0].corroboration, 3);
+  assert.equal(second.findings[0].severity, 7); // weighted mean, not 6
+});
+
+// --- I2: per-finding validation after normalization mirrors cleanFinding/blocker rules ---
+
+test('(invalid) a finding with a non-integer/out-of-range severity is dropped and warned, not thrown', () => {
+  const findingsByAgent = {
+    agentA: [
+      { file: 'a.rb', line: 5, severity: 'not-a-number', message: 'garbled severity from a flaky lane' },
+      { file: 'a.rb', line: 6, severity: 5, message: 'a perfectly fine finding' },
+    ],
+  };
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(' '));
+  let result;
+  try {
+    result = consensusFrom({ findingsByAgent, profile: 'standard' });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].message, 'a perfectly fine finding');
+  assert.equal(result.stats.droppedInvalid.length, 1);
+  assert.equal(result.stats.droppedInvalid[0].lane, 'agentA');
+  assert.match(result.stats.droppedInvalid[0].reason, /severity/i);
+  assert.ok(warnings.some((w) => w.includes('agentA')), 'console.warn must name the lane');
+});
+
+test('(invalid) a severity >= 7 finding missing evidence/High confidence/line is dropped and warned', () => {
+  const findingsByAgent = {
+    agentA: [
+      {
+        file: 'a.rb',
+        line: 5,
+        severity: 8,
+        confidence: 'Medium', // not High
+        message: 'a would-be blocker missing the evidence bar',
+      },
+      {
+        file: 'a.rb',
+        line: 8,
+        severity: 9,
+        confidence: 'High',
+        evidence: 'concrete verified execution path',
+        message: 'a real blocker that survives',
+      },
+    ],
+  };
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  let result;
+  try {
+    result = consensusFrom({ findingsByAgent, profile: 'standard' });
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(result.findings.length, 1);
+  assert.equal(result.findings[0].message, 'a real blocker that survives');
+  assert.equal(result.stats.droppedInvalid.length, 1);
+  assert.equal(result.stats.droppedInvalid[0].lane, 'agentA');
+  assert.match(result.stats.droppedInvalid[0].reason, /confidence|evidence|line/i);
+});
+
+test('(invalid) a run with no invalid findings at all reports an empty droppedInvalid, not undefined', () => {
+  const findingsByAgent = {
+    agentA: [{ file: 'a.rb', line: 1, severity: 5, message: 'fine' }],
+  };
+  const { stats } = consensusFrom({ findingsByAgent, profile: 'standard' });
+  assert.deepEqual(stats.droppedInvalid, []);
 });
