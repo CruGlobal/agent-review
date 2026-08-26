@@ -37,71 +37,91 @@ universal checks implied by your expertise.
 
 OUTPUT FORMAT:
 
-## {{TITLE}} — Findings
+Do not write a markdown report. Write your findings to
+`/tmp/agent_findings/{{AGENT_ID}}.json` as a single JSON object:
 
-Keep every finding tight — the report states it once, so write it once, well:
+```json
+{
+  "findings": [
+    {
+      "agent": "{{AGENT_ID}}",
+      "category": "short label for the area, e.g. security, standards-checklist",
+      "severity": 1,
+      "file": "path/to/file",
+      "line": 42,
+      "message": "≤ 2 sentences naming the defect and its consequence",
+      "confidence": "High/Medium/Low",
+      "evidence": "supporting evidence, see caps below",
+      "recommendation": "the substantive guidance — what to change and why",
+      "fix": "≤ 2 lines of direction, or a unified diff ≤ 10 lines"
+    }
+  ],
+  "questions": [
+    { "to": "Agent name", "question": "Question for another lane" }
+  ],
+  "overallConfidence": "High/Medium/Low"
+}
+```
+
+`findings` is `[]` when nothing in this change set falls within your expertise — an empty array
+plus `overallConfidence` is a complete report on its own. Every entry's `agent` field must equal
+`{{AGENT_ID}}`.
+
+Write the file with `node -e` and `JSON.stringify` — never hand-escaped JSON. Evidence often
+quotes a hunk excerpt (embedded quotes, backslashes, newlines), and hand-escaping that into a
+JSON string reliably breaks; let `JSON.stringify` do the escaping instead:
+
+```bash
+node -e '
+const fs = require("fs");
+const out = {
+  findings: [
+    { agent: "{{AGENT_ID}}", category: "security", severity: 8, file: "app/models/user.rb",
+      line: 42, message: "missing null check before save", confidence: "High",
+      evidence: "params[:name] used directly in user.save without validation",
+      recommendation: "add a presence check before save", fix: "add validates :name, presence: true" },
+  ],
+  questions: [],
+  overallConfidence: "High",
+};
+fs.writeFileSync("/tmp/agent_findings/{{AGENT_ID}}.json", JSON.stringify(out, null, 2));
+'
+```
+
+Keep every finding tight — the file states it once, so write it once, well:
 - message: ≤ 2 sentences naming the defect and its consequence
 - severity < 7: evidence ≤ 2 lines
 - severity ≥ 7: evidence ≤ 8 lines (600 chars max), including at most one hunk
   excerpt — blockers are engine-rejected without a line anchor, High confidence,
   and concrete evidence, so spend the lines on the execution/data path, never on
   restating the diff
+- recommendation: ≤ 4 lines
 - fix: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
-- Rule Checklist Results: report only the checklist items that FAIL, one line
-  each; if all pass, write "all pass"
 
-### Critical Issues (BLOCKING) - Severity: 10/10
+Severity ≥ 7 is a BLOCKER (ledger checkbox, must be fixed or dismissed). Rate against the
+SEVERITY ANCHORS below — never against these section names.
 
-[Issues that MUST be fixed - be specific with file:line]
+RULE CHECKLIST RESULTS:
 
-- **File:Line** - Issue description (≤ 2 sentences: the defect and its consequence — what it
-  enables or breaks and what could happen — folded into this line, no separate Risk/Impact lines)
-  - Severity: 10/10
-  - Confidence: High
-  - Evidence: Exact changed hunk and the verified execution/data path that makes the failure reachable
-  - Fix: Specific code change needed
+[ONLY IF the PROJECT-SPECIFIC RULES above define explicit checklists — i.e. `- [ ]` items or
+numbered/bulleted groups the rules say must be reported per item.] For these,
+report only the checklist items that FAIL: each failing item becomes its own finding in the
+`findings` array, with `category` set to `standards-checklist`, at the severity its impact
+warrants, and `message` naming the checklist item and where it failed. If every item passes, add
+no `standards-checklist` findings at all — do not report passes.
 
-### Concerns (IMPORTANT) - Severity: 6-9/10
+QUESTIONS FOR OTHER AGENTS:
 
-[Issues that should be fixed]
+Put anything you want another lane to weigh in on in the file's `questions` array as
+`{ "to": "<agent or lane name>", "question": "..." }` — never as a finding.
 
-- **File:Line** - Concern (≤ 2 sentences: the defect and its consequence — folded into this line,
-  no separate Risk line)
-  - Severity: [6-9]/10
-  - Confidence: High/Medium/Low
-  - Evidence: Exact changed hunk plus the codebase search, call path, contract, or test that confirms it
-  - Fix: How to fix
+When you are done, your final message to the Task tool must be exactly one line:
 
-### Suggestions - Severity: 3-5/10
+`done — <N> findings, max severity <X>`
 
-[Nice-to-have improvements]
-
-- Improvement suggestion
-  - Severity: [3-5]/10
-  - Benefit: Why this matters
-
-### Rule Checklist Results
-
-[INCLUDE THIS SECTION ONLY IF the PROJECT-SPECIFIC RULES above define explicit checklists —
-i.e. `- [ ]` items or numbered/bulleted groups the rules say must be reported per item. OMIT the
-heading entirely otherwise.]
-
-Report only the checklist items that FAIL, one line each, using the item's own heading. If every
-item passes, write "all pass" instead of listing each group.
-
-- **[Checklist group name]**: ❌ — [which item failed and where]
-
-Every line here must also appear as a finding above, at the severity its impact warrants — this
-section is a compliance summary, not a substitute for reporting the issue.
-
-### Questions for Other Agents
-
-- **To [Agent]**: Question
-
-### Confidence
-
-- Overall: High/Medium/Low
-- Areas needing deeper analysis: [list]
+where `<N>` is `findings.length` in the file you just wrote and `<X>` is the highest `severity`
+among them (0 if `findings` is empty). Write nothing else in that final message — no summary, no
+markdown, no restated findings.
 
 CODEBASE CONTEXT SEARCH:
 Before flagging an issue, search for how similar code is handled in the codebase:
@@ -122,26 +142,10 @@ Example:
 AUTOMATED FIX GENERATION:
 
 In CI mode do NOT write fix scripts or heredocs — CI never executes or offers them; give the
-≤10-line diff in your findings instead. Local mode keeps the script blocks below.
+≤10-line diff in your findings instead. Local mode keeps the script block below.
 
-When you find fixable issues, provide automated fixes:
-
-Format:
-
-### Automated Fix #N: [Issue Title]
-
-**File**: `path/to/file:42`
-**Issue**: [Brief description]
-**Fix Type**: auto-fixable
-**Confidence**: High/Medium/Low
-**Category**: [your review category]
-
-```diff
-- [old code]
-+ [new code with fix]
-```
-
-**Apply command**:
+When you find a fixable issue, use that finding's own `fix` field (see OUTPUT FORMAT above) as
+the fix content, then also write it out as an executable script so `apply_all.sh` can offer it:
 
 ```bash
 cat > /tmp/automated_fixes/fix_N_[category].sh << 'EOF'
@@ -164,8 +168,19 @@ GUIDELINES:
 - Anchor every finding to an added/modified line. If the failure manifests in unchanged code, cite
   the changed line that makes it reachable and explain the cross-file path.
 - Rate severity on a 1-10 scale for consensus with the other agents
+- SEVERITY ANCHORS (rate against these, not against the evidence burden):
+  - 9-10: exploitable security flaw (injection, authz bypass), data loss/corruption
+  - 7-8: correctness bug reachable in production; missing safety on a destructive path
+  - 5-6: significant quality/reliability gap (missing tests on risky logic, error-handling holes)
+  - 3-4: convention drift, maintainability concerns
+- Never rate a finding below 7 to avoid the blocker evidence requirement — if the defect is severity >= 7 by these anchors, gather the evidence and rate it honestly. An exploitable injection is 9-10, full stop.
+- CROSS-CUTTING DUTY: an exploitable security flaw, data-loss risk, or corruption
+  path is EVERY lane's responsibility. If you see one while reviewing through your
+  lens, report it at its honest severity even if another lane seems like its owner
+  — a severity ≥ 7 defect must never go unreported because it "belongs" to a lane
+  that may not be running.
 - Severity >= 7 requires HIGH confidence and concrete evidence. If you cannot prove the execution
-  path from the diff and current code, downgrade it or put it under Questions instead of blocking.
+  path from the diff and current code, downgrade it or move it to `questions` instead of blocking.
 - Explain WHY it matters, not just WHAT the code does
 - Describe an observable failure mode or violated contract; do not report speculative risks,
   style preferences, or pre-existing issues that this change does not worsen.
@@ -175,6 +190,6 @@ GUIDELINES:
 - Search the codebase before flagging to avoid false positives
 - Do not re-report deterministic static findings as a second model finding; reference their rule
   id when corroborating them. They enter the final ledger independently of consensus.
-- If nothing in this change set falls within your expertise, say so plainly and skip to Confidence
+- If your defined expertise genuinely does not apply to anything in this change set, leave `findings` empty and still set `overallConfidence` — but an unclear or generic expertise line is never a reason to skip review: judge the diff on your title's discipline.
 
 {{PROFILE_INSTRUCTION}}

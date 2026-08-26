@@ -20,7 +20,7 @@ this report cannot approve or block the PR) · [N] agents run ([list of launched
 NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve the wrong finding:]
 [IF status open:]
 
-- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
+- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]
       ↳ evidence: [≤8 lines/600 chars, may include one hunk excerpt]
       ↳ fix: [≤2 lines or unified diff ≤10 lines]
 
@@ -44,7 +44,7 @@ use the ledger's own `n`, NEVER renumber: a renumbered blocker makes `@claude di
 the wrong finding:]
 [IF status open:]
 
-- **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_
+- **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]
 
 [IF status fixed:]
 
@@ -94,7 +94,8 @@ breaking changes as reported by the agents]
 
 [IF routing degraded:] ⚠️ routing degraded — ran on the default model
 
-**Agent summary** [one row per launched agent, using each agent's `title`, in launch order]:
+**Agent summary** [one row per launched agent, using each agent's `title`, in launch order]
+(bands: Critical 9-10 · High 7-8 · Important 5-6 · Suggestions 3-4):
 
 | Agent         | Critical | High    | Important | Suggestions | Confidence |
 | ------------- | -------- | ------- | --------- | ----------- | ---------- |

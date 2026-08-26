@@ -48,9 +48,16 @@ function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
   // Keep enough verified context for a later incremental run to address an old
   // finding after the visible report body has been replaced. Bound each field so
   // the hidden ledger cannot grow past GitHub's comment limit unexpectedly.
-  for (const field of ['evidence', 'recommendation', 'detail', 'confidence']) {
+  // `agents` is the consensus engine's full corroborating-lane display field (see
+  // engine/consensus.cjs combineMembers) — `agent` itself stays the single primary
+  // lane id so the signature above never shifts with corroboration count.
+  for (const field of ['evidence', 'recommendation', 'detail', 'confidence', 'fix', 'agents']) {
     if (raw[field]) clean[field] = String(raw[field]).slice(0, 2000);
   }
+  // Optional boolean carry — set by the consensus engine when a group's member
+  // severities spread >= 4, flagging it for senior-human review rather than
+  // reflexive dismissal (see templates/report.md and skills/review/SKILL.md).
+  if (raw.needsHumanReview) clean.needsHumanReview = true;
   return clean;
 }
 

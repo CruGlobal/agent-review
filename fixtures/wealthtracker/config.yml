@@ -109,6 +109,8 @@ agents:
           'SUPABASE_SERVICE_ROLE',
           'service role',
           'redirect(',
+          'db.query(',
+          'SELECT * FROM',
         ]
     rules: ['rules/security.md']
 

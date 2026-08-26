@@ -18061,9 +18061,10 @@ var require_reportState = __commonJS({
         line,
         message: String(raw.message)
       };
-      for (const field of ["evidence", "recommendation", "detail", "confidence"]) {
+      for (const field of ["evidence", "recommendation", "detail", "confidence", "fix", "agents"]) {
         if (raw[field]) clean[field] = String(raw[field]).slice(0, 2e3);
       }
+      if (raw.needsHumanReview) clean.needsHumanReview = true;
       return clean;
     }
     function cleanPrevious(raw) {
@@ -18742,6 +18743,310 @@ var require_evidence = __commonJS({
   }
 });
 
+// engine/consensus.cjs
+var require_consensus = __commonJS({
+  "engine/consensus.cjs"(exports2, module2) {
+    "use strict";
+    var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
+    function confidenceRank(c) {
+      return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
+    }
+    function tokenize(message) {
+      return String(message || "").toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\d+/g, " ").split(/\s+/).filter(Boolean);
+    }
+    function jaccard(tokensA, tokensB) {
+      const a = new Set(tokensA);
+      const b = new Set(tokensB);
+      let inter = 0;
+      for (const t of a) if (b.has(t)) inter++;
+      const union = (/* @__PURE__ */ new Set([...a, ...b])).size;
+      return union === 0 ? 0 : inter / union;
+    }
+    function sameGroup(a, b) {
+      if (!a.file || a.file !== b.file) return false;
+      const bothNull = a.line == null && b.line == null;
+      const withinRange = a.line != null && b.line != null && Math.abs(a.line - b.line) <= 3;
+      if (!bothNull && !withinRange) return false;
+      return jaccard(tokenize(a.message), tokenize(b.message)) >= 0.5;
+    }
+    function parseLane(value, laneId) {
+      if (value === void 0) {
+        throw new Error(`missing findings for lane "${laneId}"`);
+      }
+      let parsed = value;
+      if (typeof value === "string") {
+        try {
+          parsed = JSON.parse(value);
+        } catch (e) {
+          throw new Error(
+            `unparseable findings JSON for lane "${laneId}": ${e.message}`
+          );
+        }
+      }
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && Array.isArray(parsed.findings)) return parsed.findings;
+      throw new Error(
+        `findings for lane "${laneId}" must be an array or {findings:[...]}`
+      );
+    }
+    function normalizeFinding(raw, laneId) {
+      const line = raw.line == null || raw.line === "" ? null : Number(raw.line);
+      const severity = Number(raw.severity);
+      return {
+        agent: laneId,
+        category: raw.category != null ? String(raw.category) : "",
+        severity: Number.isFinite(severity) ? severity : 0,
+        file: String(raw.file || ""),
+        line: Number.isFinite(line) ? line : null,
+        message: raw.message != null ? String(raw.message) : "",
+        confidence: raw.confidence != null ? String(raw.confidence) : "",
+        evidence: raw.evidence != null ? String(raw.evidence) : "",
+        recommendation: raw.recommendation != null ? String(raw.recommendation) : "",
+        fix: raw.fix != null ? String(raw.fix) : ""
+      };
+    }
+    function validateFinding(f) {
+      if (!f.file) return "missing file";
+      if (!f.message) return "missing message";
+      if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
+        return `invalid severity: ${f.severity}`;
+      }
+      if (f.severity >= 7) {
+        if (f.line === null) return "severity >= 7 requires a line anchor";
+        if (String(f.confidence || "").toLowerCase() !== "high") {
+          return "severity >= 7 requires High confidence";
+        }
+        if (!String(f.evidence || "").trim()) {
+          return "severity >= 7 requires concrete evidence";
+        }
+      }
+      return null;
+    }
+    function canonicalOrder(a, b) {
+      return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
+    }
+    function buildCliques(findings) {
+      const ordered = [...findings].sort(canonicalOrder);
+      const cliques = [];
+      for (const finding of ordered) {
+        const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
+        if (clique) clique.push(finding);
+        else cliques.push([finding]);
+      }
+      return cliques;
+    }
+    function toEntry(m) {
+      return {
+        agent: m.agent,
+        category: m.category,
+        severity: m.severity,
+        file: m.file,
+        line: m.line,
+        message: m.message,
+        confidence: m.confidence,
+        evidence: m.evidence,
+        recommendation: m.recommendation,
+        fix: m.fix,
+        corroboration: 1,
+        needsHumanReview: false,
+        _minSeverity: m.severity,
+        _maxSeverity: m.severity
+      };
+    }
+    function combineMembers(members) {
+      const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
+      const primary = ordered.reduce(
+        (best, m) => m.severity > best.severity ? m : best,
+        ordered[0]
+      );
+      const agents = [
+        ...new Set(
+          ordered.flatMap(
+            (m) => String(m.agents || m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
+          )
+        )
+      ].sort();
+      const bestConfidence = ordered.reduce(
+        (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
+        ordered[0]
+      );
+      const longestField = (field) => ordered.reduce(
+        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
+        ordered[0]
+      )[field];
+      const corroboration = ordered.reduce(
+        (sum, m) => sum + (m.corroboration || 1),
+        0
+      );
+      const minSeverity = Math.min(
+        ...ordered.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
+      );
+      const maxSeverity = Math.max(
+        ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
+      );
+      const weightedSum = ordered.reduce(
+        (sum, m) => sum + m.severity * (m.corroboration || 1),
+        0
+      );
+      const meanSeverity = weightedSum / corroboration;
+      return {
+        agent: primary.agent,
+        agents: agents.join(","),
+        category: primary.category,
+        severity: Math.round(meanSeverity),
+        file: primary.file,
+        line: primary.line,
+        message: primary.message,
+        confidence: bestConfidence.confidence,
+        evidence: longestField("evidence"),
+        recommendation: longestField("recommendation"),
+        fix: primary.fix,
+        corroboration,
+        needsHumanReview: maxSeverity - minSeverity >= 4,
+        _minSeverity: minSeverity,
+        _maxSeverity: maxSeverity
+      };
+    }
+    function unionFind(n) {
+      const parent = Array.from({ length: n }, (_, i) => i);
+      function find(x) {
+        while (parent[x] !== x) {
+          parent[x] = parent[parent[x]];
+          x = parent[x];
+        }
+        return x;
+      }
+      function union(x, y) {
+        const rx = find(x);
+        const ry = find(y);
+        if (rx !== ry) parent[rx] = ry;
+      }
+      return { find, union };
+    }
+    function applyProfileCutoff(entries, profile) {
+      if (profile !== "chill") return entries;
+      return entries.filter((e) => e.severity >= 4 || e.corroboration >= 2);
+    }
+    function sortEntries(entries) {
+      return [...entries].sort(
+        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
+      );
+    }
+    function lineDistance(a, b) {
+      if (a == null && b == null) return 0;
+      if (a == null || b == null) return null;
+      return Math.abs(a - b);
+    }
+    function buildCandidates(entries) {
+      const candidates = [];
+      for (let i = 0; i < entries.length; i++) {
+        for (let j = i + 1; j < entries.length; j++) {
+          const a = entries[i];
+          const b = entries[j];
+          if (a.file !== b.file || !a.file) continue;
+          const dist = lineDistance(a.line, b.line);
+          if (dist == null || dist > 10) continue;
+          const reason = a.line == null && b.line == null ? `both findings in ${a.file} have no line anchor` : `both findings in ${a.file} within ${dist} line(s) (L${a.line} vs L${b.line})`;
+          candidates.push({ a: i, b: j, reason });
+        }
+      }
+      return candidates;
+    }
+    function applyDecisions(entries, decisions) {
+      if (!Array.isArray(decisions)) {
+        throw new Error("consensus: decisions must be an array");
+      }
+      const n = entries.length;
+      const { find, union } = unionFind(n);
+      for (const d of decisions) {
+        const pair = d && (d.merge || d.keep);
+        if (!Array.isArray(pair) || pair.length !== 2) {
+          throw new Error(`consensus: invalid decision entry ${JSON.stringify(d)}`);
+        }
+        const [i, j] = pair;
+        if (!Number.isInteger(i) || !Number.isInteger(j) || i < 0 || j < 0 || i >= n || j >= n) {
+          throw new Error(
+            `consensus: unknown finding index in decision ${JSON.stringify(d)}`
+          );
+        }
+        if (d.merge) union(i, j);
+      }
+      const groupsByRoot = /* @__PURE__ */ new Map();
+      for (let i = 0; i < n; i++) {
+        const root = find(i);
+        if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
+        groupsByRoot.get(root).push(entries[i]);
+      }
+      return [...groupsByRoot.values()].map(
+        (members) => members.length === 1 ? members[0] : combineMembers(members)
+      );
+    }
+    function stripInternal(entry) {
+      const { _minSeverity, _maxSeverity, ...rest } = entry;
+      return rest;
+    }
+    function consensusFrom({
+      plan,
+      findingsByAgent = {},
+      profile = "standard",
+      decisions
+    } = {}) {
+      const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
+      const errors = [];
+      const perLane = {};
+      for (const laneId of laneIds) {
+        try {
+          perLane[laneId] = parseLane(findingsByAgent[laneId], laneId);
+        } catch (e) {
+          errors.push(e.message);
+        }
+      }
+      if (errors.length) {
+        throw new Error(`consensus: ${errors.join("; ")}`);
+      }
+      const all = [];
+      const droppedInvalid = [];
+      for (const laneId of laneIds) {
+        for (const raw of perLane[laneId]) {
+          const finding = normalizeFinding(raw, laneId);
+          const reason = validateFinding(finding);
+          if (reason) {
+            const messageSlice = String(finding.message || "").slice(0, 200);
+            droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
+            console.warn(
+              `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`
+            );
+            continue;
+          }
+          all.push(finding);
+        }
+      }
+      let entries = buildCliques(all).map(
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
+      );
+      const beforeCutoff = entries.length;
+      entries = applyProfileCutoff(entries, profile);
+      const droppedByProfile = beforeCutoff - entries.length;
+      entries = sortEntries(entries);
+      if (decisions !== void 0) {
+        entries = sortEntries(applyDecisions(entries, decisions));
+      }
+      const candidates = buildCandidates(entries);
+      const findings = entries.map(stripInternal);
+      const stats = {
+        raw: all.length,
+        groups: findings.filter((e) => e.corroboration > 1).length,
+        singletons: findings.filter((e) => e.corroboration === 1).length,
+        droppedByProfile,
+        droppedInvalid,
+        needsHumanReview: findings.filter((e) => e.needsHumanReview).length
+      };
+      return { findings, candidates, stats };
+    }
+    module2.exports = { consensusFrom, tokenize, jaccard, parseLane };
+  }
+});
+
 // engine/telemetry.cjs
 var require_telemetry = __commonJS({
   "engine/telemetry.cjs"(exports2, module2) {
@@ -18949,6 +19254,7 @@ var require_cli = __commonJS({
       materializeCase
     } = require_evalSuite();
     var { buildEvidence, verifyEvidenceLedger } = require_evidence();
+    var { consensusFrom } = require_consensus();
     var { validateContextManifest, contextInventory, packContext } = require_contextPack();
     var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
@@ -19070,6 +19376,7 @@ var require_cli = __commonJS({
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -19159,6 +19466,31 @@ var require_cli = __commonJS({
             cfg
           );
           out(JSON.stringify(plan, null, 2));
+          return 0;
+        }
+        case "consensus": {
+          const planPath = flag(rest, "--plan");
+          const dirPath = flag(rest, "--dir");
+          if (!planPath || !dirPath) {
+            out("usage: agent-review consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]");
+            return 1;
+          }
+          const plan = JSON.parse(readFileSync(planPath, "utf8"));
+          const profile = flag(rest, "--profile") || plan.profile || "standard";
+          const findingsByAgent = {};
+          for (const agent of plan.agents || []) {
+            const lanePath = join(dirPath, `${agent.id}.json`);
+            findingsByAgent[agent.id] = existsSync(lanePath) ? readFileSync(lanePath, "utf8") : void 0;
+          }
+          const decisionsPath = flag(rest, "--decisions");
+          const decisions = decisionsPath ? JSON.parse(readFileSync(decisionsPath, "utf8")) : void 0;
+          out(
+            JSON.stringify(
+              consensusFrom({ plan, findingsByAgent, profile, decisions }),
+              null,
+              2
+            )
+          );
           return 0;
         }
         case "emit": {

@@ -51,11 +51,35 @@ same file. Read the templates with the Read tool before substituting.)
 
 ## Stage 0A — Parse Review Mode & Initialize
 
-### Determine Review Mode
-
 The first argument selects the mode; the literal argument `ci` (in any position) selects CI mode.
 
+- **quick** — 3 agents (testing, standards + the first triggered agent); model tiers per-agent (see plan)
+- **deep** — every enabled agent in config.yml; model tiers per-agent (see plan)
+- **auto** — depth resolved from the engine's risk score after Stage 0 planning: score 0 → skip ·
+  LOW → quick · MEDIUM/HIGH → standard · CRITICAL → deep
+- **standard** (default, recommended) — agents selected by the review engine from the diff; model
+  per-agent from config.yml
+
+CI mode is on when the `ci` argument was passed, or `$AGENT_REVIEW_CI` is set to anything
+non-empty. If so, follow **[CI Mode](#ci-mode)** below — it changes what several stages do.
+
+⚠️ **CROSS-STAGE STATE** — read this once, it applies to every bash block below. Each block you
+run is a SEPARATE shell: shell variables do NOT survive from one block to the next. Anything a
+later stage needs is persisted to `/tmp/review_env.sh` at the moment it is computed, and every
+later block starts by sourcing that file. Keep this discipline or later stages will silently
+operate on empty strings.
+
+### Initialize
+
+Mode parsing, CI detection, config validation, and working directories are read-only setup with no
+required decision in between — one shell handles all of it, so a bwrap bind-race rerun replays it
+as a single unit:
+
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+
+# --- Determine Review Mode ---
 MODE="${1:-standard}"
 case "$MODE" in quick|deep|auto) ;; *) MODE="standard" ;; esac   # `ci` alone → standard mode
 
@@ -89,141 +113,57 @@ esac
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ⚠️ CROSS-STAGE STATE — read this once, it applies to every bash block below.
-# Each block you run is a SEPARATE shell: shell variables do NOT survive from one block to the
-# next. Anything a later stage needs is persisted to /tmp/review_env.sh at the moment it is
-# computed, and every later block starts by sourcing that file. Keep this discipline or later
-# stages will silently operate on empty strings.
 : > /tmp/review_env.sh    # fresh state for this review
+# Cross-run state from a prior review on this same machine/runner must never leak into this
+# one: a stale consensus_decisions.json silently merges unrelated findings (or throws an
+# unknown-index error against this run's smaller candidates array), and a stale per-lane
+# findings file can coincidentally pass Stage 2's N cross-check even though no agent wrote it
+# this run.
+rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
+rm -f /tmp/agent_findings/*.json 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
 EOF
-```
 
-### Detect CI Mode
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-# CI mode: the `ci` argument was passed, or $AGENT_REVIEW_CI is set to anything non-empty.
+# --- Detect CI Mode ---
 CI_MODE=""
 case " $* " in *" ci "*) CI_MODE="true" ;; esac
 [ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
-```
 
-If `CI_MODE` is set, follow **[CI Mode](#ci-mode)** below — it changes what several stages do.
-
-### Verify the repo is set up
-
-```bash
+# --- Verify the repo is set up ---
 agent-review config validate || {
   echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
   exit 1
 }
-```
 
-### Initialize Directories
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
+# --- Initialize Directories ---
 mkdir -p /tmp/automated_fixes
+# On a cold runner this dir does not exist yet — without it every lane's findings-file write
+# throws ENOENT, the unchanged-prompt retry reproduces the same error, and the review posts
+# nothing.
+mkdir -p /tmp/agent_findings
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
 [ -z "${CI_MODE:-}" ] && mkdir -p "$REVIEW_DIR/metrics/history"
+
+# --- Enabled agents (used by deep mode; plan agents[] drives quick/standard) ---
+agent-review config get agents > /tmp/config_agents.json || true
 ```
 
----
-
-## CI Mode
-
-Active when the invocation includes the `ci` argument or `$AGENT_REVIEW_CI` is set. In CI mode:
-
-| Stage                        | CI behavior                                                          |
-| ---------------------------- | -------------------------------------------------------------------- |
-| Stage 3/4 (debate/rebuttal)  | **Skipped** unless `$AGENT_REVIEW_DEBATE` is exactly `true`           |
-| Stage 5B (metrics dashboard) | **Skipped entirely** — nothing written under `.claude/review/metrics/` |
-| Stage 6 (report)             | Runs; fixes are described but presented as suggestions only           |
-| Stage 7 (metrics commit)     | **Skipped entirely** — no commits, no pushes, no interactive menu     |
-| Fix scripts                  | **Never written or executed in CI.** Suggestions appear only as ≤10-line diffs in the report's 🔧 Fix suggestions section |
-| Ending                       | Post the report to the PR (below) instead of the interactive menu      |
-
-When debate is skipped, omit the **Debate summary** block from `Review detail & stats` entirely,
-per the skeleton's own instruction — that block is the only place debate output ever appears.
-
-Two CI-sandbox behaviors to expect (both harmless if handled):
-
-- A Bash call may fail with `bwrap: Can't find source path ... No such file or directory`
-  naming a transient file (usually a git lockfile). That is a sandbox bind race, not a real
-  error — rerun the same command; it succeeds on retry.
-- **The run has succeeded ONLY when `$AGENT_REVIEW_COMMENT_OUT` exists and is non-empty.** As
-  your final action, verify it: `wc -c "$AGENT_REVIEW_COMMENT_OUT"` and confirm the head,
-  rollout, ledger, and status markers are present. If that file is missing when you end your
-  turn, the workflow fails and the whole review is discarded — whatever else you accomplished.
-
-### Post the report to the PR (create-or-update)
-
-Always embed the `<!-- agent-review -->` marker so subsequent runs update the same comment
-instead of stacking new ones.
+### Gather PR Context & Diff Manifest
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
-PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
-if [ -z "$PR_NUMBER" ]; then
-  echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
-else
-  # Line 2 records the head SHA this report covers — the next CI run reads it back to review
-  # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
-  # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
-  { echo '<!-- agent-review -->'
-    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
-    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
-    [ -s /tmp/agent_review_ledger.json ] \
-      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
-    [ -s /tmp/agent_review_status.json ] \
-      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
-    echo
-    cat /tmp/agent_review_report.md
-  } > /tmp/agent_review_comment.md
+set -e
 
-  # In the reusable workflow, the model never receives a GitHub token. It only
-  # stages a comment; a deterministic post-step validates the reviewed head and
-  # performs the write. Local CI-like runs retain the direct gh fallback.
-  if [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-    if [ "$AGENT_REVIEW_COMMENT_OUT" != /tmp/agent_review_comment.md ]; then
-      cp /tmp/agent_review_comment.md "$AGENT_REVIEW_COMMENT_OUT"
-    fi
-    echo "✅ Staged review comment for trusted workflow publication"
-  else
-    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-    EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
-      2>/dev/null | head -n1)
-    if [ -n "$EXISTING" ]; then
-      gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md
-      echo "✅ Updated existing review comment ($EXISTING)"
-    else
-      gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md
-      echo "✅ Posted review comment"
-    fi
-  fi
-fi
-```
-
----
-
-## Stage 0 — Context Gathering & Risk Assessment
-
-### Gather PR Context
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-
+# --- Gather PR Context ---
 # Resolve the PR number ONCE, here, and persist it — every later `gh pr view`/`gh pr comment`
 # depends on it. CI checks out a PR as a DETACHED HEAD, so a bare `gh pr view` has no branch to
 # resolve and returns nothing; the workflow therefore exports $PR_NUMBER, which wins. Locally
 # (on a PR branch) the fallback resolves it from the branch instead.
-PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
+PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null || true)}"
 [ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context — local review"
 
 # One id per review run, so successive runs never clobber each other's pending findings.
@@ -239,15 +179,10 @@ echo "Today is: $DAY_OF_WEEK"
 cat >> /tmp/review_env.sh <<EOF
 export DAY_OF_WEEK="$DAY_OF_WEEK" PR_NUMBER="$PR_NUMBER" REVIEW_ID="$REVIEW_ID"
 EOF
-```
 
-Build the diff manifest the whole review runs on:
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-
-BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null)}"
-HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null)}"
+# --- Build the diff manifest the whole review runs on ---
+BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
+HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
 
 # Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
 # inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
@@ -260,7 +195,7 @@ if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
     LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   else
-    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
+    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
     LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
       --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
       | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
@@ -270,7 +205,7 @@ if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
      && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
     if [ "$(git rev-parse "$LAST_REVIEWED")" = "$(git rev-parse "$HEAD_REF")" ]; then
       if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-        cp "$AGENT_REVIEW_PREVIOUS_COMMENT" "$AGENT_REVIEW_COMMENT_OUT"
+        cp "$AGENT_REVIEW_PREVIOUS_COMMENT" "$AGENT_REVIEW_COMMENT_OUT" || true
       fi
       echo "✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting."
       exit 0
@@ -292,7 +227,7 @@ else
   # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
   # (base_branch is optional), so guard on BOTH empty and "undefined" — otherwise RANGE would
   # degrade to "..HEAD" and the whole review would silently run on an empty diff.
-  BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null)
+  BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null || true)
   if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
     BASE_BRANCH=main
   fi
@@ -339,7 +274,7 @@ if [ ! -s /tmp/changed_files.txt ]; then
       sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
         -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
         -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
-        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT"
+        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
     fi
     echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
     exit 0
@@ -355,28 +290,30 @@ export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
 EOF
 ```
 
-Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
-excluded from risk scoring and agent selection by the engine — agents should not raise findings
-against them either.
+**Checkpoint — set REVIEW_SCOPE (not a bash turn; a decision).** Read the changed-file list and
+diff stat from the previous block's output (`/tmp/changed_files.txt`, `/tmp/diff_stat.txt`) and
+set REVIEW_SCOPE (`single_feature` | `multi_feature` | `cross_cutting` | `core_infra`) **before**
+running the next block; it defaults to `single_feature` only when the footprint genuinely is one
+— use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature
+areas or core infrastructure. Carry your decision into the next block by setting
+`REVIEW_SCOPE="<value>"` right after that block's `set -e` line, overriding the shown default.
 
-### Read Project Standards
-
-Read the repo's `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` (whichever exist) to understand the
-project's conventions. That context is shared with all agents via the archetype prompt, which
-instructs each agent to read them too.
-
-### Build the Review Plan
+### Build the Review Plan & Load Evidence
 
 Risk scoring, agent selection, special-pattern detection, and rule resolution are driven by the
 declarative review core (`.claude/review/config.yml`) — never computed inline here:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
+set -e
+REVIEW_SCOPE="${REVIEW_SCOPE:-single_feature}"   # ← set at the checkpoint above
+
+# --- Build the Review Plan ---
 agent-review plan \
   --files /tmp/changed_files.txt \
   --stat /tmp/diff_stat.txt \
   --diff /tmp/pr_diff.txt \
-  --scope "${REVIEW_SCOPE:-single_feature}" \
+  --scope "$REVIEW_SCOPE" \
   --mode "$MODE" \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
@@ -390,18 +327,14 @@ else
     --files /tmp/full_changed_files.txt \
     --stat /tmp/full_diff_stat.txt \
     --diff /tmp/pr_full_diff.txt \
-    --scope "${REVIEW_SCOPE:-single_feature}" \
+    --scope "$REVIEW_SCOPE" \
     --mode "$MODE" \
     > /tmp/review_gate_plan.json
 fi
 cat /tmp/review_gate_plan.json
-```
 
-### Load deterministic evidence and cross-repository context
-
-The reusable workflow creates these artifacts outside the model. Treat them as immutable inputs:
-
-```bash
+# --- Load deterministic evidence and cross-repository context ---
+# The reusable workflow creates these artifacts outside the model. Treat them as immutable inputs.
 if [ -s "${AGENT_REVIEW_EVIDENCE:-}" ]; then
   cp "$AGENT_REVIEW_EVIDENCE" /tmp/review_evidence.json
 else
@@ -412,7 +345,7 @@ if [ -s "${AGENT_REVIEW_CONTEXT_INVENTORY:-}" ]; then
 else
   echo '{"version":1,"repositories":[]}' > /tmp/review_context.json
 fi
-node - <<'NODE'
+node - <<'NODE' || true
 const evidence = require('/tmp/review_evidence.json');
 const context = require('/tmp/review_context.json');
 const ci = evidence.ci && evidence.ci.summary;
@@ -424,21 +357,11 @@ for (const repo of context.repositories || []) {
 NODE
 ```
 
-Every `staticFindings[]` entry is a trusted, changed-line-anchored finding and MUST be copied into
-`/tmp/consensus_findings.json` unchanged before Stage 6 emission. Agents may add corroborating
-context but may not suppress, downgrade, or duplicate it. CI failures are evidence to investigate,
-not automatic code-review blockers: distinguish a failure caused by this diff from a pending,
-flaky, or unrelated check. The workflow verifies the final ledger contains every deterministic
-static signature and rejects publication otherwise.
+Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
+excluded from risk scoring and agent selection by the engine — agents should not raise findings
+against them either.
 
-`/tmp/review_context.json` contains only a bounded inventory. Repositories marked `available` are
-under `$AGENT_REVIEW_CONTEXT_DIR/<id>/`. Read only inventory-listed files relevant to the changed
-API/schema/contract. Cite the repository id, pinned SHA, and file when cross-repo evidence changes
-a finding. Never search outside those roots.
-
-`REVIEW_SCOPE` is the heuristic scope you set from the change footprint (default `single_feature`;
-use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature areas
-or core infrastructure). The plan JSON has this shape:
+The plan JSON has this shape:
 
 ```json
 {
@@ -469,6 +392,120 @@ or core infrastructure). The plan JSON has this shape:
   ]
 }
 ```
+
+---
+
+## CI Mode
+
+Active when the invocation includes the `ci` argument or `$AGENT_REVIEW_CI` is set. In CI mode:
+
+| Stage                        | CI behavior                                                          |
+| ---------------------------- | -------------------------------------------------------------------- |
+| Stage 3/4 (debate/rebuttal)  | **Skipped** unless `$AGENT_REVIEW_DEBATE` is exactly `true`           |
+| Stage 5B (metrics dashboard) | **Skipped entirely** — nothing written under `.claude/review/metrics/` |
+| Stage 6 (report)             | Runs; fixes are described but presented as suggestions only           |
+| Stage 7 (metrics commit)     | **Skipped entirely** — no commits, no pushes, no interactive menu     |
+| Fix scripts                  | **Never written or executed in CI.** Suggestions appear only as ≤10-line diffs in the report's 🔧 Fix suggestions section |
+| Ending                       | Post the report to the PR (below) instead of the interactive menu      |
+
+When debate is skipped, omit the **Debate summary** block from `Review detail & stats` entirely,
+per the skeleton's own instruction — that block is the only place debate output ever appears.
+
+Two CI-sandbox behaviors to expect (both harmless if handled):
+
+- A Bash call may fail with `bwrap: Can't find source path ... No such file or directory`
+  naming a transient file (usually a git lockfile). That is a sandbox bind race, not a real
+  error — rerun the same command; it succeeds on retry.
+- **The run has succeeded ONLY when `$AGENT_REVIEW_COMMENT_OUT` exists and is non-empty.** As
+  your final action, verify it: `wc -c "$AGENT_REVIEW_COMMENT_OUT"` and confirm the head,
+  rollout, ledger, and status markers are present. If that file is missing when you end your
+  turn, the workflow fails and the whole review is discarded — whatever else you accomplished.
+
+### Post the report to the PR (create-or-update)
+
+Always embed the `<!-- agent-review -->` marker so subsequent runs update the same comment
+instead of stacking new ones.
+The marker lines are emitted ONLY by the node commands below — never type or edit them by hand; hand-transcribed JSON mangles escapes.
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
+if [ -z "$PR_NUMBER" ]; then
+  echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
+else
+  # Line 2 records the head SHA this report covers — the next CI run reads it back to review
+  # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
+  # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
+  { echo '<!-- agent-review -->'
+    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
+    [ -s /tmp/agent_review_ledger.json ] \
+      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+    [ -s /tmp/agent_review_status.json ] \
+      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+    echo
+    cat /tmp/agent_review_report.md
+  } > /tmp/agent_review_comment.md
+
+  # SELF-CHECK — catches hand-transcribed marker lines (mangled escapes) before they ever reach
+  # the trusted post-job. Reads the just-assembled file itself (not $AGENT_REVIEW_COMMENT_OUT,
+  # which may still hold a stale file from a prior run at this point). The marker lines above
+  # MUST come only from the node commands; never hand-write or hand-edit them.
+  node -e '
+const fs = require("fs");
+const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+for (const name of ["ledger", "status"]) {
+  const m = c.match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
+  if (m) JSON.parse(m[1]);
+}
+console.log("marker self-check OK");
+' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
+
+  # In the reusable workflow, the model never receives a GitHub token. It only
+  # stages a comment; a deterministic post-step validates the reviewed head and
+  # performs the write. Local CI-like runs retain the direct gh fallback.
+  if [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+    if [ "$AGENT_REVIEW_COMMENT_OUT" != /tmp/agent_review_comment.md ]; then
+      cp /tmp/agent_review_comment.md "$AGENT_REVIEW_COMMENT_OUT"
+    fi
+    echo "✅ Staged review comment for trusted workflow publication"
+  else
+    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+    EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
+      2>/dev/null | head -n1)
+    if [ -n "$EXISTING" ]; then
+      gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md
+      echo "✅ Updated existing review comment ($EXISTING)"
+    else
+      gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md
+      echo "✅ Posted review comment"
+    fi
+  fi
+fi
+```
+
+---
+
+## Stage 0 — Context Gathering & Risk Assessment
+
+### Read Project Standards
+
+Read the repo's `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` (whichever exist) to understand the
+project's conventions. That context is shared with all agents via the archetype prompt, which
+instructs each agent to read them too.
+
+Every `staticFindings[]` entry is a trusted, changed-line-anchored finding and MUST be copied into
+`/tmp/consensus_findings.json` unchanged before Stage 6 emission. Agents may add corroborating
+context but may not suppress, downgrade, or duplicate it. CI failures are evidence to investigate,
+not automatic code-review blockers: distinguish a failure caused by this diff from a pending,
+flaky, or unrelated check. The workflow verifies the final ledger contains every deterministic
+static signature and rejects publication otherwise.
+
+`/tmp/review_context.json` contains only a bounded inventory. Repositories marked `available` are
+under `$AGENT_REVIEW_CONTEXT_DIR/<id>/`. Read only inventory-listed files relevant to the changed
+API/schema/contract. Cite the repository id, pinned SHA, and file when cross-repo evidence changes
+a finding. Never search outside those roots.
 
 ### Auto Mode Resolution
 
@@ -611,10 +648,8 @@ plan's `agents[]` has:
   first entry not already picked (the first triggered agent). If any of those ids do not exist in
   this repo's config, just take the first three plan entries.
 
-```bash
-# Enabled agents (used by deep mode); plan agents[] drives quick/standard.
-agent-review config get agents > /tmp/config_agents.json
-```
+`/tmp/config_agents.json` (used by deep mode; plan `agents[]` drives quick/standard) was already
+fetched in Stage 0A's setup block, alongside config validation.
 
 Announce the selection, including each agent's `matchedBy` reason, e.g.:
 
@@ -669,32 +704,52 @@ land" and stopping IS the failure mode; do not do it.
 
 Display: "🚀 Launching [N] specialized review agents in parallel..."
 
-### Approved learnings (learning layer)
+### Approved learnings & dependency impact
 
-Before assembling prompts, fetch approved `rule` learnings (gated on the learning layer):
+Before assembling prompts, fetch approved `rule` learnings (gated on the learning layer) and
+compute dependency impact (Stage 1B, gated on the index being enabled in config) — both are
+read-only lookups nothing else here depends on, so one shell handles both:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+
+# --- Approved learnings (learning layer) ---
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
   agent-review rules > /tmp/review_rules.json 2>/dev/null || echo "[]" > /tmp/review_rules.json
 else
   echo "[]" > /tmp/review_rules.json
 fi
+
+# --- Dependency impact analysis (Stage 1B) ---
+echo "🔍 Analyzing dependency impact (index engine)..."
+if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
+  if [ -n "${BASE_REF:-}" ]; then
+    agent-review impact --base "$BASE_REF" > /tmp/review_impact.json || true
+  else
+    agent-review impact > /tmp/review_impact.json || true
+  fi
+  cat /tmp/review_impact.json
+else
+  echo "ℹ️  Index disabled in config.yml — skipping impact analysis."
+fi
+echo "✅ Dependency analysis complete"
 ```
 
-Each entry is `{ paths, ruleText, agent }` — a repository-specific rule ratified by a human from
-prior review feedback.
+Each learnings entry is `{ paths, ruleText, agent }` — a repository-specific rule ratified by a
+human from prior review feedback.
 
 ### Assemble each agent prompt from the archetype template
 
 There are no per-agent prompts in this skill. Every agent gets the SAME prompt skeleton — the
-plugin's `templates/archetype.md` (see the path note at the top of this file) — with seven
+plugin's `templates/archetype.md` (see the path note at the top of this file) — with ten
 placeholders filled in. Read the template once, then for EACH entry in the launch list produce one
 filled copy:
 
 | Placeholder             | Fill with                                                                                                                                                                                                                                            |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{TITLE}}`             | The agent's `title`. Fallback when absent: the `id` with `-`/`_` turned into spaces and each word capitalized, plus `" Review Agent"` (e.g. `data-integrity` → `Data Integrity Review Agent`).                                                          |
-| `{{EXPERTISE}}`         | The agent's `expertise` string. Fallback: empty (leave the line's value blank rather than inventing expertise).                                                                                                                                        |
+| `{{EXPERTISE}}`         | The agent's `expertise` string. Fallback when absent: derive the lane instead of leaving it blank — fill `<agent title>, judged against: <comma-joined basenames of its rules[] docs>` (e.g. "Architecture Review Agent, judged against: architecture.md"). Never leave the line's value blank; a blank lane means everything looks out-of-scope and the agent silently returns zero findings.       |
 | `{{RISK_CONTEXT}}`      | A bullet block from the current review plan: `- Review-delta risk: <score> (<level>)`, `- Full-PR gate risk: <gate score> (<gate level>)`, `- Special patterns: <gate risk.special joined, or "none">`, `- Unmatched risk paths: <gate risk.factors.unmatchedFiles joined, or "none">`, `- Changed Files in this pass: <N>`, `- Lines Changed in this pass: +<X> -<Y>`, `- Selected because: <matchedBy>`. |
 | `{{PROFILE_INSTRUCTION}}` | From the plan's `profile`: `chill` → "Report only high-confidence, severity ≥ 7 findings; suppress nits." · `standard` → "Report findings at all severities per the output format above." · `assertive` → "Report all findings including low-severity suggestions." |
 | `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against `$REVIEW_DIR` (`rules/security.md` → `$REVIEW_DIR/rules/security.md`), each preceded by a `----- <path> -----` line. In CI, `$AGENT_REVIEW_DIR` points to the immutable base-branch copy; never read rule docs from the PR checkout. If a listed doc is missing, note it in your output and continue with the rest. |
@@ -702,6 +757,7 @@ filled copy:
 | `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only, and only when `/tmp/review_impact.json` exists: the **actual dependents, inlined** (see the block below). Empty string for every other agent, and when impact was not computed. |
 | `{{EVIDENCE}}`          | A compact rendering of `/tmp/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
 | `{{CONTEXT}}`           | A compact rendering of `/tmp/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
+| `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `/tmp/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
 begin with its own step number and read as a standalone step. Build it from
@@ -746,27 +802,10 @@ After launching, display:
 
 ## Stage 1B — Dependency Impact Analysis (Parallel)
 
-Compute dependency impact from the persisted import graph (not grep). Run this **before** Stage 1
-whenever the launch list contains the `architecture` or `data-integrity` agent — their `{{IMPACT}}`
-slot needs the output; otherwise run it in parallel while the agents work. It is fast. Gated on the
-index being enabled in config:
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-echo "🔍 Analyzing dependency impact (index engine)..."
-
-if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
-  if [ -n "${BASE_REF:-}" ]; then
-    agent-review impact --base "$BASE_REF" > /tmp/review_impact.json
-  else
-    agent-review impact > /tmp/review_impact.json
-  fi
-  cat /tmp/review_impact.json
-else
-  echo "ℹ️  Index disabled in config.yml — skipping impact analysis."
-fi
-echo "✅ Dependency analysis complete"
-```
+Dependency impact is computed from the persisted import graph (not grep) — already done, in
+**[Approved learnings & dependency impact](#approved-learnings--dependency-impact)** above, before
+Stage 1's agents launch, since the `architecture`/`data-integrity` agents' `{{IMPACT}}` slot needs
+the output.
 
 The JSON report has these fields:
 
@@ -787,24 +826,39 @@ you do not inline is invisible to them.
 
 Wait for all agents to complete and display progress, one line per launched agent. Waiting means
 actively collecting inside this same turn (TaskOutput per pending agent) — never ending the turn
-to "wait" for notifications; in CI that kills the run:
+to "wait" for notifications; in CI that kills the run.
+
+Each agent's final Task message is exactly one line — `done — <N> findings, max severity <X>`
+(the archetype's return contract) — never a pasted report. Do not trust `<N>` on its own; cross-
+check it against the findings file the agent actually wrote:
+
+- Read `/tmp/agent_findings/<agent id>.json`.
+- The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
+  (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
+  or `findings.length` does not equal the reported `<N>`.
+- On a failed cross-check: relaunch that lane once; a lane that fails twice fails the run —
+  no report is posted. Use the lane's original Stage 1 prompt, unchanged, for the retry.
+  Optionally append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create it if
+  absent) if that helps you track which lane(s) failed — but nothing downstream may read that
+  file into any status or report field; it is scratch state for you, not a report input.
+  **A review with an incomplete lane must not produce a report at all** — an incomplete review
+  is not a property of the diff, and folding it into `irreversible` or any other status field
+  would post a false, un-clearable banner. If the retry fails the same cross-check again:
+  - **CI mode:** do not write `$AGENT_REVIEW_COMMENT_OUT`, do not proceed to Stage 3 onward,
+    print exactly this loud final line, and end your turn:
+    `❌ review incomplete: lane <id> failed twice — no report posted (the workflow will fail closed)`.
+    The publish step's existing empty-report check (see CI Mode above) then fails the run; the
+    transcript carries the diagnosis.
+  - **Local (non-CI) mode:** report the failed lane to the user the same way — the loud line
+    above — and stop; do not continue to debate, consensus, or the report.
+
+Display:
 
 ```
 Agent Reviews Complete:
-✅ [Agent title] - Found [X] critical, [Y] concerns
-✅ [Agent title] - Found [X] critical, [Y] concerns
+✅ [Agent title] - <N> findings, max severity <X>
+✅ [Agent title] - <N> findings, max severity <X>
 ```
-
-Parse each agent's output and extract:
-
-- Critical issues with severity scores
-- Important concerns with severity scores
-- Suggestions
-- Rule checklist results (if the agent emitted that section)
-- Questions for other agents
-- Confidence level
-
-Store these in structured form for the debate rounds.
 
 ---
 
@@ -879,8 +933,8 @@ Facilitate the first debate round where agents challenge each other.
 
 Display: "🗣️ Starting cross-examination debate round..."
 
-For each launched agent, launch a new Task with their original findings plus all other agents'
-findings.
+For each launched agent, launch a new Task pointing at their own findings file plus every other
+launched agent's findings file — never pasted findings text.
 
 ### Debate Prompt Template
 
@@ -900,10 +954,11 @@ Use the Task tool for each agent with:
 You are the [Agent Title] in the cross-examination debate phase.
 
 YOUR ORIGINAL FINDINGS:
-[Paste that agent's original review output with severity scores]
+Read /tmp/agent_findings/<this agent's id>.json.
 
 OTHER AGENTS' FINDINGS:
-[All other agents' findings with severity scores]
+Read every other launched agent's /tmp/agent_findings/<their id>.json — one path per lane, never
+pasted inline.
 
 MISSION: Review other agents' findings from your specialized perspective.
 
@@ -984,7 +1039,7 @@ Use the Task tool with:
 You are the [Agent Title] responding to challenges from debate round 1.
 
 YOUR ORIGINAL FINDINGS:
-[Their original findings with severity scores]
+Read /tmp/agent_findings/<this agent's id>.json.
 
 CHALLENGES RAISED AGAINST YOU:
 [List each challenge with severity score adjustments]
@@ -1036,52 +1091,72 @@ Launch rebuttal tasks for all challenged agents.
 
 ## Stage 5 — Consensus Synthesis
 
-Analyze all findings, debates, and final severity scores to build consensus.
+Grouping, severity averaging, and corroboration counting are computed by the deterministic
+engine — never in context. This stage's job is to run it, resolve any ambiguous near-miss pairs
+it surfaces, and land a plain findings array at `/tmp/consensus_findings.json` for Stage 6.
 
-**Process:**
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+echo "📊 Synthesizing consensus..."
+PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
+agent-review consensus \
+  --plan /tmp/review_plan.json \
+  --dir /tmp/agent_findings \
+  --profile "$PROFILE" \
+  > /tmp/consensus_raw.json
+```
 
-1. Collect all final findings with severity scores
-2. Group by similarity (same file:line or same general issue)
-3. Calculate average severity score for each finding
-4. Count agent agreement
+`agent-review consensus` is fail-closed: a missing findings file, or one that fails
+`JSON.parse`, for any launched lane makes it exit non-zero naming that lane — surface that error
+verbatim, never paper over it by fabricating findings or silently retrying. Every launched lane
+should already have a valid findings file by this stage — a lane that failed its Stage 2
+cross-check twice stopped the run before reaching here.
 
-**Consensus Levels (using severity scores):**
+Read `/tmp/consensus_raw.json`. Its `candidates` array names pairs of output findings (by index)
+that are close — same file, within 10 lines — but the clique rule deliberately left unmerged
+rather than risk conflating two distinct findings. When `candidates` is non-empty, resolve every
+pair with **one bounded model pass**: for each pair, read only the two named findings
+(`findings[a]` and `findings[b]` in `/tmp/consensus_raw.json` — never the full per-agent output)
+and decide whether they describe the same underlying issue. Never re-open findings outside the
+named pairs. Write the decisions to `/tmp/consensus_decisions.json`:
 
-- **Average 9-10, 4+ agents**: CRITICAL BLOCKER
-- **Average 8-9, 3+ agents**: HIGH PRIORITY BLOCKER
-- **Average 7-8, 3+ agents**: IMPORTANT (should fix before merge)
-- **Average 5-7, 2+ agents**: MEDIUM PRIORITY
-- **Average 3-5, 1-2 agents**: SUGGESTION
-- **Unresolved Debate** (agents couldn't agree, severity differs by 4+): NEEDS HUMAN REVIEW
+```json
+[
+  { "merge": [3, 7] },
+  { "keep": [1, 9] }
+]
+```
 
-When fewer agents ran than a tier's agent count requires (small reviews, quick mode, or CI without
-debate), fall back to the severity average alone and note the reduced corroboration.
+`merge` combines the pair into one entry per the engine's documented merge rules (severity =
+rounded mean, line/message/fix = the higher-severity member's, evidence/recommendation =
+whichever is longer); `keep` is a no-op kept for auditability. Skip writing
+`/tmp/consensus_decisions.json` entirely when `candidates` was empty — the first invocation's
+output is already final. Either way, this block re-runs the command when decisions exist and then
+extracts the plain findings array Stage 6 expects:
 
-**Profile-scaled reporting cutoff** (from the plan's `profile`) — apply the same floor the agents
-used so consensus output stays consistent with what was collected:
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
+if [ -s /tmp/consensus_decisions.json ]; then
+  agent-review consensus \
+    --plan /tmp/review_plan.json \
+    --dir /tmp/agent_findings \
+    --profile "$PROFILE" \
+    --decisions /tmp/consensus_decisions.json \
+    > /tmp/consensus_raw.json
+fi
+node -e 'const r = require("/tmp/consensus_raw.json"); process.stdout.write(JSON.stringify(r.findings, null, 2))' \
+  > /tmp/consensus_findings.json
+```
 
-- `chill` → only surface consensus findings with average severity ≥ 7; drop MEDIUM/SUGGESTION tiers.
-- `standard` → report all tiers above (default).
-- `assertive` → report all tiers, including low-severity suggestions, and do not collapse them.
-
-For each grouped finding, determine: final severity (average), classification, which agents flagged
-it, debate summary, consensus strength.
-
-Display a summary:
+Display a summary from `/tmp/consensus_raw.json`'s `stats`:
 
 ```
 📊 Consensus Analysis:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Critical Blockers (Severity 9-10): [N]
-High Priority Blockers (Severity 8-9): [N]
-Important Issues (Severity 7-8): [N]
-Medium Priority (Severity 5-7): [N]
-Suggestions (Severity 3-5): [N]
-Unresolved Debates: [N]
-
-Total Findings: [N]
-Average Confidence: [High/Medium/Low]
+Raw findings: [stats.raw]   Groups: [stats.groups]   Singletons: [stats.singletons]
+Dropped by profile: [stats.droppedByProfile]   Needs human review: [stats.needsHumanReview]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -1100,7 +1175,8 @@ PR_NUM="${PR_NUMBER:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number -q .n
 CURRENT_DATE=$(date +%Y-%m-%d)
 AUTHOR=$(git config user.name || echo "Developer")
 
-# Average consensus severity for this review (from Stage 5) — substitute the real number.
+# Average consensus severity for this review — derive the mean `severity` across
+# /tmp/consensus_findings.json's entries and substitute the real number.
 CURRENT_SEVERITY="[X.X]"
 
 cat >> /tmp/review_env.sh <<EOF
@@ -1211,10 +1287,15 @@ Write the consensus findings as a JSON array to `/tmp/consensus_findings.json`. 
 shaped `{ agent, category, severity, file, line, message, confidence, evidence, recommendation }`.
 For severity ≥ 7, `confidence` must be `High`, `line` must anchor to an added/modified line, and
 `evidence` must name the verified execution path or violated contract. Then emit the findings and
-apply approved learnings when that layer is enabled:
+apply approved learnings when that layer is enabled, then build the hidden findings ledger from
+the result — both steps are read-only engine calls with no required decision in between, so one
+shell handles them (see **Build the findings ledger** below for what the second half does):
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, set once in Stage 0
+. /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, INCREMENTAL, PR_NUMBER, set in Stage 0
+set -e
+
+# --- Capture consensus for the learning layer ---
 # Deterministic AST matches are not subject to model consensus. Prepend them
 # unchanged; the trusted publishing step verifies all their signatures survive
 # filtering and ledger construction.
@@ -1238,6 +1319,29 @@ else
   node -e 'const f=require("/tmp/consensus_findings.json"); process.stdout.write(JSON.stringify({kept:f,suppressed:[]},null,2))' \
     > /tmp/review_filtered.json
 fi
+
+# --- Build the findings ledger ---
+echo '[]' > /tmp/previous_agent_review_ledger.json
+if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
+  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
+    tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+      > /tmp/previous_agent_review_ledger.json
+  else
+    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
+      2>/dev/null | tr -d '\r' \
+      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+      > /tmp/previous_agent_review_ledger.json
+  fi
+  [ -s /tmp/previous_agent_review_ledger.json ] \
+    || echo '[]' > /tmp/previous_agent_review_ledger.json
+fi
+agent-review ledger \
+  --findings /tmp/review_filtered.json \
+  --previous /tmp/previous_agent_review_ledger.json \
+  > /tmp/agent_review_ledger.json
 ```
 
 Report the `kept` findings from `/tmp/review_filtered.json` and note the count of `suppressed`
@@ -1270,30 +1374,8 @@ the feedback store):
 - The ledger also carries bounded `evidence` and `recommendation` fields. This preserves enough
   context to address an older open finding after the visible report is updated by a later run.
 
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-echo '[]' > /tmp/previous_agent_review_ledger.json
-if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
-  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
-    tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
-      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-      > /tmp/previous_agent_review_ledger.json
-  else
-    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
-      2>/dev/null | tr -d '\r' \
-      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-      > /tmp/previous_agent_review_ledger.json
-  fi
-  [ -s /tmp/previous_agent_review_ledger.json ] \
-    || echo '[]' > /tmp/previous_agent_review_ledger.json
-fi
-agent-review ledger \
-  --findings /tmp/review_filtered.json \
-  --previous /tmp/previous_agent_review_ledger.json \
-  > /tmp/agent_review_ledger.json
-```
+Computed above, in the same shell as **Capture consensus for the learning layer** — see that
+block for the exact commands.
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 
@@ -1330,6 +1412,10 @@ Purely additive changes (new column, new table, new index, new code paths, confi
 **reversible**. When genuinely uncertain, classify irreversible — the only cost is a human
 look. List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
+
+A lane that failed its Stage 2 cross-check twice never reaches this point — the run already
+stopped with no report at all (see Stage 2). Reversibility judges the diff itself; it is never
+used to signal incomplete review coverage.
 
 **Status JSON.** Write the safety judgment first as `/tmp/agent_review_safety.json`:
 
@@ -1375,14 +1461,26 @@ re-review does.
 ### Write the report
 
 Read the plugin's report skeleton — `../../templates/report.md`, relative to this skill file — and
-fill it in from the consensus, risk assessment, impact analysis, and agent reports. The skeleton's
-bracketed placeholders and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where.
-Honor its conditionals:
+fill it in from `/tmp/consensus_findings.json` (consensus JSON), the full-PR gate plan
+(`/tmp/review_gate_plan.json`), and the status marker (`/tmp/agent_review_status.json`) built
+above — plus the dependency impact analysis and each agent's own
+`/tmp/agent_findings/<id>.json` for its summary-table row. The skeleton's bracketed placeholders
+and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. Honor its conditionals:
 
 - Set Rollout from `$AGENT_REVIEW_ROLLOUT_MODE` (default `advisory`). In `shadow`, say plainly that
   the report cannot approve or block the PR. Fill deterministic evidence from
   `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
+- Each finding's `agent` field is the primary (highest-severity) corroborating lane only — kept
+  single so the ledger signature never shifts with corroboration count. Wherever a finding names
+  its agent(s) for a human reader — the `_([agent])_` suffix on BLOCKERS/OTHER FINDINGS lines and
+  the **Per-agent perspectives** list — source the full corroborating set from the finding's
+  `agents` field (comma-joined), falling back to `agent` when `agents` is absent (a singleton,
+  uncorroborated finding).
+- Append ` · 🤔 needs-human-review` to a BLOCKERS/OTHER FINDINGS line only when that ledger entry
+  carries `needsHumanReview: true` (severity spread >= 4 across the finding's corroborating
+  members — a real disagreement, not something to dismiss reflexively); omit the suffix
+  otherwise.
 - Omit the **Debate summary** block from `Review detail & stats` entirely when debate rounds did
   not run. That block is the only place debate output ever appears in the report.
 - Omit the learning-layer line when the learning layer is disabled.
@@ -1542,6 +1640,20 @@ case "$choice" in
         echo
         cat /tmp/agent_review_report.md
       } > /tmp/agent_review_comment.md
+
+      # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
+      # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
+      # only from the node commands; never hand-write or hand-edit them.
+      node -e '
+const fs = require("fs");
+const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+for (const name of ["ledger", "status"]) {
+  const m = c.match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
+  if (m) JSON.parse(m[1]);
+}
+console.log("marker self-check OK");
+' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
+
       EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
         --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
         2>/dev/null | head -n1)
@@ -1600,7 +1712,9 @@ Display:
 🔴 [N] High Priority Issues
 ⚠️  [N] Important Issues
 💡 [N] Suggestions
-🤔 [N] Unresolved debates
+[IN CI MODE, OMIT THE LINE BELOW ENTIRELY WHEN DEBATE ROUNDS DID NOT RUN — same condition as the
+Debate summary block's omission. Otherwise:] 🤔 [N] Unresolved debates ([N] = ledger entries
+carrying `needsHumanReview: true`, not a debate-specific count)
 
 **Suggested Fixes**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

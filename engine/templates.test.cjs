@@ -31,6 +31,7 @@ const PLACEHOLDERS = [
   'IMPACT',
   'EVIDENCE',
   'CONTEXT',
+  'AGENT_ID',
 ];
 
 test('archetype.md uses exactly the documented placeholders', () => {
@@ -326,6 +327,23 @@ test('the local e2e harness exists and derives its contract from the CI workflow
   assert.ok(script.includes('agent-review-ledger'), 'harness must apply the publish-step validation');
 });
 
+test('the report skeleton surfaces needsHumanReview and defines the agent-summary severity bands', () => {
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(
+    report.includes('_([agent])_[ · 🤔 needs-human-review]'),
+    'BLOCKERS/OTHER FINDINGS lines must carry the optional needs-human-review suffix',
+  );
+  assert.ok(
+    report.includes('Critical 9-10 · High 7-8 · Important 5-6 · Suggestions 3-4'),
+    'Agent summary must define its severity bands to match the SEVERITY ANCHORS',
+  );
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(
+    /agents.*field.*fallback.*agent|falling back to `agent`/.test(skill),
+    'the fill rules must tell the model to source the display agent list from `agents`, falling back to `agent`',
+  );
+});
+
 test('the report skeleton and commit message never emit bare #N', () => {
   const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
   assert.ok(!report.includes('**#[N]**'), 'ledger skeleton lines must use the code-span form **`#[N]`**');
@@ -396,10 +414,10 @@ test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-fo
   const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
   const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
   assert.deepEqual(matchedLines, [
-    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
   ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
@@ -425,6 +443,47 @@ test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () 
   assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
 });
 
+test('the archetype severity guidance never contradicts the pinned SEVERITY ANCHORS', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  // The old band sentence claimed Critical/BLOCKING is 10/10 and Concerns are 6-9/10 — directly
+  // contradicting the SEVERITY ANCHORS (9-10 critical, 7-8 correctness) below it, which is what
+  // caused a 7/10 finding to be rated as merely a "Concern" instead of a blocker.
+  assert.ok(
+    !archetype.includes('Critical/BLOCKING is 10/10'),
+    'the contradictory old severity-band sentence must not survive',
+  );
+  assert.ok(
+    archetype.includes('Severity ≥ 7 is a BLOCKER'),
+    'the ≥7-is-a-blocker line must replace the old band sentence',
+  );
+});
+
+test('the archetype makes exploitable security/data-loss/corruption defects every lane\'s duty, not just the owning specialist\'s', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(
+    archetype.includes('CROSS-CUTTING DUTY:'),
+    'a CROSS-CUTTING DUTY paragraph must exist near the severity anchors',
+  );
+  assert.ok(
+    /must never go unreported because it ["'“]?belongs["'”]? to a lane/.test(archetype),
+    'the duty must say a >=7 defect must never go unreported for belonging to a lane that may not be running',
+  );
+});
+
+test('the archetype hands off findings as a JSON file with a one-line return', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(archetype.includes('/tmp/agent_findings/'), 'findings-file path missing');
+  assert.ok(archetype.includes('{{AGENT_ID}}'), 'AGENT_ID placeholder missing');
+  assert.ok(
+    archetype.includes('done — <N> findings, max severity <X>'),
+    'one-line Task return contract missing',
+  );
+  assert.ok(
+    !archetype.includes('## {{TITLE}} — Findings'),
+    'the old markdown findings report heading must not survive',
+  );
+});
+
 test('the plugin ships one thin reviewer agent per model tier', () => {
   for (const tier of ['opus', 'sonnet', 'haiku']) {
     const body = readFileSync(join(ROOT, `agents/reviewer-${tier}.md`), 'utf8');
@@ -443,25 +502,37 @@ test('the review skill routes agents by plan tier and degrades safely', () => {
   assert.ok(skill.includes('plan.mode.resolved') || skill.includes('mode.resolved'), 'auto resolution comes from the plan');
 });
 
-test('the Build the Review Plan block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
-  // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note) — this
-  // block reads $MODE (for --mode) and $RANGE/$FULL_RANGE (for the gate-plan aliasing check),
-  // none of which it computes itself, so it must source review_env.sh as its first statement.
-  // Skipping this silently sends `--mode ''` (auto mode never resolves) and aliases an empty
-  // $FULL_RANGE to an empty $RANGE (wrongly treating every re-review as the full PR).
-  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const start = skill.indexOf('### Build the Review Plan');
-  const end = skill.indexOf('### Load deterministic evidence', start);
-  assert.ok(start !== -1 && end !== -1, 'Build the Review Plan / Load deterministic evidence anchors not found');
-  const section = skill.slice(start, end);
+// Extracts the first ```bash fence in `section` and returns its first non-comment,
+// non-blank line — used to pin that every consolidated block sources review_env.sh first.
+function firstNonCommentLineOfFirstBashFence(section, label) {
   const fenceStart = section.indexOf('```bash');
+  assert.ok(fenceStart !== -1, `no \`\`\`bash fence found in the ${label} section`);
   const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
-  assert.ok(fenceStart !== -1 && fenceEnd !== -1, 'no ```bash fence found in the Build the Review Plan section');
+  assert.ok(fenceEnd !== -1, `unterminated \`\`\`bash fence in the ${label} section`);
   const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
-  const firstLine = block
+  return block
     .split('\n')
     .map((line) => line.trim())
     .find((line) => line !== '' && !line.startsWith('#'));
+}
+
+test('the Build the Review Plan & Load Evidence block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
+  // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note). Sourcing
+  // review_env.sh as the first statement is defensive idempotency for mid-run bwrap bind-race
+  // reruns and for picking up cross-block state exported by earlier blocks — here $MODE (from
+  // the Initialize block) and $RANGE/$FULL_RANGE (from Gather PR Context & Diff Manifest), used
+  // for --mode and the gate-plan aliasing check respectively. Skipping the source line silently
+  // sends `--mode ''` (auto mode never resolves) and aliases an empty $FULL_RANGE to an empty
+  // $RANGE (wrongly treating every re-review as the full PR).
+  // Task 4 split the CI-path setup into three blocks per the brief's original grouping (mode
+  // parse/CI-detect/config-validate/dirs; PR-context/diff-manifest; plan/evidence, with an
+  // explicit REVIEW_SCOPE model checkpoint between the second and third) — this is the third.
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Build the Review Plan & Load Evidence');
+  const end = skill.indexOf('## CI Mode', start);
+  assert.ok(start !== -1 && end !== -1, 'Build the Review Plan & Load Evidence / CI Mode anchors not found');
+  const section = skill.slice(start, end);
+  const firstLine = firstNonCommentLineOfFirstBashFence(section, 'Build the Review Plan & Load Evidence');
   assert.strictEqual(
     firstLine,
     '. /tmp/review_env.sh 2>/dev/null || true',
@@ -477,4 +548,420 @@ test('a score-0 skip computes status from carried-forward state and surfaces ope
   assert.ok(/agent-review status --ledger/.test(skip), 'skip status must be COMPUTED via the engine, never hand-authored');
   assert.ok(!/"pass":\s*true/.test(skip), 'skip status must not hardcode a pass:true literal');
   assert.ok(/previously-found blocker\(s\) remain open/.test(skip), 'carried-forward open blockers must be surfaced in the skip note');
+});
+
+// --- Ponytail-consensus Task 3: skill rewiring — engine consensus replaces in-context ---
+// --- grouping/averaging, agents hand off via files at every stage that reads findings. ---
+
+function stageSlice(skill, startHeader, endHeader) {
+  const start = skill.indexOf(startHeader);
+  assert.ok(start !== -1, `stage header not found: ${startHeader}`);
+  const end = skill.indexOf(endHeader, start);
+  assert.ok(end !== -1, `stage header not found: ${endHeader}`);
+  return skill.slice(start, end);
+}
+
+test('Stage 1 launch table fills {{AGENT_ID}} from the plan agent id', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(stage1.includes('{{AGENT_ID}}'), 'the launch table must fill the AGENT_ID placeholder');
+});
+
+test('Stage 2 collect cross-checks each lane\'s returned N against its findings file, treats unparseable JSON as missing, and relaunches a failed lane exactly once', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
+  assert.ok(/\/tmp\/agent_findings\//.test(stage2), 'collect stage must read the findings file, not pasted output');
+  assert.ok(/findings\.length/.test(stage2), 'collect stage must cross-check N against the file\'s findings.length');
+  assert.ok(/JSON\.parse/.test(stage2), 'collect stage must call out JSON.parse failure explicitly');
+  assert.ok(
+    /unparseable JSON exactly like a missing file|treat unparseable JSON.*like a missing file/i.test(stage2),
+    'a lane whose findings file fails JSON.parse must be treated the same as a missing file',
+  );
+  assert.ok(
+    skill.includes('relaunch that lane once; a lane that fails twice fails the run'),
+    'the relaunch-once rule must be stated verbatim, in terms of the real fail-closed mechanism',
+  );
+  assert.ok(
+    !skill.includes('blocks PASS'),
+    'the old "blocks PASS" phrasing (conflated with the irreversible/status mechanism) must be gone',
+  );
+});
+
+test('a lane that fails twice stops the run with no report — never wired into irreversible/status (controller ruling)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
+  assert.ok(
+    stage2.includes('❌ review incomplete: lane <id> failed twice — no report posted (the workflow will fail closed)'),
+    'the loud fail-closed final line must be pinned verbatim',
+  );
+  assert.ok(
+    stage2.includes('do not write `$AGENT_REVIEW_COMMENT_OUT`'),
+    'a twice-failed lane must skip writing the comment-out file, tripping the existing empty-report check',
+  );
+  assert.ok(
+    /local.*non-ci.*mode/i.test(stage2),
+    'local (non-CI) mode must also stop the same way',
+  );
+  const skillWide = skill;
+  assert.ok(
+    !/Degraded lanes\.\*\*/.test(skillWide),
+    'the old "Degraded lanes" irreversibility-wiring paragraph must be removed',
+  );
+  assert.ok(
+    !skillWide.includes('irreversibility reason so auto-approval waits for a human'),
+    'a failed lane must never be folded into the irreversible/status mechanism (false, un-clearable banner)',
+  );
+});
+
+test('Stage 5 invokes the deterministic consensus engine instead of in-context grouping/averaging', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage5 = stageSlice(skill, '## Stage 5 — Consensus Synthesis', '## Stage 5B');
+  assert.ok(stage5.includes('agent-review consensus --plan') || /agent-review consensus\s*\\?\s*\n?\s*--plan/.test(stage5), 'Stage 5 must invoke the consensus CLI with --plan');
+  assert.ok(stage5.includes('--dir /tmp/agent_findings'), 'Stage 5 must point --dir at the agent findings directory');
+  assert.ok(stage5.includes('--profile'), 'Stage 5 must pass --profile');
+  assert.ok(stage5.includes('--decisions /tmp/consensus_decisions.json'), 'Stage 5 must re-run with --decisions after a bounded pass');
+  assert.ok(stage5.includes('/tmp/consensus_findings.json'), 'Stage 5 must land the final array at /tmp/consensus_findings.json');
+  assert.ok(stage5.includes('one bounded model pass'), 'the candidates bounded-pass instruction must be present');
+  assert.ok(!skill.includes('Group findings by similarity'), 'in-context Stage 5 grouping instructions must be gone');
+  assert.ok(!stage5.includes('Calculate average severity score for each finding'), 'in-context severity averaging must be gone');
+});
+
+test('Stage 6 report inputs are named as consensus JSON + plan + status, and the reversibility full-diff exception is stated', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage6 = stageSlice(skill, '## Stage 6 — Generate Review Report', '## Stage 7');
+  const writeReport = stageSlice(skill, '### Write the report', '## Stage 7');
+  const inputsSentence = writeReport.slice(0, writeReport.indexOf('Honor its conditionals'));
+  assert.ok(!/the consensus, risk assessment, impact analysis, and agent reports/.test(inputsSentence), 'the old vague inputs sentence must be gone');
+  assert.ok(inputsSentence.includes('/tmp/consensus_findings.json'), 'report inputs sentence must name the consensus JSON file');
+  assert.ok(inputsSentence.includes('/tmp/review_gate_plan.json'), 'report inputs sentence must name the plan file');
+  assert.ok(inputsSentence.includes('/tmp/agent_review_status.json'), 'report inputs sentence must name the status file');
+  assert.ok(
+    stage6.includes('/tmp/pr_full_diff.txt') && stage6.includes('never the incremental-only'),
+    'the reversibility full-diff exception must still be stated in Stage 6',
+  );
+});
+
+test('the emit/filter/ledger/status pipeline and static-findings prepend in Stage 6 are untouched', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage6 = stageSlice(skill, '## Stage 6 — Generate Review Report', '## Stage 7');
+  assert.ok(stage6.includes("evidence.staticFindings || []"), 'static-findings prepend must be byte-identical');
+  assert.ok(stage6.includes('agent-review emit --in /tmp/consensus_findings.json'), 'emit invocation must be untouched');
+  assert.ok(stage6.includes('agent-review filter > /tmp/review_filtered.json'), 'filter invocation must be untouched');
+  assert.ok(stage6.includes('agent-review ledger \\'), 'ledger invocation must be untouched');
+  assert.ok(stage6.includes('agent-review status \\'), 'status invocation must be untouched');
+});
+
+test('Stage 3 debate prompt sources both self and peer findings from /tmp/agent_findings/*.json, not pasted output', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage3 = stageSlice(skill, '## Stage 3 — Cross-Examination Debate', '## Stage 4');
+  assert.ok(/\/tmp\/agent_findings\//.test(stage3), 'debate prompt must reference the findings-file path');
+  assert.ok(
+    !stage3.includes("[Paste that agent's original review output with severity scores]"),
+    'the old pasted-output placeholder must be gone from the debate prompt',
+  );
+  assert.ok(
+    !stage3.includes("[All other agents' findings with severity scores]"),
+    'the old pasted-output placeholder for peer findings must be gone',
+  );
+});
+
+test('Stage 4 rebuttal prompt re-sources YOUR ORIGINAL FINDINGS from the agent\'s own findings file (controller addition B)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage4 = stageSlice(skill, '## Stage 4 — Rebuttals', '## Stage 5 — Consensus Synthesis');
+  assert.ok(/\/tmp\/agent_findings\//.test(stage4), 'rebuttal prompt must reference the findings-file path');
+  assert.ok(
+    !stage4.includes('[Their original findings with severity scores]'),
+    'the old pasted-output placeholder must be gone from the rebuttal prompt',
+  );
+});
+
+test('the archetype instructs writing the findings file via node -e and JSON.stringify, never hand-escaped JSON, and caps recommendation length', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(/node -e/.test(archetype), 'archetype must show writing the findings file via node -e');
+  assert.ok(/JSON\.stringify/.test(archetype), 'archetype must show JSON.stringify building the file');
+  assert.ok(/never hand-escaped JSON/i.test(archetype), 'archetype must explicitly forbid hand-escaped JSON');
+  assert.ok(/recommendation: ≤ ?4 lines/.test(archetype), 'archetype must cap recommendation to <=4 lines');
+});
+
+// --- Ponytail-consensus Task 4: CI bash-block consolidation — fewer separate Bash-tool turns ---
+// --- for a CI run. Each turn is a fresh shell (see the "Cross-stage state" note), and every ---
+// --- turn boundary is a place a bwrap sandbox bind-race can strike mid-review. ---
+
+function countBashFences(text) {
+  let count = 0;
+  let inFence = false;
+  let inBash = false;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('```')) {
+      if (!inFence) {
+        inFence = true;
+        inBash = line.slice(3).trim().toLowerCase() === 'bash';
+        if (inBash) count += 1;
+      } else {
+        inFence = false;
+        inBash = false;
+      }
+    }
+  }
+  return count;
+}
+
+test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff manifest and the plan invocation', () => {
+  // Controller ruling: REVIEW_SCOPE requires the model to read the diff manifest's output before
+  // the plan runs — a genuine judgment call, not scriptable, so it cannot live inside a merged
+  // bash block. This pins that the checkpoint sits between the two blocks (not folded into
+  // either), and that the plan block picks up whatever the model set.
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const diffManifestStart = skill.indexOf('### Gather PR Context & Diff Manifest');
+  const planStart = skill.indexOf('### Build the Review Plan & Load Evidence');
+  assert.ok(diffManifestStart !== -1 && planStart !== -1, 'Gather PR Context / Build the Review Plan anchors not found');
+  // The checkpoint is the prose between the diff-manifest block's closing fence and the plan
+  // block's heading — not the whole "Gather PR Context & Diff Manifest" section, which itself
+  // contains a bash fence.
+  const diffManifestFenceStart = skill.indexOf('```bash', diffManifestStart);
+  const diffManifestFenceEnd = skill.indexOf('```', diffManifestFenceStart + '```bash'.length);
+  assert.ok(diffManifestFenceStart !== -1 && diffManifestFenceEnd !== -1, 'diff-manifest fence not found');
+  const checkpoint = skill.slice(diffManifestFenceEnd + '```'.length, planStart);
+  assert.ok(checkpoint.includes('Checkpoint'), 'an explicit checkpoint must sit between the diff manifest and the plan blocks');
+  assert.ok(
+    /changed-file list and\s+diff stat from the previous block/.test(checkpoint),
+    'the checkpoint must instruct reading the diff manifest\'s own output',
+  );
+  assert.ok(
+    /single_feature.*multi_feature.*cross_cutting.*core_infra/.test(checkpoint),
+    'the checkpoint must name all four REVIEW_SCOPE values',
+  );
+  assert.ok(
+    checkpoint.includes('defaults to `single_feature` only when the footprint genuinely is one'),
+    'the checkpoint must forbid defaulting to single_feature by omission',
+  );
+  const planSection = skill.slice(planStart, skill.indexOf('## CI Mode', planStart));
+  assert.ok(
+    planSection.includes('REVIEW_SCOPE="${REVIEW_SCOPE:-single_feature}"'),
+    'the plan block must read $REVIEW_SCOPE (set at the checkpoint) rather than recomputing it',
+  );
+  assert.ok(
+    !checkpoint.includes('```bash'),
+    'the checkpoint itself must not be a bash turn — it is a model decision',
+  );
+});
+
+test('the CI path uses at most 12 bash turns (Stage 0A through Stage 6)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
+  const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
+  const stage5BStart = skill.indexOf('## Stage 5B — Historical Metrics Dashboard');
+  const stage6Start = skill.indexOf('## Stage 6 — Generate Review Report');
+  const localOnlyStart = skill.indexOf('**Locally** the opposite can be stale');
+  for (const [name, index] of [
+    ['Stage 0A', stage0AStart],
+    ['Stage 7', stage7Start],
+    ['Stage 5B', stage5BStart],
+    ['Stage 6', stage6Start],
+    ['the local-only version-check branch', localOnlyStart],
+  ]) {
+    assert.ok(index !== -1, `anchor not found: ${name}`);
+  }
+  // Stage 5B ("SKIP THIS ENTIRE STAGE IN CI MODE") and the local-only plugin-staleness check
+  // ("**Locally** the opposite can be stale...") never execute during a CI run, so they are
+  // outside the CI-path turn budget — Task 4 leaves both untouched rather than risk a merge
+  // across code that only ever runs locally.
+  //
+  // The budget is 12, not 10 (a controller ruling after review): REVIEW_SCOPE requires the model
+  // to read the diff manifest's changed-file list and stat output — a genuine decision, not
+  // scriptable — before the plan invocation. That checkpoint can't sit inside a merged bash
+  // block, so Stage 0A/0's setup is three turns (mode-parse/CI-detect/config-validate/dirs;
+  // PR-context/diff-manifest; plan/evidence) instead of one, +2 over the fence-count-only budget.
+  const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
+  const count = countBashFences(ciPath);
+  assert.ok(count <= 12, `CI-path bash fence count is ${count}, expected <= 12`);
+});
+
+test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const sections = [
+    [
+      'Initialize',
+      '### Initialize',
+      '### Gather PR Context & Diff Manifest',
+    ],
+    [
+      'Gather PR Context & Diff Manifest',
+      '### Gather PR Context & Diff Manifest',
+      '### Build the Review Plan & Load Evidence',
+    ],
+    [
+      'Approved learnings & dependency impact',
+      '### Approved learnings & dependency impact',
+      '### Assemble each agent prompt',
+    ],
+    [
+      'Stage 5 decisions re-run + extract findings',
+      'extracts the plain findings array Stage 6 expects',
+      '## Stage 5B — Historical Metrics Dashboard',
+    ],
+    [
+      'Capture consensus for the learning layer + build the findings ledger',
+      '### Capture consensus for the learning layer',
+      '### Build the findings ledger',
+    ],
+  ];
+  for (const [label, startAnchor, endAnchor] of sections) {
+    const start = skill.indexOf(startAnchor);
+    const end = skill.indexOf(endAnchor, start);
+    assert.ok(start !== -1 && end !== -1, `${label}: anchors not found (start=${start}, end=${end})`);
+    const section = skill.slice(start, end);
+    const firstLine = firstNonCommentLineOfFirstBashFence(section, label);
+    // A trailing inline comment (e.g. "... || true   # REVIEW_ID, set in Stage 0") is fine —
+    // only the leading command matters, so this checks the prefix rather than exact equality.
+    assert.ok(
+      firstLine.startsWith('. /tmp/review_env.sh 2>/dev/null || true'),
+      `${label} must source review_env.sh as its first non-comment line (got: "${firstLine}")`,
+    );
+  }
+});
+
+test('Auto Mode Resolution remains its own bash turn — its output gates whether agents launch at all', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Auto Mode Resolution');
+  const end = skill.indexOf('### Risk Assessment', start);
+  assert.ok(start !== -1 && end !== -1, 'Auto Mode Resolution / Risk Assessment anchors not found');
+  const section = skill.slice(start, end);
+  assert.strictEqual(
+    countBashFences(section),
+    1,
+    'Auto Mode Resolution must stay exactly one bash turn — a skip must not launch agents',
+  );
+  assert.ok(section.includes('if [ "$MODE" = "auto" ]'), 'the auto-mode gate logic must still live in this block');
+  // It must not have been folded into any of the preceding Stage 0A/0 setup blocks either.
+  const setupStart = skill.indexOf('### Initialize');
+  const setupSection = skill.slice(setupStart, start);
+  assert.ok(
+    !setupSection.includes('RESOLVED=$(node -e'),
+    'auto-mode resolution logic must not have leaked into the earlier consolidated block',
+  );
+});
+
+test('the smoke-test tier routing block remains its own bash turn — the launch table reads $ROUTING', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Smoke-Test Tier Routing');
+  const end = skill.indexOf('## Stage 1 — Launch Specialized Review Agents', start);
+  assert.ok(start !== -1 && end !== -1, 'Smoke-Test Tier Routing anchors not found');
+  const section = skill.slice(start, end);
+  assert.strictEqual(
+    countBashFences(section),
+    1,
+    'the smoke-test ROUTING block must stay its own bash turn — it can set ROUTING=degraded, which every later launch table reads',
+  );
+});
+
+test('Task 4 consolidation preserves every fail-closed exit message verbatim', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  for (const message of [
+    '❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first.',
+    "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml.",
+    '❌ No changed files in $RANGE — nothing to review. Check the base ref.',
+    '✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting.',
+    '✅ No net changes since the last reviewed head — nothing to review. Exiting.',
+  ]) {
+    assert.ok(skill.includes(message), `fail-closed message missing or altered: ${message}`);
+  }
+});
+
+test('Task-4-merged blocks never append to a scratch file other than review_env.sh', () => {
+  // A bwrap bind-race rerun replays a whole merged block from the top — a `>>` onto any file
+  // besides review_env.sh (whose duplicate export lines are harmless) would duplicate data on
+  // retry. `>` and `mkdir -p` are fine; so is `tee -a`/`>>` when the target IS review_env.sh.
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const mergedSections = [
+    ['Initialize', '### Initialize', '### Gather PR Context & Diff Manifest'],
+    ['Gather PR Context & Diff Manifest', '### Gather PR Context & Diff Manifest', '### Build the Review Plan & Load Evidence'],
+    ['Build the Review Plan & Load Evidence', '### Build the Review Plan & Load Evidence', '## CI Mode'],
+    ['Approved learnings & dependency impact', '### Approved learnings & dependency impact', '### Assemble each agent prompt'],
+    ['Stage 5 decisions re-run + extract findings', 'extracts the plain findings array Stage 6 expects', '## Stage 5B — Historical Metrics Dashboard'],
+    ['Capture consensus + build ledger', '### Capture consensus for the learning layer', '### Build the findings ledger'],
+  ];
+  for (const [label, startAnchor, endAnchor] of mergedSections) {
+    const start = skill.indexOf(startAnchor);
+    const end = skill.indexOf(endAnchor, start);
+    assert.ok(start !== -1 && end !== -1, `${label}: anchors not found`);
+    const section = skill.slice(start, end);
+    const fenceStart = section.indexOf('```bash');
+    const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
+    const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
+    for (const line of block.split('\n')) {
+      if (!line.includes('>>')) continue;
+      assert.ok(
+        line.includes('/tmp/review_env.sh'),
+        `${label}: a rerun-unsafe append target other than review_env.sh: "${line.trim()}"`,
+      );
+    }
+  }
+});
+
+test('agents with no configured expertise get a derived lane instead of a blank one, and the opt-out guideline cannot be used to skip review', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const expertiseRow = skill.slice(skill.indexOf('| `{{EXPERTISE}}`'), skill.indexOf('\n', skill.indexOf('| `{{EXPERTISE}}`')));
+  assert.ok(
+    expertiseRow.includes('judged against:'),
+    'the {{EXPERTISE}} fallback must derive a lane from the agent title + rules[], not leave it blank',
+  );
+  assert.ok(
+    !skill.includes('leave the line\'s value blank rather than inventing expertise'),
+    'the old blank-EXPERTISE fallback text must be gone — a blank lane silently reviews nothing',
+  );
+
+  const archetype = readFileSync(ARCHETYPE, 'utf8');
+  assert.ok(
+    archetype.includes(
+      "If your defined expertise genuinely does not apply to anything in this change set, leave `findings` empty and still set `overallConfidence` — but an unclear or generic expertise line is never a reason to skip review: judge the diff on your title's discipline.",
+    ),
+    'the opt-out guideline must be tightened to forbid using an unclear/generic expertise line as an excuse to skip review',
+  );
+});
+
+test('the archetype pins an explicit severity rubric with anti-sandbagging teeth', () => {
+  const archetype = readFileSync(ARCHETYPE, 'utf8');
+  assert.ok(
+    archetype.includes(
+      'Never rate a finding below 7 to avoid the blocker evidence requirement — if the defect is severity >= 7 by these anchors, gather the evidence and rate it honestly.',
+    ),
+    'the archetype must forbid sandbagging severity below 7 to dodge the evidence-burden requirement',
+  );
+  assert.ok(
+    archetype.includes('An exploitable injection is 9-10, full stop.'),
+    'the severity rubric must anchor exploitable injections at 9-10',
+  );
+});
+
+test('the CI posting block self-checks the marker JSON before it reaches the trusted post-job', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const postSection = skill.slice(
+    skill.indexOf('### Post the report to the PR'),
+    skill.indexOf('### Post the report to the PR') + 4000,
+  );
+  assert.ok(
+    postSection.includes(
+      'The marker lines are emitted ONLY by the node commands below — never type or edit them by hand; hand-transcribed JSON mangles escapes.',
+    ),
+    'the posting block preamble must warn against hand-transcribing marker lines',
+  );
+  assert.ok(
+    postSection.includes('console.log("marker self-check OK")'),
+    'the posting block must self-check the ledger/status marker JSON after assembling the comment',
+  );
+});
+
+test('the Interactive Menu "Post review to GitHub" choice self-checks the marker JSON too', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const menuSection = skill.slice(
+    skill.indexOf('Handle the choice:'),
+    skill.indexOf('Handle the choice:') + 4000,
+  );
+  const matches = [...menuSection.matchAll(/console\.log\("marker self-check OK"\)/g)];
+  assert.equal(
+    matches.length,
+    1,
+    'choice 2 (re-post) must run the same marker self-check as the CI posting step before posting',
+  );
 });

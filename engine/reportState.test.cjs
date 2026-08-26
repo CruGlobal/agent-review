@@ -50,6 +50,31 @@ test('ledger carries bounded evidence needed to address findings after re-review
   assert.equal(ledger[0].recommendation, 'add authorize(record)');
 });
 
+test('ledger carries the fix field and bounds it to 2000 chars like the other optional fields', () => {
+  const ledger = mergeLedger([], [finding({ fix: 'add a nil guard before save' })]);
+  assert.equal(ledger[0].fix, 'add a nil guard before save');
+
+  const long = 'x'.repeat(2500);
+  const ledger2 = mergeLedger([], [finding({ signature: 'sig-3', fix: long })]);
+  assert.equal(ledger2[0].fix.length, 2000);
+});
+
+test('ledger carries the agents field (full corroborating set) bounded to 2000 chars, optional', () => {
+  const ledger = mergeLedger([], [finding({ agents: 'agentA,agentB' })]);
+  assert.equal(ledger[0].agents, 'agentA,agentB');
+
+  const withoutAgents = mergeLedger([], [finding({ signature: 'sig-2' })]);
+  assert.equal('agents' in withoutAgents[0], false);
+});
+
+test('ledger carries needsHumanReview as an optional boolean flag, only when truthy', () => {
+  const ledger = mergeLedger([], [finding({ needsHumanReview: true })]);
+  assert.equal(ledger[0].needsHumanReview, true);
+
+  const withoutFlag = mergeLedger([], [finding({ signature: 'sig-2', needsHumanReview: false })]);
+  assert.equal('needsHumanReview' in withoutFlag[0], false);
+});
+
 test('new blockers fail closed without high-confidence evidence', () => {
   assert.throws(
     () => mergeLedger([], [finding({ confidence: 'Medium' })]),
