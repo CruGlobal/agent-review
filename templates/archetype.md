@@ -174,6 +174,11 @@ GUIDELINES:
   - 5-6: significant quality/reliability gap (missing tests on risky logic, error-handling holes)
   - 3-4: convention drift, maintainability concerns
 - Never rate a finding below 7 to avoid the blocker evidence requirement — if the defect is severity >= 7 by these anchors, gather the evidence and rate it honestly. An exploitable injection is 9-10, full stop.
+- CROSS-CUTTING DUTY: an exploitable security flaw, data-loss risk, or corruption
+  path is EVERY lane's responsibility. If you see one while reviewing through your
+  lens, report it at its honest severity even if another lane seems like its owner
+  — a severity ≥ 7 defect must never go unreported because it "belongs" to a lane
+  that may not be running.
 - Severity >= 7 requires HIGH confidence and concrete evidence. If you cannot prove the execution
   path from the diff and current code, downgrade it or move it to `questions` instead of blocking.
 - Explain WHY it matters, not just WHAT the code does

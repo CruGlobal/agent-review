@@ -458,6 +458,18 @@ test('the archetype severity guidance never contradicts the pinned SEVERITY ANCH
   );
 });
 
+test('the archetype makes exploitable security/data-loss/corruption defects every lane\'s duty, not just the owning specialist\'s', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(
+    archetype.includes('CROSS-CUTTING DUTY:'),
+    'a CROSS-CUTTING DUTY paragraph must exist near the severity anchors',
+  );
+  assert.ok(
+    /must never go unreported because it ["'“]?belongs["'”]? to a lane/.test(archetype),
+    'the duty must say a >=7 defect must never go unreported for belonging to a lane that may not be running',
+  );
+});
+
 test('the archetype hands off findings as a JSON file with a one-line return', () => {
   const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
   assert.ok(archetype.includes('/tmp/agent_findings/'), 'findings-file path missing');
