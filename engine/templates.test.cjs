@@ -522,8 +522,38 @@ test('Stage 2 collect cross-checks each lane\'s returned N against its findings 
     'a lane whose findings file fails JSON.parse must be treated the same as a missing file',
   );
   assert.ok(
-    skill.includes('relaunch that lane once; a lane that fails twice blocks PASS'),
-    'the relaunch-once rule must be stated verbatim',
+    skill.includes('relaunch that lane once; a lane that fails twice fails the run'),
+    'the relaunch-once rule must be stated verbatim, in terms of the real fail-closed mechanism',
+  );
+  assert.ok(
+    !skill.includes('blocks PASS'),
+    'the old "blocks PASS" phrasing (conflated with the irreversible/status mechanism) must be gone',
+  );
+});
+
+test('a lane that fails twice stops the run with no report — never wired into irreversible/status (controller ruling)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
+  assert.ok(
+    stage2.includes('❌ review incomplete: lane <id> failed twice — no report posted (the workflow will fail closed)'),
+    'the loud fail-closed final line must be pinned verbatim',
+  );
+  assert.ok(
+    stage2.includes('do not write `$AGENT_REVIEW_COMMENT_OUT`'),
+    'a twice-failed lane must skip writing the comment-out file, tripping the existing empty-report check',
+  );
+  assert.ok(
+    /local.*non-ci.*mode/i.test(stage2),
+    'local (non-CI) mode must also stop the same way',
+  );
+  const skillWide = skill;
+  assert.ok(
+    !/Degraded lanes\.\*\*/.test(skillWide),
+    'the old "Degraded lanes" irreversibility-wiring paragraph must be removed',
+  );
+  assert.ok(
+    !skillWide.includes('irreversibility reason so auto-approval waits for a human'),
+    'a failed lane must never be folded into the irreversible/status mechanism (false, un-clearable banner)',
   );
 });
 

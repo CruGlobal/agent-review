@@ -798,11 +798,21 @@ check it against the findings file the agent actually wrote:
 - The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
   (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
   or `findings.length` does not equal the reported `<N>`.
-- On a failed cross-check: relaunch that lane once; a lane that fails twice blocks PASS. Use the
-  lane's original Stage 1 prompt, unchanged, for the retry. If the retry fails the same
-  cross-check again, append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create
-  it if absent) — Stage 6 turns that into an irreversibility reason so auto-approval waits for a
-  human — and note the degraded lane in the report instead of fabricating findings for it.
+- On a failed cross-check: relaunch that lane once; a lane that fails twice fails the run —
+  no report is posted. Use the lane's original Stage 1 prompt, unchanged, for the retry.
+  Optionally append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create it if
+  absent) if that helps you track which lane(s) failed — but nothing downstream may read that
+  file into any status or report field; it is scratch state for you, not a report input.
+  **A review with an incomplete lane must not produce a report at all** — an incomplete review
+  is not a property of the diff, and folding it into `irreversible` or any other status field
+  would post a false, un-clearable banner. If the retry fails the same cross-check again:
+  - **CI mode:** do not write `$AGENT_REVIEW_COMMENT_OUT`, do not proceed to Stage 3 onward,
+    print exactly this loud final line, and end your turn:
+    `❌ review incomplete: lane <id> failed twice — no report posted (the workflow will fail closed)`.
+    The publish step's existing empty-report check (see CI Mode above) then fails the run; the
+    transcript carries the diagnosis.
+  - **Local (non-CI) mode:** report the failed lane to the user the same way — the loud line
+    above — and stop; do not continue to debate, consensus, or the report.
 
 Display:
 
@@ -1060,9 +1070,9 @@ agent-review consensus \
 
 `agent-review consensus` is fail-closed: a missing findings file, or one that fails
 `JSON.parse`, for any launched lane makes it exit non-zero naming that lane — surface that error
-verbatim, never paper over it by fabricating findings or silently retrying. (A lane recorded in
-`/tmp/degraded_lanes.txt` at Stage 2 already failed its cross-check twice and is expected to be
-absent from `/tmp/agent_findings` — that is not a new failure to chase here.)
+verbatim, never paper over it by fabricating findings or silently retrying. Every launched lane
+should already have a valid findings file by this stage — a lane that failed its Stage 2
+cross-check twice stopped the run before reaching here.
 
 Read `/tmp/consensus_raw.json`. Its `candidates` array names pairs of output findings (by index)
 that are close — same file, within 10 lines — but the clique rule deliberately left unmerged
@@ -1359,11 +1369,9 @@ Purely additive changes (new column, new table, new index, new code paths, confi
 look. List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
 
-**Degraded lanes.** Also treat every id in `/tmp/degraded_lanes.txt` (Stage 2: a lane that failed
-its findings cross-check twice) as its own irreversibility reason — that lane's coverage is
-unverified, so auto-approval must wait for a human even when the computed ledger is clean. Add
-`"lane <id> failed the findings cross-check twice; unverified"` to `reasons` for each, and mark
-`irreversible: true` when the file is non-empty.
+A lane that failed its Stage 2 cross-check twice never reaches this point — the run already
+stopped with no report at all (see Stage 2). Reversibility judges the diff itself; it is never
+used to signal incomplete review coverage.
 
 **Status JSON.** Write the safety judgment first as `/tmp/agent_review_safety.json`:
 
