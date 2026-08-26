@@ -51,11 +51,35 @@ same file. Read the templates with the Read tool before substituting.)
 
 ## Stage 0A — Parse Review Mode & Initialize
 
-### Determine Review Mode
-
 The first argument selects the mode; the literal argument `ci` (in any position) selects CI mode.
 
+- **quick** — 3 agents (testing, standards + the first triggered agent); model tiers per-agent (see plan)
+- **deep** — every enabled agent in config.yml; model tiers per-agent (see plan)
+- **auto** — depth resolved from the engine's risk score after Stage 0 planning: score 0 → skip ·
+  LOW → quick · MEDIUM/HIGH → standard · CRITICAL → deep
+- **standard** (default, recommended) — agents selected by the review engine from the diff; model
+  per-agent from config.yml
+
+CI mode is on when the `ci` argument was passed, or `$AGENT_REVIEW_CI` is set to anything
+non-empty. If so, follow **[CI Mode](#ci-mode)** below — it changes what several stages do.
+
+⚠️ **CROSS-STAGE STATE** — read this once, it applies to every bash block below. Each block you
+run is a SEPARATE shell: shell variables do NOT survive from one block to the next. Anything a
+later stage needs is persisted to `/tmp/review_env.sh` at the moment it is computed, and every
+later block starts by sourcing that file. Keep this discipline or later stages will silently
+operate on empty strings.
+
+### Initialize & build the review plan
+
+Mode parsing, CI detection, config validation, working directories, the enabled-agents list, PR
+context, and the diff manifest are all read-only setup with no required decision in between — one
+shell handles all of it, so a bwrap bind-race rerun replays it as a single unit:
+
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+
+# --- Determine Review Mode ---
 MODE="${1:-standard}"
 case "$MODE" in quick|deep|auto) ;; *) MODE="standard" ;; esac   # `ci` alone → standard mode
 
@@ -89,48 +113,251 @@ esac
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# ⚠️ CROSS-STAGE STATE — read this once, it applies to every bash block below.
-# Each block you run is a SEPARATE shell: shell variables do NOT survive from one block to the
-# next. Anything a later stage needs is persisted to /tmp/review_env.sh at the moment it is
-# computed, and every later block starts by sourcing that file. Keep this discipline or later
-# stages will silently operate on empty strings.
 : > /tmp/review_env.sh    # fresh state for this review
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
 EOF
-```
 
-### Detect CI Mode
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-# CI mode: the `ci` argument was passed, or $AGENT_REVIEW_CI is set to anything non-empty.
+# --- Detect CI Mode ---
 CI_MODE=""
 case " $* " in *" ci "*) CI_MODE="true" ;; esac
 [ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
-```
 
-If `CI_MODE` is set, follow **[CI Mode](#ci-mode)** below — it changes what several stages do.
-
-### Verify the repo is set up
-
-```bash
+# --- Verify the repo is set up ---
 agent-review config validate || {
   echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
   exit 1
 }
-```
 
-### Initialize Directories
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
+# --- Initialize Directories ---
 mkdir -p /tmp/automated_fixes
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
 [ -z "${CI_MODE:-}" ] && mkdir -p "$REVIEW_DIR/metrics/history"
+
+# --- Enabled agents (used by deep mode; plan agents[] drives quick/standard) ---
+agent-review config get agents > /tmp/config_agents.json || true
+
+# --- Gather PR Context ---
+# Resolve the PR number ONCE, here, and persist it — every later `gh pr view`/`gh pr comment`
+# depends on it. CI checks out a PR as a DETACHED HEAD, so a bare `gh pr view` has no branch to
+# resolve and returns nothing; the workflow therefore exports $PR_NUMBER, which wins. Locally
+# (on a PR branch) the fallback resolves it from the branch instead.
+PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null || true)}"
+[ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context — local review"
+
+# One id per review run, so successive runs never clobber each other's pending findings.
+REVIEW_ID="${PR_NUMBER:-local}-$(date +%Y%m%d-%H%M%S)"
+
+# PR metadata if we're on a PR (harmless when we're not). `${PR_NUMBER:+"$PR_NUMBER"}` passes the
+# number when we have one and expands to NOTHING when we don't — never an empty argument.
+gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number,title,baseRefName,headRefName,additions,deletions,changedFiles 2>/dev/null \
+  || echo "Not in a PR branch — falling back to the configured base branch"
+
+DAY_OF_WEEK=$(date +%A)
+echo "Today is: $DAY_OF_WEEK"
+cat >> /tmp/review_env.sh <<EOF
+export DAY_OF_WEEK="$DAY_OF_WEEK" PR_NUMBER="$PR_NUMBER" REVIEW_ID="$REVIEW_ID"
+EOF
+
+# --- Build the diff manifest the whole review runs on ---
+BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
+HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
+
+# Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
+# inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
+# still an ancestor of the current head, review only the commits since it. A force-push
+# breaks ancestry, so the recorded SHA fails the checks below and we fall back to a full
+# review — the history we reviewed no longer exists, so the delta cannot be trusted.
+INCREMENTAL="" LAST_REVIEWED=""
+if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
+  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
+    LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+      | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+  else
+    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+    LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+      | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+  fi
+  if [ -n "$LAST_REVIEWED" ] \
+     && git cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null \
+     && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
+    if [ "$(git rev-parse "$LAST_REVIEWED")" = "$(git rev-parse "$HEAD_REF")" ]; then
+      if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+        cp "$AGENT_REVIEW_PREVIOUS_COMMENT" "$AGENT_REVIEW_COMMENT_OUT" || true
+      fi
+      echo "✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting."
+      exit 0
+    fi
+    INCREMENTAL="true"
+  elif [ -n "$LAST_REVIEWED" ]; then
+    echo "⚠️  Recorded reviewed SHA $LAST_REVIEWED is not an ancestor of $HEAD_REF (force push?) — full review."
+    LAST_REVIEWED=""
+  fi
+fi
+
+if [ -n "$INCREMENTAL" ]; then
+  RANGE="$LAST_REVIEWED..$HEAD_REF"
+  echo "♻️  INCREMENTAL REVIEW — commits since previously reviewed $LAST_REVIEWED"
+elif [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+  RANGE="$BASE_REF..$HEAD_REF"
+else
+  # Fallback: merge-base against the repo's configured base branch.
+  # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
+  # (base_branch is optional), so guard on BOTH empty and "undefined" — otherwise RANGE would
+  # degrade to "..HEAD" and the whole review would silently run on an empty diff.
+  BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null || true)
+  if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
+    BASE_BRANCH=main
+  fi
+  # A CI checkout has no local branches — only remote-tracking refs — so try `origin/<branch>`
+  # first and fall back to the bare name for local runs where `main` exists as a local branch.
+  MERGE_BASE=$(git merge-base HEAD "origin/$BASE_BRANCH" 2>/dev/null) \
+    || MERGE_BASE=$(git merge-base HEAD "$BASE_BRANCH" 2>/dev/null) \
+    || {
+      echo "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml."
+      exit 1
+    }
+  RANGE="$MERGE_BASE..HEAD"
+fi
+
+# Review effort may be incremental, but approval metadata must always describe
+# the entire current PR. Otherwise a small follow-up commit can erase an earlier
+# destructive migration or downgrade the PR-wide required-reviewer level.
+if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+  FULL_RANGE="$BASE_REF..$HEAD_REF"
+else
+  FULL_RANGE="$MERGE_BASE..HEAD"
+fi
+
+echo "Diff range: $RANGE"
+echo "Full PR range: $FULL_RANGE"
+git diff "$RANGE" --name-only > /tmp/changed_files.txt
+git diff "$RANGE" --stat      > /tmp/diff_stat.txt
+git diff "$RANGE"             > /tmp/pr_diff.txt
+if [ "$FULL_RANGE" = "$RANGE" ]; then
+  cp /tmp/changed_files.txt /tmp/full_changed_files.txt
+  cp /tmp/diff_stat.txt /tmp/full_diff_stat.txt
+  cp /tmp/pr_diff.txt /tmp/pr_full_diff.txt
+else
+  git diff "$FULL_RANGE" --name-only > /tmp/full_changed_files.txt
+  git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
+  git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
+fi
+
+if [ ! -s /tmp/changed_files.txt ]; then
+  if [ -n "$INCREMENTAL" ]; then
+    if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+      # The commits cancel out to the already-reviewed tree. Advance only the
+      # reviewed-head marker; all findings and safety state remain valid.
+      sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
+        -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
+        -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
+        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
+    fi
+    echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
+    exit 0
+  fi
+  echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
+  exit 1
+fi
+wc -l < /tmp/changed_files.txt
+
+cat >> /tmp/review_env.sh <<EOF
+export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FULL_RANGE"
+export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
+EOF
+
+# --- Build the Review Plan ---
+# Risk scoring, agent selection, special-pattern detection, and rule resolution are driven by the
+# declarative review core (.claude/review/config.yml) — never computed inline here.
+agent-review plan \
+  --files /tmp/changed_files.txt \
+  --stat /tmp/diff_stat.txt \
+  --diff /tmp/pr_diff.txt \
+  --scope "${REVIEW_SCOPE:-single_feature}" \
+  --mode "$MODE" \
+  > /tmp/review_plan.json
+cat /tmp/review_plan.json
+
+# A second plan covers the full PR and is the source of truth for governance:
+# displayed risk, required reviewer, and the machine-readable approval status.
+if [ "$FULL_RANGE" = "$RANGE" ]; then
+  cp /tmp/review_plan.json /tmp/review_gate_plan.json
+else
+  agent-review plan \
+    --files /tmp/full_changed_files.txt \
+    --stat /tmp/full_diff_stat.txt \
+    --diff /tmp/pr_full_diff.txt \
+    --scope "${REVIEW_SCOPE:-single_feature}" \
+    --mode "$MODE" \
+    > /tmp/review_gate_plan.json
+fi
+cat /tmp/review_gate_plan.json
+
+# --- Load deterministic evidence and cross-repository context ---
+# The reusable workflow creates these artifacts outside the model. Treat them as immutable inputs.
+if [ -s "${AGENT_REVIEW_EVIDENCE:-}" ]; then
+  cp "$AGENT_REVIEW_EVIDENCE" /tmp/review_evidence.json
+else
+  echo '{"version":1,"staticFindings":[],"ci":null}' > /tmp/review_evidence.json
+fi
+if [ -s "${AGENT_REVIEW_CONTEXT_INVENTORY:-}" ]; then
+  cp "$AGENT_REVIEW_CONTEXT_INVENTORY" /tmp/review_context.json
+else
+  echo '{"version":1,"repositories":[]}' > /tmp/review_context.json
+fi
+node - <<'NODE' || true
+const evidence = require('/tmp/review_evidence.json');
+const context = require('/tmp/review_context.json');
+const ci = evidence.ci && evidence.ci.summary;
+console.log(`Deterministic AST findings: ${(evidence.staticFindings || []).length}`);
+console.log(ci ? `CI snapshot: ${ci.success} passed, ${ci.failed} failed, ${ci.pending} pending` : 'CI snapshot: unavailable');
+for (const repo of context.repositories || []) {
+  console.log(`Context ${repo.id}: ${repo.available ? `${repo.files.length} allowlisted files at ${repo.ref}` : 'unavailable'}`);
+}
+NODE
+```
+
+Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
+excluded from risk scoring and agent selection by the engine — agents should not raise findings
+against them either.
+
+`REVIEW_SCOPE` is the heuristic scope you set from the change footprint (default `single_feature`;
+use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature areas
+or core infrastructure). The plan JSON has this shape:
+
+```json
+{
+  "profile": "standard",
+  "risk": {
+    "score": 0,
+    "level": "LOW",
+    "reviewer": "...",
+    "factors": {
+      "patternScore": 0,
+      "volumeScore": 0,
+      "specialScore": 0,
+      "scopeMultiplier": 1.0,
+      "subtotal": 0
+    },
+    "special": ["..."]
+  },
+  "mode": { "requested": "auto", "resolved": "quick" },
+  "agents": [
+    {
+      "id": "standards",
+      "model": "smart",
+      "escalates": false,
+      "tier": "sonnet",
+      "matchedBy": "always",
+      "rules": ["rules/standards.md"]
+    }
+  ]
+}
 ```
 
 ---
@@ -214,215 +441,11 @@ fi
 
 ## Stage 0 — Context Gathering & Risk Assessment
 
-### Gather PR Context
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-
-# Resolve the PR number ONCE, here, and persist it — every later `gh pr view`/`gh pr comment`
-# depends on it. CI checks out a PR as a DETACHED HEAD, so a bare `gh pr view` has no branch to
-# resolve and returns nothing; the workflow therefore exports $PR_NUMBER, which wins. Locally
-# (on a PR branch) the fallback resolves it from the branch instead.
-PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
-[ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context — local review"
-
-# One id per review run, so successive runs never clobber each other's pending findings.
-REVIEW_ID="${PR_NUMBER:-local}-$(date +%Y%m%d-%H%M%S)"
-
-# PR metadata if we're on a PR (harmless when we're not). `${PR_NUMBER:+"$PR_NUMBER"}` passes the
-# number when we have one and expands to NOTHING when we don't — never an empty argument.
-gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number,title,baseRefName,headRefName,additions,deletions,changedFiles 2>/dev/null \
-  || echo "Not in a PR branch — falling back to the configured base branch"
-
-DAY_OF_WEEK=$(date +%A)
-echo "Today is: $DAY_OF_WEEK"
-cat >> /tmp/review_env.sh <<EOF
-export DAY_OF_WEEK="$DAY_OF_WEEK" PR_NUMBER="$PR_NUMBER" REVIEW_ID="$REVIEW_ID"
-EOF
-```
-
-Build the diff manifest the whole review runs on:
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-
-BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null)}"
-HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null)}"
-
-# Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
-# inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
-# still an ancestor of the current head, review only the commits since it. A force-push
-# breaks ancestry, so the recorded SHA fails the checks below and we fall back to a full
-# review — the history we reviewed no longer exists, so the delta cannot be trusted.
-INCREMENTAL="" LAST_REVIEWED=""
-if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
-  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
-    LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
-      | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
-  else
-    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)
-    LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
-      | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
-  fi
-  if [ -n "$LAST_REVIEWED" ] \
-     && git cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null \
-     && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
-    if [ "$(git rev-parse "$LAST_REVIEWED")" = "$(git rev-parse "$HEAD_REF")" ]; then
-      if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-        cp "$AGENT_REVIEW_PREVIOUS_COMMENT" "$AGENT_REVIEW_COMMENT_OUT"
-      fi
-      echo "✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting."
-      exit 0
-    fi
-    INCREMENTAL="true"
-  elif [ -n "$LAST_REVIEWED" ]; then
-    echo "⚠️  Recorded reviewed SHA $LAST_REVIEWED is not an ancestor of $HEAD_REF (force push?) — full review."
-    LAST_REVIEWED=""
-  fi
-fi
-
-if [ -n "$INCREMENTAL" ]; then
-  RANGE="$LAST_REVIEWED..$HEAD_REF"
-  echo "♻️  INCREMENTAL REVIEW — commits since previously reviewed $LAST_REVIEWED"
-elif [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
-  RANGE="$BASE_REF..$HEAD_REF"
-else
-  # Fallback: merge-base against the repo's configured base branch.
-  # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
-  # (base_branch is optional), so guard on BOTH empty and "undefined" — otherwise RANGE would
-  # degrade to "..HEAD" and the whole review would silently run on an empty diff.
-  BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null)
-  if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
-    BASE_BRANCH=main
-  fi
-  # A CI checkout has no local branches — only remote-tracking refs — so try `origin/<branch>`
-  # first and fall back to the bare name for local runs where `main` exists as a local branch.
-  MERGE_BASE=$(git merge-base HEAD "origin/$BASE_BRANCH" 2>/dev/null) \
-    || MERGE_BASE=$(git merge-base HEAD "$BASE_BRANCH" 2>/dev/null) \
-    || {
-      echo "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml."
-      exit 1
-    }
-  RANGE="$MERGE_BASE..HEAD"
-fi
-
-# Review effort may be incremental, but approval metadata must always describe
-# the entire current PR. Otherwise a small follow-up commit can erase an earlier
-# destructive migration or downgrade the PR-wide required-reviewer level.
-if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
-  FULL_RANGE="$BASE_REF..$HEAD_REF"
-else
-  FULL_RANGE="$MERGE_BASE..HEAD"
-fi
-
-echo "Diff range: $RANGE"
-echo "Full PR range: $FULL_RANGE"
-git diff "$RANGE" --name-only > /tmp/changed_files.txt
-git diff "$RANGE" --stat      > /tmp/diff_stat.txt
-git diff "$RANGE"             > /tmp/pr_diff.txt
-if [ "$FULL_RANGE" = "$RANGE" ]; then
-  cp /tmp/changed_files.txt /tmp/full_changed_files.txt
-  cp /tmp/diff_stat.txt /tmp/full_diff_stat.txt
-  cp /tmp/pr_diff.txt /tmp/pr_full_diff.txt
-else
-  git diff "$FULL_RANGE" --name-only > /tmp/full_changed_files.txt
-  git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
-  git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
-fi
-
-if [ ! -s /tmp/changed_files.txt ]; then
-  if [ -n "$INCREMENTAL" ]; then
-    if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-      # The commits cancel out to the already-reviewed tree. Advance only the
-      # reviewed-head marker; all findings and safety state remain valid.
-      sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
-        -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
-        -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
-        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT"
-    fi
-    echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
-    exit 0
-  fi
-  echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
-  exit 1
-fi
-wc -l < /tmp/changed_files.txt
-
-cat >> /tmp/review_env.sh <<EOF
-export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FULL_RANGE"
-export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
-EOF
-```
-
-Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
-excluded from risk scoring and agent selection by the engine — agents should not raise findings
-against them either.
-
 ### Read Project Standards
 
 Read the repo's `CLAUDE.md` / `AGENTS.md` / `CONTRIBUTING.md` (whichever exist) to understand the
 project's conventions. That context is shared with all agents via the archetype prompt, which
 instructs each agent to read them too.
-
-### Build the Review Plan
-
-Risk scoring, agent selection, special-pattern detection, and rule resolution are driven by the
-declarative review core (`.claude/review/config.yml`) — never computed inline here:
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-agent-review plan \
-  --files /tmp/changed_files.txt \
-  --stat /tmp/diff_stat.txt \
-  --diff /tmp/pr_diff.txt \
-  --scope "${REVIEW_SCOPE:-single_feature}" \
-  --mode "$MODE" \
-  > /tmp/review_plan.json
-cat /tmp/review_plan.json
-
-# A second plan covers the full PR and is the source of truth for governance:
-# displayed risk, required reviewer, and the machine-readable approval status.
-if [ "$FULL_RANGE" = "$RANGE" ]; then
-  cp /tmp/review_plan.json /tmp/review_gate_plan.json
-else
-  agent-review plan \
-    --files /tmp/full_changed_files.txt \
-    --stat /tmp/full_diff_stat.txt \
-    --diff /tmp/pr_full_diff.txt \
-    --scope "${REVIEW_SCOPE:-single_feature}" \
-    --mode "$MODE" \
-    > /tmp/review_gate_plan.json
-fi
-cat /tmp/review_gate_plan.json
-```
-
-### Load deterministic evidence and cross-repository context
-
-The reusable workflow creates these artifacts outside the model. Treat them as immutable inputs:
-
-```bash
-if [ -s "${AGENT_REVIEW_EVIDENCE:-}" ]; then
-  cp "$AGENT_REVIEW_EVIDENCE" /tmp/review_evidence.json
-else
-  echo '{"version":1,"staticFindings":[],"ci":null}' > /tmp/review_evidence.json
-fi
-if [ -s "${AGENT_REVIEW_CONTEXT_INVENTORY:-}" ]; then
-  cp "$AGENT_REVIEW_CONTEXT_INVENTORY" /tmp/review_context.json
-else
-  echo '{"version":1,"repositories":[]}' > /tmp/review_context.json
-fi
-node - <<'NODE'
-const evidence = require('/tmp/review_evidence.json');
-const context = require('/tmp/review_context.json');
-const ci = evidence.ci && evidence.ci.summary;
-console.log(`Deterministic AST findings: ${(evidence.staticFindings || []).length}`);
-console.log(ci ? `CI snapshot: ${ci.success} passed, ${ci.failed} failed, ${ci.pending} pending` : 'CI snapshot: unavailable');
-for (const repo of context.repositories || []) {
-  console.log(`Context ${repo.id}: ${repo.available ? `${repo.files.length} allowlisted files at ${repo.ref}` : 'unavailable'}`);
-}
-NODE
-```
 
 Every `staticFindings[]` entry is a trusted, changed-line-anchored finding and MUST be copied into
 `/tmp/consensus_findings.json` unchanged before Stage 6 emission. Agents may add corroborating
@@ -435,40 +458,6 @@ static signature and rejects publication otherwise.
 under `$AGENT_REVIEW_CONTEXT_DIR/<id>/`. Read only inventory-listed files relevant to the changed
 API/schema/contract. Cite the repository id, pinned SHA, and file when cross-repo evidence changes
 a finding. Never search outside those roots.
-
-`REVIEW_SCOPE` is the heuristic scope you set from the change footprint (default `single_feature`;
-use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature areas
-or core infrastructure). The plan JSON has this shape:
-
-```json
-{
-  "profile": "standard",
-  "risk": {
-    "score": 0,
-    "level": "LOW",
-    "reviewer": "...",
-    "factors": {
-      "patternScore": 0,
-      "volumeScore": 0,
-      "specialScore": 0,
-      "scopeMultiplier": 1.0,
-      "subtotal": 0
-    },
-    "special": ["..."]
-  },
-  "mode": { "requested": "auto", "resolved": "quick" },
-  "agents": [
-    {
-      "id": "standards",
-      "model": "smart",
-      "escalates": false,
-      "tier": "sonnet",
-      "matchedBy": "always",
-      "rules": ["rules/standards.md"]
-    }
-  ]
-}
-```
 
 ### Auto Mode Resolution
 
@@ -611,10 +600,8 @@ plan's `agents[]` has:
   first entry not already picked (the first triggered agent). If any of those ids do not exist in
   this repo's config, just take the first three plan entries.
 
-```bash
-# Enabled agents (used by deep mode); plan agents[] drives quick/standard.
-agent-review config get agents > /tmp/config_agents.json
-```
+`/tmp/config_agents.json` (used by deep mode; plan `agents[]` drives quick/standard) was already
+fetched in Stage 0A's setup block, alongside config validation.
 
 Announce the selection, including each agent's `matchedBy` reason, e.g.:
 
@@ -669,20 +656,40 @@ land" and stopping IS the failure mode; do not do it.
 
 Display: "🚀 Launching [N] specialized review agents in parallel..."
 
-### Approved learnings (learning layer)
+### Approved learnings & dependency impact
 
-Before assembling prompts, fetch approved `rule` learnings (gated on the learning layer):
+Before assembling prompts, fetch approved `rule` learnings (gated on the learning layer) and
+compute dependency impact (Stage 1B, gated on the index being enabled in config) — both are
+read-only lookups nothing else here depends on, so one shell handles both:
 
 ```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+
+# --- Approved learnings (learning layer) ---
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
   agent-review rules > /tmp/review_rules.json 2>/dev/null || echo "[]" > /tmp/review_rules.json
 else
   echo "[]" > /tmp/review_rules.json
 fi
+
+# --- Dependency impact analysis (Stage 1B) ---
+echo "🔍 Analyzing dependency impact (index engine)..."
+if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
+  if [ -n "${BASE_REF:-}" ]; then
+    agent-review impact --base "$BASE_REF" > /tmp/review_impact.json || true
+  else
+    agent-review impact > /tmp/review_impact.json || true
+  fi
+  cat /tmp/review_impact.json
+else
+  echo "ℹ️  Index disabled in config.yml — skipping impact analysis."
+fi
+echo "✅ Dependency analysis complete"
 ```
 
-Each entry is `{ paths, ruleText, agent }` — a repository-specific rule ratified by a human from
-prior review feedback.
+Each learnings entry is `{ paths, ruleText, agent }` — a repository-specific rule ratified by a
+human from prior review feedback.
 
 ### Assemble each agent prompt from the archetype template
 
@@ -747,27 +754,10 @@ After launching, display:
 
 ## Stage 1B — Dependency Impact Analysis (Parallel)
 
-Compute dependency impact from the persisted import graph (not grep). Run this **before** Stage 1
-whenever the launch list contains the `architecture` or `data-integrity` agent — their `{{IMPACT}}`
-slot needs the output; otherwise run it in parallel while the agents work. It is fast. Gated on the
-index being enabled in config:
-
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-echo "🔍 Analyzing dependency impact (index engine)..."
-
-if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
-  if [ -n "${BASE_REF:-}" ]; then
-    agent-review impact --base "$BASE_REF" > /tmp/review_impact.json
-  else
-    agent-review impact > /tmp/review_impact.json
-  fi
-  cat /tmp/review_impact.json
-else
-  echo "ℹ️  Index disabled in config.yml — skipping impact analysis."
-fi
-echo "✅ Dependency analysis complete"
-```
+Dependency impact is computed from the persisted import graph (not grep) — already done, in
+**[Approved learnings & dependency impact](#approved-learnings--dependency-impact)** above, before
+Stage 1's agents launch, since the `architecture`/`data-integrity` agents' `{{IMPACT}}` slot needs
+the output.
 
 The JSON report has these fields:
 
@@ -1091,24 +1081,23 @@ named pairs. Write the decisions to `/tmp/consensus_decisions.json`:
 
 `merge` combines the pair into one entry per the engine's documented merge rules (severity =
 rounded mean, line/message/fix = the higher-severity member's, evidence/recommendation =
-whichever is longer); `keep` is a no-op kept for auditability. Re-run the command with the
-decisions applied:
+whichever is longer); `keep` is a no-op kept for auditability. Skip writing
+`/tmp/consensus_decisions.json` entirely when `candidates` was empty — the first invocation's
+output is already final. Either way, this block re-runs the command when decisions exist and then
+extracts the plain findings array Stage 6 expects:
 
 ```bash
-agent-review consensus \
-  --plan /tmp/review_plan.json \
-  --dir /tmp/agent_findings \
-  --profile "$PROFILE" \
-  --decisions /tmp/consensus_decisions.json \
-  > /tmp/consensus_raw.json
-```
-
-Skip the decisions round entirely when `candidates` was empty — the first invocation's output is
-already final.
-
-Extract the plain findings array Stage 6 expects:
-
-```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
+if [ -s /tmp/consensus_decisions.json ]; then
+  agent-review consensus \
+    --plan /tmp/review_plan.json \
+    --dir /tmp/agent_findings \
+    --profile "$PROFILE" \
+    --decisions /tmp/consensus_decisions.json \
+    > /tmp/consensus_raw.json
+fi
 node -e 'const r = require("/tmp/consensus_raw.json"); process.stdout.write(JSON.stringify(r.findings, null, 2))' \
   > /tmp/consensus_findings.json
 ```
@@ -1249,10 +1238,15 @@ Write the consensus findings as a JSON array to `/tmp/consensus_findings.json`. 
 shaped `{ agent, category, severity, file, line, message, confidence, evidence, recommendation }`.
 For severity ≥ 7, `confidence` must be `High`, `line` must anchor to an added/modified line, and
 `evidence` must name the verified execution path or violated contract. Then emit the findings and
-apply approved learnings when that layer is enabled:
+apply approved learnings when that layer is enabled, then build the hidden findings ledger from
+the result — both steps are read-only engine calls with no required decision in between, so one
+shell handles them (see **Build the findings ledger** below for what the second half does):
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, set once in Stage 0
+. /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, INCREMENTAL, PR_NUMBER, set in Stage 0
+set -e
+
+# --- Capture consensus for the learning layer ---
 # Deterministic AST matches are not subject to model consensus. Prepend them
 # unchanged; the trusted publishing step verifies all their signatures survive
 # filtering and ledger construction.
@@ -1276,6 +1270,29 @@ else
   node -e 'const f=require("/tmp/consensus_findings.json"); process.stdout.write(JSON.stringify({kept:f,suppressed:[]},null,2))' \
     > /tmp/review_filtered.json
 fi
+
+# --- Build the findings ledger ---
+echo '[]' > /tmp/previous_agent_review_ledger.json
+if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
+  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
+    tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
+      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+      > /tmp/previous_agent_review_ledger.json
+  else
+    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
+      2>/dev/null | tr -d '\r' \
+      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
+      > /tmp/previous_agent_review_ledger.json
+  fi
+  [ -s /tmp/previous_agent_review_ledger.json ] \
+    || echo '[]' > /tmp/previous_agent_review_ledger.json
+fi
+agent-review ledger \
+  --findings /tmp/review_filtered.json \
+  --previous /tmp/previous_agent_review_ledger.json \
+  > /tmp/agent_review_ledger.json
 ```
 
 Report the `kept` findings from `/tmp/review_filtered.json` and note the count of `suppressed`
@@ -1308,30 +1325,8 @@ the feedback store):
 - The ledger also carries bounded `evidence` and `recommendation` fields. This preserves enough
   context to address an older open finding after the visible report is updated by a later run.
 
-```bash
-. /tmp/review_env.sh 2>/dev/null || true
-echo '[]' > /tmp/previous_agent_review_ledger.json
-if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
-  if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
-    tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
-      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-      > /tmp/previous_agent_review_ledger.json
-  else
-    REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
-      2>/dev/null | tr -d '\r' \
-      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-      > /tmp/previous_agent_review_ledger.json
-  fi
-  [ -s /tmp/previous_agent_review_ledger.json ] \
-    || echo '[]' > /tmp/previous_agent_review_ledger.json
-fi
-agent-review ledger \
-  --findings /tmp/review_filtered.json \
-  --previous /tmp/previous_agent_review_ledger.json \
-  > /tmp/agent_review_ledger.json
-```
+Computed above, in the same shell as **Capture consensus for the learning layer** — see that
+block for the exact commands.
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 

@@ -458,25 +458,35 @@ test('the review skill routes agents by plan tier and degrades safely', () => {
   assert.ok(skill.includes('plan.mode.resolved') || skill.includes('mode.resolved'), 'auto resolution comes from the plan');
 });
 
-test('the Build the Review Plan block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
+// Extracts the first ```bash fence in `section` and returns its first non-comment,
+// non-blank line — used to pin that every consolidated block sources review_env.sh first.
+function firstNonCommentLineOfFirstBashFence(section, label) {
+  const fenceStart = section.indexOf('```bash');
+  assert.ok(fenceStart !== -1, `no \`\`\`bash fence found in the ${label} section`);
+  const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
+  assert.ok(fenceEnd !== -1, `unterminated \`\`\`bash fence in the ${label} section`);
+  const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
+  return block
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line !== '' && !line.startsWith('#'));
+}
+
+test('the Initialize & build the review plan block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
   // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note) — this
   // block reads $MODE (for --mode) and $RANGE/$FULL_RANGE (for the gate-plan aliasing check),
   // none of which it computes itself, so it must source review_env.sh as its first statement.
   // Skipping this silently sends `--mode ''` (auto mode never resolves) and aliases an empty
   // $FULL_RANGE to an empty $RANGE (wrongly treating every re-review as the full PR).
+  // Task 4 folded mode-parse/CI-detect/config-validate/dirs/config-agents/PR-context/diff-manifest
+  // /plan/evidence into one consolidated block under this heading (see the CI bash-turn budget
+  // test below) — the anchors moved with it.
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const start = skill.indexOf('### Build the Review Plan');
-  const end = skill.indexOf('### Load deterministic evidence', start);
-  assert.ok(start !== -1 && end !== -1, 'Build the Review Plan / Load deterministic evidence anchors not found');
+  const start = skill.indexOf('### Initialize & build the review plan');
+  const end = skill.indexOf('## CI Mode', start);
+  assert.ok(start !== -1 && end !== -1, 'Initialize & build the review plan / CI Mode anchors not found');
   const section = skill.slice(start, end);
-  const fenceStart = section.indexOf('```bash');
-  const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
-  assert.ok(fenceStart !== -1 && fenceEnd !== -1, 'no ```bash fence found in the Build the Review Plan section');
-  const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
-  const firstLine = block
-    .split('\n')
-    .map((line) => line.trim())
-    .find((line) => line !== '' && !line.startsWith('#'));
+  const firstLine = firstNonCommentLineOfFirstBashFence(section, 'Initialize & build the review plan');
   assert.strictEqual(
     firstLine,
     '. /tmp/review_env.sh 2>/dev/null || true',
@@ -625,4 +635,162 @@ test('the archetype instructs writing the findings file via node -e and JSON.str
   assert.ok(/JSON\.stringify/.test(archetype), 'archetype must show JSON.stringify building the file');
   assert.ok(/never hand-escaped JSON/i.test(archetype), 'archetype must explicitly forbid hand-escaped JSON');
   assert.ok(/recommendation: ≤ ?4 lines/.test(archetype), 'archetype must cap recommendation to <=4 lines');
+});
+
+// --- Ponytail-consensus Task 4: CI bash-block consolidation — fewer separate Bash-tool turns ---
+// --- for a CI run. Each turn is a fresh shell (see the "Cross-stage state" note), and every ---
+// --- turn boundary is a place a bwrap sandbox bind-race can strike mid-review. ---
+
+function countBashFences(text) {
+  let count = 0;
+  let inFence = false;
+  let inBash = false;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('```')) {
+      if (!inFence) {
+        inFence = true;
+        inBash = line.slice(3).trim().toLowerCase() === 'bash';
+        if (inBash) count += 1;
+      } else {
+        inFence = false;
+        inBash = false;
+      }
+    }
+  }
+  return count;
+}
+
+test('the CI path uses at most 10 bash turns (Stage 0A through Stage 6)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
+  const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
+  const stage5BStart = skill.indexOf('## Stage 5B — Historical Metrics Dashboard');
+  const stage6Start = skill.indexOf('## Stage 6 — Generate Review Report');
+  const localOnlyStart = skill.indexOf('**Locally** the opposite can be stale');
+  for (const [name, index] of [
+    ['Stage 0A', stage0AStart],
+    ['Stage 7', stage7Start],
+    ['Stage 5B', stage5BStart],
+    ['Stage 6', stage6Start],
+    ['the local-only version-check branch', localOnlyStart],
+  ]) {
+    assert.ok(index !== -1, `anchor not found: ${name}`);
+  }
+  // Stage 5B ("SKIP THIS ENTIRE STAGE IN CI MODE") and the local-only plugin-staleness check
+  // ("**Locally** the opposite can be stale...") never execute during a CI run, so they are
+  // outside the CI-path turn budget — Task 4 leaves both untouched rather than risk a merge
+  // across code that only ever runs locally.
+  const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
+  const count = countBashFences(ciPath);
+  assert.ok(count <= 10, `CI-path bash fence count is ${count}, expected <= 10`);
+});
+
+test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const sections = [
+    [
+      'Approved learnings & dependency impact',
+      '### Approved learnings & dependency impact',
+      '### Assemble each agent prompt',
+    ],
+    [
+      'Stage 5 decisions re-run + extract findings',
+      'extracts the plain findings array Stage 6 expects',
+      '## Stage 5B — Historical Metrics Dashboard',
+    ],
+    [
+      'Capture consensus for the learning layer + build the findings ledger',
+      '### Capture consensus for the learning layer',
+      '### Build the findings ledger',
+    ],
+  ];
+  for (const [label, startAnchor, endAnchor] of sections) {
+    const start = skill.indexOf(startAnchor);
+    const end = skill.indexOf(endAnchor, start);
+    assert.ok(start !== -1 && end !== -1, `${label}: anchors not found (start=${start}, end=${end})`);
+    const section = skill.slice(start, end);
+    const firstLine = firstNonCommentLineOfFirstBashFence(section, label);
+    // A trailing inline comment (e.g. "... || true   # REVIEW_ID, set in Stage 0") is fine —
+    // only the leading command matters, so this checks the prefix rather than exact equality.
+    assert.ok(
+      firstLine.startsWith('. /tmp/review_env.sh 2>/dev/null || true'),
+      `${label} must source review_env.sh as its first non-comment line (got: "${firstLine}")`,
+    );
+  }
+});
+
+test('Auto Mode Resolution remains its own bash turn — its output gates whether agents launch at all', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Auto Mode Resolution');
+  const end = skill.indexOf('### Risk Assessment', start);
+  assert.ok(start !== -1 && end !== -1, 'Auto Mode Resolution / Risk Assessment anchors not found');
+  const section = skill.slice(start, end);
+  assert.strictEqual(
+    countBashFences(section),
+    1,
+    'Auto Mode Resolution must stay exactly one bash turn — a skip must not launch agents',
+  );
+  assert.ok(section.includes('if [ "$MODE" = "auto" ]'), 'the auto-mode gate logic must still live in this block');
+  // It must not have been folded into the preceding consolidated setup block either.
+  const setupStart = skill.indexOf('### Initialize & build the review plan');
+  const setupSection = skill.slice(setupStart, start);
+  assert.ok(
+    !setupSection.includes('RESOLVED=$(node -e'),
+    'auto-mode resolution logic must not have leaked into the earlier consolidated block',
+  );
+});
+
+test('the smoke-test tier routing block remains its own bash turn — the launch table reads $ROUTING', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf('### Smoke-Test Tier Routing');
+  const end = skill.indexOf('## Stage 1 — Launch Specialized Review Agents', start);
+  assert.ok(start !== -1 && end !== -1, 'Smoke-Test Tier Routing anchors not found');
+  const section = skill.slice(start, end);
+  assert.strictEqual(
+    countBashFences(section),
+    1,
+    'the smoke-test ROUTING block must stay its own bash turn — it can set ROUTING=degraded, which every later launch table reads',
+  );
+});
+
+test('Task 4 consolidation preserves every fail-closed exit message verbatim', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  for (const message of [
+    '❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first.',
+    "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml.",
+    '❌ No changed files in $RANGE — nothing to review. Check the base ref.',
+    '✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting.',
+    '✅ No net changes since the last reviewed head — nothing to review. Exiting.',
+  ]) {
+    assert.ok(skill.includes(message), `fail-closed message missing or altered: ${message}`);
+  }
+});
+
+test('Task-4-merged blocks never append to a scratch file other than review_env.sh', () => {
+  // A bwrap bind-race rerun replays a whole merged block from the top — a `>>` onto any file
+  // besides review_env.sh (whose duplicate export lines are harmless) would duplicate data on
+  // retry. `>` and `mkdir -p` are fine; so is `tee -a`/`>>` when the target IS review_env.sh.
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const mergedSections = [
+    ['Initialize & build the review plan', '### Initialize & build the review plan', '## CI Mode'],
+    ['Approved learnings & dependency impact', '### Approved learnings & dependency impact', '### Assemble each agent prompt'],
+    ['Stage 5 decisions re-run + extract findings', 'extracts the plain findings array Stage 6 expects', '## Stage 5B — Historical Metrics Dashboard'],
+    ['Capture consensus + build ledger', '### Capture consensus for the learning layer', '### Build the findings ledger'],
+  ];
+  for (const [label, startAnchor, endAnchor] of mergedSections) {
+    const start = skill.indexOf(startAnchor);
+    const end = skill.indexOf(endAnchor, start);
+    assert.ok(start !== -1 && end !== -1, `${label}: anchors not found`);
+    const section = skill.slice(start, end);
+    const fenceStart = section.indexOf('```bash');
+    const fenceEnd = section.indexOf('```', fenceStart + '```bash'.length);
+    const block = section.slice(fenceStart + '```bash'.length, fenceEnd);
+    for (const line of block.split('\n')) {
+      if (!line.includes('>>')) continue;
+      assert.ok(
+        line.includes('/tmp/review_env.sh'),
+        `${label}: a rerun-unsafe append target other than review_env.sh: "${line.trim()}"`,
+      );
+    }
+  }
 });
