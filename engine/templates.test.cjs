@@ -854,3 +854,24 @@ test('Task-4-merged blocks never append to a scratch file other than review_env.
     }
   }
 });
+
+test('agents with no configured expertise get a derived lane instead of a blank one, and the opt-out guideline cannot be used to skip review', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const expertiseRow = skill.slice(skill.indexOf('| `{{EXPERTISE}}`'), skill.indexOf('\n', skill.indexOf('| `{{EXPERTISE}}`')));
+  assert.ok(
+    expertiseRow.includes('judged against:'),
+    'the {{EXPERTISE}} fallback must derive a lane from the agent title + rules[], not leave it blank',
+  );
+  assert.ok(
+    !skill.includes('leave the line\'s value blank rather than inventing expertise'),
+    'the old blank-EXPERTISE fallback text must be gone — a blank lane silently reviews nothing',
+  );
+
+  const archetype = readFileSync(ARCHETYPE, 'utf8');
+  assert.ok(
+    archetype.includes(
+      "If your defined expertise genuinely does not apply to anything in this change set, leave `findings` empty and still set `overallConfidence` — but an unclear or generic expertise line is never a reason to skip review: judge the diff on your title's discipline.",
+    ),
+    'the opt-out guideline must be tightened to forbid using an unclear/generic expertise line as an excuse to skip review',
+  );
+});

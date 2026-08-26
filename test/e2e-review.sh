@@ -145,6 +145,22 @@ NODE
 
 echo "✅ PASS: the staged report survives every publish-step check ($BYTES bytes)"
 echo "   report: $COMMENT"
+
+# ── Quality gate — markers alone don't prove the review worked ─────────────
+# The diff is seeded with a blatant SQL injection. A review that produces a
+# well-formed report but misses it entirely is still broken.
+node - "$COMMENT" "$ROOT" <<'NODE' || FAIL "quality gate: no open severity >= 7 finding in the ledger — the review missed the seeded SQL injection"
+const fs = require('fs');
+const path = require('path');
+const comment = fs.readFileSync(process.argv[2], 'utf8').replace(/\r/g, '');
+const A = require(path.join(process.argv[3], 'engine/addressState.cjs'));
+const state = A.extractReportState(comment);
+const blockers = state.ledger.filter((entry) => entry.status === 'open' && entry.severity >= 7);
+if (blockers.length === 0) throw new Error('no open severity >= 7 finding in the ledger');
+console.log(`   quality gate: ${blockers.length} open severity>=7 finding(s) in the ledger`);
+NODE
+echo "✅ PASS: quality gate — the seeded SQL injection produced an open severity >= 7 finding"
+
 if [ -n "$KEEP" ]; then
   echo "   scratch kept: $SCRATCH"
 else

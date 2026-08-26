@@ -196,7 +196,6 @@ GUIDELINES:
 - Search the codebase before flagging to avoid false positives
 - Do not re-report deterministic static findings as a second model finding; reference their rule
   id when corroborating them. They enter the final ledger independently of consensus.
-- If nothing in this change set falls within your expertise, leave `findings` empty and still set
-  `overallConfidence` — that alone is a complete, valid report
+- If your defined expertise genuinely does not apply to anything in this change set, leave `findings` empty and still set `overallConfidence` — but an unclear or generic expertise line is never a reason to skip review: judge the diff on your title's discipline.
 
 {{PROFILE_INSTRUCTION}}
