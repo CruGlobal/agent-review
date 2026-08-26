@@ -327,6 +327,23 @@ test('the local e2e harness exists and derives its contract from the CI workflow
   assert.ok(script.includes('agent-review-ledger'), 'harness must apply the publish-step validation');
 });
 
+test('the report skeleton surfaces needsHumanReview and defines the agent-summary severity bands', () => {
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(
+    report.includes('_([agent])_[ · 🤔 needs-human-review]'),
+    'BLOCKERS/OTHER FINDINGS lines must carry the optional needs-human-review suffix',
+  );
+  assert.ok(
+    report.includes('Critical 9-10 · High 7-8 · Important 5-6 · Suggestions 3-4'),
+    'Agent summary must define its severity bands to match the SEVERITY ANCHORS',
+  );
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(
+    /agents.*field.*fallback.*agent|falling back to `agent`/.test(skill),
+    'the fill rules must tell the model to source the display agent list from `agents`, falling back to `agent`',
+  );
+});
+
 test('the report skeleton and commit message never emit bare #N', () => {
   const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
   assert.ok(!report.includes('**#[N]**'), 'ledger skeleton lines must use the code-span form **`#[N]`**');
@@ -397,10 +414,10 @@ test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-fo
   const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
   const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
   assert.deepEqual(matchedLines, [
-    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_',
+    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
   ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
@@ -424,6 +441,21 @@ test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () 
   assert.ok(archetype.includes('severity < 7: evidence ≤ 2 lines'), 'minor evidence tier missing');
   assert.ok(archetype.includes('report only the checklist items that FAIL'), 'checklists must be violations-only');
   assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
+});
+
+test('the archetype severity guidance never contradicts the pinned SEVERITY ANCHORS', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  // The old band sentence claimed Critical/BLOCKING is 10/10 and Concerns are 6-9/10 — directly
+  // contradicting the SEVERITY ANCHORS (9-10 critical, 7-8 correctness) below it, which is what
+  // caused a 7/10 finding to be rated as merely a "Concern" instead of a blocker.
+  assert.ok(
+    !archetype.includes('Critical/BLOCKING is 10/10'),
+    'the contradictory old severity-band sentence must not survive',
+  );
+  assert.ok(
+    archetype.includes('Severity ≥ 7 is a BLOCKER'),
+    'the ≥7-is-a-blocker line must replace the old band sentence',
+  );
 });
 
 test('the archetype hands off findings as a JSON file with a one-line return', () => {
@@ -905,5 +937,19 @@ test('the CI posting block self-checks the marker JSON before it reaches the tru
   assert.ok(
     postSection.includes('console.log("marker self-check OK")'),
     'the posting block must self-check the ledger/status marker JSON after assembling the comment',
+  );
+});
+
+test('the Interactive Menu "Post review to GitHub" choice self-checks the marker JSON too', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const menuSection = skill.slice(
+    skill.indexOf('Handle the choice:'),
+    skill.indexOf('Handle the choice:') + 4000,
+  );
+  const matches = [...menuSection.matchAll(/console\.log\("marker self-check OK"\)/g)];
+  assert.equal(
+    matches.length,
+    1,
+    'choice 2 (re-post) must run the same marker self-check as the CI posting step before posting',
   );
 });

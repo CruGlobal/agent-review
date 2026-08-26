@@ -98,9 +98,8 @@ Keep every finding tight — the file states it once, so write it once, well:
 - recommendation: ≤ 4 lines
 - fix: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
 
-Severity bands: Critical/BLOCKING is 10/10; Concerns (IMPORTANT) are 6-9/10 — either tier
-requires High confidence and a file:line anchor, per the evidence cap above; Suggestions are
-3-5/10 (set `recommendation` to the benefit, `evidence` and `fix` may be empty strings).
+Severity ≥ 7 is a BLOCKER (ledger checkbox, must be fixed or dismissed). Rate against the
+SEVERITY ANCHORS below — never against these section names.
 
 RULE CHECKLIST RESULTS:
 
@@ -143,26 +142,10 @@ Example:
 AUTOMATED FIX GENERATION:
 
 In CI mode do NOT write fix scripts or heredocs — CI never executes or offers them; give the
-≤10-line diff in your findings instead. Local mode keeps the script blocks below.
+≤10-line diff in your findings instead. Local mode keeps the script block below.
 
-When you find fixable issues, provide automated fixes:
-
-Format:
-
-### Automated Fix #N: [Issue Title]
-
-**File**: `path/to/file:42`
-**Issue**: [Brief description]
-**Fix Type**: auto-fixable
-**Confidence**: High/Medium/Low
-**Category**: [your review category]
-
-```diff
-- [old code]
-+ [new code with fix]
-```
-
-**Apply command**:
+When you find a fixable issue, use that finding's own `fix` field (see OUTPUT FORMAT above) as
+the fix content, then also write it out as an executable script so `apply_all.sh` can offer it:
 
 ```bash
 cat > /tmp/automated_fixes/fix_N_[category].sh << 'EOF'

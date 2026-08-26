@@ -114,6 +114,13 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 : > /tmp/review_env.sh    # fresh state for this review
+# Cross-run state from a prior review on this same machine/runner must never leak into this
+# one: a stale consensus_decisions.json silently merges unrelated findings (or throws an
+# unknown-index error against this run's smaller candidates array), and a stale per-lane
+# findings file can coincidentally pass Stage 2's N cross-check even though no agent wrote it
+# this run.
+rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
+rm -f /tmp/agent_findings/*.json 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
@@ -134,6 +141,10 @@ agent-review config validate || {
 
 # --- Initialize Directories ---
 mkdir -p /tmp/automated_fixes
+# On a cold runner this dir does not exist yet — without it every lane's findings-file write
+# throws ENOENT, the unchanged-prompt retry reproduces the same error, and the review posts
+# nothing.
+mkdir -p /tmp/agent_findings
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
 [ -z "${CI_MODE:-}" ] && mkdir -p "$REVIEW_DIR/metrics/history"
 
@@ -1164,7 +1175,8 @@ PR_NUM="${PR_NUMBER:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number -q .n
 CURRENT_DATE=$(date +%Y-%m-%d)
 AUTHOR=$(git config user.name || echo "Developer")
 
-# Average consensus severity for this review (from Stage 5) — substitute the real number.
+# Average consensus severity for this review — derive the mean `severity` across
+# /tmp/consensus_findings.json's entries and substitute the real number.
 CURRENT_SEVERITY="[X.X]"
 
 cat >> /tmp/review_env.sh <<EOF
@@ -1459,6 +1471,16 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   the report cannot approve or block the PR. Fill deterministic evidence from
   `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
+- Each finding's `agent` field is the primary (highest-severity) corroborating lane only — kept
+  single so the ledger signature never shifts with corroboration count. Wherever a finding names
+  its agent(s) for a human reader — the `_([agent])_` suffix on BLOCKERS/OTHER FINDINGS lines and
+  the **Per-agent perspectives** list — source the full corroborating set from the finding's
+  `agents` field (comma-joined), falling back to `agent` when `agents` is absent (a singleton,
+  uncorroborated finding).
+- Append ` · 🤔 needs-human-review` to a BLOCKERS/OTHER FINDINGS line only when that ledger entry
+  carries `needsHumanReview: true` (severity spread >= 4 across the finding's corroborating
+  members — a real disagreement, not something to dismiss reflexively); omit the suffix
+  otherwise.
 - Omit the **Debate summary** block from `Review detail & stats` entirely when debate rounds did
   not run. That block is the only place debate output ever appears in the report.
 - Omit the learning-layer line when the learning layer is disabled.
@@ -1618,6 +1640,20 @@ case "$choice" in
         echo
         cat /tmp/agent_review_report.md
       } > /tmp/agent_review_comment.md
+
+      # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
+      # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
+      # only from the node commands; never hand-write or hand-edit them.
+      node -e '
+const fs = require("fs");
+const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+for (const name of ["ledger", "status"]) {
+  const m = c.match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
+  if (m) JSON.parse(m[1]);
+}
+console.log("marker self-check OK");
+' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
+
       EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
         --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
         2>/dev/null | head -n1)
@@ -1676,7 +1712,9 @@ Display:
 🔴 [N] High Priority Issues
 ⚠️  [N] Important Issues
 💡 [N] Suggestions
-🤔 [N] Unresolved debates
+[IN CI MODE, OMIT THE LINE BELOW ENTIRELY WHEN DEBATE ROUNDS DID NOT RUN — same condition as the
+Debate summary block's omission. Otherwise:] 🤔 [N] Unresolved debates ([N] = ledger entries
+carrying `needsHumanReview: true`, not a debate-specific count)
 
 **Suggested Fixes**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

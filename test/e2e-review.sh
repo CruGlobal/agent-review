@@ -85,7 +85,11 @@ node "$ROOT/dist/agent-review.cjs" evidence --root "$CONSUMER" --review-dir "$TR
 echo '{"version":1,"repositories":[]}' > /tmp/agent_review_context.json
 : > /tmp/agent_review_previous_comment.md
 rm -f /tmp/agent_review_comment.md /tmp/agent_review_report.md /tmp/review_env.sh \
-  /tmp/review_plan.json /tmp/agent_review_ledger.json /tmp/agent_review_status.json
+  /tmp/review_plan.json /tmp/agent_review_ledger.json /tmp/agent_review_status.json \
+  /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
+# Delete the whole dir, not just its contents, so this certifies COLD-start behavior too (the
+# skill's own Stage 0A `mkdir -p /tmp/agent_findings` must recreate it from nothing — see C1).
+rm -rf /tmp/agent_findings
 
 # ── The model step ────────────────────────────────────────────────────────────
 echo "▶ Running /agent-review:review auto ci with the local plugin ($MODEL, max $MAX_TURNS turns)..."
