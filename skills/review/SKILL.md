@@ -69,11 +69,11 @@ later stage needs is persisted to `/tmp/review_env.sh` at the moment it is compu
 later block starts by sourcing that file. Keep this discipline or later stages will silently
 operate on empty strings.
 
-### Initialize & build the review plan
+### Initialize
 
-Mode parsing, CI detection, config validation, working directories, the enabled-agents list, PR
-context, and the diff manifest are all read-only setup with no required decision in between — one
-shell handles all of it, so a bwrap bind-race rerun replays it as a single unit:
+Mode parsing, CI detection, config validation, and working directories are read-only setup with no
+required decision in between — one shell handles all of it, so a bwrap bind-race rerun replays it
+as a single unit:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
@@ -139,6 +139,13 @@ mkdir -p /tmp/automated_fixes
 
 # --- Enabled agents (used by deep mode; plan agents[] drives quick/standard) ---
 agent-review config get agents > /tmp/config_agents.json || true
+```
+
+### Gather PR Context & Diff Manifest
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
 
 # --- Gather PR Context ---
 # Resolve the PR number ONCE, here, and persist it — every later `gh pr view`/`gh pr comment`
@@ -270,15 +277,32 @@ cat >> /tmp/review_env.sh <<EOF
 export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FULL_RANGE"
 export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
 EOF
+```
+
+**Checkpoint — set REVIEW_SCOPE (not a bash turn; a decision).** Read the changed-file list and
+diff stat from the previous block's output (`/tmp/changed_files.txt`, `/tmp/diff_stat.txt`) and
+set REVIEW_SCOPE (`single_feature` | `multi_feature` | `cross_cutting` | `core_infra`) **before**
+running the next block; it defaults to `single_feature` only when the footprint genuinely is one
+— use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature
+areas or core infrastructure. Carry your decision into the next block by setting
+`REVIEW_SCOPE="<value>"` right after that block's `set -e` line, overriding the shown default.
+
+### Build the Review Plan & Load Evidence
+
+Risk scoring, agent selection, special-pattern detection, and rule resolution are driven by the
+declarative review core (`.claude/review/config.yml`) — never computed inline here:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+set -e
+REVIEW_SCOPE="${REVIEW_SCOPE:-single_feature}"   # ← set at the checkpoint above
 
 # --- Build the Review Plan ---
-# Risk scoring, agent selection, special-pattern detection, and rule resolution are driven by the
-# declarative review core (.claude/review/config.yml) — never computed inline here.
 agent-review plan \
   --files /tmp/changed_files.txt \
   --stat /tmp/diff_stat.txt \
   --diff /tmp/pr_diff.txt \
-  --scope "${REVIEW_SCOPE:-single_feature}" \
+  --scope "$REVIEW_SCOPE" \
   --mode "$MODE" \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
@@ -292,7 +316,7 @@ else
     --files /tmp/full_changed_files.txt \
     --stat /tmp/full_diff_stat.txt \
     --diff /tmp/pr_full_diff.txt \
-    --scope "${REVIEW_SCOPE:-single_feature}" \
+    --scope "$REVIEW_SCOPE" \
     --mode "$MODE" \
     > /tmp/review_gate_plan.json
 fi
@@ -326,9 +350,7 @@ Paths listed under `excluded_paths` in config (`agent-review config get excluded
 excluded from risk scoring and agent selection by the engine — agents should not raise findings
 against them either.
 
-`REVIEW_SCOPE` is the heuristic scope you set from the change footprint (default `single_feature`;
-use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature areas
-or core infrastructure). The plan JSON has this shape:
+The plan JSON has this shape:
 
 ```json
 {

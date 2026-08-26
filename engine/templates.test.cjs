@@ -472,21 +472,23 @@ function firstNonCommentLineOfFirstBashFence(section, label) {
     .find((line) => line !== '' && !line.startsWith('#'));
 }
 
-test('the Initialize & build the review plan block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
-  // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note) — this
-  // block reads $MODE (for --mode) and $RANGE/$FULL_RANGE (for the gate-plan aliasing check),
-  // none of which it computes itself, so it must source review_env.sh as its first statement.
-  // Skipping this silently sends `--mode ''` (auto mode never resolves) and aliases an empty
-  // $FULL_RANGE to an empty $RANGE (wrongly treating every re-review as the full PR).
-  // Task 4 folded mode-parse/CI-detect/config-validate/dirs/config-agents/PR-context/diff-manifest
-  // /plan/evidence into one consolidated block under this heading (see the CI bash-turn budget
-  // test below) — the anchors moved with it.
+test('the Build the Review Plan & Load Evidence block sources review_env.sh before using $MODE/$RANGE/$FULL_RANGE', () => {
+  // Every bash block in this skill is a fresh shell (see the "Cross-stage state" note). Sourcing
+  // review_env.sh as the first statement is defensive idempotency for mid-run bwrap bind-race
+  // reruns and for picking up cross-block state exported by earlier blocks — here $MODE (from
+  // the Initialize block) and $RANGE/$FULL_RANGE (from Gather PR Context & Diff Manifest), used
+  // for --mode and the gate-plan aliasing check respectively. Skipping the source line silently
+  // sends `--mode ''` (auto mode never resolves) and aliases an empty $FULL_RANGE to an empty
+  // $RANGE (wrongly treating every re-review as the full PR).
+  // Task 4 split the CI-path setup into three blocks per the brief's original grouping (mode
+  // parse/CI-detect/config-validate/dirs; PR-context/diff-manifest; plan/evidence, with an
+  // explicit REVIEW_SCOPE model checkpoint between the second and third) — this is the third.
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const start = skill.indexOf('### Initialize & build the review plan');
+  const start = skill.indexOf('### Build the Review Plan & Load Evidence');
   const end = skill.indexOf('## CI Mode', start);
-  assert.ok(start !== -1 && end !== -1, 'Initialize & build the review plan / CI Mode anchors not found');
+  assert.ok(start !== -1 && end !== -1, 'Build the Review Plan & Load Evidence / CI Mode anchors not found');
   const section = skill.slice(start, end);
-  const firstLine = firstNonCommentLineOfFirstBashFence(section, 'Initialize & build the review plan');
+  const firstLine = firstNonCommentLineOfFirstBashFence(section, 'Build the Review Plan & Load Evidence');
   assert.strictEqual(
     firstLine,
     '. /tmp/review_env.sh 2>/dev/null || true',
@@ -660,7 +662,47 @@ function countBashFences(text) {
   return count;
 }
 
-test('the CI path uses at most 10 bash turns (Stage 0A through Stage 6)', () => {
+test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff manifest and the plan invocation', () => {
+  // Controller ruling: REVIEW_SCOPE requires the model to read the diff manifest's output before
+  // the plan runs — a genuine judgment call, not scriptable, so it cannot live inside a merged
+  // bash block. This pins that the checkpoint sits between the two blocks (not folded into
+  // either), and that the plan block picks up whatever the model set.
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const diffManifestStart = skill.indexOf('### Gather PR Context & Diff Manifest');
+  const planStart = skill.indexOf('### Build the Review Plan & Load Evidence');
+  assert.ok(diffManifestStart !== -1 && planStart !== -1, 'Gather PR Context / Build the Review Plan anchors not found');
+  // The checkpoint is the prose between the diff-manifest block's closing fence and the plan
+  // block's heading — not the whole "Gather PR Context & Diff Manifest" section, which itself
+  // contains a bash fence.
+  const diffManifestFenceStart = skill.indexOf('```bash', diffManifestStart);
+  const diffManifestFenceEnd = skill.indexOf('```', diffManifestFenceStart + '```bash'.length);
+  assert.ok(diffManifestFenceStart !== -1 && diffManifestFenceEnd !== -1, 'diff-manifest fence not found');
+  const checkpoint = skill.slice(diffManifestFenceEnd + '```'.length, planStart);
+  assert.ok(checkpoint.includes('Checkpoint'), 'an explicit checkpoint must sit between the diff manifest and the plan blocks');
+  assert.ok(
+    /changed-file list and\s+diff stat from the previous block/.test(checkpoint),
+    'the checkpoint must instruct reading the diff manifest\'s own output',
+  );
+  assert.ok(
+    /single_feature.*multi_feature.*cross_cutting.*core_infra/.test(checkpoint),
+    'the checkpoint must name all four REVIEW_SCOPE values',
+  );
+  assert.ok(
+    checkpoint.includes('defaults to `single_feature` only when the footprint genuinely is one'),
+    'the checkpoint must forbid defaulting to single_feature by omission',
+  );
+  const planSection = skill.slice(planStart, skill.indexOf('## CI Mode', planStart));
+  assert.ok(
+    planSection.includes('REVIEW_SCOPE="${REVIEW_SCOPE:-single_feature}"'),
+    'the plan block must read $REVIEW_SCOPE (set at the checkpoint) rather than recomputing it',
+  );
+  assert.ok(
+    !checkpoint.includes('```bash'),
+    'the checkpoint itself must not be a bash turn — it is a model decision',
+  );
+});
+
+test('the CI path uses at most 12 bash turns (Stage 0A through Stage 6)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
   const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
@@ -680,14 +722,30 @@ test('the CI path uses at most 10 bash turns (Stage 0A through Stage 6)', () => 
   // ("**Locally** the opposite can be stale...") never execute during a CI run, so they are
   // outside the CI-path turn budget — Task 4 leaves both untouched rather than risk a merge
   // across code that only ever runs locally.
+  //
+  // The budget is 12, not 10 (a controller ruling after review): REVIEW_SCOPE requires the model
+  // to read the diff manifest's changed-file list and stat output — a genuine decision, not
+  // scriptable — before the plan invocation. That checkpoint can't sit inside a merged bash
+  // block, so Stage 0A/0's setup is three turns (mode-parse/CI-detect/config-validate/dirs;
+  // PR-context/diff-manifest; plan/evidence) instead of one, +2 over the fence-count-only budget.
   const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
   const count = countBashFences(ciPath);
-  assert.ok(count <= 10, `CI-path bash fence count is ${count}, expected <= 10`);
+  assert.ok(count <= 12, `CI-path bash fence count is ${count}, expected <= 12`);
 });
 
 test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const sections = [
+    [
+      'Initialize',
+      '### Initialize',
+      '### Gather PR Context & Diff Manifest',
+    ],
+    [
+      'Gather PR Context & Diff Manifest',
+      '### Gather PR Context & Diff Manifest',
+      '### Build the Review Plan & Load Evidence',
+    ],
     [
       'Approved learnings & dependency impact',
       '### Approved learnings & dependency impact',
@@ -731,8 +789,8 @@ test('Auto Mode Resolution remains its own bash turn — its output gates whethe
     'Auto Mode Resolution must stay exactly one bash turn — a skip must not launch agents',
   );
   assert.ok(section.includes('if [ "$MODE" = "auto" ]'), 'the auto-mode gate logic must still live in this block');
-  // It must not have been folded into the preceding consolidated setup block either.
-  const setupStart = skill.indexOf('### Initialize & build the review plan');
+  // It must not have been folded into any of the preceding Stage 0A/0 setup blocks either.
+  const setupStart = skill.indexOf('### Initialize');
   const setupSection = skill.slice(setupStart, start);
   assert.ok(
     !setupSection.includes('RESOLVED=$(node -e'),
@@ -772,7 +830,9 @@ test('Task-4-merged blocks never append to a scratch file other than review_env.
   // retry. `>` and `mkdir -p` are fine; so is `tee -a`/`>>` when the target IS review_env.sh.
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const mergedSections = [
-    ['Initialize & build the review plan', '### Initialize & build the review plan', '## CI Mode'],
+    ['Initialize', '### Initialize', '### Gather PR Context & Diff Manifest'],
+    ['Gather PR Context & Diff Manifest', '### Gather PR Context & Diff Manifest', '### Build the Review Plan & Load Evidence'],
+    ['Build the Review Plan & Load Evidence', '### Build the Review Plan & Load Evidence', '## CI Mode'],
     ['Approved learnings & dependency impact', '### Approved learnings & dependency impact', '### Assemble each agent prompt'],
     ['Stage 5 decisions re-run + extract findings', 'extracts the plain findings array Stage 6 expects', '## Stage 5B — Historical Metrics Dashboard'],
     ['Capture consensus + build ledger', '### Capture consensus for the learning layer', '### Build the findings ledger'],
