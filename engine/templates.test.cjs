@@ -875,3 +875,17 @@ test('agents with no configured expertise get a derived lane instead of a blank 
     'the opt-out guideline must be tightened to forbid using an unclear/generic expertise line as an excuse to skip review',
   );
 });
+
+test('the archetype pins an explicit severity rubric with anti-sandbagging teeth', () => {
+  const archetype = readFileSync(ARCHETYPE, 'utf8');
+  assert.ok(
+    archetype.includes(
+      'Never rate a finding below 7 to avoid the blocker evidence requirement — if the defect is severity >= 7 by these anchors, gather the evidence and rate it honestly.',
+    ),
+    'the archetype must forbid sandbagging severity below 7 to dodge the evidence-burden requirement',
+  );
+  assert.ok(
+    archetype.includes('An exploitable injection is 9-10, full stop.'),
+    'the severity rubric must anchor exploitable injections at 9-10',
+  );
+});

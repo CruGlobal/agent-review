@@ -185,6 +185,12 @@ GUIDELINES:
 - Anchor every finding to an added/modified line. If the failure manifests in unchanged code, cite
   the changed line that makes it reachable and explain the cross-file path.
 - Rate severity on a 1-10 scale for consensus with the other agents
+- SEVERITY ANCHORS (rate against these, not against the evidence burden):
+  - 9-10: exploitable security flaw (injection, authz bypass), data loss/corruption
+  - 7-8: correctness bug reachable in production; missing safety on a destructive path
+  - 5-6: significant quality/reliability gap (missing tests on risky logic, error-handling holes)
+  - 3-4: convention drift, maintainability concerns
+- Never rate a finding below 7 to avoid the blocker evidence requirement — if the defect is severity >= 7 by these anchors, gather the evidence and rate it honestly. An exploitable injection is 9-10, full stop.
 - Severity >= 7 requires HIGH confidence and concrete evidence. If you cannot prove the execution
   path from the diff and current code, downgrade it or move it to `questions` instead of blocking.
 - Explain WHY it matters, not just WHAT the code does
