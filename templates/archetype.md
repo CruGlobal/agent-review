@@ -37,9 +37,37 @@ universal checks implied by your expertise.
 
 OUTPUT FORMAT:
 
-## {{TITLE}} — Findings
+Do not write a markdown report. Write your findings to
+`/tmp/agent_findings/{{AGENT_ID}}.json` as a single JSON object:
 
-Keep every finding tight — the report states it once, so write it once, well:
+```json
+{
+  "findings": [
+    {
+      "agent": "{{AGENT_ID}}",
+      "category": "short label for the area, e.g. security, standards-checklist",
+      "severity": 1,
+      "file": "path/to/file",
+      "line": 42,
+      "message": "≤ 2 sentences naming the defect and its consequence",
+      "confidence": "High/Medium/Low",
+      "evidence": "supporting evidence, see caps below",
+      "recommendation": "the substantive guidance — what to change and why",
+      "fix": "≤ 2 lines of direction, or a unified diff ≤ 10 lines"
+    }
+  ],
+  "questions": [
+    { "to": "Agent name", "question": "Question for another lane" }
+  ],
+  "overallConfidence": "High/Medium/Low"
+}
+```
+
+`findings` is `[]` when nothing in this change set falls within your expertise — an empty array
+plus `overallConfidence` is a complete report on its own. Every entry's `agent` field must equal
+`{{AGENT_ID}}`.
+
+Keep every finding tight — the file states it once, so write it once, well:
 - message: ≤ 2 sentences naming the defect and its consequence
 - severity < 7: evidence ≤ 2 lines
 - severity ≥ 7: evidence ≤ 8 lines (600 chars max), including at most one hunk
@@ -47,61 +75,32 @@ Keep every finding tight — the report states it once, so write it once, well:
   and concrete evidence, so spend the lines on the execution/data path, never on
   restating the diff
 - fix: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
-- Rule Checklist Results: report only the checklist items that FAIL, one line
-  each; if all pass, write "all pass"
 
-### Critical Issues (BLOCKING) - Severity: 10/10
+Severity bands: Critical/BLOCKING is 10/10; Concerns (IMPORTANT) are 6-9/10 — either tier
+requires High confidence and a file:line anchor, per the evidence cap above; Suggestions are
+3-5/10 (set `recommendation` to the benefit, `evidence` and `fix` may be empty strings).
 
-[Issues that MUST be fixed - be specific with file:line]
+RULE CHECKLIST RESULTS:
 
-- **File:Line** - Issue description (≤ 2 sentences: the defect and its consequence — what it
-  enables or breaks and what could happen — folded into this line, no separate Risk/Impact lines)
-  - Severity: 10/10
-  - Confidence: High
-  - Evidence: Exact changed hunk and the verified execution/data path that makes the failure reachable
-  - Fix: Specific code change needed
+[ONLY IF the PROJECT-SPECIFIC RULES above define explicit checklists — i.e. `- [ ]` items or
+numbered/bulleted groups the rules say must be reported per item.] For these,
+report only the checklist items that FAIL: each failing item becomes its own finding in the
+`findings` array, with `category` set to `standards-checklist`, at the severity its impact
+warrants, and `message` naming the checklist item and where it failed. If every item passes, add
+no `standards-checklist` findings at all — do not report passes.
 
-### Concerns (IMPORTANT) - Severity: 6-9/10
+QUESTIONS FOR OTHER AGENTS:
 
-[Issues that should be fixed]
+Put anything you want another lane to weigh in on in the file's `questions` array as
+`{ "to": "<agent or lane name>", "question": "..." }` — never as a finding.
 
-- **File:Line** - Concern (≤ 2 sentences: the defect and its consequence — folded into this line,
-  no separate Risk line)
-  - Severity: [6-9]/10
-  - Confidence: High/Medium/Low
-  - Evidence: Exact changed hunk plus the codebase search, call path, contract, or test that confirms it
-  - Fix: How to fix
+When you are done, your final message to the Task tool must be exactly one line:
 
-### Suggestions - Severity: 3-5/10
+`done — <N> findings, max severity <X>`
 
-[Nice-to-have improvements]
-
-- Improvement suggestion
-  - Severity: [3-5]/10
-  - Benefit: Why this matters
-
-### Rule Checklist Results
-
-[INCLUDE THIS SECTION ONLY IF the PROJECT-SPECIFIC RULES above define explicit checklists —
-i.e. `- [ ]` items or numbered/bulleted groups the rules say must be reported per item. OMIT the
-heading entirely otherwise.]
-
-Report only the checklist items that FAIL, one line each, using the item's own heading. If every
-item passes, write "all pass" instead of listing each group.
-
-- **[Checklist group name]**: ❌ — [which item failed and where]
-
-Every line here must also appear as a finding above, at the severity its impact warrants — this
-section is a compliance summary, not a substitute for reporting the issue.
-
-### Questions for Other Agents
-
-- **To [Agent]**: Question
-
-### Confidence
-
-- Overall: High/Medium/Low
-- Areas needing deeper analysis: [list]
+where `<N>` is `findings.length` in the file you just wrote and `<X>` is the highest `severity`
+among them (0 if `findings` is empty). Write nothing else in that final message — no summary, no
+markdown, no restated findings.
 
 CODEBASE CONTEXT SEARCH:
 Before flagging an issue, search for how similar code is handled in the codebase:
@@ -165,7 +164,7 @@ GUIDELINES:
   the changed line that makes it reachable and explain the cross-file path.
 - Rate severity on a 1-10 scale for consensus with the other agents
 - Severity >= 7 requires HIGH confidence and concrete evidence. If you cannot prove the execution
-  path from the diff and current code, downgrade it or put it under Questions instead of blocking.
+  path from the diff and current code, downgrade it or move it to `questions` instead of blocking.
 - Explain WHY it matters, not just WHAT the code does
 - Describe an observable failure mode or violated contract; do not report speculative risks,
   style preferences, or pre-existing issues that this change does not worsen.
@@ -175,6 +174,7 @@ GUIDELINES:
 - Search the codebase before flagging to avoid false positives
 - Do not re-report deterministic static findings as a second model finding; reference their rule
   id when corroborating them. They enter the final ledger independently of consensus.
-- If nothing in this change set falls within your expertise, say so plainly and skip to Confidence
+- If nothing in this change set falls within your expertise, leave `findings` empty and still set
+  `overallConfidence` — that alone is a complete, valid report
 
 {{PROFILE_INSTRUCTION}}

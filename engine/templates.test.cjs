@@ -31,6 +31,7 @@ const PLACEHOLDERS = [
   'IMPACT',
   'EVIDENCE',
   'CONTEXT',
+  'AGENT_ID',
 ];
 
 test('archetype.md uses exactly the documented placeholders', () => {
@@ -423,6 +424,20 @@ test('the archetype caps agent verbosity two-tier and drops CI fix scripts', () 
   assert.ok(archetype.includes('severity < 7: evidence ≤ 2 lines'), 'minor evidence tier missing');
   assert.ok(archetype.includes('report only the checklist items that FAIL'), 'checklists must be violations-only');
   assert.ok(archetype.includes('In CI mode do NOT write fix scripts'), 'CI fix-script ban missing');
+});
+
+test('the archetype hands off findings as a JSON file with a one-line return', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(archetype.includes('/tmp/agent_findings/'), 'findings-file path missing');
+  assert.ok(archetype.includes('{{AGENT_ID}}'), 'AGENT_ID placeholder missing');
+  assert.ok(
+    archetype.includes('done — <N> findings, max severity <X>'),
+    'one-line Task return contract missing',
+  );
+  assert.ok(
+    !archetype.includes('## {{TITLE}} — Findings'),
+    'the old markdown findings report heading must not survive',
+  );
 });
 
 test('the plugin ships one thin reviewer agent per model tier', () => {
