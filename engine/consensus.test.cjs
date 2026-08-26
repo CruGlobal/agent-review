@@ -338,3 +338,84 @@ test('(jaccard) token sets just under 0.5 Jaccard are pinned and do not group', 
   assert.equal(findings.length, 2);
   assert.equal(candidates.length, 1); // still close in file/line, so it's a candidate
 });
+
+// --- Controller ruling: `fix` threads through the pipeline additively, merged like `line` ---
+// --- (highest-severity member's fix wins). ---
+
+test('(fix) singleton entries carry the raw fix field through, empty string when absent', () => {
+  const findingsByAgent = {
+    agentA: [
+      { file: 'a.rb', line: 1, severity: 5, message: 'one thing', fix: 'add a guard clause' },
+      { file: 'b.rb', line: 2, severity: 5, message: 'another distinct thing entirely' },
+    ],
+  };
+  const { findings } = consensusFrom({ findingsByAgent, profile: 'standard' });
+  const withFix = findings.find((f) => f.file === 'a.rb');
+  const withoutFix = findings.find((f) => f.file === 'b.rb');
+  assert.equal(withFix.fix, 'add a guard clause');
+  assert.equal(withoutFix.fix, '');
+});
+
+test('(fix) automatic clique merge picks the highest-severity member\'s fix, same rule as line', () => {
+  const findingsByAgent = {
+    agentA: [
+      {
+        file: 'app/models/user.rb',
+        line: 120,
+        severity: 6,
+        message: 'missing null check on user input before save',
+        fix: 'agentA fix: add a nil guard',
+      },
+    ],
+    agentB: [
+      {
+        file: 'app/models/user.rb',
+        line: 122,
+        severity: 8,
+        message: 'user input is missing a null check before saving',
+        fix: 'agentB fix: raise ArgumentError when name is blank',
+      },
+    ],
+  };
+
+  const { findings } = consensusFrom({ findingsByAgent, profile: 'standard' });
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].line, 122); // highest-severity member's line (agentB)
+  assert.equal(findings[0].fix, 'agentB fix: raise ArgumentError when name is blank');
+});
+
+test('(fix) decisions merge also carries the higher-severity member\'s fix', () => {
+  const findingsByAgent = {
+    agentA: [
+      {
+        file: 'app/models/user.rb',
+        line: 120,
+        severity: 5,
+        message: 'missing null check on user input before save',
+        fix: 'agentA fix: add a nil guard',
+      },
+    ],
+    agentC: [
+      {
+        file: 'app/models/user.rb',
+        line: 128,
+        severity: 4,
+        message: 'inefficient N+1 query when loading associated posts',
+        fix: 'agentC fix: use includes(:posts)',
+      },
+    ],
+  };
+
+  const first = consensusFrom({ findingsByAgent, profile: 'standard' });
+  assert.equal(first.candidates.length, 1);
+  const { a, b } = first.candidates[0];
+
+  const second = consensusFrom({
+    findingsByAgent,
+    profile: 'standard',
+    decisions: [{ merge: [a, b] }],
+  });
+
+  assert.equal(second.findings.length, 1);
+  assert.equal(second.findings[0].fix, 'agentA fix: add a nil guard'); // agentA severity 5 > agentC severity 4
+});

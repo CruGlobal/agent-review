@@ -99,6 +99,7 @@ function normalizeFinding(raw, laneId) {
     confidence: raw.confidence != null ? String(raw.confidence) : '',
     evidence: raw.evidence != null ? String(raw.evidence) : '',
     recommendation: raw.recommendation != null ? String(raw.recommendation) : '',
+    fix: raw.fix != null ? String(raw.fix) : '',
   };
 }
 
@@ -146,6 +147,7 @@ function toEntry(m) {
     confidence: m.confidence,
     evidence: m.evidence,
     recommendation: m.recommendation,
+    fix: m.fix,
     corroboration: 1,
     needsHumanReview: false,
     _minSeverity: m.severity,
@@ -157,7 +159,7 @@ function toEntry(m) {
 // entries on a decisions merge) into one output entry per the group rules:
 // agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
 // highest member's, evidence/recommendation = longest member's (independently
-// per field), line/category/message = the highest-severity member's,
+// per field), line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
 //
@@ -218,6 +220,7 @@ function combineMembers(members) {
     confidence: bestConfidence.confidence,
     evidence: longestField('evidence'),
     recommendation: longestField('recommendation'),
+    fix: primary.fix,
     corroboration,
     needsHumanReview: maxSeverity - minSeverity >= 4,
     _minSeverity: minSeverity,

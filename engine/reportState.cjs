@@ -48,7 +48,7 @@ function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
   // Keep enough verified context for a later incremental run to address an old
   // finding after the visible report body has been replaced. Bound each field so
   // the hidden ledger cannot grow past GitHub's comment limit unexpectedly.
-  for (const field of ['evidence', 'recommendation', 'detail', 'confidence']) {
+  for (const field of ['evidence', 'recommendation', 'detail', 'confidence', 'fix']) {
     if (raw[field]) clean[field] = String(raw[field]).slice(0, 2000);
   }
   return clean;

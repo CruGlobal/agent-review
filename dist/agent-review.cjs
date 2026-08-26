@@ -18061,7 +18061,7 @@ var require_reportState = __commonJS({
         line,
         message: String(raw.message)
       };
-      for (const field of ["evidence", "recommendation", "detail", "confidence"]) {
+      for (const field of ["evidence", "recommendation", "detail", "confidence", "fix"]) {
         if (raw[field]) clean[field] = String(raw[field]).slice(0, 2e3);
       }
       return clean;
@@ -18800,7 +18800,8 @@ var require_consensus = __commonJS({
         message: raw.message != null ? String(raw.message) : "",
         confidence: raw.confidence != null ? String(raw.confidence) : "",
         evidence: raw.evidence != null ? String(raw.evidence) : "",
-        recommendation: raw.recommendation != null ? String(raw.recommendation) : ""
+        recommendation: raw.recommendation != null ? String(raw.recommendation) : "",
+        fix: raw.fix != null ? String(raw.fix) : ""
       };
     }
     function canonicalOrder(a, b) {
@@ -18827,6 +18828,7 @@ var require_consensus = __commonJS({
         confidence: m.confidence,
         evidence: m.evidence,
         recommendation: m.recommendation,
+        fix: m.fix,
         corroboration: 1,
         needsHumanReview: false,
         _minSeverity: m.severity,
@@ -18875,6 +18877,7 @@ var require_consensus = __commonJS({
         confidence: bestConfidence.confidence,
         evidence: longestField("evidence"),
         recommendation: longestField("recommendation"),
+        fix: primary.fix,
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,

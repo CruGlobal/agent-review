@@ -50,6 +50,15 @@ test('ledger carries bounded evidence needed to address findings after re-review
   assert.equal(ledger[0].recommendation, 'add authorize(record)');
 });
 
+test('ledger carries the fix field and bounds it to 2000 chars like the other optional fields', () => {
+  const ledger = mergeLedger([], [finding({ fix: 'add a nil guard before save' })]);
+  assert.equal(ledger[0].fix, 'add a nil guard before save');
+
+  const long = 'x'.repeat(2500);
+  const ledger2 = mergeLedger([], [finding({ signature: 'sig-3', fix: long })]);
+  assert.equal(ledger2[0].fix.length, 2000);
+});
+
 test('new blockers fail closed without high-confidence evidence', () => {
   assert.throws(
     () => mergeLedger([], [finding({ confidence: 'Medium' })]),
