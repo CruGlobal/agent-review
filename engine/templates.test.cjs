@@ -493,3 +493,106 @@ test('a score-0 skip computes status from carried-forward state and surfaces ope
   assert.ok(!/"pass":\s*true/.test(skip), 'skip status must not hardcode a pass:true literal');
   assert.ok(/previously-found blocker\(s\) remain open/.test(skip), 'carried-forward open blockers must be surfaced in the skip note');
 });
+
+// --- Ponytail-consensus Task 3: skill rewiring — engine consensus replaces in-context ---
+// --- grouping/averaging, agents hand off via files at every stage that reads findings. ---
+
+function stageSlice(skill, startHeader, endHeader) {
+  const start = skill.indexOf(startHeader);
+  assert.ok(start !== -1, `stage header not found: ${startHeader}`);
+  const end = skill.indexOf(endHeader, start);
+  assert.ok(end !== -1, `stage header not found: ${endHeader}`);
+  return skill.slice(start, end);
+}
+
+test('Stage 1 launch table fills {{AGENT_ID}} from the plan agent id', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(stage1.includes('{{AGENT_ID}}'), 'the launch table must fill the AGENT_ID placeholder');
+});
+
+test('Stage 2 collect cross-checks each lane\'s returned N against its findings file, treats unparseable JSON as missing, and relaunches a failed lane exactly once', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
+  assert.ok(/\/tmp\/agent_findings\//.test(stage2), 'collect stage must read the findings file, not pasted output');
+  assert.ok(/findings\.length/.test(stage2), 'collect stage must cross-check N against the file\'s findings.length');
+  assert.ok(/JSON\.parse/.test(stage2), 'collect stage must call out JSON.parse failure explicitly');
+  assert.ok(
+    /unparseable JSON exactly like a missing file|treat unparseable JSON.*like a missing file/i.test(stage2),
+    'a lane whose findings file fails JSON.parse must be treated the same as a missing file',
+  );
+  assert.ok(
+    skill.includes('relaunch that lane once; a lane that fails twice blocks PASS'),
+    'the relaunch-once rule must be stated verbatim',
+  );
+});
+
+test('Stage 5 invokes the deterministic consensus engine instead of in-context grouping/averaging', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage5 = stageSlice(skill, '## Stage 5 — Consensus Synthesis', '## Stage 5B');
+  assert.ok(stage5.includes('agent-review consensus --plan') || /agent-review consensus\s*\\?\s*\n?\s*--plan/.test(stage5), 'Stage 5 must invoke the consensus CLI with --plan');
+  assert.ok(stage5.includes('--dir /tmp/agent_findings'), 'Stage 5 must point --dir at the agent findings directory');
+  assert.ok(stage5.includes('--profile'), 'Stage 5 must pass --profile');
+  assert.ok(stage5.includes('--decisions /tmp/consensus_decisions.json'), 'Stage 5 must re-run with --decisions after a bounded pass');
+  assert.ok(stage5.includes('/tmp/consensus_findings.json'), 'Stage 5 must land the final array at /tmp/consensus_findings.json');
+  assert.ok(stage5.includes('one bounded model pass'), 'the candidates bounded-pass instruction must be present');
+  assert.ok(!skill.includes('Group findings by similarity'), 'in-context Stage 5 grouping instructions must be gone');
+  assert.ok(!stage5.includes('Calculate average severity score for each finding'), 'in-context severity averaging must be gone');
+});
+
+test('Stage 6 report inputs are named as consensus JSON + plan + status, and the reversibility full-diff exception is stated', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage6 = stageSlice(skill, '## Stage 6 — Generate Review Report', '## Stage 7');
+  const writeReport = stageSlice(skill, '### Write the report', '## Stage 7');
+  const inputsSentence = writeReport.slice(0, writeReport.indexOf('Honor its conditionals'));
+  assert.ok(!/the consensus, risk assessment, impact analysis, and agent reports/.test(inputsSentence), 'the old vague inputs sentence must be gone');
+  assert.ok(inputsSentence.includes('/tmp/consensus_findings.json'), 'report inputs sentence must name the consensus JSON file');
+  assert.ok(inputsSentence.includes('/tmp/review_gate_plan.json'), 'report inputs sentence must name the plan file');
+  assert.ok(inputsSentence.includes('/tmp/agent_review_status.json'), 'report inputs sentence must name the status file');
+  assert.ok(
+    stage6.includes('/tmp/pr_full_diff.txt') && stage6.includes('never the incremental-only'),
+    'the reversibility full-diff exception must still be stated in Stage 6',
+  );
+});
+
+test('the emit/filter/ledger/status pipeline and static-findings prepend in Stage 6 are untouched', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage6 = stageSlice(skill, '## Stage 6 — Generate Review Report', '## Stage 7');
+  assert.ok(stage6.includes("evidence.staticFindings || []"), 'static-findings prepend must be byte-identical');
+  assert.ok(stage6.includes('agent-review emit --in /tmp/consensus_findings.json'), 'emit invocation must be untouched');
+  assert.ok(stage6.includes('agent-review filter > /tmp/review_filtered.json'), 'filter invocation must be untouched');
+  assert.ok(stage6.includes('agent-review ledger \\'), 'ledger invocation must be untouched');
+  assert.ok(stage6.includes('agent-review status \\'), 'status invocation must be untouched');
+});
+
+test('Stage 3 debate prompt sources both self and peer findings from /tmp/agent_findings/*.json, not pasted output', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage3 = stageSlice(skill, '## Stage 3 — Cross-Examination Debate', '## Stage 4');
+  assert.ok(/\/tmp\/agent_findings\//.test(stage3), 'debate prompt must reference the findings-file path');
+  assert.ok(
+    !stage3.includes("[Paste that agent's original review output with severity scores]"),
+    'the old pasted-output placeholder must be gone from the debate prompt',
+  );
+  assert.ok(
+    !stage3.includes("[All other agents' findings with severity scores]"),
+    'the old pasted-output placeholder for peer findings must be gone',
+  );
+});
+
+test('Stage 4 rebuttal prompt re-sources YOUR ORIGINAL FINDINGS from the agent\'s own findings file (controller addition B)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage4 = stageSlice(skill, '## Stage 4 — Rebuttals', '## Stage 5 — Consensus Synthesis');
+  assert.ok(/\/tmp\/agent_findings\//.test(stage4), 'rebuttal prompt must reference the findings-file path');
+  assert.ok(
+    !stage4.includes('[Their original findings with severity scores]'),
+    'the old pasted-output placeholder must be gone from the rebuttal prompt',
+  );
+});
+
+test('the archetype instructs writing the findings file via node -e and JSON.stringify, never hand-escaped JSON, and caps recommendation length', () => {
+  const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(/node -e/.test(archetype), 'archetype must show writing the findings file via node -e');
+  assert.ok(/JSON\.stringify/.test(archetype), 'archetype must show JSON.stringify building the file');
+  assert.ok(/never hand-escaped JSON/i.test(archetype), 'archetype must explicitly forbid hand-escaped JSON');
+  assert.ok(/recommendation: ≤ ?4 lines/.test(archetype), 'archetype must cap recommendation to <=4 lines');
+});

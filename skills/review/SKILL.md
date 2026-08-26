@@ -687,7 +687,7 @@ prior review feedback.
 ### Assemble each agent prompt from the archetype template
 
 There are no per-agent prompts in this skill. Every agent gets the SAME prompt skeleton — the
-plugin's `templates/archetype.md` (see the path note at the top of this file) — with seven
+plugin's `templates/archetype.md` (see the path note at the top of this file) — with ten
 placeholders filled in. Read the template once, then for EACH entry in the launch list produce one
 filled copy:
 
@@ -702,6 +702,7 @@ filled copy:
 | `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only, and only when `/tmp/review_impact.json` exists: the **actual dependents, inlined** (see the block below). Empty string for every other agent, and when impact was not computed. |
 | `{{EVIDENCE}}`          | A compact rendering of `/tmp/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
 | `{{CONTEXT}}`           | A compact rendering of `/tmp/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
+| `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `/tmp/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
 begin with its own step number and read as a standalone step. Build it from
@@ -787,24 +788,29 @@ you do not inline is invisible to them.
 
 Wait for all agents to complete and display progress, one line per launched agent. Waiting means
 actively collecting inside this same turn (TaskOutput per pending agent) — never ending the turn
-to "wait" for notifications; in CI that kills the run:
+to "wait" for notifications; in CI that kills the run.
+
+Each agent's final Task message is exactly one line — `done — <N> findings, max severity <X>`
+(the archetype's return contract) — never a pasted report. Do not trust `<N>` on its own; cross-
+check it against the findings file the agent actually wrote:
+
+- Read `/tmp/agent_findings/<agent id>.json`.
+- The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
+  (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
+  or `findings.length` does not equal the reported `<N>`.
+- On a failed cross-check: relaunch that lane once; a lane that fails twice blocks PASS. Use the
+  lane's original Stage 1 prompt, unchanged, for the retry. If the retry fails the same
+  cross-check again, append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create
+  it if absent) — Stage 6 turns that into an irreversibility reason so auto-approval waits for a
+  human — and note the degraded lane in the report instead of fabricating findings for it.
+
+Display:
 
 ```
 Agent Reviews Complete:
-✅ [Agent title] - Found [X] critical, [Y] concerns
-✅ [Agent title] - Found [X] critical, [Y] concerns
+✅ [Agent title] - <N> findings, max severity <X>
+✅ [Agent title] - <N> findings, max severity <X>
 ```
-
-Parse each agent's output and extract:
-
-- Critical issues with severity scores
-- Important concerns with severity scores
-- Suggestions
-- Rule checklist results (if the agent emitted that section)
-- Questions for other agents
-- Confidence level
-
-Store these in structured form for the debate rounds.
 
 ---
 
@@ -879,8 +885,8 @@ Facilitate the first debate round where agents challenge each other.
 
 Display: "🗣️ Starting cross-examination debate round..."
 
-For each launched agent, launch a new Task with their original findings plus all other agents'
-findings.
+For each launched agent, launch a new Task pointing at their own findings file plus every other
+launched agent's findings file — never pasted findings text.
 
 ### Debate Prompt Template
 
@@ -900,10 +906,11 @@ Use the Task tool for each agent with:
 You are the [Agent Title] in the cross-examination debate phase.
 
 YOUR ORIGINAL FINDINGS:
-[Paste that agent's original review output with severity scores]
+Read /tmp/agent_findings/<this agent's id>.json.
 
 OTHER AGENTS' FINDINGS:
-[All other agents' findings with severity scores]
+Read every other launched agent's /tmp/agent_findings/<their id>.json — one path per lane, never
+pasted inline.
 
 MISSION: Review other agents' findings from your specialized perspective.
 
@@ -984,7 +991,7 @@ Use the Task tool with:
 You are the [Agent Title] responding to challenges from debate round 1.
 
 YOUR ORIGINAL FINDINGS:
-[Their original findings with severity scores]
+Read /tmp/agent_findings/<this agent's id>.json.
 
 CHALLENGES RAISED AGAINST YOU:
 [List each challenge with severity score adjustments]
@@ -1036,52 +1043,73 @@ Launch rebuttal tasks for all challenged agents.
 
 ## Stage 5 — Consensus Synthesis
 
-Analyze all findings, debates, and final severity scores to build consensus.
+Grouping, severity averaging, and corroboration counting are computed by the deterministic
+engine — never in context. This stage's job is to run it, resolve any ambiguous near-miss pairs
+it surfaces, and land a plain findings array at `/tmp/consensus_findings.json` for Stage 6.
 
-**Process:**
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+echo "📊 Synthesizing consensus..."
+PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
+agent-review consensus \
+  --plan /tmp/review_plan.json \
+  --dir /tmp/agent_findings \
+  --profile "$PROFILE" \
+  > /tmp/consensus_raw.json
+```
 
-1. Collect all final findings with severity scores
-2. Group by similarity (same file:line or same general issue)
-3. Calculate average severity score for each finding
-4. Count agent agreement
+`agent-review consensus` is fail-closed: a missing findings file, or one that fails
+`JSON.parse`, for any launched lane makes it exit non-zero naming that lane — surface that error
+verbatim, never paper over it by fabricating findings or silently retrying. (A lane recorded in
+`/tmp/degraded_lanes.txt` at Stage 2 already failed its cross-check twice and is expected to be
+absent from `/tmp/agent_findings` — that is not a new failure to chase here.)
 
-**Consensus Levels (using severity scores):**
+Read `/tmp/consensus_raw.json`. Its `candidates` array names pairs of output findings (by index)
+that are close — same file, within 10 lines — but the clique rule deliberately left unmerged
+rather than risk conflating two distinct findings. When `candidates` is non-empty, resolve every
+pair with **one bounded model pass**: for each pair, read only the two named findings
+(`findings[a]` and `findings[b]` in `/tmp/consensus_raw.json` — never the full per-agent output)
+and decide whether they describe the same underlying issue. Never re-open findings outside the
+named pairs. Write the decisions to `/tmp/consensus_decisions.json`:
 
-- **Average 9-10, 4+ agents**: CRITICAL BLOCKER
-- **Average 8-9, 3+ agents**: HIGH PRIORITY BLOCKER
-- **Average 7-8, 3+ agents**: IMPORTANT (should fix before merge)
-- **Average 5-7, 2+ agents**: MEDIUM PRIORITY
-- **Average 3-5, 1-2 agents**: SUGGESTION
-- **Unresolved Debate** (agents couldn't agree, severity differs by 4+): NEEDS HUMAN REVIEW
+```json
+[
+  { "merge": [3, 7] },
+  { "keep": [1, 9] }
+]
+```
 
-When fewer agents ran than a tier's agent count requires (small reviews, quick mode, or CI without
-debate), fall back to the severity average alone and note the reduced corroboration.
+`merge` combines the pair into one entry per the engine's documented merge rules (severity =
+rounded mean, line/message/fix = the higher-severity member's, evidence/recommendation =
+whichever is longer); `keep` is a no-op kept for auditability. Re-run the command with the
+decisions applied:
 
-**Profile-scaled reporting cutoff** (from the plan's `profile`) — apply the same floor the agents
-used so consensus output stays consistent with what was collected:
+```bash
+agent-review consensus \
+  --plan /tmp/review_plan.json \
+  --dir /tmp/agent_findings \
+  --profile "$PROFILE" \
+  --decisions /tmp/consensus_decisions.json \
+  > /tmp/consensus_raw.json
+```
 
-- `chill` → only surface consensus findings with average severity ≥ 7; drop MEDIUM/SUGGESTION tiers.
-- `standard` → report all tiers above (default).
-- `assertive` → report all tiers, including low-severity suggestions, and do not collapse them.
+Skip the decisions round entirely when `candidates` was empty — the first invocation's output is
+already final.
 
-For each grouped finding, determine: final severity (average), classification, which agents flagged
-it, debate summary, consensus strength.
+Extract the plain findings array Stage 6 expects:
 
-Display a summary:
+```bash
+node -e 'const r = require("/tmp/consensus_raw.json"); process.stdout.write(JSON.stringify(r.findings, null, 2))' \
+  > /tmp/consensus_findings.json
+```
+
+Display a summary from `/tmp/consensus_raw.json`'s `stats`:
 
 ```
 📊 Consensus Analysis:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Critical Blockers (Severity 9-10): [N]
-High Priority Blockers (Severity 8-9): [N]
-Important Issues (Severity 7-8): [N]
-Medium Priority (Severity 5-7): [N]
-Suggestions (Severity 3-5): [N]
-Unresolved Debates: [N]
-
-Total Findings: [N]
-Average Confidence: [High/Medium/Low]
+Raw findings: [stats.raw]   Groups: [stats.groups]   Singletons: [stats.singletons]
+Dropped by profile: [stats.droppedByProfile]   Needs human review: [stats.needsHumanReview]
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -1331,6 +1359,12 @@ Purely additive changes (new column, new table, new index, new code paths, confi
 look. List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
 
+**Degraded lanes.** Also treat every id in `/tmp/degraded_lanes.txt` (Stage 2: a lane that failed
+its findings cross-check twice) as its own irreversibility reason — that lane's coverage is
+unverified, so auto-approval must wait for a human even when the computed ledger is clean. Add
+`"lane <id> failed the findings cross-check twice; unverified"` to `reasons` for each, and mark
+`irreversible: true` when the file is non-empty.
+
 **Status JSON.** Write the safety judgment first as `/tmp/agent_review_safety.json`:
 
 ```json
@@ -1375,9 +1409,11 @@ re-review does.
 ### Write the report
 
 Read the plugin's report skeleton — `../../templates/report.md`, relative to this skill file — and
-fill it in from the consensus, risk assessment, impact analysis, and agent reports. The skeleton's
-bracketed placeholders and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where.
-Honor its conditionals:
+fill it in from `/tmp/consensus_findings.json` (consensus JSON), the full-PR gate plan
+(`/tmp/review_gate_plan.json`), and the status marker (`/tmp/agent_review_status.json`) built
+above — plus the dependency impact analysis and each agent's own
+`/tmp/agent_findings/<id>.json` for its summary-table row. The skeleton's bracketed placeholders
+and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. Honor its conditionals:
 
 - Set Rollout from `$AGENT_REVIEW_ROLLOUT_MODE` (default `advisory`). In `shadow`, say plainly that
   the report cannot approve or block the PR. Fill deterministic evidence from

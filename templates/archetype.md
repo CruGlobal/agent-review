@@ -67,6 +67,27 @@ Do not write a markdown report. Write your findings to
 plus `overallConfidence` is a complete report on its own. Every entry's `agent` field must equal
 `{{AGENT_ID}}`.
 
+Write the file with `node -e` and `JSON.stringify` — never hand-escaped JSON. Evidence often
+quotes a hunk excerpt (embedded quotes, backslashes, newlines), and hand-escaping that into a
+JSON string reliably breaks; let `JSON.stringify` do the escaping instead:
+
+```bash
+node -e '
+const fs = require("fs");
+const out = {
+  findings: [
+    { agent: "{{AGENT_ID}}", category: "security", severity: 8, file: "app/models/user.rb",
+      line: 42, message: "missing null check before save", confidence: "High",
+      evidence: "params[:name] used directly in user.save without validation",
+      recommendation: "add a presence check before save", fix: "add validates :name, presence: true" },
+  ],
+  questions: [],
+  overallConfidence: "High",
+};
+fs.writeFileSync("/tmp/agent_findings/{{AGENT_ID}}.json", JSON.stringify(out, null, 2));
+'
+```
+
 Keep every finding tight — the file states it once, so write it once, well:
 - message: ≤ 2 sentences naming the defect and its consequence
 - severity < 7: evidence ≤ 2 lines
@@ -74,6 +95,7 @@ Keep every finding tight — the file states it once, so write it once, well:
   excerpt — blockers are engine-rejected without a line anchor, High confidence,
   and concrete evidence, so spend the lines on the execution/data path, never on
   restating the diff
+- recommendation: ≤ 4 lines
 - fix: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
 
 Severity bands: Critical/BLOCKING is 10/10; Concerns (IMPORTANT) are 6-9/10 — either tier
