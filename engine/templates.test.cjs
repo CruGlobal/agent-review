@@ -32,6 +32,7 @@ const PLACEHOLDERS = [
   'EVIDENCE',
   'CONTEXT',
   'AGENT_ID',
+  'DIFF_PATH',
 ];
 
 test('archetype.md uses exactly the documented placeholders', () => {
@@ -565,6 +566,22 @@ test('Stage 1 launch table fills {{AGENT_ID}} from the plan agent id', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
   assert.ok(stage1.includes('{{AGENT_ID}}'), 'the launch table must fill the AGENT_ID placeholder');
+});
+
+test('the review skill slices per agent and skips empty lanes', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review slice --plan'));
+  assert.ok(skill.includes('/tmp/agent_slices'));
+  assert.ok(skill.includes('mode is "empty"'), 'empty-slice lanes must be skipped, not launched');
+  assert.ok(skill.includes('mkdir -p /tmp/agent_slices') || /rm -f \/tmp\/agent_slices/.test(skill), 'slice dir needs fresh-state handling in Initialize');
+});
+
+test('the archetype reading contract is budgeted, not unbounded', () => {
+  const a = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(a.includes('{{DIFF_PATH}}'));
+  assert.ok(!a.includes('READ THE FULL FILES for context'), 'the unbounded read mandate must be gone');
+  assert.ok(a.includes('full-file read budget'), 'budgeted reads must be stated');
+  assert.ok(a.includes('discovery grep budget'), 'bounded discovery greps must be stated');
 });
 
 test('Stage 2 collect cross-checks each lane\'s returned N against its findings file, treats unparseable JSON as missing, and relaunches a failed lane exactly once', () => {

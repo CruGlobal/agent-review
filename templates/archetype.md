@@ -16,11 +16,15 @@ SHA-PINNED CROSS-REPOSITORY CONTEXT:
 
 INSTRUCTIONS:
 
-1. Read /tmp/pr_diff.txt for the diff
+1. Read {{DIFF_PATH}} for the diff — your assigned slice of hunks matching your triggers for a
+   sliced lane, or the full diff for a full-mode lane
 2. Read /tmp/changed_files.txt for the list of changed files
-3. For EACH changed file, read the FULL file content (not just the diff) to understand context
+3. `full-file read budget`: open at most 5 complete files (10 when your model tier is sonnet and
+   risk is HIGH/CRITICAL — the launch prompt tells you); prefer the hunk context in your diff
 4. Search the codebase for the patterns and conventions the change touches (see CODEBASE CONTEXT
-   SEARCH below) BEFORE flagging anything
+   SEARCH below) BEFORE flagging anything — `discovery grep budget`: at most 10 repo-wide greps
+   for identifiers/contracts the diff introduces or modifies, plus verification greps before
+   reporting any finding
 5. Read the project's agent/contributor guide (e.g. AGENTS.md / CLAUDE.md / CONTRIBUTING.md) if
    present, and treat it as authoritative for project conventions
 6. Inspect relevant CI failures/annotations and allowlisted cross-repository contract files from
@@ -186,7 +190,8 @@ GUIDELINES:
   style preferences, or pre-existing issues that this change does not worsen.
 - Don't flag issues clearly handled elsewhere
 - Focus on practical risks, not theoretical ones
-- READ THE FULL FILES for context, not just the diff
+- Spend your full-file read and discovery grep budgets (INSTRUCTIONS 3-4 above) on the files and
+  patterns most likely to hide a real defect — not on skimming everything shallowly
 - Search the codebase before flagging to avoid false positives
 - Do not re-report deterministic static findings as a second model finding; reference their rule
   id when corroborating them. They enter the final ledger independently of consensus.

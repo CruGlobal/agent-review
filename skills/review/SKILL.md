@@ -121,6 +121,11 @@ echo ""
 # this run.
 rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
 rm -f /tmp/agent_findings/*.json 2>/dev/null || true
+# A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
+# run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a
+# launched-subset plan this run never wrote.
+rm -f /tmp/slice_manifest.json /tmp/review_plan_launched.json /tmp/launched_lanes.json
+rm -rf /tmp/agent_slices 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
@@ -145,6 +150,7 @@ mkdir -p /tmp/automated_fixes
 # throws ENOENT, the unchanged-prompt retry reproduces the same error, and the review posts
 # nothing.
 mkdir -p /tmp/agent_findings
+mkdir -p /tmp/agent_slices
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
 [ -z "${CI_MODE:-}" ] && mkdir -p "$REVIEW_DIR/metrics/history"
 
@@ -317,6 +323,30 @@ agent-review plan \
   --mode "$MODE" \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
+
+# --- Slice the diff per lane ---
+# `always`/`escalates`/`architecture` lanes get the whole diff (mode "full"); every other lane
+# gets only the hunks its triggers matched (mode "sliced", possibly with hunks: 0 for a
+# header-only binary/mode/rename section — that lane still launches). A lane with no matching
+# hunks at all gets mode "empty" — Stage 1 does not launch it (see Stage 0B/Stage 1 above).
+agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
+  --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
+cat /tmp/slice_manifest.json
+
+# The launched-lane set (every plan agent whose slice is not empty) is what Stage 2's cross-check
+# and Stage 5's consensus `--plan` must use instead of the full /tmp/review_plan.json — otherwise
+# the engine's fail-closed missing-lane check kills the run over a lane that was never launched.
+# This derivation always runs, whether or not any lane was actually skipped — one code path, no
+# branch on "did we skip anything".
+node -e '
+const plan = require("/tmp/review_plan.json");
+const manifest = require("/tmp/slice_manifest.json");
+const launched = plan.agents.filter((a) => (manifest[a.id] || {}).mode !== "empty");
+const fs = require("fs");
+fs.writeFileSync("/tmp/launched_lanes.json", JSON.stringify(launched.map((a) => a.id)));
+fs.writeFileSync("/tmp/review_plan_launched.json", JSON.stringify({ ...plan, agents: launched }, null, 2));
+'
+cat /tmp/review_plan_launched.json
 
 # A second plan covers the full PR and is the source of truth for governance:
 # displayed risk, required reviewer, and the machine-readable approval status.
@@ -633,7 +663,9 @@ plan's `agents[]` has:
 - `id` — the agent identifier as configured (e.g. `security`, `architecture`, `testing`)
 - `model` — `smart` | `opus` | `sonnet` | `haiku`
 - `tier` — the engine-resolved `opus`/`sonnet`/`haiku` subagent tier (see Stage 1's launch table)
-- `matchedBy` — why it was selected (`always`, `path:<glob>`, or `content:<substring>`)
+- `matchedBy` — why it was selected (`always`, `path:<glob>`, `content:<substring>`, or
+  `unmatched-coverage` — the engine force-includes an escalating lane when the diff touches a
+  reviewable file none of the risk map's globs recognize and no otherwise-selected lane escalates)
 - `rules` — rule docs to load into that agent's prompt, relative to `.claude/review/`
 
 **Mode semantics** — build the launch list as follows:
@@ -742,7 +774,7 @@ human from prior review feedback.
 ### Assemble each agent prompt from the archetype template
 
 There are no per-agent prompts in this skill. Every agent gets the SAME prompt skeleton — the
-plugin's `templates/archetype.md` (see the path note at the top of this file) — with ten
+plugin's `templates/archetype.md` (see the path note at the top of this file) — with eleven
 placeholders filled in. Read the template once, then for EACH entry in the launch list produce one
 filled copy:
 
@@ -758,6 +790,7 @@ filled copy:
 | `{{EVIDENCE}}`          | A compact rendering of `/tmp/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
 | `{{CONTEXT}}`           | A compact rendering of `/tmp/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
 | `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `/tmp/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
+| `{{DIFF_PATH}}`         | Read `/tmp/slice_manifest.json` (written right after the plan — see below) for this agent's `<id>` entry. `mode: "full"` → `/tmp/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `/tmp/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
 begin with its own step number and read as a standalone step. Build it from
@@ -775,6 +808,23 @@ begin with its own step number and read as a standalone step. Build it from
 Truncate sensibly — at most ~15 dependent paths per changed file and ~15 changed files, with a
 "…and N more" tail — so a wide blast radius cannot crowd out the rest of the prompt. Omit the
 placeholder entirely (empty string) if `blastRadius` is 0.
+
+**Skipping empty-slice lanes.** A lane whose `/tmp/slice_manifest.json` entry has
+`mode is "empty"` has no changes matching its triggers anywhere in this diff — do NOT launch it;
+there is nothing for it to review. Note it in `Review detail & stats` as
+`lane <id>: no matching changes` for every skipped lane (omit the note entirely when nothing was
+skipped). A `mode: "sliced"` lane with `hunks: 0` (a header-only binary/mode/rename section) is
+NOT empty — it still launches, told only that the file changed.
+
+**Sliced lanes see only their slice.** A lane launched with `mode: "sliced"` cannot see the rest
+of the diff, so append one line to its filled prompt, right after the INSTRUCTIONS block: "Other
+changed files in this PR (not in your slice): <comma-joined contents of /tmp/changed_files.txt>".
+Omit this line for `mode: "full"` lanes — they already have the whole diff.
+
+The launched-lane set (whatever remains after the empty-lane skip above) is exactly what Stage 2's
+cross-check and Stage 5's consensus `--plan` must use — see `/tmp/review_plan_launched.json`,
+already derived deterministically right after slicing (Build the Review Plan & Load Evidence,
+above).
 
 Then launch each one with the Task tool:
 
@@ -1100,7 +1150,7 @@ it surfaces, and land a plain findings array at `/tmp/consensus_findings.json` f
 echo "📊 Synthesizing consensus..."
 PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
 agent-review consensus \
-  --plan /tmp/review_plan.json \
+  --plan /tmp/review_plan_launched.json \
   --dir /tmp/agent_findings \
   --profile "$PROFILE" \
   > /tmp/consensus_raw.json
@@ -1140,7 +1190,7 @@ set -e
 PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
 if [ -s /tmp/consensus_decisions.json ]; then
   agent-review consensus \
-    --plan /tmp/review_plan.json \
+    --plan /tmp/review_plan_launched.json \
     --dir /tmp/agent_findings \
     --profile "$PROFILE" \
     --decisions /tmp/consensus_decisions.json \
