@@ -333,21 +333,6 @@ agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
   --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
 cat /tmp/slice_manifest.json
 
-# The launched-lane set (every plan agent whose slice is not empty) is what Stage 2's cross-check
-# and Stage 5's consensus `--plan` must use instead of the full /tmp/review_plan.json — otherwise
-# the engine's fail-closed missing-lane check kills the run over a lane that was never launched.
-# This derivation always runs, whether or not any lane was actually skipped — one code path, no
-# branch on "did we skip anything".
-node -e '
-const plan = require("/tmp/review_plan.json");
-const manifest = require("/tmp/slice_manifest.json");
-const launched = plan.agents.filter((a) => (manifest[a.id] || {}).mode !== "empty");
-const fs = require("fs");
-fs.writeFileSync("/tmp/launched_lanes.json", JSON.stringify(launched.map((a) => a.id)));
-fs.writeFileSync("/tmp/review_plan_launched.json", JSON.stringify({ ...plan, agents: launched }, null, 2));
-'
-cat /tmp/review_plan_launched.json
-
 # A second plan covers the full PR and is the source of truth for governance:
 # displayed risk, required reviewer, and the machine-readable approval status.
 if [ "$FULL_RANGE" = "$RANGE" ]; then
@@ -821,10 +806,11 @@ of the diff, so append one line to its filled prompt, right after the INSTRUCTIO
 changed files in this PR (not in your slice): <comma-joined contents of /tmp/changed_files.txt>".
 Omit this line for `mode: "full"` lanes — they already have the whole diff.
 
-The launched-lane set (whatever remains after the empty-lane skip above) is exactly what Stage 2's
-cross-check and Stage 5's consensus `--plan` must use — see `/tmp/review_plan_launched.json`,
-already derived deterministically right after slicing (Build the Review Plan & Load Evidence,
-above).
+The launched-lane set (whatever remains after the empty-lane skip above — the plan's agents
+minus quick's cap or plus deep's config-only additions, per Stage 0B, minus any empty-slice skip)
+is exactly what Stage 2's cross-check and Stage 5's consensus `--plan` must use. It is derived
+immediately below, right after every Task call is issued — not before, and not re-derived a
+second way anywhere else.
 
 Then launch each one with the Task tool:
 
@@ -839,6 +825,46 @@ Then launch each one with the Task tool:
 
 The rule docs are authoritative for what each agent checks; they carry all repo-specific focus
 areas. Do not add repo-specific instructions here.
+
+### Derive the launched-subset plan (immediately after every Task call above is issued)
+
+This is the ONE place slice-empty skips, quick mode's 3-agent cap, and deep mode's config-only
+expansion all converge: rather than re-deriving "who got launched" a second way (which drifted
+from reality the first time — quick's cap and deep's config-only additions both happen AFTER any
+earlier, plan-only derivation), record the exact ids you just launched — you already know this
+list, you just built it to construct the Task calls above — and turn it straight into the plan
+Stage 2's cross-check and Stage 5's consensus will consume.
+
+Replace the `launchedIds` array below with the exact ids launched above (e.g.
+`["testing","standards","security"]` for a quick-mode run — quick: <=3; standard: the plan agents
+minus any empty-slice skip; deep: every enabled config agent minus any empty-slice skip), then run:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+node -e '
+const launchedIds = ["<fill with the exact ids launched above>"];
+const plan = require("/tmp/review_plan.json");
+const gate = require("/tmp/review_gate_plan.json");
+let cfgAgents = [];
+try { cfgAgents = JSON.parse(require("fs").readFileSync("/tmp/config_agents.json", "utf8")); } catch {}
+const byId = new Map(plan.agents.map((a) => [a.id, a]));
+const cfgById = new Map((Array.isArray(cfgAgents) ? cfgAgents : []).map((a) => [a.id, a]));
+const gateLevel = (gate.risk || {}).level;
+const agents = launchedIds.map((id) => {
+  if (byId.has(id)) return byId.get(id);
+  // Deep mode config-only lane: no plan entry exists, so synthesize a minimal one — same
+  // escalates value as config, same tier-fallback rule used to pick its subagent type above.
+  const cfg = cfgById.get(id) || {};
+  const escalates = cfg.escalates || false;
+  const tier = escalates && (gateLevel === "HIGH" || gateLevel === "CRITICAL") ? "opus" : "sonnet";
+  return { id, escalates, tier };
+});
+const fs = require("fs");
+fs.writeFileSync("/tmp/launched_lanes.json", JSON.stringify(launchedIds));
+fs.writeFileSync("/tmp/review_plan_launched.json", JSON.stringify({ ...plan, agents }, null, 2));
+'
+cat /tmp/review_plan_launched.json
+```
 
 After launching, display:
 
@@ -874,9 +900,10 @@ you do not inline is invisible to them.
 
 ## Stage 2 — Collect Agent Reports
 
-Wait for all agents to complete and display progress, one line per launched agent. Waiting means
-actively collecting inside this same turn (TaskOutput per pending agent) — never ending the turn
-to "wait" for notifications; in CI that kills the run.
+Wait for all agents to complete and display progress, one line per launched agent — the same
+launched-id list Stage 1 just recorded into `/tmp/launched_lanes.json`. Waiting means actively
+collecting inside this same turn (TaskOutput per pending agent) — never ending the turn to "wait"
+for notifications; in CI that kills the run.
 
 Each agent's final Task message is exactly one line — `done — <N> findings, max severity <X>`
 (the archetype's return contract) — never a pasted report. Do not trust `<N>` on its own; cross-

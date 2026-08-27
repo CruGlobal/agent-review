@@ -576,6 +576,36 @@ test('the review skill slices per agent and skips empty lanes', () => {
   assert.ok(skill.includes('mkdir -p /tmp/agent_slices') || /rm -f \/tmp\/agent_slices/.test(skill), 'slice dir needs fresh-state handling in Initialize');
 });
 
+test('the launched-subset plan derives at Stage 1 launch time, from lanes actually launched (controller ruling)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(
+    stage1.includes('/tmp/review_plan_launched.json') && stage1.includes('/tmp/launched_lanes.json'),
+    'the launched-subset derivation must live in the Stage 1 region, not before or after it',
+  );
+  assert.ok(
+    /after (every )?task call/i.test(stage1),
+    'the derivation must run after the launch Task calls are issued, not before',
+  );
+  assert.ok(
+    /synthesiz/i.test(stage1),
+    'deep mode config-only lanes (no plan entry) need a synthesized minimal plan entry documented',
+  );
+  const buildPlanBlock = stageSlice(
+    skill,
+    '### Build the Review Plan & Load Evidence',
+    '## CI Mode',
+  );
+  assert.ok(
+    buildPlanBlock.includes('agent-review slice --plan'),
+    'the slice command itself must still run right after the plan is built',
+  );
+  assert.ok(
+    !buildPlanBlock.includes('/tmp/review_plan_launched.json'),
+    'the old post-slice launched-subset derivation must be gone — Task 3 fix moved it to Stage 1 launch time',
+  );
+});
+
 test('the archetype reading contract is budgeted, not unbounded', () => {
   const a = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
   assert.ok(a.includes('{{DIFF_PATH}}'));
@@ -763,7 +793,7 @@ test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff
   );
 });
 
-test('the CI path uses at most 12 bash turns (Stage 0A through Stage 6)', () => {
+test('the CI path uses at most 13 bash turns (Stage 0A through Stage 6)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
   const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
@@ -789,9 +819,17 @@ test('the CI path uses at most 12 bash turns (Stage 0A through Stage 6)', () => 
   // scriptable — before the plan invocation. That checkpoint can't sit inside a merged bash
   // block, so Stage 0A/0's setup is three turns (mode-parse/CI-detect/config-validate/dirs;
   // PR-context/diff-manifest; plan/evidence) instead of one, +2 over the fence-count-only budget.
+  //
+  // 13, not 12 (rtk-slicing controller ruling, Task 3 fix): the launched-subset plan consumed by
+  // Stage 2's cross-check and Stage 5's consensus must derive from the lanes ACTUALLY launched —
+  // the one point where slice-empty skips, quick mode's 3-agent cap, and deep mode's config-only
+  // expansion all converge. That set is only fully known immediately after Stage 1 issues its
+  // Task calls, so it cannot be folded into the pre-launch "Approved learnings & dependency
+  // impact" bash block (which must run BEFORE those Task calls, to feed the archetype prompts) —
+  // it is an unavoidable extra turn, +1 over the previous budget.
   const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
   const count = countBashFences(ciPath);
-  assert.ok(count <= 12, `CI-path bash fence count is ${count}, expected <= 12`);
+  assert.ok(count <= 13, `CI-path bash fence count is ${count}, expected <= 13`);
 });
 
 test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {
