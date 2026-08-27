@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+const { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const os = require('node:os');
 const {
@@ -360,6 +360,65 @@ test('changedFiles throws (no silent fallback) when an explicit --base fails to 
       () => changedFiles('does-not-exist', C, {}),
       /could not determine a diff base/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function writeMinimalConfig(root) {
+  const dir = join(root, '.claude', 'review');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', '',
+  ].join('\n'));
+}
+
+// Regression coverage: `run`'s positional mode arg used to be validated against MODES
+// but never actually passed into buildPlan's input object, so plan.mode was always the
+// buildPlan default ('standard') regardless of what was requested on the command line.
+test('run <mode> passes the requested mode through to buildPlan, visible in both the preflight output and the tmp plan file', () => {
+  const root = tmpGitRepo();
+  try {
+    writeMinimalConfig(root);
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'quick']);
+    assert.equal(code, 0);
+    assert.match(s, /mode: quick/);
+    const plan = JSON.parse(readFileSync(planTmpPath(root), 'utf8'));
+    assert.equal(plan.mode.requested, 'quick');
+    assert.equal(plan.mode.resolved, 'quick');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('run auto is accepted (MODES gains auto) and the requested mode reaches buildPlan', () => {
+  const root = tmpGitRepo();
+  try {
+    writeMinimalConfig(root);
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'auto']);
+    assert.equal(code, 0);
+    assert.ok(!/unknown mode/.test(s));
+    const plan = JSON.parse(readFileSync(planTmpPath(root), 'utf8'));
+    assert.equal(plan.mode.requested, 'auto');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('run still rejects an unrecognized mode', () => {
+  const root = tmpGitRepo();
+  try {
+    writeMinimalConfig(root);
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'bananas']);
+    assert.equal(code, 1);
+    assert.match(s, /unknown mode "bananas"/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

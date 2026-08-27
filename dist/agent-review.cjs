@@ -19281,6 +19281,7 @@ var require_cliCommands = __commonJS({
       lines.push(`risk: ${r.score} ${r.level} (reviewer: ${r.reviewer})`);
       if (r.special && r.special.length)
         lines.push(`special: ${r.special.join(", ")}`);
+      if (plan.mode) lines.push(`mode: ${plan.mode.resolved}`);
       lines.push("agents:");
       for (const a of plan.agents) lines.push(`  - ${a.id} [${a.matchedBy}]`);
       if (impact) {
@@ -19384,7 +19385,7 @@ var require_cli = __commonJS({
         INDEX: join(RD, "index")
       };
     }
-    var MODES = ["quick", "standard", "deep"];
+    var MODES = ["auto", "quick", "standard", "deep"];
     var PLAN_MODES = ["auto", "quick", "standard", "deep"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
@@ -19991,7 +19992,8 @@ var require_cli = __commonJS({
               diffText: diff,
               linesChanged: linesChangedFromStat(stat),
               scope,
-              reviewDirRel: C.reviewDirRel
+              reviewDirRel: C.reviewDirRel,
+              mode
             },
             cfg
           );

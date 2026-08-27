@@ -88,7 +88,7 @@ function ctx(argv) {
     INDEX: join(RD, 'index'),
   };
 }
-const MODES = ['quick', 'standard', 'deep'];
+const MODES = ['auto', 'quick', 'standard', 'deep'];
 const PLAN_MODES = ['auto', 'quick', 'standard', 'deep'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
@@ -733,6 +733,7 @@ function main(rawArgv) {
           linesChanged: linesChangedFromStat(stat),
           scope,
           reviewDirRel: C.reviewDirRel,
+          mode,
         },
         cfg,
       );

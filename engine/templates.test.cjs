@@ -233,6 +233,31 @@ test('every fail-closed interact exit is reported back to the maintainer', () =>
   assert.ok(!/git diff --cached --check\n/.test(workflow));
 });
 
+test('review workflow reports back to the PR when the review job fails', () => {
+  const workflow = readFileSync(REVIEW_WORKFLOW, 'utf8');
+  const failure = workflow.slice(workflow.indexOf('  report-failure:'));
+  assert.ok(failure, 'review workflow must define a report-failure job');
+  assert.match(failure, /needs: review\n    if: failure\(\)/);
+  assert.match(failure, /permissions:\n      pull-requests: write/);
+  assert.ok(failure.includes('gh pr comment'));
+  // Simple static message — no failure_reason plumbing like interact.yml's job.
+  assert.ok(failure.includes('did not complete'));
+  assert.ok(failure.includes('no report was posted'));
+  assert.ok(failure.includes('nothing was changed'));
+  assert.ok(failure.includes('agent-review'), 'must tell the maintainer which label to cycle');
+  assert.ok(failure.includes('github.event.pull_request.number'));
+  assert.ok(failure.includes('github.run_id'), 'must link to the run log');
+  // The review job itself must not gain new permissions to support this.
+  const review = workflow.slice(0, workflow.indexOf('  report-failure:'));
+  assert.match(review, /permissions:\n      contents: read\n      checks: read\n      pull-requests: write/);
+});
+
+test('review.yml stays YAML-parseable', () => {
+  const { parse } = require('yaml');
+  const doc = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
+  assert.ok(doc.jobs['report-failure'], 'report-failure job must parse as a real job');
+});
+
 test('the review skill forbids ending the turn while agents are still running', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('never end your turn while launched agents are still running'));

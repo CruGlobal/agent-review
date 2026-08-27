@@ -392,3 +392,25 @@ jobs:
             /tmp/agent_review_evidence.json
             /tmp/agent_review_context.json
             ${{ runner.temp }}/claude-execution-output.json
+
+  report-failure:
+    needs: review
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Tell the maintainer the review did not complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n\n' '⚠️ The agent-review run did not complete — **no report was posted, nothing was changed**.'
+            printf '%s\n' 'Re-trigger by cycling the `agent-review` label (remove it, then add it back).'
+            printf '\n%s\n' "[View the run log]($RUN_URL)"
+          } > "$RUNNER_TEMP/review-failure.md"
+          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/review-failure.md" >/dev/null
