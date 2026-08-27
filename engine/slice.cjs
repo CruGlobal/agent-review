@@ -15,9 +15,11 @@ const { pathMatches, contentMatches } = require('./selectAgents.cjs');
 
 // Splits diffText into `diff --git` file sections, each further split into
 // a header (everything before the first hunk: the `diff --git`/`index`/
-// `---`/`+++` lines) and a list of complete `@@ ... @@` hunks. Reassembling
-// header + hunks.join('') reproduces the original block byte-for-byte — this
-// is what makes whole-file inclusion trivially a valid unified diff.
+// `---`/`+++` lines — or the WHOLE section for a binary/mode-only/pure-rename
+// change that carries no `@@` hunks at all) and a list of complete
+// `@@ ... @@` hunks. Reassembling header + hunks.join('') reproduces the
+// original block byte-for-byte — this is what makes whole-file inclusion
+// trivially a valid unified diff.
 function parseDiff(diffText) {
   if (!diffText) return [];
   return diffText
@@ -35,13 +37,15 @@ function parseDiff(diffText) {
     });
 }
 
-// Added/context lines only ('+' and ' ' prefixes) — removed lines ('-') and
-// the "@@ ... @@" hunk marker itself are excluded, matching the brief's
-// "added/context lines" wording.
+// Controller ruling: content-trigger slicing must see what selection saw.
+// selectAgents' contentMatches scans the whole code block, deletions
+// included — a lane selected because a dangerous call was REMOVED must
+// receive that hunk. So every body line except the "@@ ... @@" marker line
+// itself is in play: '+' added, '-' removed, ' ' context.
 function hunkContentText(hunk) {
   return hunk
     .split('\n')
-    .filter((l) => l.startsWith('+') || l.startsWith(' '))
+    .filter((l) => !l.startsWith('@@'))
     .join('\n');
 }
 
@@ -76,11 +80,18 @@ function sliceForAgent({ agent, diffText }) {
   let hunks = 0;
   for (const block of blocks) {
     const wholeFile = block.file != null && pathMatches(block.file, paths);
-    const keptHunks = wholeFile
-      ? block.hunks
-      : block.hunks.filter((h) =>
-          content.some((c) => contentMatches(hunkContentText(h), c)),
-        );
+    if (wholeFile) {
+      // Controller ruling: a path-matched file with zero hunks (binary,
+      // mode-only, pure rename) still belongs in the slice — the lane must
+      // learn the file changed, even with nothing to review line-by-line.
+      parts.push(block.header + block.hunks.join(''));
+      files += 1;
+      hunks += block.hunks.length;
+      continue;
+    }
+    const keptHunks = block.hunks.filter((h) =>
+      content.some((c) => contentMatches(hunkContentText(h), c)),
+    );
     if (keptHunks.length === 0) continue;
     parts.push(block.header + keptHunks.join(''));
     files += 1;

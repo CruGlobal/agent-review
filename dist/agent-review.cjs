@@ -19097,7 +19097,7 @@ var require_slice = __commonJS({
       });
     }
     function hunkContentText(hunk) {
-      return hunk.split("\n").filter((l) => l.startsWith("+") || l.startsWith(" ")).join("\n");
+      return hunk.split("\n").filter((l) => !l.startsWith("@@")).join("\n");
     }
     function countAll(diffText) {
       const files = (diffText.match(/^diff --git /gm) || []).length;
@@ -19122,7 +19122,13 @@ var require_slice = __commonJS({
       let hunks = 0;
       for (const block of blocks) {
         const wholeFile = block.file != null && pathMatches(block.file, paths);
-        const keptHunks = wholeFile ? block.hunks : block.hunks.filter(
+        if (wholeFile) {
+          parts.push(block.header + block.hunks.join(""));
+          files += 1;
+          hunks += block.hunks.length;
+          continue;
+        }
+        const keptHunks = block.hunks.filter(
           (h) => content.some((c) => contentMatches(hunkContentText(h), c))
         );
         if (keptHunks.length === 0) continue;
@@ -19598,6 +19604,10 @@ var require_cli = __commonJS({
           mkdirSync(outDir, { recursive: true });
           const manifest = {};
           for (const agent of plan.agents || []) {
+            if (String(agent.id).includes("/") || String(agent.id).includes("..")) {
+              out(`error: unsafe agent id for slice output filename: "${agent.id}"`);
+              return 1;
+            }
             const result = sliceForAgent({ agent, diffText });
             writeFileSync(join(outDir, `${agent.id}.diff`), result.diff);
             manifest[agent.id] = {

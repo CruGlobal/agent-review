@@ -127,3 +127,86 @@ test('sliceForAgent is pure — same inputs, same output, no I/O side effects', 
   const b = sliceForAgent({ agent: pathAgent, diffText: DIFF });
   assert.deepEqual(a, b);
 });
+
+// --- Fix report follow-ups (controller rulings) ---
+
+test('content-trigger slicing sees deletions too — a removed dangerous call must be caught', () => {
+  const diff = [
+    'diff --git a/src/db/repo.js b/src/db/repo.js',
+    'index 5555555..6666666 100644',
+    '--- a/src/db/repo.js',
+    '+++ b/src/db/repo.js',
+    '@@ -10,3 +10,2 @@',
+    ' function fetchAll() {',
+    '-  return db.query("SELECT * FROM users");',
+    '+  return cache.get("users");',
+    ' }',
+    '',
+  ].join('\n');
+  const securityAgent = {
+    id: 'security',
+    triggers: { content: ['db.query('] },
+  };
+  const result = sliceForAgent({ agent: securityAgent, diffText: diff });
+  assert.equal(result.mode, 'sliced');
+  assert.equal(result.files, 1);
+  assert.equal(result.hunks, 1);
+  assert.ok(result.diff.includes('db.query("SELECT * FROM users")'));
+});
+
+test('a path-matched binary file with zero hunks still belongs in the slice', () => {
+  const diff = [
+    'diff --git a/assets/logo.png b/assets/logo.png',
+    'index 1234567..89abcde 100644',
+    'Binary files a/assets/logo.png and b/assets/logo.png differ',
+    'diff --git a/src/other.js b/src/other.js',
+    'index aaaaaaa..bbbbbbb 100644',
+    '--- a/src/other.js',
+    '+++ b/src/other.js',
+    '@@ -1,1 +1,1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n');
+  const assetsAgent = { id: 'assets', triggers: { paths: ['assets/**'] } };
+  const result = sliceForAgent({ agent: assetsAgent, diffText: diff });
+  assert.equal(result.mode, 'sliced');
+  assert.equal(result.files, 1);
+  assert.equal(result.hunks, 0);
+  assert.ok(result.diff.includes('diff --git a/assets/logo.png b/assets/logo.png'));
+  assert.ok(result.diff.includes('Binary files a/assets/logo.png and b/assets/logo.png differ'));
+  assert.ok(!result.diff.includes('src/other.js'), 'unrelated (non-matching) file logic is unchanged');
+});
+
+test('a path-matched mode-only change with zero hunks still belongs in the slice', () => {
+  const diff = [
+    'diff --git a/scripts/run.sh b/scripts/run.sh',
+    'old mode 100644',
+    'new mode 100755',
+    '',
+  ].join('\n');
+  const scriptsAgent = { id: 'scripts', triggers: { paths: ['scripts/**'] } };
+  const result = sliceForAgent({ agent: scriptsAgent, diffText: diff });
+  assert.equal(result.mode, 'sliced');
+  assert.equal(result.files, 1);
+  assert.equal(result.hunks, 0);
+  assert.ok(result.diff.includes('old mode 100644'));
+  assert.ok(result.diff.includes('new mode 100755'));
+});
+
+test('a path-matched pure rename with zero hunks still belongs in the slice', () => {
+  const diff = [
+    'diff --git a/src/old-name.js b/src/new-name.js',
+    'similarity index 100%',
+    'rename from src/old-name.js',
+    'rename to src/new-name.js',
+    '',
+  ].join('\n');
+  const renameAgent = { id: 'renamed', triggers: { paths: ['src/new-name.js'] } };
+  const result = sliceForAgent({ agent: renameAgent, diffText: diff });
+  assert.equal(result.mode, 'sliced');
+  assert.equal(result.files, 1);
+  assert.equal(result.hunks, 0);
+  assert.ok(result.diff.includes('rename from src/old-name.js'));
+  assert.ok(result.diff.includes('rename to src/new-name.js'));
+});

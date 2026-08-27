@@ -225,6 +225,18 @@ test('slice subcommand requires --plan, --diff, and --out-dir', () => {
   assert.match(s, /usage: agent-review slice/);
 });
 
+test('slice subcommand refuses an agent id that would escape --out-dir', () => {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-slice-unsafe-'));
+  const planPath = join(root, 'plan.json');
+  writeFileSync(planPath, JSON.stringify({ agents: [{ id: '../evil', always: true }] }));
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, '');
+  const { code, s } = run(['slice', '--plan', planPath, '--diff', diffPath, '--out-dir', join(root, 'out')]);
+  assert.equal(code, 1);
+  assert.match(s, /unsafe agent id/);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test('address subcommands prepare, validate, emit feedback, and finalize through the CLI', () => {
   const { mkdirSync, readFileSync } = require('node:fs');
   const root = mkdtempSync(join(os.tmpdir(), 'ar-address-'));

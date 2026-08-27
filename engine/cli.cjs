@@ -344,6 +344,10 @@ function main(rawArgv) {
       mkdirSync(outDir, { recursive: true });
       const manifest = {};
       for (const agent of plan.agents || []) {
+        if (String(agent.id).includes('/') || String(agent.id).includes('..')) {
+          out(`error: unsafe agent id for slice output filename: "${agent.id}"`);
+          return 1;
+        }
         const result = sliceForAgent({ agent, diffText });
         writeFileSync(join(outDir, `${agent.id}.diff`), result.diff);
         manifest[agent.id] = {
