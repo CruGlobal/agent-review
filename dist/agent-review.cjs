@@ -16897,6 +16897,7 @@ var require_selectAgents = __commonJS({
   "engine/selectAgents.cjs"(exports2, module2) {
     "use strict";
     var { minimatch } = require_commonjs3();
+    var { matchingPattern } = require_scoreRisk();
     var OPTS = { dot: true };
     function isExcluded(file, config) {
       return (config.excluded_paths || []).some((g) => minimatch(file, g, OPTS));
@@ -16944,6 +16945,11 @@ var require_selectAgents = __commonJS({
       const right = /[A-Za-z0-9_]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
       return new RegExp(left + escaped + right, "m").test(contentText);
     }
+    function hasUnmatchedReviewableFile(reviewed, config) {
+      if (!config.risk || !Array.isArray(config.risk.patterns))
+        return reviewed.length > 0;
+      return reviewed.some((f) => !matchingPattern(f, config).matched);
+    }
     function selectAgents({ files, diffText, reviewDirRel }, config) {
       const reviewed = files.filter((f) => !isExcluded(f, config));
       const contentText = codeDiff(diffText, config, reviewDirRel);
@@ -16956,12 +16962,33 @@ var require_selectAgents = __commonJS({
             id: a.id,
             model: a.model || "smart",
             escalates: a.escalates || false,
+            triggers: a.triggers,
             matchedBy
           });
       }
+      const hasEscalating = out.some((a) => a.escalates);
+      if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
+        const eligible = config.agents.filter((a) => a.enabled !== false);
+        const forced = eligible.find((a) => a.id === "security") || eligible.find((a) => a.escalates === true);
+        if (forced && !out.some((o) => o.id === forced.id)) {
+          out.push({
+            id: forced.id,
+            model: forced.model || "smart",
+            escalates: forced.escalates || false,
+            triggers: forced.triggers,
+            matchedBy: "unmatched-coverage"
+          });
+        }
+      }
       return out;
     }
-    module2.exports = { selectAgents, agentMatches, codeDiff, contentMatches };
+    module2.exports = {
+      selectAgents,
+      agentMatches,
+      codeDiff,
+      contentMatches,
+      hasUnmatchedReviewableFile
+    };
   }
 });
 

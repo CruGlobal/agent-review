@@ -1,5 +1,6 @@
 'use strict';
 const { minimatch } = require('minimatch');
+const { matchingPattern } = require('./scoreRisk.cjs');
 
 const OPTS = { dot: true };
 
@@ -63,6 +64,18 @@ function contentMatches(contentText, trigger) {
   return new RegExp(left + escaped + right, 'm').test(contentText);
 }
 
+// Same conservative unknown scoreRisk floors: a reviewable file that matches no
+// risk pattern is an unknown, not proof of safety. Reuses scoreRisk's own
+// matcher rather than re-deriving the notion of "unmatched". When no risk map
+// is configured at all (isolated fixtures; real configs always carry one),
+// every reviewable file is unmatched — the same conservative default scoreRisk
+// applies when `patternPoints` can't match against anything.
+function hasUnmatchedReviewableFile(reviewed, config) {
+  if (!config.risk || !Array.isArray(config.risk.patterns))
+    return reviewed.length > 0;
+  return reviewed.some((f) => !matchingPattern(f, config).matched);
+}
+
 function selectAgents({ files, diffText, reviewDirRel }, config) {
   const reviewed = files.filter((f) => !isExcluded(f, config));
   const contentText = codeDiff(diffText, config, reviewDirRel);
@@ -75,10 +88,42 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
         id: a.id,
         model: a.model || 'smart',
         escalates: a.escalates || false,
+        triggers: a.triggers,
         matchedBy,
       });
   }
+
+  // Coverage guarantee: prose-driven selection (always-on lanes, path/content
+  // triggers) can leave a novel path with no escalating lane in the plan. If
+  // the diff touches at least one reviewable file the risk map doesn't
+  // recognize, and no selected lane escalates, force one in deterministically
+  // — the config's `security` lane by id, else the first `escalates: true`
+  // agent in config order. Disabled agents are never eligible, and an agent
+  // already selected normally is not duplicated.
+  const hasEscalating = out.some((a) => a.escalates);
+  if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
+    const eligible = config.agents.filter((a) => a.enabled !== false);
+    const forced =
+      eligible.find((a) => a.id === 'security') ||
+      eligible.find((a) => a.escalates === true);
+    if (forced && !out.some((o) => o.id === forced.id)) {
+      out.push({
+        id: forced.id,
+        model: forced.model || 'smart',
+        escalates: forced.escalates || false,
+        triggers: forced.triggers,
+        matchedBy: 'unmatched-coverage',
+      });
+    }
+  }
+
   return out;
 }
 
-module.exports = { selectAgents, agentMatches, codeDiff, contentMatches };
+module.exports = {
+  selectAgents,
+  agentMatches,
+  codeDiff,
+  contentMatches,
+  hasUnmatchedReviewableFile,
+};

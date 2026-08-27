@@ -61,6 +61,130 @@ test('disabled agent never selected', () => {
   assert.ok(!sel.some((a) => a.id === 'financial'));
 });
 
+test('selected agents carry their config triggers verbatim', () => {
+  const sel = selectAgents(
+    { files: ['pages/api/foo.ts'], diffText: '' },
+    config,
+  );
+  const security = sel.find((a) => a.id === 'security');
+  assert.deepEqual(security.triggers, {
+    paths: ['pages/api/**'],
+    content: ['process.env.'],
+  });
+  const architecture = sel.find((a) => a.id === 'architecture');
+  assert.ok('triggers' in architecture);
+  assert.equal(architecture.triggers, undefined);
+});
+
+// Coverage guarantee: an unmatched reviewable file (outside the risk map, same
+// set scoreRisk floors) must not slip through on always-on, non-escalating
+// agents alone. Local config below deliberately omits the shared `config`
+// above's always-on escalating `architecture` lane so the guarantee's own
+// force-include is what's under test.
+const coverageConfig = {
+  excluded_paths: ['**/*.md'],
+  risk: {
+    patterns: [{ glob: 'src/known/**', points: 1, tier: 'low' }],
+  },
+  agents: [
+    {
+      id: 'security',
+      escalates: true,
+      triggers: { paths: ['pages/api/**'] },
+    },
+    { id: 'style', always: true },
+  ],
+};
+
+test('an escalating lane is force-included when unmatched reviewable files exist', () => {
+  const sel = selectAgents(
+    { files: ['src/unmatched.js'], diffText: '' },
+    coverageConfig,
+  );
+  assert.ok(sel.some((a) => a.id === 'style'), 'always-on lane still selected');
+  const security = sel.find((a) => a.id === 'security');
+  assert.ok(security, 'security force-included for unmatched coverage');
+  assert.equal(security.matchedBy, 'unmatched-coverage');
+});
+
+test('an already-selected escalating lane suppresses the coverage guarantee', () => {
+  const cfg = {
+    ...coverageConfig,
+    agents: [
+      { id: 'architecture', always: true, escalates: true },
+      ...coverageConfig.agents,
+    ],
+  };
+  const sel = selectAgents(
+    { files: ['src/unmatched.js'], diffText: '' },
+    cfg,
+  );
+  assert.ok(sel.some((a) => a.id === 'architecture' && a.escalates));
+  assert.ok(
+    !sel.some((a) => a.id === 'security'),
+    'security not force-included once an escalating lane is already selected',
+  );
+});
+
+test('no force-include when the diff has no unmatched reviewable files', () => {
+  // excluded path: never reaches the reviewable set at all.
+  const excluded = selectAgents(
+    { files: ['docs/readme.md'], diffText: '' },
+    coverageConfig,
+  );
+  assert.ok(!excluded.some((a) => a.id === 'security'));
+
+  // reviewable but matched by a risk pattern: not "unmatched".
+  const matched = selectAgents(
+    { files: ['src/known/thing.js'], diffText: '' },
+    coverageConfig,
+  );
+  assert.ok(!matched.some((a) => a.id === 'security'));
+});
+
+test('a disabled security agent is never force-included for coverage', () => {
+  const cfg = {
+    ...coverageConfig,
+    agents: [
+      {
+        id: 'security',
+        enabled: false,
+        escalates: true,
+        triggers: { paths: ['pages/api/**'] },
+      },
+      { id: 'style', always: true },
+    ],
+  };
+  const sel = selectAgents(
+    { files: ['src/unmatched.js'], diffText: '' },
+    cfg,
+  );
+  assert.ok(!sel.some((a) => a.id === 'security'));
+  assert.ok(!sel.some((a) => a.matchedBy === 'unmatched-coverage'));
+});
+
+test('falls back to the first escalating agent in config order when there is no security agent', () => {
+  const cfg = {
+    ...coverageConfig,
+    agents: [
+      { id: 'style', always: true },
+      {
+        id: 'data-integrity',
+        escalates: true,
+        triggers: { paths: ['migrations/**'] },
+      },
+      { id: 'perf', escalates: true, triggers: { paths: ['perf/**'] } },
+    ],
+  };
+  const sel = selectAgents(
+    { files: ['src/unmatched.js'], diffText: '' },
+    cfg,
+  );
+  const forced = sel.find((a) => a.matchedBy === 'unmatched-coverage');
+  assert.ok(forced, 'an escalating lane was force-included');
+  assert.equal(forced.id, 'data-integrity', 'first escalates:true agent in config order wins');
+});
+
 test('codeDiff drops the reviewer config under a custom review dir', () => {
   const cfg = { excluded_paths: [], agents: [] };
   const diff = 'diff --git a/.review/config.yml b/.review/config.yml\n+content: [foo]\n';
