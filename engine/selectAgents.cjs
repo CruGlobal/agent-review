@@ -37,6 +37,12 @@ function codeDiff(diffText, config, reviewDirRel) {
   return kept.join('');
 }
 
+// Exported so callers (e.g. engine/slice.cjs) reuse the exact glob semantics
+// selectAgents applies to `triggers.paths`, instead of re-deriving them.
+function pathMatches(file, globs) {
+  return (globs || []).some((g) => minimatch(file, g, OPTS));
+}
+
 function agentMatches(agent, files, contentText) {
   if (agent.always) return 'always';
   const t = agent.triggers || {};
@@ -88,6 +94,7 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
         id: a.id,
         model: a.model || 'smart',
         escalates: a.escalates || false,
+        always: a.always || false,
         triggers: a.triggers,
         matchedBy,
       });
@@ -111,6 +118,7 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
         id: forced.id,
         model: forced.model || 'smart',
         escalates: forced.escalates || false,
+        always: forced.always || false,
         triggers: forced.triggers,
         matchedBy: 'unmatched-coverage',
       });
@@ -126,4 +134,5 @@ module.exports = {
   codeDiff,
   contentMatches,
   hasUnmatchedReviewableFile,
+  pathMatches,
 };

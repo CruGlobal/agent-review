@@ -76,6 +76,17 @@ test('selected agents carry their config triggers verbatim', () => {
   assert.equal(architecture.triggers, undefined);
 });
 
+// Task 2 (slice) reads `always` off the plan agent directly — it sits beside
+// `triggers` in config, not inside it — to decide the full-diff rule.
+test('selected agents carry the config always flag beside triggers', () => {
+  const sel = selectAgents(
+    { files: ['pages/api/foo.ts'], diffText: '' },
+    config,
+  );
+  assert.equal(sel.find((a) => a.id === 'architecture').always, true);
+  assert.equal(sel.find((a) => a.id === 'security').always, false);
+});
+
 // Coverage guarantee: an unmatched reviewable file (outside the risk map, same
 // set scoreRisk floors) must not slip through on always-on, non-escalating
 // agents alone. Local config below deliberately omits the shared `config`

@@ -177,6 +177,54 @@ test('plan subcommand rejects an unknown --mode', () => {
   assert.match(text, /unknown mode "bananas"/);
 });
 
+test('slice subcommand writes per-agent diff files and prints a JSON manifest', () => {
+  const { readFileSync, existsSync } = require('node:fs');
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-slice-'));
+  const diff = [
+    'diff --git a/src/api/users.js b/src/api/users.js',
+    'index 1111111..2222222 100644',
+    '--- a/src/api/users.js',
+    '+++ b/src/api/users.js',
+    '@@ -1,2 +1,3 @@',
+    ' function getUser() {',
+    '+  const k = process.env.SECRET;',
+    ' }',
+    '',
+  ].join('\n');
+  const plan = {
+    profile: 'standard',
+    agents: [
+      { id: 'architecture', escalates: true, always: true, triggers: undefined },
+      { id: 'security', escalates: false, always: false, triggers: { content: ['process.env.'] } },
+      { id: 'financial', escalates: false, always: false, triggers: { paths: ['src/finance/**'] } },
+    ],
+  };
+  const planPath = join(root, 'plan.json');
+  writeFileSync(planPath, JSON.stringify(plan));
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, diff);
+  const outDir = join(root, 'slices');
+  const { code, s } = run(['slice', '--plan', planPath, '--diff', diffPath, '--out-dir', outDir]);
+  assert.equal(code, 0);
+  const manifest = JSON.parse(s);
+  assert.deepEqual(manifest, {
+    architecture: { mode: 'full', files: 1, hunks: 1 },
+    security: { mode: 'sliced', files: 1, hunks: 1 },
+    financial: { mode: 'empty', files: 0, hunks: 0 },
+  });
+  assert.equal(readFileSync(join(outDir, 'architecture.diff'), 'utf8'), diff);
+  assert.ok(readFileSync(join(outDir, 'security.diff'), 'utf8').includes('process.env.SECRET'));
+  assert.ok(existsSync(join(outDir, 'financial.diff')));
+  assert.equal(readFileSync(join(outDir, 'financial.diff'), 'utf8'), '');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('slice subcommand requires --plan, --diff, and --out-dir', () => {
+  const { code, s } = run(['slice']);
+  assert.equal(code, 1);
+  assert.match(s, /usage: agent-review slice/);
+});
+
 test('address subcommands prepare, validate, emit feedback, and finalize through the CLI', () => {
   const { mkdirSync, readFileSync } = require('node:fs');
   const root = mkdtempSync(join(os.tmpdir(), 'ar-address-'));

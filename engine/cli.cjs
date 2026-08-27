@@ -49,6 +49,7 @@ const {
 } = require('./evalSuite.cjs');
 const { buildEvidence, verifyEvidenceLedger } = require('./evidence.cjs');
 const { consensusFrom } = require('./consensus.cjs');
+const { sliceForAgent } = require('./slice.cjs');
 const { validateContextManifest, contextInventory, packContext } = require('./contextPack.cjs');
 const { readTelemetry, summarizeTelemetry, rolloutReadiness } = require('./telemetry.cjs');
 const {
@@ -197,6 +198,7 @@ const USAGE = `usage: agent-review <command>
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
+  slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -327,6 +329,30 @@ function main(rawArgv) {
           2,
         ),
       );
+      return 0;
+    }
+    case 'slice': {
+      const planPath = flag(rest, '--plan');
+      const diffPath = flag(rest, '--diff');
+      const outDir = flag(rest, '--out-dir');
+      if (!planPath || !diffPath || !outDir) {
+        out('usage: agent-review slice --plan <f> --diff <f> --out-dir <d>');
+        return 1;
+      }
+      const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+      const diffText = readFileSync(diffPath, 'utf8');
+      mkdirSync(outDir, { recursive: true });
+      const manifest = {};
+      for (const agent of plan.agents || []) {
+        const result = sliceForAgent({ agent, diffText });
+        writeFileSync(join(outDir, `${agent.id}.diff`), result.diff);
+        manifest[agent.id] = {
+          mode: result.mode,
+          files: result.files,
+          hunks: result.hunks,
+        };
+      }
+      out(JSON.stringify(manifest, null, 2));
       return 0;
     }
     case 'emit': {

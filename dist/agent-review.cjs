@@ -16924,6 +16924,9 @@ var require_selectAgents = __commonJS({
       }
       return kept.join("");
     }
+    function pathMatches(file, globs) {
+      return (globs || []).some((g) => minimatch(file, g, OPTS));
+    }
     function agentMatches(agent, files, contentText) {
       if (agent.always) return "always";
       const t = agent.triggers || {};
@@ -16962,6 +16965,7 @@ var require_selectAgents = __commonJS({
             id: a.id,
             model: a.model || "smart",
             escalates: a.escalates || false,
+            always: a.always || false,
             triggers: a.triggers,
             matchedBy
           });
@@ -16975,6 +16979,7 @@ var require_selectAgents = __commonJS({
             id: forced.id,
             model: forced.model || "smart",
             escalates: forced.escalates || false,
+            always: forced.always || false,
             triggers: forced.triggers,
             matchedBy: "unmatched-coverage"
           });
@@ -16987,7 +16992,8 @@ var require_selectAgents = __commonJS({
       agentMatches,
       codeDiff,
       contentMatches,
-      hasUnmatchedReviewableFile
+      hasUnmatchedReviewableFile,
+      pathMatches
     };
   }
 });
@@ -19074,6 +19080,63 @@ var require_consensus = __commonJS({
   }
 });
 
+// engine/slice.cjs
+var require_slice = __commonJS({
+  "engine/slice.cjs"(exports2, module2) {
+    "use strict";
+    var { pathMatches, contentMatches } = require_selectAgents();
+    function parseDiff(diffText) {
+      if (!diffText) return [];
+      return diffText.split(/(?=^diff --git )/m).filter(Boolean).map((block) => {
+        const fileMatch = block.match(/^diff --git a\/\S+ b\/(\S+)/m);
+        const hunkStart = block.search(/^@@ /m);
+        const header = hunkStart === -1 ? block : block.slice(0, hunkStart);
+        const hunkText = hunkStart === -1 ? "" : block.slice(hunkStart);
+        const hunks = hunkText ? hunkText.split(/(?=^@@ )/m).filter(Boolean) : [];
+        return { file: fileMatch ? fileMatch[1] : null, header, hunks };
+      });
+    }
+    function hunkContentText(hunk) {
+      return hunk.split("\n").filter((l) => l.startsWith("+") || l.startsWith(" ")).join("\n");
+    }
+    function countAll(diffText) {
+      const files = (diffText.match(/^diff --git /gm) || []).length;
+      const hunks = (diffText.match(/^@@ /gm) || []).length;
+      return { files, hunks };
+    }
+    function isFullDiff(agent) {
+      return agent.escalates === true || agent.id === "architecture" || agent.always === true;
+    }
+    function sliceForAgent({ agent, diffText }) {
+      const text = diffText || "";
+      if (isFullDiff(agent)) {
+        const { files: files2, hunks: hunks2 } = countAll(text);
+        return { mode: "full", diff: text, files: files2, hunks: hunks2 };
+      }
+      const triggers = agent.triggers || {};
+      const paths = triggers.paths || [];
+      const content = triggers.content || [];
+      const blocks = parseDiff(text);
+      const parts = [];
+      let files = 0;
+      let hunks = 0;
+      for (const block of blocks) {
+        const wholeFile = block.file != null && pathMatches(block.file, paths);
+        const keptHunks = wholeFile ? block.hunks : block.hunks.filter(
+          (h) => content.some((c) => contentMatches(hunkContentText(h), c))
+        );
+        if (keptHunks.length === 0) continue;
+        parts.push(block.header + keptHunks.join(""));
+        files += 1;
+        hunks += keptHunks.length;
+      }
+      const diff = parts.join("");
+      return { mode: diff ? "sliced" : "empty", diff, files, hunks };
+    }
+    module2.exports = { sliceForAgent, parseDiff };
+  }
+});
+
 // engine/telemetry.cjs
 var require_telemetry = __commonJS({
   "engine/telemetry.cjs"(exports2, module2) {
@@ -19282,6 +19345,7 @@ var require_cli = __commonJS({
     } = require_evalSuite();
     var { buildEvidence, verifyEvidenceLedger } = require_evidence();
     var { consensusFrom } = require_consensus();
+    var { sliceForAgent } = require_slice();
     var { validateContextManifest, contextInventory, packContext } = require_contextPack();
     var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
@@ -19404,6 +19468,7 @@ var require_cli = __commonJS({
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
+  slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -19518,6 +19583,30 @@ var require_cli = __commonJS({
               2
             )
           );
+          return 0;
+        }
+        case "slice": {
+          const planPath = flag(rest, "--plan");
+          const diffPath = flag(rest, "--diff");
+          const outDir = flag(rest, "--out-dir");
+          if (!planPath || !diffPath || !outDir) {
+            out("usage: agent-review slice --plan <f> --diff <f> --out-dir <d>");
+            return 1;
+          }
+          const plan = JSON.parse(readFileSync(planPath, "utf8"));
+          const diffText = readFileSync(diffPath, "utf8");
+          mkdirSync(outDir, { recursive: true });
+          const manifest = {};
+          for (const agent of plan.agents || []) {
+            const result = sliceForAgent({ agent, diffText });
+            writeFileSync(join(outDir, `${agent.id}.diff`), result.diff);
+            manifest[agent.id] = {
+              mode: result.mode,
+              files: result.files,
+              hunks: result.hunks
+            };
+          }
+          out(JSON.stringify(manifest, null, 2));
           return 0;
         }
         case "emit": {
