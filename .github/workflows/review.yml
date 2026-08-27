@@ -409,7 +409,8 @@ jobs:
         run: |
           set -euo pipefail
           {
-            printf '%s\n\n' '⚠️ The agent-review run did not complete — **no report was posted, nothing was changed**.'
+            printf '%s\n\n' '⚠️ The agent-review run did not complete.'
+            printf '%s\n\n' 'The review may be missing or partially posted — check for an agent-review comment below; the run made no code changes either way.'
             printf '%s\n' 'Re-trigger by cycling the `agent-review` label (remove it, then add it back).'
             printf '\n%s\n' "[View the run log]($RUN_URL)"
           } > "$RUNNER_TEMP/review-failure.md"

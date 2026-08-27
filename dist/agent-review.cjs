@@ -19281,7 +19281,7 @@ var require_cliCommands = __commonJS({
       lines.push(`risk: ${r.score} ${r.level} (reviewer: ${r.reviewer})`);
       if (r.special && r.special.length)
         lines.push(`special: ${r.special.join(", ")}`);
-      if (plan.mode) lines.push(`mode: ${plan.mode.resolved}`);
+      lines.push(`mode: ${plan.mode.resolved}`);
       lines.push("agents:");
       for (const a of plan.agents) lines.push(`  - ${a.id} [${a.matchedBy}]`);
       if (impact) {

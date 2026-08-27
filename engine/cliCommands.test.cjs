@@ -87,6 +87,8 @@ test('preflightSummary includes risk, reviewer, agents, blast radius', () => {
   const plan = {
     profile: 'standard',
     risk: { score: 46, level: 'CRITICAL', reviewer: 'Caleb Cox', special: [] },
+    // mode is a genuine buildPlan contract field — always emitted (see engine/plan.cjs).
+    mode: { requested: 'standard', resolved: 'standard' },
     agents: [{ id: 'financial', matchedBy: 'path:src/components/HrTools/**' }],
   };
   const impact = {
@@ -99,4 +101,5 @@ test('preflightSummary includes risk, reviewer, agents, blast radius', () => {
   assert.match(s, /Caleb Cox/);
   assert.match(s, /financial/);
   assert.match(s, /blastRadius 166/);
+  assert.match(s, /mode: standard/);
 });

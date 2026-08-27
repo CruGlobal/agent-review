@@ -241,9 +241,13 @@ test('review workflow reports back to the PR when the review job fails', () => {
   assert.match(failure, /permissions:\n      pull-requests: write/);
   assert.ok(failure.includes('gh pr comment'));
   // Simple static message — no failure_reason plumbing like interact.yml's job.
+  // The publish step posts/patches its comment BEFORE its postcondition check, so a
+  // failure there can still leave a report on the PR — the message must stay truthful
+  // on that path too, not claim "no report was posted" unconditionally.
   assert.ok(failure.includes('did not complete'));
-  assert.ok(failure.includes('no report was posted'));
-  assert.ok(failure.includes('nothing was changed'));
+  assert.ok(failure.includes('may be missing or partially posted'));
+  assert.ok(failure.includes('check for an agent-review comment'));
+  assert.ok(failure.includes('made no code changes'));
   assert.ok(failure.includes('agent-review'), 'must tell the maintainer which label to cycle');
   assert.ok(failure.includes('github.event.pull_request.number'));
   assert.ok(failure.includes('github.run_id'), 'must link to the run log');
