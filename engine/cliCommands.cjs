@@ -33,6 +33,7 @@ function preflightSummary(plan, impact) {
   lines.push(`risk: ${r.score} ${r.level} (reviewer: ${r.reviewer})`);
   if (r.special && r.special.length)
     lines.push(`special: ${r.special.join(', ')}`);
+  lines.push(`mode: ${plan.mode.resolved}`);
   lines.push('agents:');
   for (const a of plan.agents) lines.push(`  - ${a.id} [${a.matchedBy}]`);
   if (impact) {

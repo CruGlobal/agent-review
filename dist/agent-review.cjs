@@ -16897,6 +16897,7 @@ var require_selectAgents = __commonJS({
   "engine/selectAgents.cjs"(exports2, module2) {
     "use strict";
     var { minimatch } = require_commonjs3();
+    var { matchingPattern } = require_scoreRisk();
     var OPTS = { dot: true };
     function isExcluded(file, config) {
       return (config.excluded_paths || []).some((g) => minimatch(file, g, OPTS));
@@ -16923,6 +16924,9 @@ var require_selectAgents = __commonJS({
       }
       return kept.join("");
     }
+    function pathMatches(file, globs) {
+      return (globs || []).some((g) => minimatch(file, g, OPTS));
+    }
     function agentMatches(agent, files, contentText) {
       if (agent.always) return "always";
       const t = agent.triggers || {};
@@ -16944,6 +16948,11 @@ var require_selectAgents = __commonJS({
       const right = /[A-Za-z0-9_]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
       return new RegExp(left + escaped + right, "m").test(contentText);
     }
+    function hasUnmatchedReviewableFile(reviewed, config) {
+      if (!config.risk || !Array.isArray(config.risk.patterns))
+        return reviewed.length > 0;
+      return reviewed.some((f) => !matchingPattern(f, config).matched);
+    }
     function selectAgents({ files, diffText, reviewDirRel }, config) {
       const reviewed = files.filter((f) => !isExcluded(f, config));
       const contentText = codeDiff(diffText, config, reviewDirRel);
@@ -16956,12 +16965,36 @@ var require_selectAgents = __commonJS({
             id: a.id,
             model: a.model || "smart",
             escalates: a.escalates || false,
+            always: a.always || false,
+            triggers: a.triggers,
             matchedBy
           });
       }
+      const hasEscalating = out.some((a) => a.escalates);
+      if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
+        const eligible = config.agents.filter((a) => a.enabled !== false);
+        const forced = eligible.find((a) => a.id === "security" && a.escalates === true) || eligible.find((a) => a.escalates === true) || eligible.find((a) => a.id === "security");
+        if (forced && !out.some((o) => o.id === forced.id)) {
+          out.push({
+            id: forced.id,
+            model: forced.model || "smart",
+            escalates: forced.escalates || false,
+            always: forced.always || false,
+            triggers: forced.triggers,
+            matchedBy: "unmatched-coverage"
+          });
+        }
+      }
       return out;
     }
-    module2.exports = { selectAgents, agentMatches, codeDiff, contentMatches };
+    module2.exports = {
+      selectAgents,
+      agentMatches,
+      codeDiff,
+      contentMatches,
+      hasUnmatchedReviewableFile,
+      pathMatches
+    };
   }
 });
 
@@ -19047,6 +19080,88 @@ var require_consensus = __commonJS({
   }
 });
 
+// engine/slice.cjs
+var require_slice = __commonJS({
+  "engine/slice.cjs"(exports2, module2) {
+    "use strict";
+    var { pathMatches, contentMatches } = require_selectAgents();
+    function parseDiff(diffText) {
+      if (!diffText) return [];
+      return diffText.split(/(?=^diff --git )/m).filter(Boolean).map((block) => {
+        const fileMatch = block.match(/^diff --git a\/(\S+) b\/(\S+)/m);
+        const hunkStart = block.search(/^@@ /m);
+        const header = hunkStart === -1 ? block : block.slice(0, hunkStart);
+        const hunkText = hunkStart === -1 ? "" : block.slice(hunkStart);
+        const hunks = hunkText ? hunkText.split(/(?=^@@ )/m).filter(Boolean) : [];
+        const isGitDiffBlock = /^diff --git /.test(block);
+        return {
+          file: fileMatch ? fileMatch[2] : null,
+          oldFile: fileMatch ? fileMatch[1] : null,
+          header,
+          hunks,
+          unparseable: isGitDiffBlock && !fileMatch
+        };
+      });
+    }
+    function hunkContentText(hunk) {
+      return hunk.split("\n").filter((l) => !l.startsWith("@@")).join("\n");
+    }
+    function countAll(diffText) {
+      const files = (diffText.match(/^diff --git /gm) || []).length;
+      const hunks = (diffText.match(/^@@ /gm) || []).length;
+      return { files, hunks };
+    }
+    function isFullDiff(agent) {
+      return agent.escalates === true || agent.id === "architecture" || agent.always === true || // I4b (final review, belt-and-suspenders): a lane the coverage guarantee
+      // force-included is ALWAYS full-diff, regardless of its own `escalates`
+      // value. Without this, an operator's `escalates: false` override on the
+      // forced lane (see selectAgents.cjs's forced-pick fallback) would let
+      // this rule slice it down — likely to an empty slice — which would
+      // silently cancel the coverage guarantee it exists to provide.
+      agent.matchedBy === "unmatched-coverage";
+    }
+    function sliceForAgent({ agent, diffText }) {
+      const text = diffText || "";
+      if (isFullDiff(agent)) {
+        const { files: files2, hunks: hunks2 } = countAll(text);
+        return { mode: "full", diff: text, files: files2, hunks: hunks2 };
+      }
+      const triggers = agent.triggers || {};
+      const paths = triggers.paths || [];
+      const content = triggers.content || [];
+      const blocks = parseDiff(text);
+      const parts = [];
+      let files = 0;
+      let hunks = 0;
+      for (const block of blocks) {
+        if (block.unparseable) {
+          parts.push(block.header + block.hunks.join(""));
+          files += 1;
+          hunks += block.hunks.length;
+          continue;
+        }
+        const wholeFile = block.file != null && pathMatches(block.file, paths) || block.oldFile != null && block.oldFile !== block.file && pathMatches(block.oldFile, paths);
+        if (wholeFile) {
+          parts.push(block.header + block.hunks.join(""));
+          files += 1;
+          hunks += block.hunks.length;
+          continue;
+        }
+        const keptHunks = block.hunks.filter(
+          (h) => content.some((c) => contentMatches(hunkContentText(h), c))
+        );
+        if (keptHunks.length === 0) continue;
+        parts.push(block.header + keptHunks.join(""));
+        files += 1;
+        hunks += keptHunks.length;
+      }
+      const diff = parts.join("");
+      return { mode: diff ? "sliced" : "empty", diff, files, hunks };
+    }
+    module2.exports = { sliceForAgent, parseDiff };
+  }
+});
+
 // engine/telemetry.cjs
 var require_telemetry = __commonJS({
   "engine/telemetry.cjs"(exports2, module2) {
@@ -19185,6 +19300,7 @@ var require_cliCommands = __commonJS({
       lines.push(`risk: ${r.score} ${r.level} (reviewer: ${r.reviewer})`);
       if (r.special && r.special.length)
         lines.push(`special: ${r.special.join(", ")}`);
+      lines.push(`mode: ${plan.mode.resolved}`);
       lines.push("agents:");
       for (const a of plan.agents) lines.push(`  - ${a.id} [${a.matchedBy}]`);
       if (impact) {
@@ -19255,6 +19371,7 @@ var require_cli = __commonJS({
     } = require_evalSuite();
     var { buildEvidence, verifyEvidenceLedger } = require_evidence();
     var { consensusFrom } = require_consensus();
+    var { sliceForAgent } = require_slice();
     var { validateContextManifest, contextInventory, packContext } = require_contextPack();
     var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
@@ -19287,8 +19404,7 @@ var require_cli = __commonJS({
         INDEX: join(RD, "index")
       };
     }
-    var MODES = ["quick", "standard", "deep"];
-    var PLAN_MODES = ["auto", "quick", "standard", "deep"];
+    var MODES = ["auto", "quick", "standard", "deep"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
@@ -19377,6 +19493,7 @@ var require_cli = __commonJS({
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
+  slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -19454,8 +19571,8 @@ var require_cli = __commonJS({
           const statPath = flag(rest, "--stat");
           const scope = flag(rest, "--scope") || "single_feature";
           const mode = flag(rest, "--mode") || "standard";
-          if (!PLAN_MODES.includes(mode)) {
-            out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join("/")})`);
+          if (!MODES.includes(mode)) {
+            out(`error: unknown mode "${mode}" (use ${MODES.join("/")})`);
             return 1;
           }
           const files = readFileSync(filesPath, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
@@ -19491,6 +19608,34 @@ var require_cli = __commonJS({
               2
             )
           );
+          return 0;
+        }
+        case "slice": {
+          const planPath = flag(rest, "--plan");
+          const diffPath = flag(rest, "--diff");
+          const outDir = flag(rest, "--out-dir");
+          if (!planPath || !diffPath || !outDir) {
+            out("usage: agent-review slice --plan <f> --diff <f> --out-dir <d>");
+            return 1;
+          }
+          const plan = JSON.parse(readFileSync(planPath, "utf8"));
+          const diffText = readFileSync(diffPath, "utf8");
+          mkdirSync(outDir, { recursive: true });
+          const manifest = {};
+          for (const agent of plan.agents || []) {
+            if (String(agent.id).includes("/") || String(agent.id).includes("..")) {
+              out(`error: unsafe agent id for slice output filename: "${agent.id}"`);
+              return 1;
+            }
+            const result = sliceForAgent({ agent, diffText });
+            writeFileSync(join(outDir, `${agent.id}.diff`), result.diff);
+            manifest[agent.id] = {
+              mode: result.mode,
+              files: result.files,
+              hunks: result.hunks
+            };
+          }
+          out(JSON.stringify(manifest, null, 2));
           return 0;
         }
         case "emit": {
@@ -19865,7 +20010,8 @@ var require_cli = __commonJS({
               diffText: diff,
               linesChanged: linesChangedFromStat(stat),
               scope,
-              reviewDirRel: C.reviewDirRel
+              reviewDirRel: C.reviewDirRel,
+              mode
             },
             cfg
           );

@@ -32,6 +32,7 @@ const PLACEHOLDERS = [
   'EVIDENCE',
   'CONTEXT',
   'AGENT_ID',
+  'DIFF_PATH',
 ];
 
 test('archetype.md uses exactly the documented placeholders', () => {
@@ -230,6 +231,35 @@ test('every fail-closed interact exit is reported back to the maintainer', () =>
   assert.ok(workflow.includes('echo "failure_reason='));
   // A whitespace nit must not discard an already-validated patch.
   assert.ok(!/git diff --cached --check\n/.test(workflow));
+});
+
+test('review workflow reports back to the PR when the review job fails', () => {
+  const workflow = readFileSync(REVIEW_WORKFLOW, 'utf8');
+  const failure = workflow.slice(workflow.indexOf('  report-failure:'));
+  assert.ok(failure, 'review workflow must define a report-failure job');
+  assert.match(failure, /needs: review\n    if: failure\(\)/);
+  assert.match(failure, /permissions:\n      pull-requests: write/);
+  assert.ok(failure.includes('gh pr comment'));
+  // Simple static message — no failure_reason plumbing like interact.yml's job.
+  // The publish step posts/patches its comment BEFORE its postcondition check, so a
+  // failure there can still leave a report on the PR — the message must stay truthful
+  // on that path too, not claim "no report was posted" unconditionally.
+  assert.ok(failure.includes('did not complete'));
+  assert.ok(failure.includes('may be missing or partially posted'));
+  assert.ok(failure.includes('check for an agent-review comment'));
+  assert.ok(failure.includes('made no code changes'));
+  assert.ok(failure.includes('agent-review'), 'must tell the maintainer which label to cycle');
+  assert.ok(failure.includes('github.event.pull_request.number'));
+  assert.ok(failure.includes('github.run_id'), 'must link to the run log');
+  // The review job itself must not gain new permissions to support this.
+  const review = workflow.slice(0, workflow.indexOf('  report-failure:'));
+  assert.match(review, /permissions:\n      contents: read\n      checks: read\n      pull-requests: write/);
+});
+
+test('review.yml stays YAML-parseable', () => {
+  const { parse } = require('yaml');
+  const doc = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
+  assert.ok(doc.jobs['report-failure'], 'report-failure job must parse as a real job');
 });
 
 test('the review skill forbids ending the turn while agents are still running', () => {
@@ -567,6 +597,107 @@ test('Stage 1 launch table fills {{AGENT_ID}} from the plan agent id', () => {
   assert.ok(stage1.includes('{{AGENT_ID}}'), 'the launch table must fill the AGENT_ID placeholder');
 });
 
+test('the review skill slices per agent and skips empty lanes', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('agent-review slice --plan'));
+  assert.ok(skill.includes('/tmp/agent_slices'));
+  assert.ok(skill.includes('mode is "empty"'), 'empty-slice lanes must be skipped, not launched');
+  assert.ok(skill.includes('mkdir -p /tmp/agent_slices') || /rm -f \/tmp\/agent_slices/.test(skill), 'slice dir needs fresh-state handling in Initialize');
+});
+
+// --- Final review fix wave (I1, I2, I3, I5) ---
+
+test('I1: a lane with no slice_manifest entry at all (deep config-only) is a full-diff lane', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const diffPathRow = skill.split('\n').find((l) => l.includes('{{DIFF_PATH}}'));
+  assert.ok(diffPathRow, '{{DIFF_PATH}} placeholder row not found');
+  assert.ok(
+    /no manifest entry/i.test(diffPathRow) && diffPathRow.includes('/tmp/pr_diff.txt'),
+    'deep mode config-only lanes (no plan entry, never sliced) must fall back to the full diff',
+  );
+});
+
+test('I2: {{RISK_CONTEXT}} surfaces the lane\'s model tier for the archetype\'s read budget', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const riskContextRow = skill.split('\n').find((l) => l.includes('{{RISK_CONTEXT}}'));
+  assert.ok(riskContextRow, '{{RISK_CONTEXT}} placeholder row not found');
+  assert.ok(
+    riskContextRow.includes('- Model tier: <tier>'),
+    'the risk-context bullet list must include the lane\'s tier — the archetype\'s ~10-file budget on sonnet+HIGH/CRITICAL is otherwise unreachable',
+  );
+});
+
+test('I3: skipped-lane notes are plumbed through a file from Stage 1 to Stage 6', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('/tmp/skipped_lanes.txt'), 'a skipped-lanes file must exist');
+  assert.ok(
+    /rm -f[^\n]*\/tmp\/skipped_lanes\.txt/.test(skill),
+    'fresh-state cleanup must remove /tmp/skipped_lanes.txt like the other per-run slice state',
+  );
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(
+    stage1.includes('skippedIds') && stage1.includes('/tmp/skipped_lanes.txt'),
+    'the same Stage 1 block that writes launched_lanes.json must also write skipped_lanes.txt',
+  );
+  assert.ok(
+    /Stage 6[^]*?\[IF any lanes were skipped:\]/i.test(skill) ||
+      skill.includes('[IF any lanes were skipped:]'),
+    'Stage 6 conditional-fill list must reference the skeleton\'s skipped-lanes line',
+  );
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(
+    report.includes('[IF any lanes were skipped:] - lanes with no matching changes: [ids]'),
+    'the report skeleton must carry the exact skipped-lanes conditional line',
+  );
+});
+
+test('I5: quick mode always retains a coverage-forced lane, even past the 3-agent cap', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '## Stage 1 — Launch Specialized Review Agents');
+  assert.ok(
+    /unmatched-coverage/.test(stage0b) && /always/i.test(stage0b),
+    'quick mode\'s bullet must state that an unmatched-coverage lane is always retained',
+  );
+});
+
+test('the launched-subset plan derives at Stage 1 launch time, from lanes actually launched (controller ruling)', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(
+    stage1.includes('/tmp/review_plan_launched.json') && stage1.includes('/tmp/launched_lanes.json'),
+    'the launched-subset derivation must live in the Stage 1 region, not before or after it',
+  );
+  assert.ok(
+    /after (every )?task call/i.test(stage1),
+    'the derivation must run after the launch Task calls are issued, not before',
+  );
+  assert.ok(
+    /synthesiz/i.test(stage1),
+    'deep mode config-only lanes (no plan entry) need a synthesized minimal plan entry documented',
+  );
+  const buildPlanBlock = stageSlice(
+    skill,
+    '### Build the Review Plan & Load Evidence',
+    '## CI Mode',
+  );
+  assert.ok(
+    buildPlanBlock.includes('agent-review slice --plan'),
+    'the slice command itself must still run right after the plan is built',
+  );
+  assert.ok(
+    !buildPlanBlock.includes('/tmp/review_plan_launched.json'),
+    'the old post-slice launched-subset derivation must be gone — Task 3 fix moved it to Stage 1 launch time',
+  );
+});
+
+test('the archetype reading contract is budgeted, not unbounded', () => {
+  const a = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
+  assert.ok(a.includes('{{DIFF_PATH}}'));
+  assert.ok(!a.includes('READ THE FULL FILES for context'), 'the unbounded read mandate must be gone');
+  assert.ok(a.includes('full-file read budget'), 'budgeted reads must be stated');
+  assert.ok(a.includes('discovery grep budget'), 'bounded discovery greps must be stated');
+});
+
 test('Stage 2 collect cross-checks each lane\'s returned N against its findings file, treats unparseable JSON as missing, and relaunches a failed lane exactly once', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
@@ -746,7 +877,7 @@ test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff
   );
 });
 
-test('the CI path uses at most 12 bash turns (Stage 0A through Stage 6)', () => {
+test('the CI path uses at most 13 bash turns (Stage 0A through Stage 6)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
   const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
@@ -772,9 +903,17 @@ test('the CI path uses at most 12 bash turns (Stage 0A through Stage 6)', () => 
   // scriptable — before the plan invocation. That checkpoint can't sit inside a merged bash
   // block, so Stage 0A/0's setup is three turns (mode-parse/CI-detect/config-validate/dirs;
   // PR-context/diff-manifest; plan/evidence) instead of one, +2 over the fence-count-only budget.
+  //
+  // 13, not 12 (rtk-slicing controller ruling, Task 3 fix): the launched-subset plan consumed by
+  // Stage 2's cross-check and Stage 5's consensus must derive from the lanes ACTUALLY launched —
+  // the one point where slice-empty skips, quick mode's 3-agent cap, and deep mode's config-only
+  // expansion all converge. That set is only fully known immediately after Stage 1 issues its
+  // Task calls, so it cannot be folded into the pre-launch "Approved learnings & dependency
+  // impact" bash block (which must run BEFORE those Task calls, to feed the archetype prompts) —
+  // it is an unavoidable extra turn, +1 over the previous budget.
   const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
   const count = countBashFences(ciPath);
-  assert.ok(count <= 12, `CI-path bash fence count is ${count}, expected <= 12`);
+  assert.ok(count <= 13, `CI-path bash fence count is ${count}, expected <= 13`);
 });
 
 test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {

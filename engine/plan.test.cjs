@@ -54,6 +54,25 @@ test('buildPlan assembles risk + agents + resolved rules', () => {
   assert.deepEqual(arch.rules, ['rules/architecture.md', 'rules/ux.md']);
 });
 
+test('plan agents carry their config triggers verbatim', () => {
+  const plan = buildPlan(
+    {
+      files: ['src/components/Tasks/TaskRow.tsx'],
+      diffText: '+x',
+      linesChanged: 20,
+      scope: 'single_feature',
+    },
+    config,
+  );
+  assert.ok(plan.agents.every((a) => 'triggers' in a));
+  const ux = plan.agents.find((a) => a.id === 'ux');
+  assert.deepEqual(ux.triggers, { paths: ['src/components/**/*.tsx'] });
+  const arch = plan.agents.find((a) => a.id === 'architecture');
+  // architecture has no `triggers` in config (it's an always-on lane) — the
+  // key must still be present, just carrying the config's undefined verbatim.
+  assert.equal(arch.triggers, undefined);
+});
+
 test('resolveTiers routes smart lanes by escalation and risk', () => {
   const agents = [
     { id: 'security', model: 'smart', escalates: true },

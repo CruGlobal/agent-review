@@ -1,5 +1,6 @@
 'use strict';
 const { minimatch } = require('minimatch');
+const { matchingPattern } = require('./scoreRisk.cjs');
 
 const OPTS = { dot: true };
 
@@ -36,6 +37,12 @@ function codeDiff(diffText, config, reviewDirRel) {
   return kept.join('');
 }
 
+// Exported so callers (e.g. engine/slice.cjs) reuse the exact glob semantics
+// selectAgents applies to `triggers.paths`, instead of re-deriving them.
+function pathMatches(file, globs) {
+  return (globs || []).some((g) => minimatch(file, g, OPTS));
+}
+
 function agentMatches(agent, files, contentText) {
   if (agent.always) return 'always';
   const t = agent.triggers || {};
@@ -63,6 +70,18 @@ function contentMatches(contentText, trigger) {
   return new RegExp(left + escaped + right, 'm').test(contentText);
 }
 
+// Same conservative unknown scoreRisk floors: a reviewable file that matches no
+// risk pattern is an unknown, not proof of safety. Reuses scoreRisk's own
+// matcher rather than re-deriving the notion of "unmatched". When no risk map
+// is configured at all (isolated fixtures; real configs always carry one),
+// every reviewable file is unmatched — the same conservative default scoreRisk
+// applies when `patternPoints` can't match against anything.
+function hasUnmatchedReviewableFile(reviewed, config) {
+  if (!config.risk || !Array.isArray(config.risk.patterns))
+    return reviewed.length > 0;
+  return reviewed.some((f) => !matchingPattern(f, config).matched);
+}
+
 function selectAgents({ files, diffText, reviewDirRel }, config) {
   const reviewed = files.filter((f) => !isExcluded(f, config));
   const contentText = codeDiff(diffText, config, reviewDirRel);
@@ -75,10 +94,52 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
         id: a.id,
         model: a.model || 'smart',
         escalates: a.escalates || false,
+        always: a.always || false,
+        triggers: a.triggers,
         matchedBy,
       });
   }
+
+  // Coverage guarantee: prose-driven selection (always-on lanes, path/content
+  // triggers) can leave a novel path with no escalating lane in the plan. If
+  // the diff touches at least one reviewable file the risk map doesn't
+  // recognize, and no selected lane escalates, force one in deterministically
+  // — the config's `security` lane by id, else the first `escalates: true`
+  // agent in config order. Disabled agents are never eligible, and an agent
+  // already selected normally is not duplicated.
+  const hasEscalating = out.some((a) => a.escalates);
+  if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
+    const eligible = config.agents.filter((a) => a.enabled !== false);
+    // Belt-and-suspenders (final review I4a): prefer a lane that genuinely
+    // escalates — an operator explicitly de-escalating `security`
+    // (`escalates: false`) must not silently outrank a lane that actually
+    // escalates to opus. Only when NOTHING escalates at all do we fall back
+    // to forcing `security` by id as before (an explicit operator override,
+    // documented in templates/config.yml's WARNING).
+    const forced =
+      eligible.find((a) => a.id === 'security' && a.escalates === true) ||
+      eligible.find((a) => a.escalates === true) ||
+      eligible.find((a) => a.id === 'security');
+    if (forced && !out.some((o) => o.id === forced.id)) {
+      out.push({
+        id: forced.id,
+        model: forced.model || 'smart',
+        escalates: forced.escalates || false,
+        always: forced.always || false,
+        triggers: forced.triggers,
+        matchedBy: 'unmatched-coverage',
+      });
+    }
+  }
+
   return out;
 }
 
-module.exports = { selectAgents, agentMatches, codeDiff, contentMatches };
+module.exports = {
+  selectAgents,
+  agentMatches,
+  codeDiff,
+  contentMatches,
+  hasUnmatchedReviewableFile,
+  pathMatches,
+};

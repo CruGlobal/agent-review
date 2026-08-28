@@ -86,6 +86,8 @@ breaking changes as reported by the agents]
 
 **Risk factors detected**: [list specific factors, or "none"]
 
+[IF any lanes were skipped:] - lanes with no matching changes: [ids]
+
 **Deterministic evidence**:
 
 - AST/static rules: [N findings, list rule ids or "none"]

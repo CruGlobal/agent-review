@@ -49,6 +49,7 @@ const {
 } = require('./evalSuite.cjs');
 const { buildEvidence, verifyEvidenceLedger } = require('./evidence.cjs');
 const { consensusFrom } = require('./consensus.cjs');
+const { sliceForAgent } = require('./slice.cjs');
 const { validateContextManifest, contextInventory, packContext } = require('./contextPack.cjs');
 const { readTelemetry, summarizeTelemetry, rolloutReadiness } = require('./telemetry.cjs');
 const {
@@ -87,8 +88,9 @@ function ctx(argv) {
     INDEX: join(RD, 'index'),
   };
 }
-const MODES = ['quick', 'standard', 'deep'];
-const PLAN_MODES = ['auto', 'quick', 'standard', 'deep'];
+// M1 (final review): `plan` and `run` validate the same mode vocabulary —
+// one constant, not two copies that can drift apart.
+const MODES = ['auto', 'quick', 'standard', 'deep'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
 function learningPaths(cfg, C) {
@@ -197,6 +199,7 @@ const USAGE = `usage: agent-review <command>
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
+  slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
@@ -281,8 +284,8 @@ function main(rawArgv) {
       const statPath = flag(rest, '--stat');
       const scope = flag(rest, '--scope') || 'single_feature';
       const mode = flag(rest, '--mode') || 'standard';
-      if (!PLAN_MODES.includes(mode)) {
-        out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join('/')})`);
+      if (!MODES.includes(mode)) {
+        out(`error: unknown mode "${mode}" (use ${MODES.join('/')})`);
         return 1;
       }
       const files = readFileSync(filesPath, 'utf8')
@@ -327,6 +330,34 @@ function main(rawArgv) {
           2,
         ),
       );
+      return 0;
+    }
+    case 'slice': {
+      const planPath = flag(rest, '--plan');
+      const diffPath = flag(rest, '--diff');
+      const outDir = flag(rest, '--out-dir');
+      if (!planPath || !diffPath || !outDir) {
+        out('usage: agent-review slice --plan <f> --diff <f> --out-dir <d>');
+        return 1;
+      }
+      const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+      const diffText = readFileSync(diffPath, 'utf8');
+      mkdirSync(outDir, { recursive: true });
+      const manifest = {};
+      for (const agent of plan.agents || []) {
+        if (String(agent.id).includes('/') || String(agent.id).includes('..')) {
+          out(`error: unsafe agent id for slice output filename: "${agent.id}"`);
+          return 1;
+        }
+        const result = sliceForAgent({ agent, diffText });
+        writeFileSync(join(outDir, `${agent.id}.diff`), result.diff);
+        manifest[agent.id] = {
+          mode: result.mode,
+          files: result.files,
+          hunks: result.hunks,
+        };
+      }
+      out(JSON.stringify(manifest, null, 2));
       return 0;
     }
     case 'emit': {
@@ -703,6 +734,7 @@ function main(rawArgv) {
           linesChanged: linesChangedFromStat(stat),
           scope,
           reviewDirRel: C.reviewDirRel,
+          mode,
         },
         cfg,
       );

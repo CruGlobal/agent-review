@@ -102,6 +102,13 @@ risk:
 # `model` picks the review tier: an explicit `model:` (opus/sonnet/haiku) is
 # honored in every review mode; `smart` lanes are the ones quick mode may
 # downgrade to haiku, and only when `escalates` is false.
+# WARNING: the engine honors this operator override — explicitly setting `escalates: false` on
+# the security lane below removes it from the escalating-lane coverage guarantee (an unmatched
+# reviewable file no longer force-includes a lane that actually escalates to opus). The engine
+# still force-includes `security` by id when NO lane escalates at all, so coverage never silently
+# vanishes — but if every lane's `escalates` is set to false, that forced lane won't actually
+# escalate either. De-escalating every lane disables coverage escalation entirely: an unmatched
+# reviewable file will still get a lane, but never one that reads at opus rigor.
 agents:
   - id: security
     title: Security Review Agent

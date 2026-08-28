@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync } = require('node:child_process');
-const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+const { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } = require('node:fs');
 const { join } = require('node:path');
 const os = require('node:os');
 const {
@@ -69,7 +69,10 @@ test('ctx()-derived reviewDirRel reaches buildPlan and suppresses self-match und
     profile: 'standard',
     excluded_paths: [],
     risk: {
-      patterns: [],
+      // Zero-point pattern for the reviewer's own config path: keeps this file
+      // out of the unmatched-coverage guarantee's floor (Task 1) so this test
+      // isolates only what it's meant to check — content self-match suppression.
+      patterns: [{ glob: '.review/**', points: 0, tier: 'low' }],
       volume_multiplier: [{ upTo: null, points: 0 }],
       scope_multiplier: { single_feature: 1.0 },
       special: [],
@@ -172,6 +175,66 @@ test('plan subcommand rejects an unknown --mode', () => {
   ]);
   assert.strictEqual(code, 1);
   assert.match(text, /unknown mode "bananas"/);
+});
+
+test('slice subcommand writes per-agent diff files and prints a JSON manifest', () => {
+  const { readFileSync, existsSync } = require('node:fs');
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-slice-'));
+  const diff = [
+    'diff --git a/src/api/users.js b/src/api/users.js',
+    'index 1111111..2222222 100644',
+    '--- a/src/api/users.js',
+    '+++ b/src/api/users.js',
+    '@@ -1,2 +1,3 @@',
+    ' function getUser() {',
+    '+  const k = process.env.SECRET;',
+    ' }',
+    '',
+  ].join('\n');
+  const plan = {
+    profile: 'standard',
+    agents: [
+      { id: 'architecture', escalates: true, always: true, triggers: undefined },
+      { id: 'security', escalates: false, always: false, triggers: { content: ['process.env.'] } },
+      { id: 'financial', escalates: false, always: false, triggers: { paths: ['src/finance/**'] } },
+    ],
+  };
+  const planPath = join(root, 'plan.json');
+  writeFileSync(planPath, JSON.stringify(plan));
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, diff);
+  const outDir = join(root, 'slices');
+  const { code, s } = run(['slice', '--plan', planPath, '--diff', diffPath, '--out-dir', outDir]);
+  assert.equal(code, 0);
+  const manifest = JSON.parse(s);
+  assert.deepEqual(manifest, {
+    architecture: { mode: 'full', files: 1, hunks: 1 },
+    security: { mode: 'sliced', files: 1, hunks: 1 },
+    financial: { mode: 'empty', files: 0, hunks: 0 },
+  });
+  assert.equal(readFileSync(join(outDir, 'architecture.diff'), 'utf8'), diff);
+  assert.ok(readFileSync(join(outDir, 'security.diff'), 'utf8').includes('process.env.SECRET'));
+  assert.ok(existsSync(join(outDir, 'financial.diff')));
+  assert.equal(readFileSync(join(outDir, 'financial.diff'), 'utf8'), '');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('slice subcommand requires --plan, --diff, and --out-dir', () => {
+  const { code, s } = run(['slice']);
+  assert.equal(code, 1);
+  assert.match(s, /usage: agent-review slice/);
+});
+
+test('slice subcommand refuses an agent id that would escape --out-dir', () => {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-slice-unsafe-'));
+  const planPath = join(root, 'plan.json');
+  writeFileSync(planPath, JSON.stringify({ agents: [{ id: '../evil', always: true }] }));
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, '');
+  const { code, s } = run(['slice', '--plan', planPath, '--diff', diffPath, '--out-dir', join(root, 'out')]);
+  assert.equal(code, 1);
+  assert.match(s, /unsafe agent id/);
+  rmSync(root, { recursive: true, force: true });
 });
 
 test('address subcommands prepare, validate, emit feedback, and finalize through the CLI', () => {
@@ -297,6 +360,65 @@ test('changedFiles throws (no silent fallback) when an explicit --base fails to 
       () => changedFiles('does-not-exist', C, {}),
       /could not determine a diff base/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function writeMinimalConfig(root) {
+  const dir = join(root, '.claude', 'review');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', '',
+  ].join('\n'));
+}
+
+// Regression coverage: `run`'s positional mode arg used to be validated against MODES
+// but never actually passed into buildPlan's input object, so plan.mode was always the
+// buildPlan default ('standard') regardless of what was requested on the command line.
+test('run <mode> passes the requested mode through to buildPlan, visible in both the preflight output and the tmp plan file', () => {
+  const root = tmpGitRepo();
+  try {
+    writeMinimalConfig(root);
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'quick']);
+    assert.equal(code, 0);
+    assert.match(s, /mode: quick/);
+    const plan = JSON.parse(readFileSync(planTmpPath(root), 'utf8'));
+    assert.equal(plan.mode.requested, 'quick');
+    assert.equal(plan.mode.resolved, 'quick');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('run auto is accepted (MODES gains auto) and the requested mode reaches buildPlan', () => {
+  const root = tmpGitRepo();
+  try {
+    writeMinimalConfig(root);
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'auto']);
+    assert.equal(code, 0);
+    assert.ok(!/unknown mode/.test(s));
+    const plan = JSON.parse(readFileSync(planTmpPath(root), 'utf8'));
+    assert.equal(plan.mode.requested, 'auto');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('run still rejects an unrecognized mode', () => {
+  const root = tmpGitRepo();
+  try {
+    writeMinimalConfig(root);
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'bananas']);
+    assert.equal(code, 1);
+    assert.match(s, /unknown mode "bananas"/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

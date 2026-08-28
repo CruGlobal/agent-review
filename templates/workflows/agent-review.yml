@@ -1,4 +1,4 @@
-# agent-review-template-version: 0.5.0
+# agent-review-template-version: 0.6.0
 name: agent-review
 on:
   pull_request:
