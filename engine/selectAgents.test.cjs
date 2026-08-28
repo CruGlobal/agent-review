@@ -196,6 +196,55 @@ test('falls back to the first escalating agent in config order when there is no 
   assert.equal(forced.id, 'data-integrity', 'first escalates:true agent in config order wins');
 });
 
+// I4a (final review, belt-and-suspenders): an operator explicitly de-escalating
+// the security lane must not silently defeat the coverage guarantee when a
+// genuinely escalating lane is available — prefer it over an id-only match.
+test('coverage guarantee prefers a genuinely escalating lane over a de-escalated security lane', () => {
+  const cfg = {
+    ...coverageConfig,
+    agents: [
+      {
+        id: 'security',
+        escalates: false,
+        triggers: { paths: ['pages/api/**'] },
+      },
+      {
+        id: 'data-integrity',
+        escalates: true,
+        triggers: { paths: ['migrations/**'] },
+      },
+      { id: 'style', always: true },
+    ],
+  };
+  const sel = selectAgents({ files: ['src/unmatched.js'], diffText: '' }, cfg);
+  const forced = sel.find((a) => a.matchedBy === 'unmatched-coverage');
+  assert.ok(forced, 'a lane was force-included');
+  assert.equal(forced.id, 'data-integrity', 'the genuinely escalating lane wins over de-escalated security');
+  assert.equal(forced.escalates, true);
+});
+
+// When EVERY lane is explicitly de-escalated (including security), the engine
+// still forces security-by-id as today — the operator override is honored,
+// but templates/config.yml's WARNING says plainly this disables escalation.
+test('coverage guarantee still forces security-by-id when every lane is de-escalated', () => {
+  const cfg = {
+    ...coverageConfig,
+    agents: [
+      {
+        id: 'security',
+        escalates: false,
+        triggers: { paths: ['pages/api/**'] },
+      },
+      { id: 'style', always: true, escalates: false },
+    ],
+  };
+  const sel = selectAgents({ files: ['src/unmatched.js'], diffText: '' }, cfg);
+  const forced = sel.find((a) => a.matchedBy === 'unmatched-coverage');
+  assert.ok(forced, 'security is still force-included by id');
+  assert.equal(forced.id, 'security');
+  assert.equal(forced.escalates, false, 'the operator override is honored — the lane does not actually escalate');
+});
+
 test('codeDiff drops the reviewer config under a custom review dir', () => {
   const cfg = { excluded_paths: [], agents: [] };
   const diff = 'diff --git a/.review/config.yml b/.review/config.yml\n+content: [foo]\n';

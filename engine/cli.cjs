@@ -88,8 +88,9 @@ function ctx(argv) {
     INDEX: join(RD, 'index'),
   };
 }
+// M1 (final review): `plan` and `run` validate the same mode vocabulary —
+// one constant, not two copies that can drift apart.
 const MODES = ['auto', 'quick', 'standard', 'deep'];
-const PLAN_MODES = ['auto', 'quick', 'standard', 'deep'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
 function learningPaths(cfg, C) {
@@ -283,8 +284,8 @@ function main(rawArgv) {
       const statPath = flag(rest, '--stat');
       const scope = flag(rest, '--scope') || 'single_feature';
       const mode = flag(rest, '--mode') || 'standard';
-      if (!PLAN_MODES.includes(mode)) {
-        out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join('/')})`);
+      if (!MODES.includes(mode)) {
+        out(`error: unknown mode "${mode}" (use ${MODES.join('/')})`);
         return 1;
       }
       const files = readFileSync(filesPath, 'utf8')

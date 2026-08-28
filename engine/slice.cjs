@@ -11,6 +11,14 @@
 // Reuses selectAgents' own matcher semantics rather than re-deriving them:
 // `pathMatches` for triggers.paths globs, `contentMatches` for triggers.content
 // token semantics (identifier-like vs punctuation-bearing markers).
+//
+// M6 (final review): slicing does NOT re-apply selectAgents' excluded_paths/
+// `.md`-and-reviewer-config content-scan filtering — a path-matched or
+// unparseable block may include files selection's `codeDiff` would have
+// dropped from content scanning. Slices are therefore a strict SUPERSET of
+// what selection considered, never a narrower view than the lane was
+// selected against — the safe direction for a specialist that was already
+// selected to review this diff.
 const { pathMatches, contentMatches } = require('./selectAgents.cjs');
 
 // Splits diffText into `diff --git` file sections, each further split into
@@ -26,14 +34,31 @@ function parseDiff(diffText) {
     .split(/(?=^diff --git )/m)
     .filter(Boolean)
     .map((block) => {
-      const fileMatch = block.match(/^diff --git a\/\S+ b\/(\S+)/m);
+      // M3: capture BOTH the old (a/) and new (b/) path so rename blocks can
+      // be matched by either — an operator's path trigger naming the old
+      // path must still find a renamed file.
+      const fileMatch = block.match(/^diff --git a\/(\S+) b\/(\S+)/m);
       const hunkStart = block.search(/^@@ /m);
       const header = hunkStart === -1 ? block : block.slice(0, hunkStart);
       const hunkText = hunkStart === -1 ? '' : block.slice(hunkStart);
       const hunks = hunkText
         ? hunkText.split(/(?=^@@ )/m).filter(Boolean)
         : [];
-      return { file: fileMatch ? fileMatch[1] : null, header, hunks };
+      // M2: a `diff --git` line whose paths could not be parsed (git-quoted
+      // paths — spaces/special characters) means we cannot tell which
+      // lane's globs it belongs to. Mark it unparseable so sliceForAgent
+      // fails OPEN: it's included in every sliced lane's output rather than
+      // risk silently starving one (selection/slice divergence must never
+      // go in the starve direction). A true preamble (no `diff --git` line
+      // at all) is NOT this case — it keeps its existing behavior.
+      const isGitDiffBlock = /^diff --git /.test(block);
+      return {
+        file: fileMatch ? fileMatch[2] : null,
+        oldFile: fileMatch ? fileMatch[1] : null,
+        header,
+        hunks,
+        unparseable: isGitDiffBlock && !fileMatch,
+      };
     });
 }
 
@@ -59,7 +84,14 @@ function isFullDiff(agent) {
   return (
     agent.escalates === true ||
     agent.id === 'architecture' ||
-    agent.always === true
+    agent.always === true ||
+    // I4b (final review, belt-and-suspenders): a lane the coverage guarantee
+    // force-included is ALWAYS full-diff, regardless of its own `escalates`
+    // value. Without this, an operator's `escalates: false` override on the
+    // forced lane (see selectAgents.cjs's forced-pick fallback) would let
+    // this rule slice it down — likely to an empty slice — which would
+    // silently cancel the coverage guarantee it exists to provide.
+    agent.matchedBy === 'unmatched-coverage'
   );
 }
 
@@ -79,7 +111,21 @@ function sliceForAgent({ agent, diffText }) {
   let files = 0;
   let hunks = 0;
   for (const block of blocks) {
-    const wholeFile = block.file != null && pathMatches(block.file, paths);
+    if (block.unparseable) {
+      // M2: can't tell whose glob this belongs to — fail OPEN into every
+      // sliced lane rather than risk a silent starve.
+      parts.push(block.header + block.hunks.join(''));
+      files += 1;
+      hunks += block.hunks.length;
+      continue;
+    }
+    // M3: a rename's path trigger may name either the old (a/) or new (b/)
+    // path — match against both, not only the new path `block.file`.
+    const wholeFile =
+      (block.file != null && pathMatches(block.file, paths)) ||
+      (block.oldFile != null &&
+        block.oldFile !== block.file &&
+        pathMatches(block.oldFile, paths));
     if (wholeFile) {
       // Controller ruling: a path-matched file with zero hunks (binary,
       // mode-only, pure rename) still belongs in the slice — the lane must

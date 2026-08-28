@@ -110,9 +110,16 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
   const hasEscalating = out.some((a) => a.escalates);
   if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
     const eligible = config.agents.filter((a) => a.enabled !== false);
+    // Belt-and-suspenders (final review I4a): prefer a lane that genuinely
+    // escalates — an operator explicitly de-escalating `security`
+    // (`escalates: false`) must not silently outrank a lane that actually
+    // escalates to opus. Only when NOTHING escalates at all do we fall back
+    // to forcing `security` by id as before (an explicit operator override,
+    // documented in templates/config.yml's WARNING).
     const forced =
-      eligible.find((a) => a.id === 'security') ||
-      eligible.find((a) => a.escalates === true);
+      eligible.find((a) => a.id === 'security' && a.escalates === true) ||
+      eligible.find((a) => a.escalates === true) ||
+      eligible.find((a) => a.id === 'security');
     if (forced && !out.some((o) => o.id === forced.id)) {
       out.push({
         id: forced.id,

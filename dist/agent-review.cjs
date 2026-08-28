@@ -16973,7 +16973,7 @@ var require_selectAgents = __commonJS({
       const hasEscalating = out.some((a) => a.escalates);
       if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
         const eligible = config.agents.filter((a) => a.enabled !== false);
-        const forced = eligible.find((a) => a.id === "security") || eligible.find((a) => a.escalates === true);
+        const forced = eligible.find((a) => a.id === "security" && a.escalates === true) || eligible.find((a) => a.escalates === true) || eligible.find((a) => a.id === "security");
         if (forced && !out.some((o) => o.id === forced.id)) {
           out.push({
             id: forced.id,
@@ -19088,12 +19088,19 @@ var require_slice = __commonJS({
     function parseDiff(diffText) {
       if (!diffText) return [];
       return diffText.split(/(?=^diff --git )/m).filter(Boolean).map((block) => {
-        const fileMatch = block.match(/^diff --git a\/\S+ b\/(\S+)/m);
+        const fileMatch = block.match(/^diff --git a\/(\S+) b\/(\S+)/m);
         const hunkStart = block.search(/^@@ /m);
         const header = hunkStart === -1 ? block : block.slice(0, hunkStart);
         const hunkText = hunkStart === -1 ? "" : block.slice(hunkStart);
         const hunks = hunkText ? hunkText.split(/(?=^@@ )/m).filter(Boolean) : [];
-        return { file: fileMatch ? fileMatch[1] : null, header, hunks };
+        const isGitDiffBlock = /^diff --git /.test(block);
+        return {
+          file: fileMatch ? fileMatch[2] : null,
+          oldFile: fileMatch ? fileMatch[1] : null,
+          header,
+          hunks,
+          unparseable: isGitDiffBlock && !fileMatch
+        };
       });
     }
     function hunkContentText(hunk) {
@@ -19105,7 +19112,13 @@ var require_slice = __commonJS({
       return { files, hunks };
     }
     function isFullDiff(agent) {
-      return agent.escalates === true || agent.id === "architecture" || agent.always === true;
+      return agent.escalates === true || agent.id === "architecture" || agent.always === true || // I4b (final review, belt-and-suspenders): a lane the coverage guarantee
+      // force-included is ALWAYS full-diff, regardless of its own `escalates`
+      // value. Without this, an operator's `escalates: false` override on the
+      // forced lane (see selectAgents.cjs's forced-pick fallback) would let
+      // this rule slice it down — likely to an empty slice — which would
+      // silently cancel the coverage guarantee it exists to provide.
+      agent.matchedBy === "unmatched-coverage";
     }
     function sliceForAgent({ agent, diffText }) {
       const text = diffText || "";
@@ -19121,7 +19134,13 @@ var require_slice = __commonJS({
       let files = 0;
       let hunks = 0;
       for (const block of blocks) {
-        const wholeFile = block.file != null && pathMatches(block.file, paths);
+        if (block.unparseable) {
+          parts.push(block.header + block.hunks.join(""));
+          files += 1;
+          hunks += block.hunks.length;
+          continue;
+        }
+        const wholeFile = block.file != null && pathMatches(block.file, paths) || block.oldFile != null && block.oldFile !== block.file && pathMatches(block.oldFile, paths);
         if (wholeFile) {
           parts.push(block.header + block.hunks.join(""));
           files += 1;
@@ -19386,7 +19405,6 @@ var require_cli = __commonJS({
       };
     }
     var MODES = ["auto", "quick", "standard", "deep"];
-    var PLAN_MODES = ["auto", "quick", "standard", "deep"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
@@ -19553,8 +19571,8 @@ var require_cli = __commonJS({
           const statPath = flag(rest, "--stat");
           const scope = flag(rest, "--scope") || "single_feature";
           const mode = flag(rest, "--mode") || "standard";
-          if (!PLAN_MODES.includes(mode)) {
-            out(`error: unknown mode "${mode}" (use ${PLAN_MODES.join("/")})`);
+          if (!MODES.includes(mode)) {
+            out(`error: unknown mode "${mode}" (use ${MODES.join("/")})`);
             return 1;
           }
           const files = readFileSync(filesPath, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);

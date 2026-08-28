@@ -210,3 +210,69 @@ test('a path-matched pure rename with zero hunks still belongs in the slice', ()
   assert.ok(result.diff.includes('rename from src/old-name.js'));
   assert.ok(result.diff.includes('rename to src/new-name.js'));
 });
+
+// --- Final review fix wave (I4b, M2, M3) ---
+
+// I4b: a coverage-forced lane (matchedBy 'unmatched-coverage') must always be
+// full-diff, even when the operator explicitly de-escalated it (escalates:
+// false) — otherwise the coverage guarantee would force-select a lane and
+// then slice.cjs would starve it down to (likely) an empty slice, silently
+// cancelling the guarantee it exists to provide.
+test('a coverage-forced lane is always full-diff, even when escalates is false', () => {
+  const forcedAgent = {
+    id: 'security',
+    escalates: false,
+    matchedBy: 'unmatched-coverage',
+    triggers: { paths: ['pages/api/**'] },
+  };
+  const result = sliceForAgent({ agent: forcedAgent, diffText: DIFF });
+  assert.equal(result.mode, 'full');
+  assert.equal(result.diff, DIFF);
+  assert.equal(result.files, 2);
+  assert.equal(result.hunks, 3);
+});
+
+// M3: rename matching — a path trigger must match EITHER the old (a/) or the
+// new (b/) path of a rename, not only the new path.
+test('a path trigger matches the OLD (a/) path of a rename, not only the new path', () => {
+  const diff = [
+    'diff --git a/src/old-name.js b/src/new-name.js',
+    'similarity index 100%',
+    'rename from src/old-name.js',
+    'rename to src/new-name.js',
+    '',
+  ].join('\n');
+  const oldPathAgent = { id: 'renamed', triggers: { paths: ['src/old-name.js'] } };
+  const result = sliceForAgent({ agent: oldPathAgent, diffText: diff });
+  assert.equal(result.mode, 'sliced');
+  assert.equal(result.files, 1);
+  assert.ok(result.diff.includes('rename from src/old-name.js'));
+  assert.ok(result.diff.includes('rename to src/new-name.js'));
+});
+
+// M2: when the `diff --git` line's file path cannot be parsed (git-quoted
+// paths, e.g. filenames with spaces), fail OPEN — treat the block as
+// matching every sliced agent (a superset) rather than risk silently
+// starving a lane that should have seen it.
+test('an unparseable (quoted) diff --git path is included in every sliced agent\'s output (fail-open)', () => {
+  const diff = [
+    'diff --git "a/quoted file.js" "b/quoted file.js"',
+    'index 1111111..2222222 100644',
+    '--- "a/quoted file.js"',
+    '+++ "b/quoted file.js"',
+    '@@ -1,1 +1,1 @@',
+    '-old',
+    '+new',
+    '',
+  ].join('\n');
+  const unrelatedAgent = {
+    id: 'unrelated',
+    triggers: { paths: ['src/finance/**'], content: ['stripe.charge'] },
+  };
+  const result = sliceForAgent({ agent: unrelatedAgent, diffText: diff });
+  assert.equal(result.mode, 'sliced', 'must not be empty — the unparseable block fails open into every lane');
+  assert.equal(result.files, 1);
+  assert.equal(result.hunks, 1);
+  assert.ok(result.diff.includes('quoted file.js'));
+  assert.ok(result.diff.includes('+new'));
+});
