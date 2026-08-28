@@ -124,7 +124,7 @@ rm -f /tmp/agent_findings/*.json 2>/dev/null || true
 # A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
 # run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a
 # launched-subset plan this run never wrote.
-rm -f /tmp/slice_manifest.json /tmp/review_plan_launched.json /tmp/launched_lanes.json
+rm -f /tmp/slice_manifest.json /tmp/review_plan_launched.json /tmp/launched_lanes.json /tmp/skipped_lanes.txt
 rm -rf /tmp/agent_slices 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
@@ -328,7 +328,7 @@ cat /tmp/review_plan.json
 # `always`/`escalates`/`architecture` lanes get the whole diff (mode "full"); every other lane
 # gets only the hunks its triggers matched (mode "sliced", possibly with hunks: 0 for a
 # header-only binary/mode/rename section — that lane still launches). A lane with no matching
-# hunks at all gets mode "empty" — Stage 1 does not launch it (see Stage 0B/Stage 1 above).
+# hunks at all gets mode "empty" — Stage 1 does not launch it (see Stage 0B/Stage 1 below).
 agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
   --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
 cat /tmp/slice_manifest.json
@@ -663,7 +663,10 @@ plan's `agents[]` has:
   without `path_rules` merging; only plan entries carry those.
 - **quick** → at most three agents drawn from the plan's `agents[]`: `testing`, `standards`, and the
   first entry not already picked (the first triggered agent). If any of those ids do not exist in
-  this repo's config, just take the first three plan entries.
+  this repo's config, just take the first three plan entries. **Exception:** any plan entry whose
+  `matchedBy` is `unmatched-coverage` is ALWAYS retained in quick's launch list, occupying one of
+  the three slots (bumping the "first triggered agent" pick if needed) — quick mode must never
+  narrow away the one lane the coverage guarantee force-included for an otherwise-unmatched file.
 
 `/tmp/config_agents.json` (used by deep mode; plan `agents[]` drives quick/standard) was already
 fetched in Stage 0A's setup block, alongside config validation.
@@ -767,7 +770,7 @@ filled copy:
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{TITLE}}`             | The agent's `title`. Fallback when absent: the `id` with `-`/`_` turned into spaces and each word capitalized, plus `" Review Agent"` (e.g. `data-integrity` → `Data Integrity Review Agent`).                                                          |
 | `{{EXPERTISE}}`         | The agent's `expertise` string. Fallback when absent: derive the lane instead of leaving it blank — fill `<agent title>, judged against: <comma-joined basenames of its rules[] docs>` (e.g. "Architecture Review Agent, judged against: architecture.md"). Never leave the line's value blank; a blank lane means everything looks out-of-scope and the agent silently returns zero findings.       |
-| `{{RISK_CONTEXT}}`      | A bullet block from the current review plan: `- Review-delta risk: <score> (<level>)`, `- Full-PR gate risk: <gate score> (<gate level>)`, `- Special patterns: <gate risk.special joined, or "none">`, `- Unmatched risk paths: <gate risk.factors.unmatchedFiles joined, or "none">`, `- Changed Files in this pass: <N>`, `- Lines Changed in this pass: +<X> -<Y>`, `- Selected because: <matchedBy>`. |
+| `{{RISK_CONTEXT}}`      | A bullet block from the current review plan: `- Review-delta risk: <score> (<level>)`, `- Full-PR gate risk: <gate score> (<gate level>)`, `- Special patterns: <gate risk.special joined, or "none">`, `- Unmatched risk paths: <gate risk.factors.unmatchedFiles joined, or "none">`, `- Changed Files in this pass: <N>`, `- Lines Changed in this pass: +<X> -<Y>`, `- Selected because: <matchedBy>`, `- Model tier: <tier>` (this lane's resolved `opus`/`sonnet`/`haiku` tier — the archetype's full-file read budget reads this to know when it's doubled). |
 | `{{PROFILE_INSTRUCTION}}` | From the plan's `profile`: `chill` → "Report only high-confidence, severity ≥ 7 findings; suppress nits." · `standard` → "Report findings at all severities per the output format above." · `assertive` → "Report all findings including low-severity suggestions." |
 | `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against `$REVIEW_DIR` (`rules/security.md` → `$REVIEW_DIR/rules/security.md`), each preceded by a `----- <path> -----` line. In CI, `$AGENT_REVIEW_DIR` points to the immutable base-branch copy; never read rule docs from the PR checkout. If a listed doc is missing, note it in your output and continue with the rest. |
 | `{{LEARNINGS}}`         | Entries from `/tmp/review_rules.json` whose `agent` matches this agent's `id`, rendered as `APPROVED LEARNINGS (ratified from prior reviews — apply to files under <paths>):` followed by one bullet per `ruleText`. Empty string when there are none. |
@@ -775,7 +778,7 @@ filled copy:
 | `{{EVIDENCE}}`          | A compact rendering of `/tmp/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
 | `{{CONTEXT}}`           | A compact rendering of `/tmp/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
 | `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `/tmp/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
-| `{{DIFF_PATH}}`         | Read `/tmp/slice_manifest.json` (written right after the plan — see below) for this agent's `<id>` entry. `mode: "full"` → `/tmp/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `/tmp/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. |
+| `{{DIFF_PATH}}`         | Read `/tmp/slice_manifest.json` (written right after the plan — see above) for this agent's `<id>` entry. `mode: "full"` → `/tmp/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `/tmp/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. **No manifest entry at all** (deep mode's config-only lanes — agents with no plan entry, so `agent-review slice` never sliced them) → treat it as a full-diff lane: fill `/tmp/pr_diff.txt`. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
 begin with its own step number and read as a standalone step. Build it from
@@ -796,15 +799,18 @@ placeholder entirely (empty string) if `blastRadius` is 0.
 
 **Skipping empty-slice lanes.** A lane whose `/tmp/slice_manifest.json` entry has
 `mode is "empty"` has no changes matching its triggers anywhere in this diff — do NOT launch it;
-there is nothing for it to review. Note it in `Review detail & stats` as
-`lane <id>: no matching changes` for every skipped lane (omit the note entirely when nothing was
-skipped). A `mode: "sliced"` lane with `hunks: 0` (a header-only binary/mode/rename section) is
-NOT empty — it still launches, told only that the file changed.
+there is nothing for it to review. Track its id — the launched-subset derivation below writes the
+full skipped-lane list to `/tmp/skipped_lanes.txt` for Stage 6 to note in `Review detail & stats`
+as `lane <id>: no matching changes` for every skipped lane. A `mode: "sliced"` lane with `hunks: 0`
+(a header-only binary/mode/rename section) is NOT empty — it still launches, told only that the
+file changed.
 
 **Sliced lanes see only their slice.** A lane launched with `mode: "sliced"` cannot see the rest
 of the diff, so append one line to its filled prompt, right after the INSTRUCTIONS block: "Other
-changed files in this PR (not in your slice): <comma-joined contents of /tmp/changed_files.txt>".
-Omit this line for `mode: "full"` lanes — they already have the whole diff.
+changed files in this PR (not in your slice): <comma-joined contents of /tmp/changed_files.txt>.
+Diff stat: <contents of /tmp/diff_stat.txt>" (spec R1 — the changed-file list plus the diff stat,
+together, so a sliced lane can pull other hunks deliberately). Omit this line for `mode: "full"`
+lanes — they already have the whole diff.
 
 The launched-lane set (whatever remains after the empty-lane skip above — the plan's agents
 minus quick's cap or plus deep's config-only additions, per Stage 0B, minus any empty-slice skip)
@@ -837,12 +843,16 @@ Stage 2's cross-check and Stage 5's consensus will consume.
 
 Replace the `launchedIds` array below with the exact ids launched above (e.g.
 `["testing","standards","security"]` for a quick-mode run — quick: <=3; standard: the plan agents
-minus any empty-slice skip; deep: every enabled config agent minus any empty-slice skip), then run:
+minus any empty-slice skip; deep: every enabled config agent minus any empty-slice skip), and
+replace `skippedIds` with the ids you tracked above as empty-slice skips (`[]` if none — this is
+the same list the "Skipping empty-slice lanes" note above uses for `Review detail & stats`), then
+run:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 node -e '
 const launchedIds = ["<fill with the exact ids launched above>"];
+const skippedIds = ["<fill with the exact empty-slice-skipped ids, or leave empty>"];
 const plan = require("/tmp/review_plan.json");
 const gate = require("/tmp/review_gate_plan.json");
 let cfgAgents = [];
@@ -861,6 +871,9 @@ const agents = launchedIds.map((id) => {
 });
 const fs = require("fs");
 fs.writeFileSync("/tmp/launched_lanes.json", JSON.stringify(launchedIds));
+// One id per line; an empty file (not a missing one) when nothing was skipped — Stage 6 reads
+// this to fill Review detail & stats' "lanes with no matching changes" note.
+fs.writeFileSync("/tmp/skipped_lanes.txt", skippedIds.length ? skippedIds.join("\n") + "\n" : "");
 fs.writeFileSync("/tmp/review_plan_launched.json", JSON.stringify({ ...plan, agents }, null, 2));
 '
 cat /tmp/review_plan_launched.json
@@ -1568,6 +1581,10 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   `$ROUTING` is `degraded` (the Stage 0B smoke test failed and every agent launched on
   `general-purpose` instead of its tier subagent type). Omit it entirely otherwise — never
   freestyle this note; the skeleton in `templates/report.md` owns its exact wording.
+- Fill the skeleton's `[IF any lanes were skipped:]` line inside `Review detail & stats` from
+  `/tmp/skipped_lanes.txt` (one id per line, written at Stage 1's launched-subset derivation) as
+  `- lanes with no matching changes: <comma-joined ids>`. Omit the line entirely when the file is
+  empty or absent.
 
 Fill the skeleton top-down and state each finding exactly once: open blockers in
 "BLOCKERS — fix or dismiss to pass" (with their evidence and fix lines), every

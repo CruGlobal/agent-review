@@ -605,6 +605,61 @@ test('the review skill slices per agent and skips empty lanes', () => {
   assert.ok(skill.includes('mkdir -p /tmp/agent_slices') || /rm -f \/tmp\/agent_slices/.test(skill), 'slice dir needs fresh-state handling in Initialize');
 });
 
+// --- Final review fix wave (I1, I2, I3, I5) ---
+
+test('I1: a lane with no slice_manifest entry at all (deep config-only) is a full-diff lane', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const diffPathRow = skill.split('\n').find((l) => l.includes('{{DIFF_PATH}}'));
+  assert.ok(diffPathRow, '{{DIFF_PATH}} placeholder row not found');
+  assert.ok(
+    /no manifest entry/i.test(diffPathRow) && diffPathRow.includes('/tmp/pr_diff.txt'),
+    'deep mode config-only lanes (no plan entry, never sliced) must fall back to the full diff',
+  );
+});
+
+test('I2: {{RISK_CONTEXT}} surfaces the lane\'s model tier for the archetype\'s read budget', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const riskContextRow = skill.split('\n').find((l) => l.includes('{{RISK_CONTEXT}}'));
+  assert.ok(riskContextRow, '{{RISK_CONTEXT}} placeholder row not found');
+  assert.ok(
+    riskContextRow.includes('- Model tier: <tier>'),
+    'the risk-context bullet list must include the lane\'s tier — the archetype\'s ~10-file budget on sonnet+HIGH/CRITICAL is otherwise unreachable',
+  );
+});
+
+test('I3: skipped-lane notes are plumbed through a file from Stage 1 to Stage 6', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('/tmp/skipped_lanes.txt'), 'a skipped-lanes file must exist');
+  assert.ok(
+    /rm -f[^\n]*\/tmp\/skipped_lanes\.txt/.test(skill),
+    'fresh-state cleanup must remove /tmp/skipped_lanes.txt like the other per-run slice state',
+  );
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(
+    stage1.includes('skippedIds') && stage1.includes('/tmp/skipped_lanes.txt'),
+    'the same Stage 1 block that writes launched_lanes.json must also write skipped_lanes.txt',
+  );
+  assert.ok(
+    /Stage 6[^]*?\[IF any lanes were skipped:\]/i.test(skill) ||
+      skill.includes('[IF any lanes were skipped:]'),
+    'Stage 6 conditional-fill list must reference the skeleton\'s skipped-lanes line',
+  );
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(
+    report.includes('[IF any lanes were skipped:] - lanes with no matching changes: [ids]'),
+    'the report skeleton must carry the exact skipped-lanes conditional line',
+  );
+});
+
+test('I5: quick mode always retains a coverage-forced lane, even past the 3-agent cap', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '## Stage 1 — Launch Specialized Review Agents');
+  assert.ok(
+    /unmatched-coverage/.test(stage0b) && /always/i.test(stage0b),
+    'quick mode\'s bullet must state that an unmatched-coverage lane is always retained',
+  );
+});
+
 test('the launched-subset plan derives at Stage 1 launch time, from lanes actually launched (controller ruling)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
