@@ -3,9 +3,9 @@
 Multi-agent PR review for [Claude Code](https://docs.claude.com/en/docs/claude-code): risk-scored
 agent selection, cross-examination debate, consensus synthesis, per-repo bootstrapped rules, and
 a human-ratified learning loop. Each review dispatches a small set of specialist agents (security,
-architecture, data-integrity, testing, standards, plus any repo-specific agents) chosen by a risk
-score computed from the diff itself, so trivial changes get a fast pass and risky ones get deeper
-scrutiny. Everything repo-specific — risk globs, agent triggers, prose rule docs — lives in the
+architecture, data-integrity, testing, standards, simplification, plus any repo-specific agents)
+chosen by a risk score computed from the diff itself, so trivial changes get a fast pass and
+risky ones get deeper scrutiny. Everything repo-specific — risk globs, agent triggers, prose rule docs — lives in the
 consuming repo's own `.claude/review/` directory, so the same plugin adapts to any codebase without
 hardcoding anything about it.
 

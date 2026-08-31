@@ -29,7 +29,7 @@ plugin. Run `agent-review help` for the subcommand list.
 THIS skill file — `skills/init/SKILL.md` — so the plugin root is two levels up:
 
 - config skeleton: `../../templates/config.yml`
-- core rule-doc starters: `../../templates/rules/{architecture,data-integrity,security,standards,testing}.md`
+- core rule-doc starters: `../../templates/rules/{architecture,data-integrity,security,simplification,standards,testing}.md`
 - settings keys to merge: `../../templates/settings-snippet.json`
 - consumer CI workflow: `../../templates/workflows/agent-review.yml`
 - fix/dismiss interaction workflow: `../../templates/workflows/agent-review-interact.yml`
@@ -336,8 +336,9 @@ because it maps the prefix to a real directory.
 > Enable it for mixed repos with a substantial JS/TS surface, scoping `roots` to that surface. Call
 > the decision out in the 3B proposal either way.
 
-**Agent roster** — always the five core agents from the skeleton (`security`, `architecture`,
-`data-integrity`, `testing`, `standards`), plus domain specialists where the scan matches:
+**Agent roster** — always the six core agents from the skeleton (`security`, `architecture`,
+`data-integrity`, `testing`, `standards`, `simplification`), plus domain specialists where the
+scan matches:
 
 | Detected                                          | Specialist agent | Trigger seeds                                                        |
 | -------------------------------------------------- | ---------------- | -------------------------------------------------------------------- |
@@ -386,7 +387,7 @@ with this constraint, verbatim, before anything else:
 
 Then its job:
 
-- Read `$TPL/rules/<agent>.md` for each of the five core agents and use it as the base of your
+- Read `$TPL/rules/<agent>.md` for each of the six core agents and use it as the base of your
   draft. **Keep the generic body verbatim** — it is the shared baseline — and add a repo-specific
   section after the
   `<!-- init: extend this file with repo-specific focus areas and evidence links -->` marker line
@@ -522,7 +523,7 @@ Rules for the subagents: `evidence` holds PR numbers it actually read; prefix `t
 for lens-3 candidates and keep the failure mode in the `suggestedRule`; `targetAgent` must be an
 id from the roster you gave it; no candidate without evidence.
 
-The roster you give each miner is the **full Phase 1 roster**: the five core agents, every table
+The roster you give each miner is the **full Phase 1 roster**: the six core agents, every table
 specialist you selected, **and every novel agent you proposed**, each with its `title` and
 `expertise` so the miner can route accurately. Omitting a novel id forces its findings into a core
 bucket and quietly buries the evidence that justified proposing it.
@@ -563,7 +564,7 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
 - `risk.patterns` — the derived list. Replace the commented example lines with real globs; delete
   any example that has no counterpart in this repo.
 - `risk.manifests`, `risk.lockfiles`, `risk.special[*].packages/paths/files/keywords` — as derived.
-- `agents` — the five core agents with `title`/`expertise` kept from the skeleton, `triggers`
+- `agents` — the six core agents with `title`/`expertise` kept from the skeleton, `triggers`
   filled for `security` and `data-integrity`, plus each selected specialist with its own
   `id`/`title`/`expertise`/`triggers`/`rules`. Add `escalates: true` when a proposed lane owns
   migration or security-config risk (it does not need to already be one of the three named
