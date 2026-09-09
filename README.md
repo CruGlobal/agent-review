@@ -3,9 +3,9 @@
 Multi-agent PR review for [Claude Code](https://docs.claude.com/en/docs/claude-code): risk-scored
 agent selection, cross-examination debate, consensus synthesis, per-repo bootstrapped rules, and
 a human-ratified learning loop. Each review dispatches a small set of specialist agents (security,
-architecture, data-integrity, testing, standards, plus any repo-specific agents) chosen by a risk
-score computed from the diff itself, so trivial changes get a fast pass and risky ones get deeper
-scrutiny. Everything repo-specific — risk globs, agent triggers, prose rule docs — lives in the
+architecture, data-integrity, testing, standards, simplification, plus any repo-specific agents)
+chosen by a risk score computed from the diff itself, so trivial changes get a fast pass and
+risky ones get deeper scrutiny. Everything repo-specific — risk globs, agent triggers, prose rule docs — lives in the
 consuming repo's own `.claude/review/` directory, so the same plugin adapts to any codebase without
 hardcoding anything about it.
 
@@ -191,7 +191,8 @@ bumped and the manifest restamped; rewriting a released manifest entry in place 
 test, but that edit is loud in code review, unlike a forgotten bump). To cut a release:
 
 1. Bump the version in `.claude-plugin/plugin.json`, `package.json`, and the three template
-   markers; run `npm run stamp-templates`, then `npm test`.
+   markers; run `npm install --package-lock-only` (syncs the version mirrored in
+   `package-lock.json`), then `npm run stamp-templates`, then `npm test`.
 2. Merge to `main`, then tag it: `git tag v<version> && git push origin v<version>`.
 
 Pre-1.0 versions are beta: minor bumps may change behavior. 1.0.0 marks the first

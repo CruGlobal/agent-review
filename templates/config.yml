@@ -160,6 +160,18 @@ agents:
     always: true
     rules: ['rules/standards.md']
 
+  # Advisory lane: rules/simplification.md caps pure cleanups below the blocker
+  # threshold and requires cited proof for every reuse claim. Keep this entry
+  # LAST — quick mode's third slot takes the first plan entry after
+  # testing/standards, and it must never land on this lane. Costs one extra
+  # smart-tier lane per standard/deep review; set `enabled: false` to opt out.
+  - id: simplification
+    title: Simplification & Reuse Review Agent
+    expertise: Code reuse, duplication, unnecessary abstraction, dead weight, wasteful computation on real data paths.
+    enabled: true
+    always: true
+    rules: ['rules/simplification.md']
+
 # ── Per-path rules ────────────────────────────────────────────────────────────
 # Extra rule docs applied to EVERY agent reviewing a matching file.
 # Example: - { paths: ['<ui-components>/**'], rules: ['rules/ux.md'] }
