@@ -1244,3 +1244,21 @@ test('the address skill takes fix/dismiss arguments and prompts once for missing
   assert.ok(skill.includes('Fixes are applied, committed, and pushed before the dismissal prompt'), 'fixes never wait on the prompt');
   assert.ok(skill.includes('never dismisses on its own judgment'), 'the rule survives argument mode');
 });
+
+test('re-review and yolo-review are thin drivers over the review and address skills', () => {
+  const re = readFileSync(join(ROOT, 'skills/re-review/SKILL.md'), 'utf8');
+  assert.match(re, /^name: re-review$/m);
+  assert.ok(re.includes('`agent-review:review` with the arguments `auto incremental`'));
+  assert.ok(re.split('\n').length < 40, 're-review must stay thin');
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  assert.match(yolo, /^name: yolo-review$/m);
+  assert.ok(yolo.includes('`agent-review:address` with the argument `fix blockers`'));
+  assert.ok(yolo.includes('`agent-review:review` with the arguments `auto incremental`'));
+  assert.ok(yolo.includes('Never dismiss'), 'yolo must not dismiss');
+  assert.ok(yolo.includes('at most two more times'), 'the loop is bounded');
+  assert.ok(yolo.includes('gh pr view "$PR_NUMBER" --json reviews'), 'approval is observed, not performed');
+  assert.ok(yolo.includes('github-actions[bot]'));
+  assert.ok(yolo.includes('cannot approve'), 'must say the session cannot approve');
+  assert.ok(yolo.includes('git status --porcelain'), 'clean tree precondition');
+  assert.ok(!yolo.includes('apply_all.sh --yes'));
+});
