@@ -39,6 +39,7 @@ const {
   validateAddressResult,
   feedbackForAddress,
   finalizeAddress,
+  parseCommand,
 } = require('./addressState.cjs');
 const {
   readData,
@@ -203,7 +204,7 @@ const USAGE = `usage: agent-review <command>
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
-  address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
+  address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
@@ -392,6 +393,24 @@ function main(rawArgv) {
     }
     case 'address': {
       const sub = rest[0];
+      if (sub === 'parse') {
+        const commandPath = flag(rest, '--command');
+        if (!commandPath) {
+          out('usage: agent-review address parse --command <f> [--lenient] [--ledger <f>]');
+          return 1;
+        }
+        const ledgerPath = flag(rest, '--ledger');
+        try {
+          out(JSON.stringify(parseCommand(readFileSync(commandPath, 'utf8'), {
+            lenient: rest.includes('--lenient'),
+            ledger: ledgerPath ? JSON.parse(readFileSync(ledgerPath, 'utf8')) : null,
+          })));
+          return 0;
+        } catch (e) {
+          out(`error: ${e.message}`);
+          return 1;
+        }
+      }
       if (sub === 'prepare') {
         const commandPath = flag(rest, '--command');
         const reportPath = flag(rest, '--report');
@@ -477,7 +496,7 @@ function main(rawArgv) {
         }));
         return 0;
       }
-      out('usage: agent-review address prepare|validate|feedback|finalize');
+      out('usage: agent-review address parse|prepare|validate|feedback|finalize');
       return 1;
     }
     case 'ledger': {
