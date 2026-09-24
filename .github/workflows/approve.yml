@@ -1,0 +1,36 @@
+name: agent-review approve (reusable)
+# Judges a report that a trusted collaborator posted from a local review run
+# ("Post review to GitHub"). Unlike the CI path, the report here is authored by
+# a person, so enabling auto_approve on a caller trusts that person's posted
+# report; the head, rollout, and status rules still apply.
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        type: string
+        required: true
+      comment_id:
+        type: string
+        required: true
+      auto_approve:
+        description: Approve the PR when the posted report passes for the current head; shadow reports never approve
+        type: boolean
+        default: false
+
+jobs:
+  approve:
+    if: >-
+      inputs.auto_approve &&
+      github.event_name == 'issue_comment' &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: CruGlobal/agent-review/.github/actions/approve@main
+        with:
+          pr_number: ${{ inputs.pr_number }}
+          report_comment_id: ${{ inputs.comment_id }}
+          approval_body: >-
+            Auto-approved: the posted agent-review report covers the current head,
+            passes with no open blockers, and the change is reversible.

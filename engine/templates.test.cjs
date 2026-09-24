@@ -1157,3 +1157,23 @@ test('review.yml approves only when the caller opts in and the review job succee
   assert.equal(step.with.report_comment_id, undefined, 'CI judges only the bot report');
   assert.ok(doc.jobs['report-failure'], 'report-failure job must survive');
 });
+
+test('approve.yml judges the posted comment, defaults auto_approve off, and re-checks the author', () => {
+  const { parse } = require('yaml');
+  const doc = parse(readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8'));
+  const on = doc.on || doc[true];
+  const inputs = on.workflow_call.inputs;
+  assert.equal(inputs.pr_number.required, true);
+  assert.equal(inputs.comment_id.required, true);
+  assert.equal(inputs.auto_approve.type, 'boolean');
+  assert.equal(inputs.auto_approve.default, false);
+  const job = doc.jobs.approve;
+  assert.ok(job.if.includes('inputs.auto_approve'));
+  assert.ok(job.if.includes("github.event_name == 'issue_comment'"));
+  assert.ok(job.if.includes('author_association'), 'the reusable side re-checks the poster, not only the caller');
+  assert.deepEqual(job.permissions, { 'pull-requests': 'write' });
+  const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
+  assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
+  assert.equal(step.with.report_comment_id, '${{ inputs.comment_id }}');
+  assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
+});
