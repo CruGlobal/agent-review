@@ -186,7 +186,12 @@ test('CI workflows fail closed on missing/stale reports and use portable paginat
   assert.ok(review.includes('Claude exited without producing an agent-review report'));
   assert.ok(review.includes('EXPECTED_HEAD'));
   assert.ok(review.includes("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: '1'"));
-  assert.ok(interact.includes('waiting for incremental re-review'));
+  // The stale-report check moved into the shared approve action: it reads the
+  // PR's current head and the engine rule (approval.test.cjs) rejects a report
+  // for any other head.
+  const approveAction = readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8');
+  assert.ok(approveAction.includes('HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)'));
+  assert.ok(approveAction.includes('--head "$HEAD_SHA"'));
   assert.ok(!review.includes('--paginate --slurp'));
   assert.ok(!interact.includes('--paginate --slurp'));
 });
@@ -1122,4 +1127,16 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(!run.includes('--request-changes'), 'the action never requests changes');
   assert.ok(run.includes('::warning::'), 'an approval API failure is a warning, never a red check');
   assert.ok(!run.includes("grep -q -- '- \\[ \\]'"), 'the checkbox fallback is gone; the engine decides');
+});
+
+test('interact.yml approves through the shared action, gated by auto_approve', () => {
+  const { parse } = require('yaml');
+  const doc = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
+  const step = doc.jobs.publish.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
+  assert.ok(step, 'publish job must call the shared approve action');
+  assert.equal(step.if, 'inputs.auto_approve');
+  assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
+  assert.match(step.with.approval_body, /fixed or dismissed/);
+  const body = readFileSync(INTERACT_WORKFLOW, 'utf8');
+  assert.ok(!body.includes('gh pr review'), 'interact.yml must not carry its own approval shell');
 });
