@@ -125,7 +125,7 @@ it decides whether CI spends money reviewing a PR.
 The one in `agent-review-approve.yml` is the one that approves after a review you ran in the
 terminal.
 
-**Is `auto_approve` true by default?** Yes, in plugin version 0.8.0 and later. Repos that copied
+**Is `auto_approve` true by default?** Yes, in plugin version 1.0.0 and later. Repos that copied
 older files keep `false` until they run `/agent-review:update-files`, which never flips it for
 you.
 
@@ -293,8 +293,8 @@ test, but that edit is loud in code review, unlike a forgotten bump). To cut a r
    `package-lock.json`), then `npm run stamp-templates`, then `npm test`.
 2. Merge to `main`, then tag it: `git tag v<version> && git push origin v<version>`.
 
-Pre-1.0 versions are beta: minor bumps may change behavior. 1.0.0 marks the first
-production-ready release.
+1.0.0 is the first production-ready release: the one-command flow, approval on every path, and
+advisory defaults. Minor bumps from here keep the four commands and the caller-template inputs stable.
 
 ## Known limitations
 
