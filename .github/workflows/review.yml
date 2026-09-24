@@ -428,6 +428,7 @@ jobs:
     if: inputs.auto_approve
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       pull-requests: write
     steps:
       - uses: CruGlobal/agent-review/.github/actions/approve@main

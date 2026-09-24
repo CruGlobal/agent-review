@@ -18182,8 +18182,16 @@ var require_approval = __commonJS({
     "use strict";
     var MARKER = "<!-- agent-review -->";
     var ROLLOUTS_THAT_APPROVE = /* @__PURE__ */ new Set(["advisory", "enforce"]);
-    function markerLine(text, name) {
-      const m = text.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, "m"));
+    function headerBlock(text) {
+      const lines = [];
+      for (const line of text.split("\n")) {
+        if (!/^<!-- agent-review(-[a-z]+: .*)? -->$/.test(line)) break;
+        lines.push(line);
+      }
+      return lines.join("\n");
+    }
+    function markerLine(header, name) {
+      const m = header.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, "m"));
       return m ? m[1].trim() : null;
     }
     function no(reason) {
@@ -18194,16 +18202,17 @@ var require_approval = __commonJS({
       if (!expected) return no("no expected head SHA supplied");
       const text = String(body || "").replace(/\r/g, "");
       if (!text.startsWith(MARKER)) return no("not an agent-review report");
-      const rollout = markerLine(text, "rollout");
+      const header = headerBlock(text);
+      const rollout = markerLine(header, "rollout");
       if (!rollout) return no("report carries no rollout marker");
       if (rollout === "shadow") return no("shadow reports never approve");
       if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return no(`unknown rollout mode "${rollout}"`);
-      const reportHead = markerLine(text, "head");
+      const reportHead = markerLine(header, "head");
       if (!reportHead) return no("report carries no reviewed-head marker");
       if (reportHead.toLowerCase() !== expected) {
         return no(`report covers ${reportHead} but the PR head is ${expected}`);
       }
-      const statusRaw = markerLine(text, "status");
+      const statusRaw = markerLine(header, "status");
       if (!statusRaw) return no("report carries no status marker");
       let status;
       try {

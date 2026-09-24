@@ -1127,6 +1127,14 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(!run.includes('--request-changes'), 'the action never requests changes');
   assert.ok(run.includes('::warning::'), 'an approval API failure is a warning, never a red check');
   assert.ok(!run.includes("grep -q -- '- \\[ \\]'"), 'the checkbox fallback is gone; the engine decides');
+  // A report judged by comment id was posted by a person: only repository
+  // writers may trigger an approval, mirroring the interact permission check.
+  assert.ok(run.includes('gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission'), 'comment-id reports require the author to hold write permission');
+  assert.ok(run.includes('admin|maintain|write'), 'permission must be admin, maintain, or write');
+  // "Could not judge" is a warning, never a failed job: a transient API error
+  // must not fail the interact publish job after the ledger is already posted.
+  assert.ok(run.includes("trap '"), 'errors are trapped');
+  assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
 });
 
 test('interact.yml approves through the shared action, gated by auto_approve', () => {
@@ -1151,7 +1159,7 @@ test('review.yml approves only when the caller opts in and the review job succee
   assert.ok(job, 'review.yml must define an approve job');
   assert.equal(job.needs, 'review', 'a failed or skipped review must never reach the approver');
   assert.equal(job.if, 'inputs.auto_approve');
-  assert.deepEqual(job.permissions, { 'pull-requests': 'write' });
+  assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' }, 'the runtime checkout needs contents: read');
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
   assert.equal(step.with.report_comment_id, undefined, 'CI judges only the bot report');
@@ -1171,23 +1179,24 @@ test('approve.yml judges the posted comment, defaults auto_approve off, and re-c
   assert.ok(job.if.includes('inputs.auto_approve'));
   assert.ok(job.if.includes("github.event_name == 'issue_comment'"));
   assert.ok(job.if.includes('author_association'), 'the reusable side re-checks the poster, not only the caller');
-  assert.deepEqual(job.permissions, { 'pull-requests': 'write' });
+  assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' }, 'the runtime checkout needs contents: read');
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.equal(step.with.report_comment_id, '${{ inputs.comment_id }}');
   assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
 });
 
-test('the approve template is opt-in, created-only, collaborator-gated, and the review caller shows the knob', () => {
+test('the approve template is opt-in, fires on created or edited, is collaborator-gated, and the review caller shows the knob', () => {
   const template = readFileSync(join(ROOT, 'templates/workflows/agent-review-approve.yml'), 'utf8');
   assert.ok(template.includes('auto_approve: false'));
-  assert.ok(template.includes('types: [created]'), 'edited must never re-issue an approval');
-  assert.ok(!/types: \[[^\]]*edited/.test(template));
+  // A local re-post edits the poster's own earlier comment, so edited must fire
+  // too; the head rule keeps a stale report from approving a newer push.
+  assert.ok(template.includes('types: [created, edited]'), 'local re-posts are edits of the poster\'s own comment');
   assert.ok(template.includes("startsWith(github.event.comment.body, '<!-- agent-review -->')"));
   assert.ok(template.includes('"OWNER","MEMBER","COLLABORATOR"'));
   assert.ok(template.includes('uses: CruGlobal/agent-review/.github/workflows/approve.yml@main'));
   assert.ok(template.includes('comment_id: ${{ github.event.comment.id }}'));
-  assert.match(template, /permissions:\n      pull-requests: write/);
+  assert.match(template, /permissions:\n      contents: read\n      pull-requests: write/);
   const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
   assert.ok(review.includes('auto_approve: false'), 'the review caller must show the opt-in knob');
 });
@@ -1200,7 +1209,14 @@ test('the docs and skills know the approve template and the review-side auto_app
   assert.ok(init.includes('../../templates/workflows/agent-review-approve.yml'));
   const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(review.includes('agent-review-approve.yml'), 'the post-to-GitHub handler must say a posted report can trigger approval');
+  // The local post must create-or-update only a comment the poster authored:
+  // editing the bot's CI report would put human text under the bot's login,
+  // and the approve template would never see a created/edited event it trusts.
+  const menu = review.slice(review.indexOf('2. 📝 Post review to GitHub'));
+  assert.ok(menu.includes('ME=$(gh api user --jq .login)'), 'local post resolves the posting user');
+  assert.ok(menu.includes('select(.user.login == $me)'), 'local post updates only the poster\'s own report comment');
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
   assert.ok(readme.includes('agent-review-approve.yml'));
   assert.ok(readme.includes('stronger trust grant'), 'README must state the local-post trust boundary');
+  assert.ok(readme.includes('repository write access'), 'README must say only writers can trigger the local-post approval');
 });

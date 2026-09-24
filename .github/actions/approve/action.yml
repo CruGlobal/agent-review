@@ -2,15 +2,17 @@ name: agent-review approve
 description: >-
   Approve a pull request when its published agent-review report passes for the
   PR's current head. Fails closed on any missing or disagreeing marker, never
-  requests changes, and downgrades an approval API failure to a warning.
+  requests changes, never fails the job, and downgrades an approval API failure
+  to a warning.
 inputs:
   pr_number:
     description: Pull request number
     required: true
   report_comment_id:
     description: >-
-      Issue-comment id of the report to judge. Empty selects the first PR comment
-      authored by github-actions[bot] whose body starts with the agent-review marker.
+      Issue-comment id of the report to judge; its author must hold repository
+      write permission. Empty selects the first PR comment authored by
+      github-actions[bot] whose body starts with the agent-review marker.
     required: false
     default: ''
   approval_body:
@@ -38,13 +40,36 @@ runs:
         REPORT_COMMENT_ID: ${{ inputs.report_comment_id }}
         APPROVAL_BODY: ${{ inputs.approval_body }}
       run: |
-        set -euo pipefail
+        set -eEuo pipefail
+        # Anything unexpected (API error, deleted comment, runtime failure) is
+        # "could not judge": report it and stop successfully, so the calling job
+        # (which may already have published a ledger) never fails on approval.
+        trap 'echo "::warning::agent-review approve could not judge PR #$PR (${BASH_COMMAND%% *} failed) — not approving." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
         rm -rf "$RUNTIME_DIR"
         mv .agent-review-approve-runtime "$RUNTIME_DIR"
         REPORT="$RUNNER_TEMP/agent-review-approve-report.md"
         if [ -n "$REPORT_COMMENT_ID" ]; then
-          gh api "repos/$REPO/issues/comments/$REPORT_COMMENT_ID" --jq '.body // empty' > "$REPORT"
+          COMMENT="$RUNNER_TEMP/agent-review-approve-comment.json"
+          gh api "repos/$REPO/issues/comments/$REPORT_COMMENT_ID" > "$COMMENT"
+          # A report judged by comment id was posted by a person. Only repository
+          # writers may trigger an approval, the same bar the interact workflow
+          # applies to fix/dismiss commands; author_association alone admits any
+          # org member and read-only collaborators.
+          AUTHOR=$(jq -r '.user.login // empty' "$COMMENT")
+          ISSUE_NUMBER=$(jq -r '.issue_url // "" | split("/") | last' "$COMMENT")
+          if [ "$ISSUE_NUMBER" != "$PR" ]; then
+            echo "Not approving PR #$PR: comment $REPORT_COMMENT_ID does not belong to it." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          PERMISSION=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission)
+          case "$PERMISSION" in
+            admin|maintain|write) ;;
+            *)
+              echo "Not approving PR #$PR: $AUTHOR does not hold repository write permission." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0 ;;
+          esac
+          jq -r '.body // empty' "$COMMENT" > "$REPORT"
         else
           gh api "repos/$REPO/issues/$PR/comments" --paginate \
             | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .body // empty' \

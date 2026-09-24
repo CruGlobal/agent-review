@@ -6,11 +6,21 @@
 const MARKER = '<!-- agent-review -->';
 const ROLLOUTS_THAT_APPROVE = new Set(['advisory', 'enforce']);
 
-// First `<!-- agent-review-<name>: … -->` line in the body. The hidden markers
-// sit at the top of the comment, so the first match is the trusted one even if
-// the visible report later quotes a marker line.
-function markerLine(text, name) {
-  const m = text.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, 'm'));
+// The hidden markers form one contiguous block at the top of the comment. Only
+// that block is trusted: the visible report below it is model-written and can
+// quote PR content, so a marker line appearing there must never count.
+function headerBlock(text) {
+  const lines = [];
+  for (const line of text.split('\n')) {
+    if (!/^<!-- agent-review(-[a-z]+: .*)? -->$/.test(line)) break;
+    lines.push(line);
+  }
+  return lines.join('\n');
+}
+
+// First `<!-- agent-review-<name>: … -->` line in the header block.
+function markerLine(header, name) {
+  const m = header.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, 'm'));
   return m ? m[1].trim() : null;
 }
 
@@ -23,19 +33,20 @@ function evaluateApproval(body, { head } = {}) {
   if (!expected) return no('no expected head SHA supplied');
   const text = String(body || '').replace(/\r/g, '');
   if (!text.startsWith(MARKER)) return no('not an agent-review report');
+  const header = headerBlock(text);
 
-  const rollout = markerLine(text, 'rollout');
+  const rollout = markerLine(header, 'rollout');
   if (!rollout) return no('report carries no rollout marker');
   if (rollout === 'shadow') return no('shadow reports never approve');
   if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return no(`unknown rollout mode "${rollout}"`);
 
-  const reportHead = markerLine(text, 'head');
+  const reportHead = markerLine(header, 'head');
   if (!reportHead) return no('report carries no reviewed-head marker');
   if (reportHead.toLowerCase() !== expected) {
     return no(`report covers ${reportHead} but the PR head is ${expected}`);
   }
 
-  const statusRaw = markerLine(text, 'status');
+  const statusRaw = markerLine(header, 'status');
   if (!statusRaw) return no('report carries no status marker');
   let status;
   try {

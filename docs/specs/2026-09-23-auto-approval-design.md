@@ -156,8 +156,22 @@ jobs:
       auto_approve: false
 ```
 
-Only `created` is a trigger: an `edited` trigger would let editing an old report re-issue an
-approval that post-dates later pushes and defeats stale-approval dismissal.
+Both `created` and `edited` are triggers (revised after the whole-branch review): the review
+skill's "Post review to GitHub" creates-or-updates the poster's own earlier report comment, so a
+re-post after fixing findings is an `edited` event. The head rule already stops an edited report
+for an older push from approving the newer one, which was the original reason for omitting
+`edited`. The skill must never edit the bot's CI report: that would put hand-posted text under
+the login the CI and interact paths trust.
+
+When the action is given a `report_comment_id`, it additionally requires the comment's author to
+hold repository write permission (`admin`, `maintain`, or `write`, via
+`repos/{repo}/collaborators/{user}/permission`), the same bar `interact.yml` applies to fix and
+dismiss commands. `author_association` alone admits every org member and read-only
+collaborators, which is too broad for an approval.
+
+The action never fails the calling job: an unexpected error while judging ("could not judge") is
+reported as a warning and the step exits successfully, so the interact publish job, which has
+already posted its ledger by then, is never marked failed by the approval step.
 
 ## Trust boundaries
 

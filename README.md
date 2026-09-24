@@ -158,15 +158,18 @@ hand-typed comment. Reports marked `shadow` never approve, an irreversible chang
 auto-approves, and a report for an older head is ignored until the incremental re-review lands.
 
 To approve reports that developers run locally and post with the review's "Post review to
-GitHub" option, copy `templates/workflows/agent-review-approve.yml` too. It fires on a new PR
-comment from an OWNER/MEMBER/COLLABORATOR that starts with the report marker and applies the same
-rules. Because that report is authored by the poster rather than the bot, enabling
-`auto_approve` there is a stronger trust grant than the CI path — a collaborator could compose
-a passing marker comment for the current head. In every path the bot approves regardless of who
-authored the PR; keep a branch-protection rule requiring a non-author human approval if that
-matters to you. All three approval paths share one rule (`agent-review approval`) and one
-composite action (`.github/actions/approve`), fail closed, never request changes, and report an
-approval API failure as a warning.
+GitHub" option, copy `templates/workflows/agent-review-approve.yml` too. It fires when a PR
+comment starting with the report marker is created or edited (a re-post edits the poster's own
+earlier comment), requires the poster to hold repository write access — the same bar the
+interact workflow applies to `@claude fix` — and applies the same rules. Because that report is
+authored by the poster rather than the bot, enabling `auto_approve` there is a
+stronger trust grant than the CI path — a writer could compose a passing marker comment for the
+current head.
+In every path the bot approves regardless of who authored the PR; keep a branch-protection rule
+requiring a non-author human approval if that matters to you. All three approval paths share one
+rule (`agent-review approval`) and one composite action (`.github/actions/approve`), fail closed,
+never request changes, never fail the calling job, and report an approval API failure as a
+warning.
 
 ## Testing CI changes locally
 
