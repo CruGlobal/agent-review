@@ -1140,3 +1140,20 @@ test('interact.yml approves through the shared action, gated by auto_approve', (
   const body = readFileSync(INTERACT_WORKFLOW, 'utf8');
   assert.ok(!body.includes('gh pr review'), 'interact.yml must not carry its own approval shell');
 });
+
+test('review.yml approves only when the caller opts in and the review job succeeded', () => {
+  const { parse } = require('yaml');
+  const doc = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
+  const on = doc.on || doc[true];
+  assert.equal(on.workflow_call.inputs.auto_approve.type, 'boolean');
+  assert.equal(on.workflow_call.inputs.auto_approve.default, false);
+  const job = doc.jobs.approve;
+  assert.ok(job, 'review.yml must define an approve job');
+  assert.equal(job.needs, 'review', 'a failed or skipped review must never reach the approver');
+  assert.equal(job.if, 'inputs.auto_approve');
+  assert.deepEqual(job.permissions, { 'pull-requests': 'write' });
+  const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
+  assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
+  assert.equal(step.with.report_comment_id, undefined, 'CI judges only the bot report');
+  assert.ok(doc.jobs['report-failure'], 'report-failure job must survive');
+});

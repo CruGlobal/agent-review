@@ -12,6 +12,10 @@ on:
         description: shadow posts advisory reports and must never auto-approve
         type: string
         default: shadow
+      auto_approve:
+        description: Approve the PR when the published report passes for the current head; shadow reports never approve
+        type: boolean
+        default: false
     secrets:
       # Console API key (sk-ant-api03-…), metered billing. Subscription OAuth
       # tokens (`claude setup-token`) are NOT accepted: Anthropic rejects them
@@ -415,3 +419,17 @@ jobs:
             printf '\n%s\n' "[View the run log]($RUN_URL)"
           } > "$RUNNER_TEMP/review-failure.md"
           gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/review-failure.md" >/dev/null
+
+  # Opt-in. Reads only the bot-authored report the publish step validated, so a
+  # hand-typed marker comment can never be the one judged. `needs: review` with
+  # a plain `if:` means a failed or skipped review never reaches this job.
+  approve:
+    needs: review
+    if: inputs.auto_approve
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: CruGlobal/agent-review/.github/actions/approve@main
+        with:
+          pr_number: ${{ github.event.pull_request.number }}
