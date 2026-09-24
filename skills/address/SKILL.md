@@ -15,9 +15,11 @@ layer so repeat-dismissed finding classes stop being raised.
 **Usage**:
 
 ```
-/agent-review:address              # Local: converse (fix 1,3 / dismiss 2 [false-positive]: reason)
-/agent-review:address check        # Local: verify YOUR OWN rework against the open findings before pushing
-/agent-review:address ci           # CI: apply only trusted fix operations and write a result handoff
+/agent-review:address                              # Local: converse (fix 1,3 / dismiss 2 [false-positive]: reason)
+/agent-review:address fix 1,2,3,4 dismiss 5,6,7,8  # Local: argument mode — fixes run, then ONE prompt for dismissal reasons
+/agent-review:address fix blockers                 # Local: fix every open severity ≥ 7 finding (also: fix all)
+/agent-review:address check                        # Local: verify YOUR OWN rework against the open findings before pushing
+/agent-review:address ci                           # CI: apply only trusted fix operations and write a result handoff
 ```
 
 **Engine access**: the `agent-review` binary ships with this plugin. The feedback commands used
@@ -162,7 +164,30 @@ findings are actually addressed. This mode judges; it does not edit code.
 
 ## Stage 1 — Get the instruction
 
-**Local**: show the open findings and ask what to do. Accept natural phrasing — "fix 1, 3 and 5",
+**Argument mode** (any argument other than `check` or `ci`): do not converse. Write the raw
+argument string to `/tmp/address_command.txt` and parse it through the engine — never by hand:
+
+```bash
+. /tmp/address_env.sh
+agent-review address parse --command /tmp/address_command.txt --lenient --ledger /tmp/address_ledger.json \
+  > /tmp/address_ops.json || { cat /tmp/address_ops.json; echo "Usage: fix 1,2 dismiss 3,4 [code]: reason · fix blockers · fix all"; exit 1; }
+node -e 'for (const o of require("/tmp/address_ops.json")) console.log(`#${o.n} ${o.action}${o.reasonCode ? " ["+o.reasonCode+"]: "+o.reason : o.action === "dismiss" ? " (reason pending)" : ""}`)'
+```
+
+The lenient grammar accepts `fix: 1,2`, whitespace between clauses, the `dimiss` typo, `fix all`
+(every open finding) and `fix blockers` (open severity ≥ 7). Numbers that don't exist or are
+already resolved are reported and dropped; the rest proceed. A dismissal without `[code]: reason`
+comes back with `reasonCode: null`.
+Fixes are applied, committed, and pushed before the dismissal prompt (Stage 2); then, if any
+dismissal has a null reason, ask exactly ONE prompt for the batch:
+
+> Dismissing #5, #6, #7, #8 — give `[code]: reason` (one for all, or one `N [code]: reason` line each).
+
+Validate the answer with the same codes as below; re-ask on an invalid code. The skill still
+never dismisses on its own judgment: the reason comes from the user, in the argument or the
+prompt. With reasons in hand, continue at Stage 3.
+
+**Conversational mode** (no argument): show the open findings and ask what to do. Accept natural phrasing — "fix 1, 3 and 5",
 "dismiss 2 and 4 [intentional]: legacy importer contract", "fix the rest", "explain 7". `explain N` means
 walk through the finding's reasoning from the report body — explaining costs nothing and often
 settles fix-vs-dismiss.

@@ -1233,3 +1233,14 @@ test('the review skill runs the incremental path locally on the `incremental` ar
   // A zero-risk local delta advances the head marker instead of stopping silently.
   assert.ok(skill.includes('no reviewable risk in the delta'), 'local score-0 incremental must post the skip note');
 });
+
+test('the address skill takes fix/dismiss arguments and prompts once for missing dismissal reasons', () => {
+  const skill = readFileSync(ADDRESS_SKILL, 'utf8');
+  assert.ok(skill.includes('/agent-review:address fix 1,2,3,4 dismiss 5,6,7,8'), 'usage shows argument mode');
+  assert.ok(skill.includes('/agent-review:address fix blockers'), 'usage shows the blockers shorthand');
+  assert.ok(skill.includes('agent-review address parse --command /tmp/address_command.txt --lenient --ledger /tmp/address_ledger.json'), 'argument mode parses through the engine');
+  assert.ok(skill.includes('exactly ONE prompt'), 'bare dismissals prompt once per batch');
+  assert.ok(skill.includes('reasonCode: null'), 'the null-reason contract is named');
+  assert.ok(skill.includes('Fixes are applied, committed, and pushed before the dismissal prompt'), 'fixes never wait on the prompt');
+  assert.ok(skill.includes('never dismisses on its own judgment'), 'the rule survives argument mode');
+});
