@@ -18308,21 +18308,33 @@ var require_addressState = __commonJS({
         return n;
       });
     }
-    function parseCommand(body) {
+    function expandKeyword(word, ledger) {
+      if (!ledger) throw new Error(`"fix ${word}" requires a ledger to expand`);
+      const open = ledger.filter((e) => e.status === "open");
+      const picked = word === "blockers" ? open.filter((e) => e.severity >= 7) : open;
+      return picked.map((e) => e.n);
+    }
+    function parseCommand(body, { lenient = false, ledger = null } = {}) {
       const raw = String(body || "");
       if (!raw.trim() || raw.length > 1e4) throw new Error("address command is empty or too long");
-      const command = (raw.replace(/^\s*@claude\b/i, "").split(/\r?\n/).find((line) => line.trim()) || "").trim();
+      const command = lenient ? raw.replace(/^\s*@claude\b/i, "").trim() : (raw.replace(/^\s*@claude\b/i, "").split(/\r?\n/).find((line) => line.trim()) || "").trim();
       if (!command) throw new Error("address command is empty");
       if (command.length > 2e3) throw new Error("address command is too long");
+      const clauses = lenient ? command.split(/\s*;\s*|\r?\n/).map((seg) => seg.replace(/\s+/g, " ").trim()).filter(Boolean).flatMap((seg) => /^(?:dismiss|dimiss):?\s+#?\d+(?:\s*,\s*#?\d+)*\s+\[[a-z-]+\]\s*:/i.test(seg) ? [seg] : seg.split(/\s*,?\s+(?=(?:fix|dismiss|dimiss)\b)/i).filter(Boolean)) : command.split(/\s*;\s*/);
       const operations = [];
-      for (const clause of command.split(/\s*;\s*/)) {
-        let match = clause.match(/^fix\s+(#?\d+(?:\s*,\s*#?\d+)*)$/i);
+      for (const clause of clauses) {
+        let match = lenient ? clause.match(/^fix:?\s+(all|blockers)$/i) : null;
+        if (match) {
+          for (const n of expandKeyword(match[1].toLowerCase(), ledger)) operations.push({ n, action: "fix" });
+          continue;
+        }
+        match = clause.match(lenient ? /^fix:?\s+(#?\d+(?:\s*,\s*#?\d+)*),?$/i : /^fix\s+(#?\d+(?:\s*,\s*#?\d+)*)$/i);
         if (match) {
           for (const n of parseNumberList(match[1])) operations.push({ n, action: "fix" });
           continue;
         }
         match = clause.match(
-          /^dismiss\s+(#?\d+(?:\s*,\s*#?\d+)*)\s+\[([a-z-]+)\]\s*:\s*(.+)$/i
+          lenient ? /^(?:dismiss|dimiss):?\s+(#?\d+(?:\s*,\s*#?\d+)*)\s+\[([a-z-]+)\]\s*:\s*(.+)$/i : /^dismiss\s+(#?\d+(?:\s*,\s*#?\d+)*)\s+\[([a-z-]+)\]\s*:\s*(.+)$/i
         );
         if (match) {
           const reasonCode = match[2].toLowerCase();
@@ -18332,6 +18344,13 @@ var require_addressState = __commonJS({
           const reason = singleLine(match[3], "dismissal reason", 500);
           for (const n of parseNumberList(match[1])) {
             operations.push({ n, action: "dismiss", reasonCode, reason });
+          }
+          continue;
+        }
+        match = lenient ? clause.match(/^(?:dismiss|dimiss):?\s+(#?\d+(?:\s*,\s*#?\d+)*),?$/i) : null;
+        if (match) {
+          for (const n of parseNumberList(match[1])) {
+            operations.push({ n, action: "dismiss", reasonCode: null, reason: null });
           }
           continue;
         }
@@ -19424,7 +19443,8 @@ var require_cli = __commonJS({
       prepareAddressRequest,
       validateAddressResult,
       feedbackForAddress,
-      finalizeAddress
+      finalizeAddress,
+      parseCommand
     } = require_addressState();
     var {
       readData,
@@ -19561,7 +19581,7 @@ var require_cli = __commonJS({
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
-  address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
+  address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
@@ -19734,6 +19754,24 @@ var require_cli = __commonJS({
         }
         case "address": {
           const sub = rest[0];
+          if (sub === "parse") {
+            const commandPath = flag(rest, "--command");
+            if (!commandPath) {
+              out("usage: agent-review address parse --command <f> [--lenient] [--ledger <f>]");
+              return 1;
+            }
+            const ledgerPath = flag(rest, "--ledger");
+            try {
+              out(JSON.stringify(parseCommand(readFileSync(commandPath, "utf8"), {
+                lenient: rest.includes("--lenient"),
+                ledger: ledgerPath ? JSON.parse(readFileSync(ledgerPath, "utf8")) : null
+              })));
+              return 0;
+            } catch (e) {
+              out(`error: ${e.message}`);
+              return 1;
+            }
+          }
           if (sub === "prepare") {
             const commandPath = flag(rest, "--command");
             const reportPath = flag(rest, "--report");
@@ -19819,7 +19857,7 @@ var require_cli = __commonJS({
             }));
             return 0;
           }
-          out("usage: agent-review address prepare|validate|feedback|finalize");
+          out("usage: agent-review address parse|prepare|validate|feedback|finalize");
           return 1;
         }
         case "ledger": {

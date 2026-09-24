@@ -885,7 +885,7 @@ test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff
 test('the CI path uses at most 13 bash turns (Stage 0A through Stage 6)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
-  const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
+  const stage7Start = skill.indexOf('## Stage 7 — Post, Print & Metrics');
   const stage5BStart = skill.indexOf('## Stage 5B — Historical Metrics Dashboard');
   const stage6Start = skill.indexOf('## Stage 6 — Generate Review Report');
   const localOnlyStart = skill.indexOf('**Locally** the opposite can be stale');
@@ -1096,18 +1096,18 @@ test('the CI posting block self-checks the marker JSON before it reaches the tru
   );
 });
 
-test('the Interactive Menu "Post review to GitHub" choice self-checks the marker JSON too', () => {
+test('Stage 7 posts automatically, self-checks the marker JSON, and prints the report body', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const menuSection = skill.slice(
-    skill.indexOf('Handle the choice:'),
-    skill.indexOf('Handle the choice:') + 4000,
-  );
-  const matches = [...menuSection.matchAll(/console\.log\("marker self-check OK"\)/g)];
-  assert.equal(
-    matches.length,
-    1,
-    'choice 2 (re-post) must run the same marker self-check as the CI posting step before posting',
-  );
+  const stage7 = skill.slice(skill.indexOf('## Stage 7 — Post, Print & Metrics'), skill.indexOf('## Stage 8'));
+  assert.ok(stage7.includes('### Post and print'));
+  assert.ok(!stage7.includes('Please respond: 1, 2, 3'), 'the blocking menu is gone');
+  assert.ok(!stage7.includes('What would you like to do?'));
+  assert.ok(stage7.includes('console.log("marker self-check OK")'), 'the marker self-check must survive');
+  assert.ok(stage7.includes('ME=$(gh api user --jq .login)'), 'local post updates only the poster\'s own comment');
+  assert.ok(stage7.includes("awk '/^<details>/{exit} {print}' /tmp/agent_review_report.md"), 'the visible report body is printed to the terminal');
+  assert.ok(stage7.includes('💾 Saved locally, no PR'), 'no-PR case saves and says so');
+  assert.ok(stage7.includes('/tmp/agent_review_post_result.txt'));
+  assert.ok(stage7.includes('Never run `apply_all.sh --yes`'), 'fix scripts stay unexecuted');
 });
 
 test('the approval gate is one composite action that delegates the decision to the engine', () => {
@@ -1186,9 +1186,9 @@ test('approve.yml judges the posted comment, defaults auto_approve off, and re-c
   assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
 });
 
-test('the approve template is opt-in, fires on created or edited, is collaborator-gated, and the review caller shows the knob', () => {
+test('the approve template is on by default, fires on created or edited, is collaborator-gated, and the review caller shows the knob', () => {
   const template = readFileSync(join(ROOT, 'templates/workflows/agent-review-approve.yml'), 'utf8');
-  assert.ok(template.includes('auto_approve: false'));
+  assert.ok(template.includes('auto_approve: true'));
   // A local re-post edits the poster's own earlier comment, so edited must fire
   // too; the head rule keeps a stale report from approving a newer push.
   assert.ok(template.includes('types: [created, edited]'), 'local re-posts are edits of the poster\'s own comment');
@@ -1198,7 +1198,7 @@ test('the approve template is opt-in, fires on created or edited, is collaborato
   assert.ok(template.includes('comment_id: ${{ github.event.comment.id }}'));
   assert.match(template, /permissions:\n      contents: read\n      pull-requests: write/);
   const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
-  assert.ok(review.includes('auto_approve: false'), 'the review caller must show the opt-in knob');
+  assert.ok(review.includes('auto_approve: true'), 'the review caller approves by default');
 });
 
 test('the docs and skills know the approve template and the review-side auto_approve knob', () => {
@@ -1212,11 +1212,96 @@ test('the docs and skills know the approve template and the review-side auto_app
   // The local post must create-or-update only a comment the poster authored:
   // editing the bot's CI report would put human text under the bot's login,
   // and the approve template would never see a created/edited event it trusts.
-  const menu = review.slice(review.indexOf('2. 📝 Post review to GitHub'));
+  const menu = review.slice(review.indexOf('### Post and print'));
   assert.ok(menu.includes('ME=$(gh api user --jq .login)'), 'local post resolves the posting user');
-  assert.ok(menu.includes('select(.user.login == $me)'), 'local post updates only the poster\'s own report comment');
+  assert.ok(menu.includes('select(.user.login == \\"$ME\\")'), 'local post updates only the poster\'s own report comment (gh has no --arg; interpolate)');
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
   assert.ok(readme.includes('agent-review-approve.yml'));
   assert.ok(readme.includes('stronger trust grant'), 'README must state the local-post trust boundary');
   assert.ok(readme.includes('repository write access'), 'README must say only writers can trigger the local-post approval');
+});
+
+test('the review skill runs the incremental path locally on the `incremental` argument', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('/agent-review:review auto incremental'), 'usage must show the local incremental form');
+  assert.ok(skill.includes('case " $* " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac'), 'the argument must be detected like `ci`');
+  assert.ok(skill.includes('if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then'), 'the incremental gate must accept the local request');
+  assert.ok(!skill.includes('# Incremental re-review (CI only)'), 'the CI-only comment is stale');
+  assert.ok(skill.includes('push first'), 'unpushed local commits must stop an incremental review');
+  assert.ok(skill.includes('only committed changes are reviewed'), 'a dirty tree must warn');
+  assert.ok(skill.includes("bot's comment remains the CI ledger"), 'must explain the bot-canonical case');
+  // A zero-risk local delta advances the head marker instead of stopping silently.
+  assert.ok(skill.includes('no reviewable risk in the delta'), 'local score-0 incremental must post the skip note');
+});
+
+test('the address skill takes fix/dismiss arguments and prompts once for missing dismissal reasons', () => {
+  const skill = readFileSync(ADDRESS_SKILL, 'utf8');
+  assert.ok(skill.includes('/agent-review:address fix 1,2,3,4 dismiss 5,6,7,8'), 'usage shows argument mode');
+  assert.ok(skill.includes('/agent-review:address fix blockers'), 'usage shows the blockers shorthand');
+  assert.ok(skill.includes('agent-review address parse --command /tmp/address_command.txt --lenient --ledger /tmp/address_ledger.json'), 'argument mode parses through the engine');
+  assert.ok(skill.includes('exactly ONE prompt'), 'bare dismissals prompt once per batch');
+  assert.ok(skill.includes('reasonCode: null'), 'the null-reason contract is named');
+  assert.ok(skill.includes('Fixes are applied, committed, and pushed before the dismissal prompt'), 'fixes never wait on the prompt');
+  assert.ok(skill.includes('never dismisses on its own judgment'), 'the rule survives argument mode');
+});
+
+test('re-review and yolo-review are thin drivers over the review and address skills', () => {
+  const re = readFileSync(join(ROOT, 'skills/re-review/SKILL.md'), 'utf8');
+  assert.match(re, /^name: re-review$/m);
+  assert.ok(re.includes('`agent-review:review` with the arguments `auto incremental`'));
+  assert.ok(re.split('\n').length < 40, 're-review must stay thin');
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  assert.match(yolo, /^name: yolo-review$/m);
+  assert.ok(yolo.includes('`agent-review:address` with the argument `fix blockers`'));
+  assert.ok(yolo.includes('`agent-review:review` with the arguments `auto incremental`'));
+  assert.ok(yolo.includes('Never dismiss'), 'yolo must not dismiss');
+  assert.ok(yolo.includes('at most two more times'), 'the loop is bounded');
+  assert.ok(yolo.includes('gh pr view "$PR_NUMBER" --json reviews'), 'approval is observed, not performed');
+  assert.ok(yolo.includes('.author.login == \\"github-actions\\" or .author.login == \\"github-actions[bot]\\"'), 'GraphQL reports the bot as github-actions');
+  assert.ok(yolo.includes('cannot approve'), 'must say the session cannot approve');
+  assert.ok(yolo.includes('git status --porcelain'), 'clean tree precondition');
+  assert.ok(!yolo.includes('apply_all.sh --yes'));
+});
+
+test('templates ship advisory and approving by default, label gate kept, config agrees', () => {
+  const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
+  assert.ok(review.includes('rollout_mode: advisory'));
+  assert.ok(!review.includes('rollout_mode: shadow'));
+  assert.ok(review.includes("contains(github.event.pull_request.labels.*.name, 'agent-review')"), 'label gate stays');
+  const interact = readFileSync(join(ROOT, 'templates/workflows/agent-review-interact.yml'), 'utf8');
+  assert.ok(interact.includes('auto_approve: true'));
+  const config = readFileSync(join(ROOT, 'templates/config.yml'), 'utf8');
+  assert.match(config, /^rollout:\n  mode: advisory$/m, 'the trusted-policy step refuses a caller that disagrees with config');
+  const reusable = readFileSync(join(ROOT, '.github/workflows/interact.yml'), 'utf8');
+  assert.ok(!reusable.includes('Disabled during shadow/advisory rollout'), 'stale description: advisory approves');
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  assert.ok(init.includes('`rollout` — `advisory`'), 'init generates advisory');
+  const update = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  assert.ok(update.includes('rollout.mode'), 'update-files must warn when config still says shadow');
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.ok(readme.includes('## The flow'));
+  assert.ok(readme.includes('/agent-review:yolo-review'));
+  assert.ok(readme.includes('approves by default'), 'README states the default up front');
+});
+
+test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'s own, rollout from config, no silent overwrite', () => {
+  const { readdirSync } = require('node:fs');
+  for (const dir of readdirSync(join(ROOT, 'skills'))) {
+    const body = readFileSync(join(ROOT, 'skills', dir, 'SKILL.md'), 'utf8');
+    assert.ok(!body.includes('--jq --arg'), `${dir}: gh's --jq takes one expression; --arg does not exist (gh 2.78)`);
+  }
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage7 = review.slice(review.indexOf('## Stage 7 — Post, Print & Metrics'), review.indexOf('## Stage 8'));
+  assert.ok(stage7.includes('agent-review config get rollout.mode'), 'a local post takes the rollout marker from config, so shadow-in-config disables approval');
+  assert.ok(stage7.includes(': > /tmp/agent_review_post_result.txt'), 'the post result is truncated before posting');
+  assert.ok(stage7.includes('❌ post failed'), 'a failed post is reported, never last run\'s success line');
+  assert.ok(review.includes('if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then'), 'a plain local review merges the previous ledger instead of resetting it');
+  // Local canonical comment: the current user's own marked comment when one exists, else the oldest.
+  const ownFirst = '(map(select(.user.login == \\"$ME\\")) | first) // first';
+  assert.ok(review.includes(ownFirst), 'review reads the previous ledger own-first locally');
+  const address = readFileSync(ADDRESS_SKILL, 'utf8');
+  assert.ok(address.includes(ownFirst), 'address works the user\'s own comment when one exists');
+  assert.ok(address.includes('In argument mode, push without confirming'), 'argument mode and yolo never stop at the push confirmation');
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  assert.ok(yolo.includes(ownFirst), 'yolo reads the same canonical comment address writes');
 });

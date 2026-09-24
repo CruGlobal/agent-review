@@ -477,3 +477,22 @@ test('approval subcommand judges a report file against a head SHA', () => {
   assert.match(usage.s, /usage: agent-review approval/);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('address parse prints lenient operations and rejects bare dismissals in strict mode', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-parse-'));
+  const cmd = join(dir, 'cmd.txt');
+  writeFileSync(cmd, 'fix: 1,2 dimiss 3');
+  const ledger = join(dir, 'ledger.json');
+  writeFileSync(ledger, JSON.stringify([{ n: 1, severity: 8, status: 'open' }, { n: 2, severity: 3, status: 'open' }, { n: 3, severity: 7, status: 'open' }]));
+  const ok = run(['address', 'parse', '--command', cmd, '--lenient']);
+  assert.equal(ok.code, 0);
+  assert.deepEqual(JSON.parse(ok.s).map((o) => [o.n, o.action, o.reasonCode]), [[1, 'fix', undefined], [2, 'fix', undefined], [3, 'dismiss', null]]);
+  writeFileSync(cmd, 'fix blockers');
+  const blockers = run(['address', 'parse', '--command', cmd, '--lenient', '--ledger', ledger]);
+  assert.deepEqual(JSON.parse(blockers.s).map((o) => o.n), [1, 3]);
+  writeFileSync(cmd, 'dismiss 3');
+  const strict = run(['address', 'parse', '--command', cmd]);
+  assert.equal(strict.code, 1);
+  assert.match(strict.s, /invalid address syntax/);
+  rmSync(dir, { recursive: true, force: true });
+});

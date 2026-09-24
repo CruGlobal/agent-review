@@ -88,23 +88,58 @@ function parseNumberList(value) {
     });
 }
 
-function parseCommand(body) {
+function expandKeyword(word, ledger) {
+  if (!ledger) throw new Error(`"fix ${word}" requires a ledger to expand`);
+  const open = ledger.filter((e) => e.status === 'open');
+  const picked = word === 'blockers' ? open.filter((e) => e.severity >= 7) : open;
+  return picked.map((e) => e.n);
+}
+
+// Strict grammar (CI, PR comments): `fix 1, 3; dismiss 2 [code]: reason`. Lenient
+// grammar (local argument mode) additionally accepts an optional colon after the
+// keyword, clauses separated by whitespace/newlines before the next keyword, the
+// `dimiss` typo, `fix all` / `fix blockers` (expanded against `ledger`), and a bare
+// `dismiss N, M` whose reason the skill prompts for (reasonCode/reason are null).
+function parseCommand(body, { lenient = false, ledger = null } = {}) {
   const raw = String(body || '');
   if (!raw.trim() || raw.length > 10000) throw new Error('address command is empty or too long');
   // A PR comment usually carries prose after the instruction ("@claude fix 1\n\nThanks!"),
-  // so the command is the first non-empty line once the mention is stripped.
-  const command = (raw.replace(/^\s*@claude\b/i, '').split(/\r?\n/).find((line) => line.trim()) || '').trim();
+  // so the command is the first non-empty line once the mention is stripped. Lenient
+  // input is the whole argument string.
+  const command = lenient
+    ? raw.replace(/^\s*@claude\b/i, '').trim()
+    : (raw.replace(/^\s*@claude\b/i, '').split(/\r?\n/).find((line) => line.trim()) || '').trim();
   if (!command) throw new Error('address command is empty');
   if (command.length > 2000) throw new Error('address command is too long');
+  // Lenient: `;` and newlines always separate clauses. Within a segment, a
+  // dismissal that carries `[code]: reason` is one clause to the end of the
+  // segment, so a reason may say "will fix later" without spawning a fix; any
+  // other segment splits before each keyword so `fix 1 dismiss 2 [x]: r` works.
+  const clauses = lenient
+    ? command
+        .split(/\s*;\s*|\r?\n/)
+        .map((seg) => seg.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .flatMap((seg) => (/^(?:dismiss|dimiss):?\s+#?\d+(?:\s*,\s*#?\d+)*\s+\[[a-z-]+\]\s*:/i.test(seg)
+          ? [seg]
+          : seg.split(/\s*,?\s+(?=(?:fix|dismiss|dimiss)\b)/i).filter(Boolean)))
+    : command.split(/\s*;\s*/);
   const operations = [];
-  for (const clause of command.split(/\s*;\s*/)) {
-    let match = clause.match(/^fix\s+(#?\d+(?:\s*,\s*#?\d+)*)$/i);
+  for (const clause of clauses) {
+    let match = lenient ? clause.match(/^fix:?\s+(all|blockers)$/i) : null;
+    if (match) {
+      for (const n of expandKeyword(match[1].toLowerCase(), ledger)) operations.push({ n, action: 'fix' });
+      continue;
+    }
+    match = clause.match(lenient ? /^fix:?\s+(#?\d+(?:\s*,\s*#?\d+)*),?$/i : /^fix\s+(#?\d+(?:\s*,\s*#?\d+)*)$/i);
     if (match) {
       for (const n of parseNumberList(match[1])) operations.push({ n, action: 'fix' });
       continue;
     }
     match = clause.match(
-      /^dismiss\s+(#?\d+(?:\s*,\s*#?\d+)*)\s+\[([a-z-]+)\]\s*:\s*(.+)$/i,
+      lenient
+        ? /^(?:dismiss|dimiss):?\s+(#?\d+(?:\s*,\s*#?\d+)*)\s+\[([a-z-]+)\]\s*:\s*(.+)$/i
+        : /^dismiss\s+(#?\d+(?:\s*,\s*#?\d+)*)\s+\[([a-z-]+)\]\s*:\s*(.+)$/i,
     );
     if (match) {
       const reasonCode = match[2].toLowerCase();
@@ -114,6 +149,13 @@ function parseCommand(body) {
       const reason = singleLine(match[3], 'dismissal reason', 500);
       for (const n of parseNumberList(match[1])) {
         operations.push({ n, action: 'dismiss', reasonCode, reason });
+      }
+      continue;
+    }
+    match = lenient ? clause.match(/^(?:dismiss|dimiss):?\s+(#?\d+(?:\s*,\s*#?\d+)*),?$/i) : null;
+    if (match) {
+      for (const n of parseNumberList(match[1])) {
+        operations.push({ n, action: 'dismiss', reasonCode: null, reason: null });
       }
       continue;
     }

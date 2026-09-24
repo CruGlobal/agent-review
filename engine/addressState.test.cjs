@@ -8,6 +8,7 @@ const {
   feedbackForAddress,
   finalizeAddress,
   extractReportState,
+  parseCommand,
 } = require('./addressState.cjs');
 
 function finding(overrides = {}) {
@@ -366,4 +367,54 @@ test('finding numbers never render as bare #N — GitHub autolinks them to unrel
 test('prepare errors that reach the PR wrap finding numbers in code spans', () => {
   assert.throws(() => request('@claude fix 99'), /`#99` is not in the findings ledger/);
   assert.throws(() => request('@claude fix 1; fix 1'), /finding `#1` appears more than once/);
+});
+
+test('parseCommand lenient accepts colons, whitespace-separated clauses, the dimiss typo, and bare dismissals', () => {
+  const ops = parseCommand('fix: 1,2,3,4, dimiss 5,6,7,8', { lenient: true });
+  assert.deepEqual(ops.map((o) => [o.n, o.action, o.reasonCode, o.reason]), [
+    [1, 'fix', undefined, undefined], [2, 'fix', undefined, undefined],
+    [3, 'fix', undefined, undefined], [4, 'fix', undefined, undefined],
+    [5, 'dismiss', null, null], [6, 'dismiss', null, null],
+    [7, 'dismiss', null, null], [8, 'dismiss', null, null],
+  ]);
+  const inline = parseCommand('fix 1\ndismiss 2, 3 [pre-existing]: legacy importer', { lenient: true });
+  assert.deepEqual(inline.map((o) => [o.n, o.action, o.reasonCode]), [[1, 'fix', undefined], [2, 'dismiss', 'pre-existing'], [3, 'dismiss', 'pre-existing']]);
+  assert.equal(inline[1].reason, 'legacy importer');
+});
+
+test('parseCommand lenient expands fix all and fix blockers against open ledger entries only', () => {
+  const ledger = [
+    { n: 1, severity: 9, status: 'open' },
+    { n: 2, severity: 4, status: 'open' },
+    { n: 3, severity: 8, status: 'fixed' },
+    { n: 4, severity: 7, status: 'open' },
+    { n: 5, severity: 7, status: 'dismissed' },
+  ];
+  assert.deepEqual(parseCommand('fix blockers', { lenient: true, ledger }).map((o) => o.n), [1, 4]);
+  assert.deepEqual(parseCommand('fix all', { lenient: true, ledger }).map((o) => o.n), [1, 2, 4]);
+  assert.throws(() => parseCommand('fix all', { lenient: true }), /requires a ledger/);
+});
+
+test('parseCommand rejects a number listed twice in lenient mode too', () => {
+  assert.throws(() => parseCommand('fix 1 dismiss 1 [other]: x', { lenient: true }), /more than once/);
+});
+
+test('parseCommand strict mode still rejects every lenient form', () => {
+  for (const cmd of ['fix: 1', 'fix 1 dismiss 2 [other]: x', 'dimiss 2 [other]: x', 'dismiss 2', 'fix all', 'fix blockers']) {
+    assert.throws(() => parseCommand(cmd), Error, cmd);
+  }
+});
+
+test('parseCommand lenient keeps keyword words inside a dismissal reason', () => {
+  const kept = parseCommand('dismiss 2 [deferred]: will address after we fix 5', { lenient: true });
+  assert.deepEqual(kept.map((o) => [o.n, o.action, o.reason]), [[2, 'dismiss', 'will address after we fix 5']]);
+  const later = parseCommand('dismiss 2 [other]: we will fix later', { lenient: true });
+  assert.equal(later[0].reason, 'we will fix later');
+  // A newline or ; still separates a following clause.
+  const two = parseCommand('dismiss 2 [other]: we will fix later\nfix 3', { lenient: true });
+  assert.deepEqual(two.map((o) => [o.n, o.action]), [[2, 'dismiss'], [3, 'fix']]);
+  const semi = parseCommand('dismiss 2 [other]: need to dismiss this; fix 3', { lenient: true });
+  assert.deepEqual(semi.map((o) => [o.n, o.action]), [[2, 'dismiss'], [3, 'fix']]);
+  // Compact mixed clauses without a reason still split on the keyword.
+  assert.deepEqual(parseCommand('fix 1 dismiss 2 [other]: x', { lenient: true }).map((o) => o.action), ['fix', 'dismiss']);
 });

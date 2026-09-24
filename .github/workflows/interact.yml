@@ -20,7 +20,7 @@ on:
         type: string
         required: true
       auto_approve:
-        description: Disabled during shadow/advisory rollout; enable only after readiness gates pass
+        description: Approve the PR when the ledger passes for the current head; shadow reports never approve
         type: boolean
         default: false
     secrets:

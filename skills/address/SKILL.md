@@ -15,9 +15,11 @@ layer so repeat-dismissed finding classes stop being raised.
 **Usage**:
 
 ```
-/agent-review:address              # Local: converse (fix 1,3 / dismiss 2 [false-positive]: reason)
-/agent-review:address check        # Local: verify YOUR OWN rework against the open findings before pushing
-/agent-review:address ci           # CI: apply only trusted fix operations and write a result handoff
+/agent-review:address                              # Local: converse (fix 1,3 / dismiss 2 [false-positive]: reason)
+/agent-review:address fix 1,2,3,4 dismiss 5,6,7,8  # Local: argument mode — fixes run, then ONE prompt for dismissal reasons
+/agent-review:address fix blockers                 # Local: fix every open severity ≥ 7 finding (also: fix all)
+/agent-review:address check                        # Local: verify YOUR OWN rework against the open findings before pushing
+/agent-review:address ci                           # CI: apply only trusted fix operations and write a result handoff
 ```
 
 **Engine access**: the `agent-review` binary ships with this plugin. The feedback commands used
@@ -120,9 +122,12 @@ PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 [ -n "$PR_NUMBER" ] || { echo "❌ No PR context — the ledger lives on a PR comment."; exit 1; }
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
-# The oldest marked comment is the canonical report (same rule as the review skill).
+# Canonical report: this user's own marked comment when one exists (a local review or
+# re-review writes it), else the oldest marked comment (same rule as the review skill).
+# Local canonical comment: this user's own marked comment when one exists, else the oldest.
+ME=$(gh api user --jq .login 2>/dev/null || echo "")
 COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-  --jq 'map(select(.body | startswith("<!-- agent-review -->"))) | first | .id // empty' | head -n1)
+  --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .id // empty" | head -n1)
 [ -n "$COMMENT_ID" ] || { echo "❌ No marked review report on PR #$PR_NUMBER."; exit 1; }
 
 gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > /tmp/address_comment.md
@@ -162,7 +167,30 @@ findings are actually addressed. This mode judges; it does not edit code.
 
 ## Stage 1 — Get the instruction
 
-**Local**: show the open findings and ask what to do. Accept natural phrasing — "fix 1, 3 and 5",
+**Argument mode** (any argument other than `check` or `ci`): do not converse. Write the raw
+argument string to `/tmp/address_command.txt` and parse it through the engine — never by hand:
+
+```bash
+. /tmp/address_env.sh
+agent-review address parse --command /tmp/address_command.txt --lenient --ledger /tmp/address_ledger.json \
+  > /tmp/address_ops.json || { cat /tmp/address_ops.json; echo "Usage: fix 1,2 dismiss 3,4 [code]: reason · fix blockers · fix all"; exit 1; }
+node -e 'for (const o of require("/tmp/address_ops.json")) console.log(`#${o.n} ${o.action}${o.reasonCode ? " ["+o.reasonCode+"]: "+o.reason : o.action === "dismiss" ? " (reason pending)" : ""}`)'
+```
+
+The lenient grammar accepts `fix: 1,2`, whitespace between clauses, the `dimiss` typo, `fix all`
+(every open finding) and `fix blockers` (open severity ≥ 7). Numbers that don't exist or are
+already resolved are reported and dropped; the rest proceed. A dismissal without `[code]: reason`
+comes back with `reasonCode: null`.
+Fixes are applied, committed, and pushed before the dismissal prompt (Stage 2); then, if any
+dismissal has a null reason, ask exactly ONE prompt for the batch:
+
+> Dismissing #5, #6, #7, #8 — give `[code]: reason` (one for all, or one `N [code]: reason` line each).
+
+Validate the answer with the same codes as below; re-ask on an invalid code. The skill still
+never dismisses on its own judgment: the reason comes from the user, in the argument or the
+prompt. With reasons in hand, continue at Stage 3.
+
+**Conversational mode** (no argument): show the open findings and ask what to do. Accept natural phrasing — "fix 1, 3 and 5",
 "dismiss 2 and 4 [intentional]: legacy importer contract", "fix the rest", "explain 7". `explain N` means
 walk through the finding's reasoning from the report body — explaining costs nothing and often
 settles fix-vs-dismiss.
@@ -206,7 +234,8 @@ FIX_SHA=$(git rev-parse --short HEAD)
 echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh
 ```
 
-Confirm with the user before pushing. The push triggers an incremental re-review of exactly these
+Confirm with the user before pushing. In argument mode, push without confirming: the argument is
+the instruction, and yolo depends on it. The push triggers an incremental re-review of exactly these
 commits — that is the verification loop, not a cost bug.
 
 ## Stage 3 — Update the ledger

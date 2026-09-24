@@ -16,6 +16,7 @@ prose rule docs.
 /agent-review:review quick        # Fast feedback for simple changes
 /agent-review:review deep        # Every enabled agent, maximum depth
 /agent-review:review auto         # Depth picked from the engine's risk score (see Stage 0)
+/agent-review:review auto incremental   # Local incremental: only commits since the last posted review; same PR comment
 /agent-review:review standard ci  # Non-interactive CI run (posts to the PR)
 /agent-review:review auto ci      # CI run, right-sized: skips no-risk diffs, quick for LOW,
                                   # standard for MEDIUM/HIGH, deep for CRITICAL
@@ -25,9 +26,12 @@ prose rule docs.
 escalating-lane count.
 `auto` costs whatever tier it resolves to — and $0 when it skips a no-risk diff.
 
-**Incremental CI re-reviews**: in CI mode the posted report records the reviewed head SHA.
-A later run on the same PR diffs only the commits since that SHA (falling back to a full
-review after a force-push, when the recorded SHA is no longer reachable from the new head).
+**Incremental re-reviews**: the posted report records the reviewed head SHA. In CI, a later run
+on the same PR diffs only the commits since that SHA. Locally, pass `incremental` (any position)
+to do the same: `/agent-review:re-review` is the shorthand for `auto incremental`. Both fall back
+to a full review after a force-push, when the recorded SHA is no longer reachable from the new
+head. Only committed changes are reviewed; if local `HEAD` is ahead of the PR head, push first —
+the review records the PR head and the approval workflow compares against it.
 
 Everything repo-specific — risk globs, agent triggers, rule docs — comes from the consuming
 repo's `.claude/review/` directory. Never hardcode repo specifics in this skill.
@@ -138,6 +142,12 @@ case " $* " in *" ci "*) CI_MODE="true" ;; esac
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
 
+# --- Detect a local incremental request ---
+INCREMENTAL_REQUESTED=""
+case " $* " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac
+[ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
+echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> /tmp/review_env.sh
+
 # --- Verify the repo is set up ---
 agent-review config validate || {
   echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
@@ -190,20 +200,33 @@ EOF
 BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
 HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
 
-# Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
-# inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
-# still an ancestor of the current head, review only the commits since it. A force-push
-# breaks ancestry, so the recorded SHA fails the checks below and we fall back to a full
-# review — the history we reviewed no longer exists, so the delta cannot be trusted.
+# Incremental re-review (CI, or the local `incremental` argument): a previous run recorded the
+# head SHA it reviewed inside the posted report comment (`<!-- agent-review-head: <sha> -->`).
+# When that SHA is still an ancestor of the current head, review only the commits since it. A
+# force-push breaks ancestry, so the recorded SHA fails the checks below and we fall back to a
+# full review — the history we reviewed no longer exists, so the delta cannot be trusted.
+# Locally the canonical comment may be the bot's CI report; its ledger is still the previous
+# state, and the merged report is posted as this user's own comment
+# (the bot's comment remains the CI ledger).
 INCREMENTAL="" LAST_REVIEWED=""
-if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
+if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
+  LOCAL_HEAD=$(git rev-parse HEAD)
+  if [ -n "$HEAD_REF" ] && [ "$LOCAL_HEAD" != "$HEAD_REF" ] && git merge-base --is-ancestor "$HEAD_REF" "$LOCAL_HEAD" 2>/dev/null; then
+    echo "❌ Local HEAD is ahead of the PR head ($HEAD_REF) — push first, then re-run. The review records the PR head and the approval workflow compares against it."
+    exit 1
+  fi
+  [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty — only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
+fi
+if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   else
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+    ME=$(gh api user --jq .login 2>/dev/null || echo "")
     LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
       | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   fi
   if [ -n "$LAST_REVIEWED" ] \
@@ -575,6 +598,29 @@ if [ "$MODE" = "auto" ]; then
           && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
       } > /tmp/agent_review_report.md
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
+    elif [ -n "$INCREMENTAL_REQUESTED" ]; then
+      # Same carry-forward as CI: keep the previous ledger and reversibility, recompute status,
+      # and post a skip note so the head marker advances and the next re-review stays small.
+      echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
+      echo '[]' > /tmp/previous_agent_review_ledger.json
+      echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
+      REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+      # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+      ME=$(gh api user --jq .login 2>/dev/null || echo "")
+      gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
+        | tr -d '\r' > /tmp/previous_agent_review_comment.md
+      sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
+      [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
+      sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_status.json
+      [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' > /tmp/agent_review_safety.json
+      agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
+      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --evidence /tmp/review_evidence.json ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+      OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
+      { echo "🎚️ **agent-review: skipped** — no reviewable risk in the delta since the last review."
+        [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
+      } > /tmp/agent_review_report.md
+      echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via Stage 7, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
     fi
@@ -590,9 +636,10 @@ fi
 ```
 
 If auto resolved to `skip`: in CI, run the **[CI Mode posting step](#post-the-report-to-the-pr-create-or-update)**
-with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally,
-report the skip and stop. If it resolved to `quick`/`standard`/`deep`, continue exactly as if that
-mode had been passed on the command line.
+with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally
+with `incremental`, run Stage 7's post-and-print with the skip note, then Stage 8. Locally without
+`incremental`, report the skip and stop. If it resolved to `quick`/`standard`/`deep`, continue
+exactly as if that mode had been passed on the command line.
 
 ### Risk Assessment
 
@@ -1412,15 +1459,17 @@ fi
 
 # --- Build the findings ledger ---
 echo '[]' > /tmp/previous_agent_review_ledger.json
-if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
+if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
   else
     REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+    ME=$(gh api user --jq .login 2>/dev/null || echo "")
     gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" \
       2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
@@ -1642,7 +1691,7 @@ installed.
 
 ---
 
-## Stage 7 — Commit Metrics & Interactive Actions
+## Stage 7 — Post, Print & Metrics
 
 **SKIP THIS ENTIRE STAGE IN CI MODE** — no commits, no pushes, no interactive menu. In CI, go
 straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
@@ -1674,71 +1723,37 @@ fi
 Only commit metrics when the user asked for a committed dashboard — if the working tree has
 unrelated staged changes, report the dashboard path and skip the commit instead.
 
-### Interactive Menu
+### Post and print
 
-Ask the user:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ REVIEW COMPLETE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Found:
-• [N] CRITICAL BLOCKERS (severity 9-10)
-• [N] HIGH PRIORITY BLOCKERS (severity 8-9)
-• [N] IMPORTANT issues (severity 7-8)
-• [N] MEDIUM priority (severity 5-7)
-• [N] Suggestions (severity 3-5)
-• [N] Unresolved debates (needs senior review)
-
-⏱️ Review Time: [X] minutes
-🔧 Suggested Fixes: [FIX_COUNT] available
-
-Risk Level: [LOW/MEDIUM/HIGH/CRITICAL]
-Required Reviewer: [risk.reviewer]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-What would you like to do?
-
-1. 📊 View metrics dashboard
-2. 📝 Post review to GitHub
-3. 🔧 Review suggested fixes (dry run first!)
-4. 📦 View dependency impact
-5. 💾 Save report locally only
-6. ❌ Exit
-
-Please respond: 1, 2, 3, 4, 5, or 6
-```
-
-Handle the choice:
+No menu. When a PR resolves, post the report now; either way print what a reader sees on the PR.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, PR_NUMBER, FIX_COUNT
-case "$choice" in
-  1) cat "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" ;;
-  2)
-    # Same create-or-update path as CI: the marker makes repeat posts update one comment instead
-    # of stacking new ones, so an interactive re-post never duplicates the CI comment.
-    if [ -z "${PR_NUMBER:-}" ]; then
-      echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
-    else
-      REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-      { echo '<!-- agent-review -->'
-        [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
-        echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
-        [ -s /tmp/agent_review_ledger.json ] \
-          && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
-        [ -s /tmp/agent_review_status.json ] \
-          && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
-        echo
-        cat /tmp/agent_review_report.md
-      } > /tmp/agent_review_comment.md
+. /tmp/review_env.sh 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
+: > /tmp/agent_review_post_result.txt
+if [ -z "${PR_NUMBER:-}" ]; then
+  echo "💾 Saved locally, no PR — report at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+else
+  REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+  # The rollout marker decides whether an approver may act on this report. Locally it comes
+  # from the repo's trusted config (rollout.mode), so `shadow` there really does turn
+  # approval off; CI sets AGENT_REVIEW_ROLLOUT_MODE from the caller, which must agree.
+  ROLLOUT=$(agent-review config get rollout.mode 2>/dev/null || echo "")
+  case "$ROLLOUT" in shadow|advisory|enforce) ;; *) ROLLOUT="advisory" ;; esac
+  { echo '<!-- agent-review -->'
+    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-$ROLLOUT} -->"
+    [ -s /tmp/agent_review_ledger.json ] \
+      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+    [ -s /tmp/agent_review_status.json ] \
+      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+    echo
+    cat /tmp/agent_review_report.md
+  } > /tmp/agent_review_comment.md
 
-      # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
-      # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
-      # only from the node commands; never hand-write or hand-edit them.
-      node -e '
+  # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
+  # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
+  # only from the node commands; never hand-write or hand-edit them.
+  node -e '
 const fs = require("fs");
 const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
 for (const name of ["ledger", "status"]) {
@@ -1748,46 +1763,37 @@ for (const name of ["ledger", "status"]) {
 console.log("marker self-check OK");
 ' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
 
-      # Create-or-update ONLY a report comment this user posted. Never edit the bot's CI
-      # report: that would put hand-posted text under the bot's login (which the CI and
-      # interact approvers trust), and the approve template only judges comments whose
-      # author is a repository writer. A consumer running agent-review-approve.yml with
-      # auto_approve enabled judges the created or edited comment: it approves the PR only
-      # if the report covers the current head and passes.
-      ME=$(gh api user --jq .login)
-      EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq --arg me "$ME" 'map(select(.user.login == $me) | select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
-        2>/dev/null | head -n1)
-      if [ -n "$EXISTING" ]; then
-        gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md \
-          && echo "✅ Updated your existing review comment ($EXISTING)"
-      else
-        gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md \
-          && echo "✅ Review posted"
-      fi
-    fi
-    ;;
-  3)
-    if [ "$FIX_COUNT" -gt 0 ]; then
-      cat /tmp/fix_summary.txt
-      # DRY RUN — prints every fix, applies nothing.
-      bash /tmp/automated_fixes/apply_all.sh
-      echo ""
-      echo "These scripts are model-generated from PR content and UNTRUSTED."
-      echo "After reading each one: bash /tmp/automated_fixes/apply_all.sh --yes"
-      echo "Then: git diff   (undo with: git checkout .)"
-    else
-      echo "No suggested fixes available"
-    fi
-    ;;
-  4) cat /tmp/review_impact.json ;;
-  5)
-    echo "Report saved to: /tmp/agent_review_report.md"
-    echo "Metrics saved to: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"
-    ;;
-  *) echo "Exiting..." ;;
-esac
+  # Create-or-update ONLY a report comment this user posted. Never edit the bot's CI
+  # report: that would put hand-posted text under the bot's login (which the CI and
+  # interact approvers trust), and the approve template only judges comments whose
+  # author is a repository writer. A consumer running agent-review-approve.yml with
+  # auto_approve enabled judges the created or edited comment: it approves the PR only
+  # if the report covers the current head and passes.
+  # gh's --jq takes exactly one expression (no --arg): interpolate the login.
+  ME=$(gh api user --jq .login)
+  EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+    --jq "map(select(.user.login == \"$ME\") | select(.body | contains(\"<!-- agent-review -->\"))) | first | .id // empty" \
+    2>/dev/null | head -n1)
+  if [ -n "$EXISTING" ]; then
+    gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md >/dev/null \
+      && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt \
+      || echo "❌ post failed — could not update comment $EXISTING; report left at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+  else
+    gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md >/dev/null \
+      && echo "✅ Review posted to PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt \
+      || echo "❌ post failed — could not comment on PR #$PR_NUMBER; report left at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+  fi
+fi
+
+# What the PR shows, in the terminal: everything before the collapsed appendix.
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+awk '/^<details>/{exit} {print}' /tmp/agent_review_report.md
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 ```
+
+The metrics dashboard (`$REVIEW_DIR/metrics/PR_<n>_metrics.md`), the dependency impact
+(`/tmp/review_impact.json`), and the fix dry-run (`bash /tmp/automated_fixes/apply_all.sh`,
+which prints and applies nothing) are optional follow-ups named in Stage 8; do not stop to ask.
 
 Never run `apply_all.sh --yes` on the user's behalf without an explicit, informed "yes" — the fix
 scripts are model-generated from PR content and are untrusted input.
@@ -1830,7 +1836,7 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📄 /tmp/agent_review_report.md
 📊 .claude/review/metrics/ (skipped in CI mode)
-[CI] 💬 Posted to PR #[N]
+💬 [contents of /tmp/agent_review_post_result.txt]
 
 **Next Steps**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1838,6 +1844,8 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 2. Review [FIX_COUNT] suggested fixes before applying any
 3. Check [N] high-impact dependency changes
 4. Mark finding outcomes and run `agent-review learn` to grow the learning layer
+5. Optional: cat $REVIEW_DIR/metrics/PR_[N]_metrics.md · cat /tmp/review_impact.json · bash /tmp/automated_fixes/apply_all.sh (dry run)
+6. /agent-review:address fix 1,2 dismiss 3 [code]: reason — then /agent-review:re-review
 [IF the installed plugin is older than main (local runs only):]
 ⬆️  agent-review update available: you are on v[PLUGIN_VERSION], latest is v[LATEST]
    → run `/plugin marketplace update cruglobal`

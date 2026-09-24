@@ -214,10 +214,13 @@ context:
   enabled: false
   manifest: context/repositories.json
 
-# Stay label-gated and non-approving until `agent-review rollout` says the
-# seeded suite and real PR dismissal telemetry meet these gates.
+# Reports approve by default (`advisory`). Set `shadow` to post advice only; the
+# review workflow refuses a caller whose rollout_mode disagrees with this value,
+# so change the caller templates and this key together. `agent-review rollout`
+# still scores the seeded suite and dismissal telemetry for teams that want the
+# gate before turning approval on.
 rollout:
-  mode: shadow
+  mode: advisory
   label: agent-review
   minimum_evaluated_runs: 50
   minimum_dispositions: 30
