@@ -1,4 +1,4 @@
-# agent-review-template-version: 0.6.2
+# agent-review-template-version: 0.7.0
 name: agent-review
 on:
   pull_request:
@@ -19,6 +19,9 @@ jobs:
     with:
       mode: auto
       rollout_mode: shadow
+      # Approve the PR when the CI report passes for the current head. Leave
+      # false until `agent-review rollout` passes and a maintainer decides.
+      auto_approve: false
     secrets:
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
       context_token: ${{ secrets.AGENT_REVIEW_CONTEXT_TOKEN }}

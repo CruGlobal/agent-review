@@ -6,7 +6,8 @@ description: Refresh this repo's copied agent-review workflow files to the lates
 # Update agent-review workflow files
 
 Consumer repos carry copies of the `templates/workflows/` files (`agent-review.yml`,
-`agent-review-interact.yml`, `agent-review-readiness.yml`). Those copies go stale when the
+`agent-review-interact.yml`, `agent-review-readiness.yml`, `agent-review-approve.yml`). Those copies go
+stale when the
 templates change upstream. This skill replaces them with the latest templates while carrying
 over the repo's own choices, shows the diff, and offers to open a PR.
 
@@ -26,7 +27,7 @@ may itself be the stale thing. `gh` auth is already required by the rest of the 
 set -e
 UPDATE_DIR=/tmp/agent_review_templates
 rm -rf "$UPDATE_DIR" && mkdir -p "$UPDATE_DIR"
-for f in agent-review.yml agent-review-interact.yml agent-review-readiness.yml; do
+for f in agent-review.yml agent-review-interact.yml agent-review-readiness.yml agent-review-approve.yml; do
   gh api "repos/CruGlobal/agent-review/contents/templates/workflows/$f" --jq .content \
     | base64 -d > "$UPDATE_DIR/$f"
 done
@@ -43,8 +44,9 @@ For each fetched template, look for the matching file in `.github/workflows/`:
 - **File exists**: read its `# agent-review-template-version:` marker (missing marker =
   pre-0.3.0). If the marker already equals the latest version, report "up to date" and skip it.
 - **File missing**: the repo never installed that piece. Offer it, don't force it — ask the
-  user whether to add it, and default to skipping `agent-review-readiness.yml` unless they want
-  the rollout gate.
+  user whether to add it, and default to skipping `agent-review-readiness.yml` (the rollout
+  gate) and `agent-review-approve.yml` (approval of locally posted reports; a stronger trust
+  grant than the CI path) unless they want them.
 
 If every file is current, say so and stop here.
 
@@ -53,7 +55,9 @@ If every file is current, say so and stop here.
 The fresh template is the base; the repo's existing file is the source of truth for these knobs
 only. Read each from the existing file and apply it into the fresh copy:
 
-- **`auto_approve`** (interact): keep the repo's value (e.g. `mpdx_api` runs `false`).
+- **`auto_approve`** (review, interact, and approve): keep the repo's value on each caller
+  (e.g. `mpdx_api` runs `false` everywhere). A repo that expresses it as
+  `${{ vars.SOMETHING == 'true' }}` keeps that expression verbatim.
 - **Secret mappings**: keep the repo's right-hand sides for `anthropic_api_key:` and
   `context_token:` (some repos use a different secret name than `ANTHROPIC_API_KEY`).
 - **The review trigger gate** (review): if the repo customized the `if:` label gate or the

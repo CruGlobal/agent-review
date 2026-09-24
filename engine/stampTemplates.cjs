@@ -10,7 +10,7 @@ const { join } = require('node:path');
 
 const ROOT = join(__dirname, '..');
 const MANIFEST = join(ROOT, 'templates/workflows/template-manifest.json');
-const TEMPLATES = ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml'];
+const TEMPLATES = ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml', 'agent-review-approve.yml'];
 
 const version = JSON.parse(readFileSync(join(ROOT, '.claude-plugin/plugin.json'), 'utf8')).version;
 const manifest = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, 'utf8')) : {};

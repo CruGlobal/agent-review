@@ -484,45 +484,12 @@ jobs:
             --body-file "$RUNNER_TEMP/address-final/summary.md" >/dev/null
       - name: Approve when the ledger is fully addressed and the change is reversible
         if: inputs.auto_approve
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ inputs.pr_number }}
-          REPO: ${{ github.repository }}
-        run: |
-          BODY=$(gh api "repos/$REPO/issues/$PR/comments" --paginate \
-            | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .body // empty')
-          [ -n "$BODY" ] || { echo "No report found — not approving."; exit 0; }
-          ROLLOUT=$(printf '%s' "$BODY" | tr -d '\r' \
-            | sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' | head -1)
-          if [ "$ROLLOUT" = "shadow" ] || [ -z "$ROLLOUT" ]; then
-            echo "Rollout is ${ROLLOUT:-unmarked} — shadow/unmarked reports never auto-approve."
-            exit 0
-          fi
-          REPORT_HEAD=$(printf '%s' "$BODY" | tr -d '\r' \
-            | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
-          CURRENT_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
-          if [ -z "$REPORT_HEAD" ] || [ "$REPORT_HEAD" != "$CURRENT_HEAD" ]; then
-            echo "Report covers ${REPORT_HEAD:-no head} but current head is $CURRENT_HEAD — waiting for incremental re-review."
-            exit 0
-          fi
-          STATUS=$(printf '%s' "$BODY" | tr -d '\r' \
-            | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
-          if [ -n "$STATUS" ]; then
-            PASS=$(printf '%s' "$STATUS" | jq -r '.pass // false')
-            IRREVERSIBLE=$(printf '%s' "$STATUS" | jq -r '.irreversible // false')
-            [ "$PASS" = "true" ] || { echo "Status: not passing — not approving."; exit 0; }
-            if [ "$IRREVERSIBLE" = "true" ]; then
-              echo "Status: passing but irreversible — human approval required, not auto-approving."
-              exit 0
-            fi
-          elif printf '%s' "$BODY" | grep -q -- '- \[ \]'; then
-            echo "Ledger still has open items — not approving."
-            exit 0
-          fi
-          if ! gh pr review "$PR" --repo "$REPO" --approve \
-            --body "Auto-approved: every agent-review finding is fixed or dismissed with a reason, and the change is reversible."; then
-            echo "::warning::Approval failed — enable 'Allow GitHub Actions to create and approve pull requests' in repo/org Actions settings."
-          fi
+        uses: CruGlobal/agent-review/.github/actions/approve@main
+        with:
+          pr_number: ${{ inputs.pr_number }}
+          approval_body: >-
+            Auto-approved: every agent-review finding is fixed or dismissed with
+            a reason, and the change is reversible.
       - name: Delete the successful handoff artifact
         if: success()
         env:

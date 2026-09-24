@@ -1748,12 +1748,19 @@ for (const name of ["ledger", "status"]) {
 console.log("marker self-check OK");
 ' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
 
+      # Create-or-update ONLY a report comment this user posted. Never edit the bot's CI
+      # report: that would put hand-posted text under the bot's login (which the CI and
+      # interact approvers trust), and the approve template only judges comments whose
+      # author is a repository writer. A consumer running agent-review-approve.yml with
+      # auto_approve enabled judges the created or edited comment: it approves the PR only
+      # if the report covers the current head and passes.
+      ME=$(gh api user --jq .login)
       EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
+        --jq --arg me "$ME" 'map(select(.user.login == $me) | select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
         2>/dev/null | head -n1)
       if [ -n "$EXISTING" ]; then
         gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md \
-          && echo "✅ Updated existing review comment ($EXISTING)"
+          && echo "✅ Updated your existing review comment ($EXISTING)"
       else
         gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md \
           && echo "✅ Review posted"

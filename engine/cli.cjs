@@ -32,6 +32,7 @@ const {
 } = require('./learningsStore.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
+const { evaluateApproval } = require('./approval.cjs');
 const {
   MAX_RESULT_BYTES,
   prepareAddressRequest,
@@ -205,6 +206,7 @@ const USAGE = `usage: agent-review <command>
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
+  approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -515,6 +517,16 @@ function main(rawArgv) {
           2,
         ),
       );
+      return 0;
+    }
+    case 'approval': {
+      const reportPath = flag(rest, '--report');
+      const head = flag(rest, '--head');
+      if (!reportPath || !head) {
+        out('usage: agent-review approval --report <f> --head <sha>');
+        return 1;
+      }
+      out(JSON.stringify(evaluateApproval(readFileSync(reportPath, 'utf8'), { head })));
       return 0;
     }
     case 'evidence': {

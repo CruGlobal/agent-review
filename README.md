@@ -151,6 +151,26 @@ Maintainer-authorized dismissals still update the canonical ledger, but they do 
 `learnings/feedback.jsonl` — that file is committed alongside the fix, so the learning loop
 records outcomes from same-repository PRs only.
 
+The review workflow can also approve on its own: pass `auto_approve: true` from
+`agent-review.yml` and, after the CI review publishes a passing report for the PR's current
+head, an `approve` job approves the PR. It judges only the bot-authored report, never a
+hand-typed comment. Reports marked `shadow` never approve, an irreversible change never
+auto-approves, and a report for an older head is ignored until the incremental re-review lands.
+
+To approve reports that developers run locally and post with the review's "Post review to
+GitHub" option, copy `templates/workflows/agent-review-approve.yml` too. It fires when a PR
+comment starting with the report marker is created or edited (a re-post edits the poster's own
+earlier comment), requires the poster to hold repository write access — the same bar the
+interact workflow applies to `@claude fix` — and applies the same rules. Because that report is
+authored by the poster rather than the bot, enabling `auto_approve` there is a
+stronger trust grant than the CI path — a writer could compose a passing marker comment for the
+current head.
+In every path the bot approves regardless of who authored the PR; keep a branch-protection rule
+requiring a non-author human approval if that matters to you. All three approval paths share one
+rule (`agent-review approval`) and one composite action (`.github/actions/approve`), fail closed,
+never request changes, never fail the calling job, and report an approval API failure as a
+warning.
+
 ## Testing CI changes locally
 
 ```
@@ -176,7 +196,7 @@ Two things can go stale in a consumer repo, and each has its own update path:
 
 CI never needs the first — the workflows pull the plugin fresh from this repo on every run. The
 second refreshes the repo's copied caller workflows to the latest templates while preserving the
-repo's own settings (`auto_approve`, secret names, label gates, pinned refs), shows the diff, and
+repo's own settings (`auto_approve` on each caller, secret names, label gates, pinned refs), shows the diff, and
 offers a PR. Reviews flag both automatically: the report gains a footer when a repo's workflow
 files carry an older `# agent-review-template-version:` marker, and local runs note when the
 installed plugin is behind the latest version.
