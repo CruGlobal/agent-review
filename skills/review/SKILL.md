@@ -1757,6 +1757,8 @@ console.log("marker self-check OK");
       else
         gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md \
           && echo "✅ Review posted"
+      # A consumer running agent-review-approve.yml with auto_approve enabled judges this
+      # comment: it approves the PR only if the report covers the current head and passes.
       fi
     fi
     ;;

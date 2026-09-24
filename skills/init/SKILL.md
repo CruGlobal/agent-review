@@ -34,6 +34,7 @@ THIS skill file — `skills/init/SKILL.md` — so the plugin root is two levels 
 - consumer CI workflow: `../../templates/workflows/agent-review.yml`
 - fix/dismiss interaction workflow: `../../templates/workflows/agent-review-interact.yml`
 - rollout-readiness workflow: `../../templates/workflows/agent-review-readiness.yml`
+- local-post approval workflow (optional): `../../templates/workflows/agent-review-approve.yml`
 - structural-rule starter: `../../templates/static/`
 - seeded-evaluation format: `../../templates/evals/`
 - SHA-pinned context manifest format: `../../templates/context/repositories.json`
@@ -620,8 +621,10 @@ Present the complete proposal:
    related repositories with pinned SHAs/path budgets.
 6. **Evaluation + rollout** — all seeded/clean cases, threshold values, and the fact that shadow
    mode cannot approve or block. Show the manual readiness workflow.
-7. **CI workflows** — the review, fix/dismiss interaction, and readiness workflow contents and
-   where they land. Call out that interaction auto-approval is disabled in shadow mode.
+7. **CI workflows** — the review, fix/dismiss interaction, readiness, and (optional) local-post
+   approval workflow contents and where they land. Call out that every `auto_approve` is
+   `false` in shadow mode, and that the approval workflow trusts a collaborator's posted
+   report rather than the bot's.
 8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
 9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`.

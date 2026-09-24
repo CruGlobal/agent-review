@@ -1191,3 +1191,16 @@ test('the approve template is opt-in, created-only, collaborator-gated, and the 
   const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
   assert.ok(review.includes('auto_approve: false'), 'the review caller must show the opt-in knob');
 });
+
+test('the docs and skills know the approve template and the review-side auto_approve knob', () => {
+  const update = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  assert.ok(update.includes('agent-review-approve.yml'), 'update-files must fetch and offer the approve template');
+  assert.ok(update.includes('review, interact, and approve'), 'auto_approve is carried over on every caller');
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  assert.ok(init.includes('../../templates/workflows/agent-review-approve.yml'));
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(review.includes('agent-review-approve.yml'), 'the post-to-GitHub handler must say a posted report can trigger approval');
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.ok(readme.includes('agent-review-approve.yml'));
+  assert.ok(readme.includes('stronger trust grant'), 'README must state the local-post trust boundary');
+});
