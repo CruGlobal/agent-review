@@ -1,0 +1,23 @@
+# agent-review-template-version: 0.7.0
+name: agent-review approve
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  approve:
+    # A review run locally and posted with "Post review to GitHub" starts with
+    # the agent-review marker. Only trusted collaborators' posts count, shadow
+    # reports never approve, and the report must cover the PR's current head.
+    # Enabling auto_approve here trusts the poster's report — a stronger grant
+    # than the CI path, which judges only the bot's own report.
+    if: >-
+      github.event.issue.pull_request != null &&
+      startsWith(github.event.comment.body, '<!-- agent-review -->') &&
+      contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    permissions:
+      pull-requests: write
+    uses: CruGlobal/agent-review/.github/workflows/approve.yml@main
+    with:
+      pr_number: ${{ github.event.issue.number }}
+      comment_id: ${{ github.event.comment.id }}
+      auto_approve: false

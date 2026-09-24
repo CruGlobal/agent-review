@@ -1,4 +1,4 @@
-# agent-review-template-version: 0.6.2
+# agent-review-template-version: 0.7.0
 name: agent-review rollout readiness
 on:
   workflow_dispatch:

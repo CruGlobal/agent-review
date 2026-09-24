@@ -307,7 +307,7 @@ test('the plugin version is the single source of truth and every surface agrees'
   // Every copied workflow template carries a version marker equal to the plugin
   // version. This deliberately forces a version bump whenever a template
   // changes — the marker is what lets a review flag stale consumer copies.
-  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml']) {
+  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml', 'agent-review-approve.yml']) {
     const body = readFileSync(join(ROOT, 'templates/workflows', name), 'utf8');
     const marker = body.match(/^# agent-review-template-version: (\d+\.\d+\.\d+)$/m);
     assert.ok(marker, `${name} must carry an agent-review-template-version marker`);
@@ -320,7 +320,7 @@ test('the plugin version is the single source of truth and every surface agrees'
   const manifest = JSON.parse(readFileSync(join(ROOT, 'templates/workflows/template-manifest.json'), 'utf8'));
   const entry = manifest[pluginVersion];
   assert.ok(entry, `template-manifest.json has no entry for v${pluginVersion} — bump the version, then npm run stamp-templates`);
-  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml']) {
+  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml', 'agent-review-approve.yml']) {
     const hash = createHash('sha256').update(readFileSync(join(ROOT, 'templates/workflows', name))).digest('hex');
     assert.equal(
       entry[name],
@@ -1176,4 +1176,18 @@ test('approve.yml judges the posted comment, defaults auto_approve off, and re-c
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.equal(step.with.report_comment_id, '${{ inputs.comment_id }}');
   assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
+});
+
+test('the approve template is opt-in, created-only, collaborator-gated, and the review caller shows the knob', () => {
+  const template = readFileSync(join(ROOT, 'templates/workflows/agent-review-approve.yml'), 'utf8');
+  assert.ok(template.includes('auto_approve: false'));
+  assert.ok(template.includes('types: [created]'), 'edited must never re-issue an approval');
+  assert.ok(!/types: \[[^\]]*edited/.test(template));
+  assert.ok(template.includes("startsWith(github.event.comment.body, '<!-- agent-review -->')"));
+  assert.ok(template.includes('"OWNER","MEMBER","COLLABORATOR"'));
+  assert.ok(template.includes('uses: CruGlobal/agent-review/.github/workflows/approve.yml@main'));
+  assert.ok(template.includes('comment_id: ${{ github.event.comment.id }}'));
+  assert.match(template, /permissions:\n      pull-requests: write/);
+  const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
+  assert.ok(review.includes('auto_approve: false'), 'the review caller must show the opt-in knob');
 });
