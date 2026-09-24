@@ -107,12 +107,22 @@ function parseCommand(body, { lenient = false, ledger = null } = {}) {
   // so the command is the first non-empty line once the mention is stripped. Lenient
   // input is the whole argument string.
   const command = lenient
-    ? raw.replace(/^\s*@claude\b/i, '').replace(/\s+/g, ' ').trim()
+    ? raw.replace(/^\s*@claude\b/i, '').trim()
     : (raw.replace(/^\s*@claude\b/i, '').split(/\r?\n/).find((line) => line.trim()) || '').trim();
   if (!command) throw new Error('address command is empty');
   if (command.length > 2000) throw new Error('address command is too long');
+  // Lenient: `;` and newlines always separate clauses. Within a segment, a
+  // dismissal that carries `[code]: reason` is one clause to the end of the
+  // segment, so a reason may say "will fix later" without spawning a fix; any
+  // other segment splits before each keyword so `fix 1 dismiss 2 [x]: r` works.
   const clauses = lenient
-    ? command.split(/\s*;\s*|\s*,?\s+(?=(?:fix|dismiss|dimiss)\b)/i).filter(Boolean)
+    ? command
+        .split(/\s*;\s*|\r?\n/)
+        .map((seg) => seg.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .flatMap((seg) => (/^(?:dismiss|dimiss):?\s+#?\d+(?:\s*,\s*#?\d+)*\s+\[[a-z-]+\]\s*:/i.test(seg)
+          ? [seg]
+          : seg.split(/\s*,?\s+(?=(?:fix|dismiss|dimiss)\b)/i).filter(Boolean)))
     : command.split(/\s*;\s*/);
   const operations = [];
   for (const clause of clauses) {

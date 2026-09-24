@@ -40,8 +40,10 @@ re-reviews cheap.
    ```bash
    . /tmp/yolo_env.sh
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+   ME=$(gh api user --jq .login 2>/dev/null || echo "")
    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' | tr -d '\r' \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" | tr -d '\r' \
      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 > /tmp/yolo_ledger.json
    OPEN=$(node -e 'const l=require("/tmp/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
    echo "open blockers: $OPEN"
@@ -65,16 +67,19 @@ re-reviews cheap.
    ```bash
    . /tmp/yolo_env.sh
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+   ME=$(gh api user --jq .login 2>/dev/null || echo "")
    STATUS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' | tr -d '\r' \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" | tr -d '\r' \
      | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
    PASS=$(printf '%s' "$STATUS" | jq -r '.pass // false'); IRREVERSIBLE=$(printf '%s' "$STATUS" | jq -r '.irreversible // false')
    echo "pass=$PASS irreversible=$IRREVERSIBLE"
    if [ "$PASS" = "true" ] && [ "$IRREVERSIBLE" != "true" ]; then
      for i in $(seq 1 9); do
+       # gh's --jq takes one expression (no --arg); GraphQL reports the bot as github-actions.
        APPROVED=$(gh pr view "$PR_NUMBER" --json reviews \
-         --jq --arg since "$START_TS" '[.reviews[] | select(.author.login == "github-actions[bot]") | select(.state == "APPROVED") | select(.submittedAt > $since)] | length')
-       [ "${APPROVED:-0}" -gt 0 ] && { echo "✅ Approved by github-actions[bot]"; break; }
+         --jq "[.reviews[] | select(.author.login == \"github-actions\" or .author.login == \"github-actions[bot]\") | select(.state == \"APPROVED\") | select(.submittedAt > \"$START_TS\")] | length")
+       [ "${APPROVED:-0}" -gt 0 ] && { echo "✅ Approved by the github-actions bot"; break; }
        [ "$i" -lt 9 ] && sleep 20
      done
      [ "${APPROVED:-0}" -gt 0 ] || echo "⏳ Ledger passes but no bot approval arrived within 3 minutes — this repo may not run agent-review-approve.yml with auto_approve on, or the workflow is still queued. The PR is ready for a human."

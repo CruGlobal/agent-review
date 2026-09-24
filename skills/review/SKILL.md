@@ -223,8 +223,10 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
       | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   else
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
+    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+    ME=$(gh api user --jq .login 2>/dev/null || echo "")
     LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
       | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   fi
   if [ -n "$LAST_REVIEWED" ] \
@@ -603,8 +605,10 @@ if [ "$MODE" = "auto" ]; then
       echo '[]' > /tmp/previous_agent_review_ledger.json
       echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+      # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+      ME=$(gh api user --jq .login 2>/dev/null || echo "")
       gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
         | tr -d '\r' > /tmp/previous_agent_review_comment.md
       sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
       [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
@@ -1455,15 +1459,17 @@ fi
 
 # --- Build the findings ledger ---
 echo '[]' > /tmp/previous_agent_review_ledger.json
-if [ -n "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ]; then
+if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
   else
     REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
+    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+    ME=$(gh api user --jq .login 2>/dev/null || echo "")
     gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" \
       2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
@@ -1723,13 +1729,19 @@ No menu. When a PR resolves, post the report now; either way print what a reader
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
+: > /tmp/agent_review_post_result.txt
 if [ -z "${PR_NUMBER:-}" ]; then
   echo "💾 Saved locally, no PR — report at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
 else
   REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+  # The rollout marker decides whether an approver may act on this report. Locally it comes
+  # from the repo's trusted config (rollout.mode), so `shadow` there really does turn
+  # approval off; CI sets AGENT_REVIEW_ROLLOUT_MODE from the caller, which must agree.
+  ROLLOUT=$(agent-review config get rollout.mode 2>/dev/null || echo "")
+  case "$ROLLOUT" in shadow|advisory|enforce) ;; *) ROLLOUT="advisory" ;; esac
   { echo '<!-- agent-review -->'
     [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
-    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
+    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-$ROLLOUT} -->"
     [ -s /tmp/agent_review_ledger.json ] \
       && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
     [ -s /tmp/agent_review_status.json ] \
@@ -1757,16 +1769,19 @@ console.log("marker self-check OK");
   # author is a repository writer. A consumer running agent-review-approve.yml with
   # auto_approve enabled judges the created or edited comment: it approves the PR only
   # if the report covers the current head and passes.
+  # gh's --jq takes exactly one expression (no --arg): interpolate the login.
   ME=$(gh api user --jq .login)
   EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-    --jq --arg me "$ME" 'map(select(.user.login == $me) | select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
+    --jq "map(select(.user.login == \"$ME\") | select(.body | contains(\"<!-- agent-review -->\"))) | first | .id // empty" \
     2>/dev/null | head -n1)
   if [ -n "$EXISTING" ]; then
     gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md >/dev/null \
-      && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt
+      && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt \
+      || echo "❌ post failed — could not update comment $EXISTING; report left at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
   else
     gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md >/dev/null \
-      && echo "✅ Review posted to PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt
+      && echo "✅ Review posted to PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt \
+      || echo "❌ post failed — could not comment on PR #$PR_NUMBER; report left at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
   fi
 fi
 

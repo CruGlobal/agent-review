@@ -18317,10 +18317,10 @@ var require_addressState = __commonJS({
     function parseCommand(body, { lenient = false, ledger = null } = {}) {
       const raw = String(body || "");
       if (!raw.trim() || raw.length > 1e4) throw new Error("address command is empty or too long");
-      const command = lenient ? raw.replace(/^\s*@claude\b/i, "").replace(/\s+/g, " ").trim() : (raw.replace(/^\s*@claude\b/i, "").split(/\r?\n/).find((line) => line.trim()) || "").trim();
+      const command = lenient ? raw.replace(/^\s*@claude\b/i, "").trim() : (raw.replace(/^\s*@claude\b/i, "").split(/\r?\n/).find((line) => line.trim()) || "").trim();
       if (!command) throw new Error("address command is empty");
       if (command.length > 2e3) throw new Error("address command is too long");
-      const clauses = lenient ? command.split(/\s*;\s*|\s*,?\s+(?=(?:fix|dismiss|dimiss)\b)/i).filter(Boolean) : command.split(/\s*;\s*/);
+      const clauses = lenient ? command.split(/\s*;\s*|\r?\n/).map((seg) => seg.replace(/\s+/g, " ").trim()).filter(Boolean).flatMap((seg) => /^(?:dismiss|dimiss):?\s+#?\d+(?:\s*,\s*#?\d+)*\s+\[[a-z-]+\]\s*:/i.test(seg) ? [seg] : seg.split(/\s*,?\s+(?=(?:fix|dismiss|dimiss)\b)/i).filter(Boolean)) : command.split(/\s*;\s*/);
       const operations = [];
       for (const clause of clauses) {
         let match = lenient ? clause.match(/^fix:?\s+(all|blockers)$/i) : null;

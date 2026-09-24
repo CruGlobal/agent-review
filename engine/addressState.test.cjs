@@ -404,3 +404,17 @@ test('parseCommand strict mode still rejects every lenient form', () => {
     assert.throws(() => parseCommand(cmd), Error, cmd);
   }
 });
+
+test('parseCommand lenient keeps keyword words inside a dismissal reason', () => {
+  const kept = parseCommand('dismiss 2 [deferred]: will address after we fix 5', { lenient: true });
+  assert.deepEqual(kept.map((o) => [o.n, o.action, o.reason]), [[2, 'dismiss', 'will address after we fix 5']]);
+  const later = parseCommand('dismiss 2 [other]: we will fix later', { lenient: true });
+  assert.equal(later[0].reason, 'we will fix later');
+  // A newline or ; still separates a following clause.
+  const two = parseCommand('dismiss 2 [other]: we will fix later\nfix 3', { lenient: true });
+  assert.deepEqual(two.map((o) => [o.n, o.action]), [[2, 'dismiss'], [3, 'fix']]);
+  const semi = parseCommand('dismiss 2 [other]: need to dismiss this; fix 3', { lenient: true });
+  assert.deepEqual(semi.map((o) => [o.n, o.action]), [[2, 'dismiss'], [3, 'fix']]);
+  // Compact mixed clauses without a reason still split on the keyword.
+  assert.deepEqual(parseCommand('fix 1 dismiss 2 [other]: x', { lenient: true }).map((o) => o.action), ['fix', 'dismiss']);
+});

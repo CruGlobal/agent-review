@@ -122,9 +122,12 @@ PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 [ -n "$PR_NUMBER" ] || { echo "❌ No PR context — the ledger lives on a PR comment."; exit 1; }
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 
-# The oldest marked comment is the canonical report (same rule as the review skill).
+# Canonical report: this user's own marked comment when one exists (a local review or
+# re-review writes it), else the oldest marked comment (same rule as the review skill).
+# Local canonical comment: this user's own marked comment when one exists, else the oldest.
+ME=$(gh api user --jq .login 2>/dev/null || echo "")
 COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-  --jq 'map(select(.body | startswith("<!-- agent-review -->"))) | first | .id // empty' | head -n1)
+  --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .id // empty" | head -n1)
 [ -n "$COMMENT_ID" ] || { echo "❌ No marked review report on PR #$PR_NUMBER."; exit 1; }
 
 gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > /tmp/address_comment.md
@@ -231,7 +234,8 @@ FIX_SHA=$(git rev-parse --short HEAD)
 echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh
 ```
 
-Confirm with the user before pushing. The push triggers an incremental re-review of exactly these
+Confirm with the user before pushing. In argument mode, push without confirming: the argument is
+the instruction, and yolo depends on it. The push triggers an incremental re-review of exactly these
 commits — that is the verification loop, not a cost bug.
 
 ## Stage 3 — Update the ledger
