@@ -113,7 +113,7 @@ To have CI review a PR without anyone typing anything, add the `agent-review` la
 | `rollout_mode` / `rollout.mode` | `agent-review.yml` **and** `.claude/review/config.yml`, together | `advisory` reports can approve. `shadow` reports are advice only and never approve. The two must match or CI refuses to run. | `advisory` |
 | The `agent-review` label | On a PR | Whether the **CI** review runs on that PR (it costs money). Reviews you run from the terminal ignore the label. | Only labelled PRs get a CI review |
 
-Reports approve by default. To stop approvals in a repo, set `auto_approve: false` in
+The robot approves by default. To stop approvals in a repo, set `auto_approve: false` in
 `agent-review-approve.yml` (terminal reviews), `agent-review.yml` (CI reviews), or both.
 
 ## Questions people ask
