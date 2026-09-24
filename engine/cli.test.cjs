@@ -450,3 +450,30 @@ test('planTmpPath is stable per ROOT, distinct across ROOTs, and namespaced', ()
   assert.notEqual(a1, b);
   assert.match(a1, /agent-review-plan-[0-9a-f]{12}\.json$/);
 });
+
+test('approval subcommand judges a report file against a head SHA', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-approval-'));
+  const head = 'abc123def4567890abc123def4567890abc12345';
+  const file = join(dir, 'report.md');
+  writeFileSync(file, [
+    '<!-- agent-review -->',
+    '<!-- agent-review-rollout: advisory -->',
+    `<!-- agent-review-head: ${head} -->`,
+    `<!-- agent-review-status: ${JSON.stringify({ v: 1, head, pass: true, irreversible: false })} -->`,
+    '',
+    'report',
+  ].join('\n'));
+  const ok = run(['approval', '--report', file, '--head', head]);
+  assert.equal(ok.code, 0);
+  assert.deepEqual(JSON.parse(ok.s), {
+    approve: true,
+    reason: `report for ${head} passes with no open blockers and the change is reversible`,
+  });
+  const stale = run(['approval', '--report', file, '--head', '0000000000000000000000000000000000000000']);
+  assert.equal(stale.code, 0);
+  assert.equal(JSON.parse(stale.s).approve, false);
+  const usage = run(['approval', '--report', file]);
+  assert.equal(usage.code, 1);
+  assert.match(usage.s, /usage: agent-review approval/);
+  rmSync(dir, { recursive: true, force: true });
+});

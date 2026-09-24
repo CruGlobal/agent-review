@@ -18176,6 +18176,61 @@ var require_reportState = __commonJS({
   }
 });
 
+// engine/approval.cjs
+var require_approval = __commonJS({
+  "engine/approval.cjs"(exports2, module2) {
+    "use strict";
+    var MARKER = "<!-- agent-review -->";
+    var ROLLOUTS_THAT_APPROVE = /* @__PURE__ */ new Set(["advisory", "enforce"]);
+    function markerLine(text, name) {
+      const m = text.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, "m"));
+      return m ? m[1].trim() : null;
+    }
+    function no(reason) {
+      return { approve: false, reason };
+    }
+    function evaluateApproval(body, { head } = {}) {
+      const expected = String(head || "").trim().toLowerCase();
+      if (!expected) return no("no expected head SHA supplied");
+      const text = String(body || "").replace(/\r/g, "");
+      if (!text.startsWith(MARKER)) return no("not an agent-review report");
+      const rollout = markerLine(text, "rollout");
+      if (!rollout) return no("report carries no rollout marker");
+      if (rollout === "shadow") return no("shadow reports never approve");
+      if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return no(`unknown rollout mode "${rollout}"`);
+      const reportHead = markerLine(text, "head");
+      if (!reportHead) return no("report carries no reviewed-head marker");
+      if (reportHead.toLowerCase() !== expected) {
+        return no(`report covers ${reportHead} but the PR head is ${expected}`);
+      }
+      const statusRaw = markerLine(text, "status");
+      if (!statusRaw) return no("report carries no status marker");
+      let status;
+      try {
+        status = JSON.parse(statusRaw);
+      } catch {
+        return no("status marker is not valid JSON");
+      }
+      if (!status || typeof status !== "object" || Array.isArray(status)) {
+        return no("status marker is not an object");
+      }
+      if (status.head !== void 0 && String(status.head).toLowerCase() !== expected) {
+        return no(`status head ${status.head} disagrees with the PR head ${expected}`);
+      }
+      if (status.pass !== true) {
+        const open = Number.isInteger(status.openBlockers) ? status.openBlockers : "unknown";
+        return no(`status is not passing (${open} open blockers)`);
+      }
+      if (status.irreversible === true) return no("change is irreversible; a human must approve");
+      return {
+        approve: true,
+        reason: `report for ${expected} passes with no open blockers and the change is reversible`
+      };
+    }
+    module2.exports = { evaluateApproval, MARKER };
+  }
+});
+
 // engine/addressState.cjs
 var require_addressState = __commonJS({
   "engine/addressState.cjs"(exports2, module2) {
@@ -19354,6 +19409,7 @@ var require_cli = __commonJS({
     } = require_learningsStore();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
+    var { evaluateApproval } = require_approval();
     var {
       MAX_RESULT_BYTES,
       prepareAddressRequest,
@@ -19499,6 +19555,7 @@ var require_cli = __commonJS({
   address prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
+  approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -19789,6 +19846,16 @@ var require_cli = __commonJS({
               2
             )
           );
+          return 0;
+        }
+        case "approval": {
+          const reportPath = flag(rest, "--report");
+          const head = flag(rest, "--head");
+          if (!reportPath || !head) {
+            out("usage: agent-review approval --report <f> --head <sha>");
+            return 1;
+          }
+          out(JSON.stringify(evaluateApproval(readFileSync(reportPath, "utf8"), { head })));
           return 0;
         }
         case "evidence": {
