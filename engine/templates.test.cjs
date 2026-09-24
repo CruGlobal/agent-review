@@ -1104,3 +1104,22 @@ test('the Interactive Menu "Post review to GitHub" choice self-checks the marker
     'choice 2 (re-post) must run the same marker self-check as the CI posting step before posting',
   );
 });
+
+test('the approval gate is one composite action that delegates the decision to the engine', () => {
+  const { parse } = require('yaml');
+  const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
+  assert.equal(action.runs.using, 'composite');
+  assert.deepEqual(Object.keys(action.inputs).sort(), ['approval_body', 'pr_number', 'report_comment_id']);
+  assert.equal(action.inputs.pr_number.required, true);
+  assert.equal(action.inputs.report_comment_id.default, '');
+  const checkout = action.runs.steps.find((s) => s.uses && s.uses.startsWith('actions/checkout@'));
+  assert.equal(checkout.with.repository, 'CruGlobal/agent-review');
+  assert.equal(checkout.with['persist-credentials'], false);
+  const run = action.runs.steps.map((s) => s.run || '').join('\n');
+  assert.ok(run.includes('agent-review.cjs" approval --report'), 'the action must delegate the decision to the engine');
+  assert.ok(run.includes('select(.user.login == "github-actions[bot]")'), 'without a comment id only the bot report counts');
+  assert.ok(run.includes('gh pr review "$PR" --repo "$REPO" --approve'), 'the action posts the approval');
+  assert.ok(!run.includes('--request-changes'), 'the action never requests changes');
+  assert.ok(run.includes('::warning::'), 'an approval API failure is a warning, never a red check');
+  assert.ok(!run.includes("grep -q -- '- \\[ \\]'"), 'the checkbox fallback is gone; the engine decides');
+});
