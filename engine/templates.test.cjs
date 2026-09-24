@@ -1186,9 +1186,9 @@ test('approve.yml judges the posted comment, defaults auto_approve off, and re-c
   assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
 });
 
-test('the approve template is opt-in, fires on created or edited, is collaborator-gated, and the review caller shows the knob', () => {
+test('the approve template is on by default, fires on created or edited, is collaborator-gated, and the review caller shows the knob', () => {
   const template = readFileSync(join(ROOT, 'templates/workflows/agent-review-approve.yml'), 'utf8');
-  assert.ok(template.includes('auto_approve: false'));
+  assert.ok(template.includes('auto_approve: true'));
   // A local re-post edits the poster's own earlier comment, so edited must fire
   // too; the head rule keeps a stale report from approving a newer push.
   assert.ok(template.includes('types: [created, edited]'), 'local re-posts are edits of the poster\'s own comment');
@@ -1198,7 +1198,7 @@ test('the approve template is opt-in, fires on created or edited, is collaborato
   assert.ok(template.includes('comment_id: ${{ github.event.comment.id }}'));
   assert.match(template, /permissions:\n      contents: read\n      pull-requests: write/);
   const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
-  assert.ok(review.includes('auto_approve: false'), 'the review caller must show the opt-in knob');
+  assert.ok(review.includes('auto_approve: true'), 'the review caller approves by default');
 });
 
 test('the docs and skills know the approve template and the review-side auto_approve knob', () => {
@@ -1261,4 +1261,25 @@ test('re-review and yolo-review are thin drivers over the review and address ski
   assert.ok(yolo.includes('cannot approve'), 'must say the session cannot approve');
   assert.ok(yolo.includes('git status --porcelain'), 'clean tree precondition');
   assert.ok(!yolo.includes('apply_all.sh --yes'));
+});
+
+test('templates ship advisory and approving by default, label gate kept, config agrees', () => {
+  const review = readFileSync(join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
+  assert.ok(review.includes('rollout_mode: advisory'));
+  assert.ok(!review.includes('rollout_mode: shadow'));
+  assert.ok(review.includes("contains(github.event.pull_request.labels.*.name, 'agent-review')"), 'label gate stays');
+  const interact = readFileSync(join(ROOT, 'templates/workflows/agent-review-interact.yml'), 'utf8');
+  assert.ok(interact.includes('auto_approve: true'));
+  const config = readFileSync(join(ROOT, 'templates/config.yml'), 'utf8');
+  assert.match(config, /^rollout:\n  mode: advisory$/m, 'the trusted-policy step refuses a caller that disagrees with config');
+  const reusable = readFileSync(join(ROOT, '.github/workflows/interact.yml'), 'utf8');
+  assert.ok(!reusable.includes('Disabled during shadow/advisory rollout'), 'stale description: advisory approves');
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  assert.ok(init.includes('`rollout` — `advisory`'), 'init generates advisory');
+  const update = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  assert.ok(update.includes('rollout.mode'), 'update-files must warn when config still says shadow');
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.ok(readme.includes('## The flow'));
+  assert.ok(readme.includes('/agent-review:yolo-review'));
+  assert.ok(readme.includes('approves by default'), 'README states the default up front');
 });

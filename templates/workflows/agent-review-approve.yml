@@ -1,4 +1,4 @@
-# agent-review-template-version: 0.7.0
+# agent-review-template-version: 0.8.0
 name: agent-review approve
 on:
   issue_comment:
@@ -10,7 +10,7 @@ jobs:
     # which is why edited fires too. Only posts by repository writers count,
     # shadow reports never approve, and the report must cover the PR's current
     # head, so an edited report for an older push cannot approve the newer one.
-    # Enabling auto_approve here trusts a writer's posted report — a stronger
+    # auto_approve here trusts a writer's posted report — a stronger
     # grant than the CI path, which judges only the bot's own report.
     if: >-
       github.event.issue.pull_request != null &&
@@ -23,4 +23,4 @@ jobs:
     with:
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
-      auto_approve: false
+      auto_approve: true

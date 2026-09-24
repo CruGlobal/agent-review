@@ -9,6 +9,20 @@ risky ones get deeper scrutiny. Everything repo-specific — risk globs, agent t
 consuming repo's own `.claude/review/` directory, so the same plugin adapts to any codebase without
 hardcoding anything about it.
 
+## The flow
+
+```
+/agent-review:review                              # review; posts to the PR; prints the findings
+/agent-review:address fix 1,2,3 dismiss 4,5       # fix, push; one prompt for the dismissal reasons
+/agent-review:re-review                           # only the commits since; same comment; prints
+/agent-review:yolo-review                         # all of the above, fixes every blocker, waits for approval
+```
+
+Reports approve by default: the templates ship `rollout_mode: advisory` with `auto_approve: true`
+on every caller, label-gated so a review runs only on PRs carrying the `agent-review` label. A
+posted report that passes for the PR's current head is approved by the bot. Turn it off with
+`auto_approve: false`, or post advice only with `rollout_mode: shadow` (caller and config together).
+
 ## Install
 
 In a Claude Code session:
@@ -114,8 +128,8 @@ agent-review rollout --eval evaluation.json --telemetry telemetry.json --fail-on
 ```
 
 `rollout` fails closed until the configured sample sizes, evaluation thresholds, and dismissal
-thresholds all pass. The generated consumer workflow is label-gated in `shadow` mode, which posts
-advice but never approves. `.github/workflows/readiness.yml` provides the same gate as a reusable,
+thresholds all pass. The generated consumer workflow is label-gated in `advisory` mode and approves by default;
+`shadow` posts advice only and is the opt-in for teams that want this gate first. `.github/workflows/readiness.yml` provides the same gate as a reusable,
 manual GitHub Actions check. Keep a private holdout suite; a benchmark committed beside every
 expected answer is useful for development but cannot protect against prompt overfitting.
 
@@ -133,9 +147,10 @@ It calls this repo's reusable workflow (`.github/workflows/review.yml`), which r
 secret in the consuming repo before merging the workflow — `Settings → Secrets and variables →
 Actions → New repository secret`.
 
-The template starts label-gated with `rollout_mode: shadow`. Add the `agent-review` label to trial
-a PR. Removing the label gate or enabling approval is a separate maintainer decision after the
-readiness command passes; the tool never edits that policy automatically.
+The template starts label-gated in `rollout_mode: advisory` with `auto_approve: true`: add the
+`agent-review` label to review a PR, and a passing report approves it. Dropping the label gate is
+a cost decision; turning approval off is `auto_approve: false` (or `shadow` on both the caller and
+`rollout.mode` in config).
 Copy `templates/workflows/agent-review-interact.yml` as well to enable trusted collaborators to
 use `@claude fix …` and taxonomy-coded `@claude dismiss … [code]: reason` comments; its reusable
 workflow defaults `auto_approve` to false. Address runs split authority across two fresh jobs:

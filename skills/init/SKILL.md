@@ -580,7 +580,7 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
 - `ci` — enabled, retaining the repository's meaningful test/lint/security check names.
 - `context` — enable only when concrete API consumers or contract/documentation repositories were
   identified. Pin each to a full commit SHA and allowlist only relevant paths; never use a branch.
-- `rollout` — leave in label-gated `shadow` mode with the skeleton's sample/quality thresholds.
+- `rollout` — `advisory` (approving) with the skeleton's sample/quality thresholds; propose `shadow` only when the team asked for advice-only.
 - `learning` and `enforcement` — leave at the skeleton's defaults.
 
 Draft a development evaluation suite in memory: at least five realistic seeded defects drawn from
@@ -619,8 +619,9 @@ Present the complete proposal:
    team is least likely to have written down anywhere).
 5. **Deterministic evidence** — every proposed ast-grep rule plus its tests, CI ingestion, and any
    related repositories with pinned SHAs/path budgets.
-6. **Evaluation + rollout** — all seeded/clean cases, threshold values, and the fact that shadow
-   mode cannot approve or block. Show the manual readiness workflow.
+6. **Evaluation + rollout** — all seeded/clean cases, threshold values, and that reports approve
+   by default (`advisory`); how to turn that off (`auto_approve: false` on the callers, or
+   `rollout.mode: shadow` in config). Show the manual readiness workflow as optional.
 7. **CI workflows** — the review, fix/dismiss interaction, readiness, and (optional) local-post
    approval workflow contents and where they land. Call out that every `auto_approve` is
    `false` in shadow mode, and that the approval workflow trusts a collaborator's posted

@@ -58,6 +58,11 @@ only. Read each from the existing file and apply it into the fresh copy:
 - **`auto_approve`** (review, interact, and approve): keep the repo's value on each caller
   (e.g. `mpdx_api` runs `false` everywhere). A repo that expresses it as
   `${{ vars.SOMETHING == 'true' }}` keeps that expression verbatim.
+- **`rollout_mode` vs config**: the fresh `agent-review.yml` says `advisory`. If the repo's
+  `.claude/review/config.yml` still says `rollout.mode: shadow`, say so and offer to change it in
+  the same PR — the reusable workflow refuses a caller whose mode disagrees with the trusted
+  config, so updating the caller alone breaks CI. A repo that deliberately keeps `shadow` keeps
+  it on both sides.
 - **Secret mappings**: keep the repo's right-hand sides for `anthropic_api_key:` and
   `context_token:` (some repos use a different secret name than `ANTHROPIC_API_KEY`).
 - **The review trigger gate** (review): if the repo customized the `if:` label gate or the
