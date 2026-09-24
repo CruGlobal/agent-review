@@ -16,6 +16,7 @@ prose rule docs.
 /agent-review:review quick        # Fast feedback for simple changes
 /agent-review:review deep        # Every enabled agent, maximum depth
 /agent-review:review auto         # Depth picked from the engine's risk score (see Stage 0)
+/agent-review:review auto incremental   # Local incremental: only commits since the last posted review; same PR comment
 /agent-review:review standard ci  # Non-interactive CI run (posts to the PR)
 /agent-review:review auto ci      # CI run, right-sized: skips no-risk diffs, quick for LOW,
                                   # standard for MEDIUM/HIGH, deep for CRITICAL
@@ -25,9 +26,12 @@ prose rule docs.
 escalating-lane count.
 `auto` costs whatever tier it resolves to — and $0 when it skips a no-risk diff.
 
-**Incremental CI re-reviews**: in CI mode the posted report records the reviewed head SHA.
-A later run on the same PR diffs only the commits since that SHA (falling back to a full
-review after a force-push, when the recorded SHA is no longer reachable from the new head).
+**Incremental re-reviews**: the posted report records the reviewed head SHA. In CI, a later run
+on the same PR diffs only the commits since that SHA. Locally, pass `incremental` (any position)
+to do the same: `/agent-review:re-review` is the shorthand for `auto incremental`. Both fall back
+to a full review after a force-push, when the recorded SHA is no longer reachable from the new
+head. Only committed changes are reviewed; if local `HEAD` is ahead of the PR head, push first —
+the review records the PR head and the approval workflow compares against it.
 
 Everything repo-specific — risk globs, agent triggers, rule docs — comes from the consuming
 repo's `.claude/review/` directory. Never hardcode repo specifics in this skill.
@@ -138,6 +142,12 @@ case " $* " in *" ci "*) CI_MODE="true" ;; esac
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
 
+# --- Detect a local incremental request ---
+INCREMENTAL_REQUESTED=""
+case " $* " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac
+[ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
+echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> /tmp/review_env.sh
+
 # --- Verify the repo is set up ---
 agent-review config validate || {
   echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
@@ -190,13 +200,24 @@ EOF
 BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
 HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
 
-# Incremental re-review (CI only): a previous CI run recorded the head SHA it reviewed
-# inside the posted report comment (`<!-- agent-review-head: <sha> -->`). When that SHA is
-# still an ancestor of the current head, review only the commits since it. A force-push
-# breaks ancestry, so the recorded SHA fails the checks below and we fall back to a full
-# review — the history we reviewed no longer exists, so the delta cannot be trusted.
+# Incremental re-review (CI, or the local `incremental` argument): a previous run recorded the
+# head SHA it reviewed inside the posted report comment (`<!-- agent-review-head: <sha> -->`).
+# When that SHA is still an ancestor of the current head, review only the commits since it. A
+# force-push breaks ancestry, so the recorded SHA fails the checks below and we fall back to a
+# full review — the history we reviewed no longer exists, so the delta cannot be trusted.
+# Locally the canonical comment may be the bot's CI report; its ledger is still the previous
+# state, and the merged report is posted as this user's own comment
+# (the bot's comment remains the CI ledger).
 INCREMENTAL="" LAST_REVIEWED=""
-if [ -n "$CI_MODE" ] && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
+if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
+  LOCAL_HEAD=$(git rev-parse HEAD)
+  if [ -n "$HEAD_REF" ] && [ "$LOCAL_HEAD" != "$HEAD_REF" ] && git merge-base --is-ancestor "$HEAD_REF" "$LOCAL_HEAD" 2>/dev/null; then
+    echo "❌ Local HEAD is ahead of the PR head ($HEAD_REF) — push first, then re-run. The review records the PR head and the approval workflow compares against it."
+    exit 1
+  fi
+  [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty — only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
+fi
+if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
@@ -575,6 +596,27 @@ if [ "$MODE" = "auto" ]; then
           && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
       } > /tmp/agent_review_report.md
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
+    elif [ -n "$INCREMENTAL_REQUESTED" ]; then
+      # Same carry-forward as CI: keep the previous ledger and reversibility, recompute status,
+      # and post a skip note so the head marker advances and the next re-review stays small.
+      echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
+      echo '[]' > /tmp/previous_agent_review_ledger.json
+      echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
+      REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+      gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+        --jq '[.[] | select(.body | startswith("<!-- agent-review -->"))][0].body // empty' 2>/dev/null \
+        | tr -d '\r' > /tmp/previous_agent_review_comment.md
+      sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
+      [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
+      sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_status.json
+      [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' > /tmp/agent_review_safety.json
+      agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
+      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --evidence /tmp/review_evidence.json ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+      OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
+      { echo "🎚️ **agent-review: skipped** — no reviewable risk in the delta since the last review."
+        [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
+      } > /tmp/agent_review_report.md
+      echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via Stage 7, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
     fi
@@ -590,9 +632,10 @@ fi
 ```
 
 If auto resolved to `skip`: in CI, run the **[CI Mode posting step](#post-the-report-to-the-pr-create-or-update)**
-with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally,
-report the skip and stop. If it resolved to `quick`/`standard`/`deep`, continue exactly as if that
-mode had been passed on the command line.
+with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally
+with `incremental`, run Stage 7's post-and-print with the skip note, then Stage 8. Locally without
+`incremental`, report the skip and stop. If it resolved to `quick`/`standard`/`deep`, continue
+exactly as if that mode had been passed on the command line.
 
 ### Risk Assessment
 

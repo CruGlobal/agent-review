@@ -1220,3 +1220,16 @@ test('the docs and skills know the approve template and the review-side auto_app
   assert.ok(readme.includes('stronger trust grant'), 'README must state the local-post trust boundary');
   assert.ok(readme.includes('repository write access'), 'README must say only writers can trigger the local-post approval');
 });
+
+test('the review skill runs the incremental path locally on the `incremental` argument', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('/agent-review:review auto incremental'), 'usage must show the local incremental form');
+  assert.ok(skill.includes('case " $* " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac'), 'the argument must be detected like `ci`');
+  assert.ok(skill.includes('if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then'), 'the incremental gate must accept the local request');
+  assert.ok(!skill.includes('# Incremental re-review (CI only)'), 'the CI-only comment is stale');
+  assert.ok(skill.includes('push first'), 'unpushed local commits must stop an incremental review');
+  assert.ok(skill.includes('only committed changes are reviewed'), 'a dirty tree must warn');
+  assert.ok(skill.includes("bot's comment remains the CI ledger"), 'must explain the bot-canonical case');
+  // A zero-risk local delta advances the head marker instead of stopping silently.
+  assert.ok(skill.includes('no reviewable risk in the delta'), 'local score-0 incremental must post the skip note');
+});
