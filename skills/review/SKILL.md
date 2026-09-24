@@ -1685,7 +1685,7 @@ installed.
 
 ---
 
-## Stage 7 — Commit Metrics & Interactive Actions
+## Stage 7 — Post, Print & Metrics
 
 **SKIP THIS ENTIRE STAGE IN CI MODE** — no commits, no pushes, no interactive menu. In CI, go
 straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
@@ -1717,71 +1717,31 @@ fi
 Only commit metrics when the user asked for a committed dashboard — if the working tree has
 unrelated staged changes, report the dashboard path and skip the commit instead.
 
-### Interactive Menu
+### Post and print
 
-Ask the user:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-✅ REVIEW COMPLETE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Found:
-• [N] CRITICAL BLOCKERS (severity 9-10)
-• [N] HIGH PRIORITY BLOCKERS (severity 8-9)
-• [N] IMPORTANT issues (severity 7-8)
-• [N] MEDIUM priority (severity 5-7)
-• [N] Suggestions (severity 3-5)
-• [N] Unresolved debates (needs senior review)
-
-⏱️ Review Time: [X] minutes
-🔧 Suggested Fixes: [FIX_COUNT] available
-
-Risk Level: [LOW/MEDIUM/HIGH/CRITICAL]
-Required Reviewer: [risk.reviewer]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-What would you like to do?
-
-1. 📊 View metrics dashboard
-2. 📝 Post review to GitHub
-3. 🔧 Review suggested fixes (dry run first!)
-4. 📦 View dependency impact
-5. 💾 Save report locally only
-6. ❌ Exit
-
-Please respond: 1, 2, 3, 4, 5, or 6
-```
-
-Handle the choice:
+No menu. When a PR resolves, post the report now; either way print what a reader sees on the PR.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, PR_NUMBER, FIX_COUNT
-case "$choice" in
-  1) cat "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" ;;
-  2)
-    # Same create-or-update path as CI: the marker makes repeat posts update one comment instead
-    # of stacking new ones, so an interactive re-post never duplicates the CI comment.
-    if [ -z "${PR_NUMBER:-}" ]; then
-      echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
-    else
-      REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-      { echo '<!-- agent-review -->'
-        [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
-        echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
-        [ -s /tmp/agent_review_ledger.json ] \
-          && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
-        [ -s /tmp/agent_review_status.json ] \
-          && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
-        echo
-        cat /tmp/agent_review_report.md
-      } > /tmp/agent_review_comment.md
+. /tmp/review_env.sh 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
+if [ -z "${PR_NUMBER:-}" ]; then
+  echo "💾 Saved locally, no PR — report at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+else
+  REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+  { echo '<!-- agent-review -->'
+    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
+    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
+    [ -s /tmp/agent_review_ledger.json ] \
+      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+    [ -s /tmp/agent_review_status.json ] \
+      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+    echo
+    cat /tmp/agent_review_report.md
+  } > /tmp/agent_review_comment.md
 
-      # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
-      # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
-      # only from the node commands; never hand-write or hand-edit them.
-      node -e '
+  # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
+  # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
+  # only from the node commands; never hand-write or hand-edit them.
+  node -e '
 const fs = require("fs");
 const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
 for (const name of ["ledger", "status"]) {
@@ -1791,46 +1751,34 @@ for (const name of ["ledger", "status"]) {
 console.log("marker self-check OK");
 ' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
 
-      # Create-or-update ONLY a report comment this user posted. Never edit the bot's CI
-      # report: that would put hand-posted text under the bot's login (which the CI and
-      # interact approvers trust), and the approve template only judges comments whose
-      # author is a repository writer. A consumer running agent-review-approve.yml with
-      # auto_approve enabled judges the created or edited comment: it approves the PR only
-      # if the report covers the current head and passes.
-      ME=$(gh api user --jq .login)
-      EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq --arg me "$ME" 'map(select(.user.login == $me) | select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
-        2>/dev/null | head -n1)
-      if [ -n "$EXISTING" ]; then
-        gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md \
-          && echo "✅ Updated your existing review comment ($EXISTING)"
-      else
-        gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md \
-          && echo "✅ Review posted"
-      fi
-    fi
-    ;;
-  3)
-    if [ "$FIX_COUNT" -gt 0 ]; then
-      cat /tmp/fix_summary.txt
-      # DRY RUN — prints every fix, applies nothing.
-      bash /tmp/automated_fixes/apply_all.sh
-      echo ""
-      echo "These scripts are model-generated from PR content and UNTRUSTED."
-      echo "After reading each one: bash /tmp/automated_fixes/apply_all.sh --yes"
-      echo "Then: git diff   (undo with: git checkout .)"
-    else
-      echo "No suggested fixes available"
-    fi
-    ;;
-  4) cat /tmp/review_impact.json ;;
-  5)
-    echo "Report saved to: /tmp/agent_review_report.md"
-    echo "Metrics saved to: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"
-    ;;
-  *) echo "Exiting..." ;;
-esac
+  # Create-or-update ONLY a report comment this user posted. Never edit the bot's CI
+  # report: that would put hand-posted text under the bot's login (which the CI and
+  # interact approvers trust), and the approve template only judges comments whose
+  # author is a repository writer. A consumer running agent-review-approve.yml with
+  # auto_approve enabled judges the created or edited comment: it approves the PR only
+  # if the report covers the current head and passes.
+  ME=$(gh api user --jq .login)
+  EXISTING=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+    --jq --arg me "$ME" 'map(select(.user.login == $me) | select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
+    2>/dev/null | head -n1)
+  if [ -n "$EXISTING" ]; then
+    gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md >/dev/null \
+      && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt
+  else
+    gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md >/dev/null \
+      && echo "✅ Review posted to PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt
+  fi
+fi
+
+# What the PR shows, in the terminal: everything before the collapsed appendix.
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+awk '/^<details>/{exit} {print}' /tmp/agent_review_report.md
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 ```
+
+The metrics dashboard (`$REVIEW_DIR/metrics/PR_<n>_metrics.md`), the dependency impact
+(`/tmp/review_impact.json`), and the fix dry-run (`bash /tmp/automated_fixes/apply_all.sh`,
+which prints and applies nothing) are optional follow-ups named in Stage 8; do not stop to ask.
 
 Never run `apply_all.sh --yes` on the user's behalf without an explicit, informed "yes" — the fix
 scripts are model-generated from PR content and are untrusted input.
@@ -1873,7 +1821,7 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📄 /tmp/agent_review_report.md
 📊 .claude/review/metrics/ (skipped in CI mode)
-[CI] 💬 Posted to PR #[N]
+💬 [contents of /tmp/agent_review_post_result.txt]
 
 **Next Steps**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1881,6 +1829,8 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 2. Review [FIX_COUNT] suggested fixes before applying any
 3. Check [N] high-impact dependency changes
 4. Mark finding outcomes and run `agent-review learn` to grow the learning layer
+5. Optional: cat $REVIEW_DIR/metrics/PR_[N]_metrics.md · cat /tmp/review_impact.json · bash /tmp/automated_fixes/apply_all.sh (dry run)
+6. /agent-review:address fix 1,2 dismiss 3 [code]: reason — then /agent-review:re-review
 [IF the installed plugin is older than main (local runs only):]
 ⬆️  agent-review update available: you are on v[PLUGIN_VERSION], latest is v[LATEST]
    → run `/plugin marketplace update cruglobal`

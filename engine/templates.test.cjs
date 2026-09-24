@@ -885,7 +885,7 @@ test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff
 test('the CI path uses at most 13 bash turns (Stage 0A through Stage 6)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
-  const stage7Start = skill.indexOf('## Stage 7 — Commit Metrics & Interactive Actions');
+  const stage7Start = skill.indexOf('## Stage 7 — Post, Print & Metrics');
   const stage5BStart = skill.indexOf('## Stage 5B — Historical Metrics Dashboard');
   const stage6Start = skill.indexOf('## Stage 6 — Generate Review Report');
   const localOnlyStart = skill.indexOf('**Locally** the opposite can be stale');
@@ -1096,18 +1096,18 @@ test('the CI posting block self-checks the marker JSON before it reaches the tru
   );
 });
 
-test('the Interactive Menu "Post review to GitHub" choice self-checks the marker JSON too', () => {
+test('Stage 7 posts automatically, self-checks the marker JSON, and prints the report body', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const menuSection = skill.slice(
-    skill.indexOf('Handle the choice:'),
-    skill.indexOf('Handle the choice:') + 4000,
-  );
-  const matches = [...menuSection.matchAll(/console\.log\("marker self-check OK"\)/g)];
-  assert.equal(
-    matches.length,
-    1,
-    'choice 2 (re-post) must run the same marker self-check as the CI posting step before posting',
-  );
+  const stage7 = skill.slice(skill.indexOf('## Stage 7 — Post, Print & Metrics'), skill.indexOf('## Stage 8'));
+  assert.ok(stage7.includes('### Post and print'));
+  assert.ok(!stage7.includes('Please respond: 1, 2, 3'), 'the blocking menu is gone');
+  assert.ok(!stage7.includes('What would you like to do?'));
+  assert.ok(stage7.includes('console.log("marker self-check OK")'), 'the marker self-check must survive');
+  assert.ok(stage7.includes('ME=$(gh api user --jq .login)'), 'local post updates only the poster\'s own comment');
+  assert.ok(stage7.includes("awk '/^<details>/{exit} {print}' /tmp/agent_review_report.md"), 'the visible report body is printed to the terminal');
+  assert.ok(stage7.includes('💾 Saved locally, no PR'), 'no-PR case saves and says so');
+  assert.ok(stage7.includes('/tmp/agent_review_post_result.txt'));
+  assert.ok(stage7.includes('Never run `apply_all.sh --yes`'), 'fix scripts stay unexecuted');
 });
 
 test('the approval gate is one composite action that delegates the decision to the engine', () => {
@@ -1212,7 +1212,7 @@ test('the docs and skills know the approve template and the review-side auto_app
   // The local post must create-or-update only a comment the poster authored:
   // editing the bot's CI report would put human text under the bot's login,
   // and the approve template would never see a created/edited event it trusts.
-  const menu = review.slice(review.indexOf('2. 📝 Post review to GitHub'));
+  const menu = review.slice(review.indexOf('### Post and print'));
   assert.ok(menu.includes('ME=$(gh api user --jq .login)'), 'local post resolves the posting user');
   assert.ok(menu.includes('select(.user.login == $me)'), 'local post updates only the poster\'s own report comment');
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
