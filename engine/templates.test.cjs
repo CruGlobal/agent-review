@@ -1305,3 +1305,62 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
   assert.ok(yolo.includes(ownFirst), 'yolo reads the same canonical comment address writes');
 });
+
+test('posted review comments keep every marker on one line under zsh and bash, so the approver can read them', (t) => {
+  const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const { evaluateApproval } = require('./approval.cjs');
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const assemblies = [...skill.matchAll(/^ {2}\{ printf[\s\S]*?^ {2}\} > \/tmp\/agent_review_comment\.md$/gm)].map((m) => m[0]);
+  const selfChecks = [...skill.matchAll(/^ {2}node -e '\nconst fs[\s\S]*?^' \|\|/gm)].map((m) => m[0].slice(0, -3));
+  assert.strictEqual(assemblies.length, 2, 'both comment-assembly blocks must write markers with printf');
+  assert.strictEqual(selfChecks.length, 2, 'both comment-assembly blocks must be followed by the marker self-check');
+
+  const head = 'a'.repeat(40);
+  // A finding whose evidence holds a line break: zsh's echo turned its \n escape into a real one (PR #3665).
+  const ledger = [{ n: 1, id: 'f1', evidence: 'L586: a = {...}\nL587: b = {...}', status: 'open' }];
+  const status = { v: 1, head, risk: 'LOW', openBlockers: 0, pass: true, irreversible: false, irreversibleReasons: [] };
+  const shells = ['bash', 'zsh'].filter((sh) => {
+    try { execFileSync(sh, ['-c', 'true']); return true; } catch { return false; }
+  });
+  if (!shells.includes('zsh')) t.diagnostic('zsh not installed; only bash was exercised');
+
+  for (const shell of shells) {
+    for (const [i, block] of assemblies.entries()) {
+      const dir = mkdtempSync(join(tmpdir(), 'agent-review-markers-'));
+      try {
+        writeFileSync(join(dir, 'agent_review_ledger.json'), JSON.stringify(ledger));
+        writeFileSync(join(dir, 'agent_review_status.json'), JSON.stringify(status));
+        writeFileSync(join(dir, 'agent_review_report.md'), 'report body\n');
+        const script = `${block}\n${selfChecks[i]}`.replaceAll('/tmp/', `${dir}/`);
+        execFileSync(shell, ['-c', script], { env: { ...process.env, HEAD_REF: head, AGENT_REVIEW_ROLLOUT_MODE: 'advisory' } });
+        const comment = readFileSync(join(dir, 'agent_review_comment.md'), 'utf8');
+        assert.deepStrictEqual(evaluateApproval(comment, { head }).approve, true, `${shell}, block ${i + 1}: ${evaluateApproval(comment, { head }).reason}`);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+test('the marker self-check fails when a split marker line hides the status from the approver', () => {
+  const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const selfCheck = skill.match(/^ {2}node -e '\nconst fs[\s\S]*?^'/m)[0];
+  const dir = mkdtempSync(join(tmpdir(), 'agent-review-selfcheck-'));
+  try {
+    writeFileSync(join(dir, 'agent_review_ledger.json'), '[]');
+    writeFileSync(join(dir, 'agent_review_status.json'), '{"pass":true}');
+    writeFileSync(join(dir, 'agent_review_comment.md'), [
+      '<!-- agent-review -->',
+      '<!-- agent-review-ledger: [{"evidence":"first half',
+      'second half"}] -->',
+      '<!-- agent-review-status: {"pass":true} -->',
+      '',
+    ].join('\n'));
+    assert.throws(() => execFileSync('bash', ['-c', selfCheck.replaceAll('/tmp/', `${dir}/`)], { stdio: 'pipe' }));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

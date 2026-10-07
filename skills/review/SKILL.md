@@ -474,13 +474,15 @@ else
   # Line 2 records the head SHA this report covers — the next CI run reads it back to review
   # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
   # ledger's machine state, which /agent-review:address and the dismiss fast path mutate.
-  { echo '<!-- agent-review -->'
-    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
-    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
+  # printf, not echo: zsh's echo turns the \n escapes inside marker JSON into real line breaks,
+  # which splits a marker line and hides every marker after it from the approver.
+  { printf '%s\n' '<!-- agent-review -->'
+    [ -n "${HEAD_REF:-}" ] && printf '%s\n' "<!-- agent-review-head: $HEAD_REF -->"
+    printf '%s\n' "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
     [ -s /tmp/agent_review_ledger.json ] \
-      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+      && printf '%s\n' "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
     [ -s /tmp/agent_review_status.json ] \
-      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+      && printf '%s\n' "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
     echo
     cat /tmp/agent_review_report.md
   } > /tmp/agent_review_comment.md
@@ -492,9 +494,17 @@ else
   node -e '
 const fs = require("fs");
 const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+// The approver reads marker lines only up to the first line that is not one, so do the same.
+const header = [];
+for (const line of c.split("\n")) {
+  if (!/^<!-- agent-review(-[a-z]+: .*)? -->$/.test(line)) break;
+  header.push(line);
+}
 for (const name of ["ledger", "status"]) {
-  const m = c.match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
+  const m = header.join("\n").match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
   if (m) JSON.parse(m[1]);
+  else if (fs.existsSync("/tmp/agent_review_" + name + ".json") && fs.statSync("/tmp/agent_review_" + name + ".json").size > 0)
+    throw new Error(name + " marker is missing from the comment header");
 }
 console.log("marker self-check OK");
 ' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
@@ -1739,13 +1749,15 @@ else
   # approval off; CI sets AGENT_REVIEW_ROLLOUT_MODE from the caller, which must agree.
   ROLLOUT=$(agent-review config get rollout.mode 2>/dev/null || echo "")
   case "$ROLLOUT" in shadow|advisory|enforce) ;; *) ROLLOUT="advisory" ;; esac
-  { echo '<!-- agent-review -->'
-    [ -n "${HEAD_REF:-}" ] && echo "<!-- agent-review-head: $HEAD_REF -->"
-    echo "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-$ROLLOUT} -->"
+  # printf, not echo: zsh's echo turns the \n escapes inside marker JSON into real line breaks,
+  # which splits a marker line and hides every marker after it from the approver.
+  { printf '%s\n' '<!-- agent-review -->'
+    [ -n "${HEAD_REF:-}" ] && printf '%s\n' "<!-- agent-review-head: $HEAD_REF -->"
+    printf '%s\n' "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-$ROLLOUT} -->"
     [ -s /tmp/agent_review_ledger.json ] \
-      && echo "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
+      && printf '%s\n' "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
     [ -s /tmp/agent_review_status.json ] \
-      && echo "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+      && printf '%s\n' "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
     echo
     cat /tmp/agent_review_report.md
   } > /tmp/agent_review_comment.md
@@ -1756,9 +1768,17 @@ else
   node -e '
 const fs = require("fs");
 const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+// The approver reads marker lines only up to the first line that is not one, so do the same.
+const header = [];
+for (const line of c.split("\n")) {
+  if (!/^<!-- agent-review(-[a-z]+: .*)? -->$/.test(line)) break;
+  header.push(line);
+}
 for (const name of ["ledger", "status"]) {
-  const m = c.match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
+  const m = header.join("\n").match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
   if (m) JSON.parse(m[1]);
+  else if (fs.existsSync("/tmp/agent_review_" + name + ".json") && fs.statSync("/tmp/agent_review_" + name + ".json").size > 0)
+    throw new Error(name + " marker is missing from the comment header");
 }
 console.log("marker self-check OK");
 ' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
