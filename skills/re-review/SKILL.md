@@ -15,6 +15,6 @@ posted review yet, this becomes a full review and says so.
 **Usage**: `/agent-review:re-review` (optionally `quick`, `standard`, or `deep` in place of auto,
 and `engine=agent-review|code-review` or `effort=low|medium|high|xhigh|max`).
 
-**Do this**: invoke `agent-review:review` with the arguments `auto incremental` plus every other
-token the user gave, unchanged (for example `engine=code-review` or `effort=high`; a mode word
-replaces `auto`), and follow it to the end. Nothing else: this skill has no stages of its own.
+**Do this**: invoke `agent-review:review` with the arguments `auto incremental`, plus the user's
+`engine=` and `effort=` tokens, if any (the user's mode word, when they gave one, replaces `auto`),
+and follow it to the end. Nothing else: this skill has no stages of its own.

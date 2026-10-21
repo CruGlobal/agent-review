@@ -174,6 +174,53 @@ test('startup: default engine omits effort', () => {
   assert.match(l2, /architecture \[skipped: no trigger matched\]/);
 });
 
+function defaultEngineInput(resolved) {
+  const input = startupInput();
+  input.options.engine = { value: 'agent-review', source: 'default' };
+  input.options.effort = null;
+  input.plan = {
+    mode: { requested: resolved, resolved },
+    agents: [
+      { id: 'security', matchedBy: 'path:src/**' },
+      { id: 'testing', matchedBy: 'always' },
+      { id: 'standards', matchedBy: 'always' },
+      { id: 'architecture', matchedBy: 'always' },
+    ],
+  };
+  return input;
+}
+
+const QUICK_NOTE = 'note: quick mode keeps at most 3 of these lanes (see Stage 0B).';
+const DEEP_NOTE = 'note: deep mode also runs every enabled lane listed as skipped.';
+
+test('startup: default engine in quick mode says the 3-lane cap applies', () => {
+  const lines = formatStartup(defaultEngineInput('quick')).split('\n');
+  assert.ok(lines.includes(QUICK_NOTE));
+  assert.ok(!lines.includes(DEEP_NOTE));
+});
+
+test('startup: default engine in deep mode says skipped lanes run too', () => {
+  const lines = formatStartup(defaultEngineInput('deep')).split('\n');
+  assert.ok(lines.includes(DEEP_NOTE));
+  assert.ok(!lines.includes(QUICK_NOTE));
+});
+
+test('startup: default engine in standard mode adds no mode note', () => {
+  const lines = formatStartup(defaultEngineInput('standard')).split('\n');
+  assert.ok(!lines.includes(QUICK_NOTE));
+  assert.ok(!lines.includes(DEEP_NOTE));
+});
+
+test('startup: code-review engine never adds the quick or deep note', () => {
+  for (const resolved of ['quick', 'deep']) {
+    const input = startupInput();
+    input.plan.mode = { requested: resolved, resolved };
+    const lines = formatStartup(input).split('\n');
+    assert.ok(!lines.includes(QUICK_NOTE), `quick note under code-review in ${resolved}`);
+    assert.ok(!lines.includes(DEEP_NOTE), `deep note under code-review in ${resolved}`);
+  }
+});
+
 test('startup: empty-slice lanes', () => {
   const input = startupInput({
     sliceManifest: { testing: { mode: 'empty', files: [], hunks: 0 } },

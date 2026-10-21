@@ -1370,16 +1370,22 @@ test('review skill wires the code-review engine', () => {
     bashBlocks(init).includes('agent-review options --args "$REVIEW_ARGS" ${CI_MODE:+--ci} > /tmp/review_options.json'),
     'Initialize resolves options from the raw arguments, forcing the default engine in CI',
   );
-  assert.ok(
-    init.indexOf('CI_MODE="true"') < init.indexOf('agent-review options --args'),
-    'CI is detected before options are resolved, so --ci reaches the resolver',
-  );
+  const ciDetect = init.indexOf('CI_MODE="true"');
+  const optionsCall = init.indexOf('agent-review options --args');
+  assert.notStrictEqual(ciDetect, -1, 'Initialize must detect CI');
+  assert.notStrictEqual(optionsCall, -1, 'Initialize must resolve options');
+  assert.ok(ciDetect < optionsCall, 'CI is detected before options are resolved, so --ci reaches the resolver');
   assert.match(
     bashBlocks(init),
     /^export ENGINE="\$ENGINE" EFFORT="\$EFFORT" REVIEWS_RUN="\$REVIEWS_RUN"$/m,
     'ENGINE, EFFORT, and REVIEWS_RUN are persisted to review_env.sh for later stages',
   );
-  assert.ok(init.includes('"$ENGINE" = "code-review"'), 'mode banners must not claim the quick cap or deep expansion under code-review');
+  for (const banner of [
+    '[ "$ENGINE" = "code-review" ] || echo "• 3 agents (testing, standards + the first triggered agent)"',
+    '[ "$ENGINE" = "code-review" ] || echo "• Every enabled agent in config.yml"',
+  ]) {
+    assert.ok(bashBlocks(init).includes(banner), `mode banner must be skipped under code-review: ${banner}`);
+  }
 
   const plans = commandsIn(bash, 'agent-review plan');
   assert.strictEqual(plans.length, 2, 'expected the review plan and the gate plan');
@@ -1399,10 +1405,11 @@ test('review skill wires the code-review engine', () => {
   ]) {
     assert.ok(startup[0].includes(part), `startup call lacks ${part}`);
   }
-  assert.ok(
-    bashBlocks(buildPlan).indexOf('agent-review slice') < bashBlocks(buildPlan).indexOf('agent-review startup'),
-    'the start-up line reads the slice manifest, so it prints after slicing',
-  );
+  const sliceCall = bashBlocks(buildPlan).indexOf('agent-review slice');
+  const startupCall = bashBlocks(buildPlan).indexOf('agent-review startup');
+  assert.notStrictEqual(sliceCall, -1, 'the plan block must slice the diff');
+  assert.notStrictEqual(startupCall, -1, 'the plan block must print the start-up line');
+  assert.ok(sliceCall < startupCall, 'the start-up line reads the slice manifest, so it prints after slicing');
 
   const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '### Smoke-Test Tier Routing').replace(/\s+/g, ' ');
   assert.match(

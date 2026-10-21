@@ -382,7 +382,7 @@ agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
   --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
 cat /tmp/slice_manifest.json
 
-# --- Start-up line: the options this run uses, where each came from, and who will review ---
+# --- Start-up line: the options this run uses, where each came from, and the planned reviewers ---
 if [ -n "$INCREMENTAL" ]; then
   STARTUP_SCOPE="since $(git rev-parse --short "$LAST_REVIEWED") (re-review)"
 else
@@ -431,8 +431,10 @@ NODE
 ```
 
 Show the user the start-up lines (`agent-review · engine: …`, `reviewers: …`, and any `note:`
-lines) exactly as printed. They state what this run uses and who will review, so never restate
-them from memory.
+lines) exactly as printed. They state the options this run uses and where each came from. Under
+the `code-review` engine the `reviewers:` line is exactly who will review, so never restate it
+from memory. Under the `agent-review` engine it lists the plan's lanes; Stage 0B still decides the
+final launch list, and a `note:` line says when quick or deep changes it.
 
 Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
 excluded from risk scoring and agent selection by the engine — agents should not raise findings
@@ -958,7 +960,8 @@ fill its eight placeholders:
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** above), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
 
 The launched-lane set (whatever remains after the empty-lane skip above — the plan's agents
-minus quick's cap or plus deep's config-only additions, per Stage 0B, minus any empty-slice skip)
+minus quick's cap or plus deep's config-only additions, per Stage 0B (neither applies under the
+`code-review` engine), minus any empty-slice skip)
 is exactly what Stage 2's cross-check and Stage 5's consensus `--plan` must use. It is derived
 immediately below, right after every Task call is issued — not before, and not re-derived a
 second way anywhere else.

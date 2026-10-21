@@ -19634,6 +19634,10 @@ var require_cliCommands = __commonJS({
       return lines.join("\n");
     }
     var LEFTOVER_CI_NOTE = "this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.";
+    var DEFAULT_ENGINE_MODE_NOTES = {
+      quick: "quick mode keeps at most 3 of these lanes (see Stage 0B).",
+      deep: "deep mode also runs every enabled lane listed as skipped."
+    };
     function reviewerTag(agent, slice, model) {
       if (slice && slice.mode === "empty") return "skipped: no matching hunks";
       const by = agent.matchedBy || "";
@@ -19668,6 +19672,8 @@ var require_cliCommands = __commonJS({
         reviewers.push(`${a.id} [skipped: no trigger matched]`);
       }
       const lines = [head.join(" \xB7 "), `reviewers: ${reviewers.join(", ")}`];
+      if (options.engine.value === "agent-review" && DEFAULT_ENGINE_MODE_NOTES[resolved])
+        lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
       for (const n of options.notes || []) lines.push(`note: ${n}`);
       if (options.reviewsRun.value === "local" && ciFilesPresent)
         lines.push(`note: ${LEFTOVER_CI_NOTE}`);
