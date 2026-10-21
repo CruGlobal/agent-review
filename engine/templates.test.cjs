@@ -575,9 +575,16 @@ test('code-review-lane.md carries the contracts', () => {
     FINAL_LINE_CONTRACT,
     'Recategorized from ',
     'Outside the reviewed range: ',
+    'Doubted: ',
+    'REFUTED by the /code-review verifier',
+    'args: "{{EFFORT}} {{TARGET}}{{MAX_FINDINGS_FLAG}}"',
   ]) {
     assert.ok(text.includes(needle), `code-review lane must contain ${JSON.stringify(needle)}`);
   }
+  assert.ok(
+    !text.includes("REFUTED by /code-review's verifier"),
+    'the REFUTED proof string is copied into a single-quoted node -e script, so it must hold no apostrophe',
+  );
   for (const category of ['simplification', 'efficiency', 'reuse', 'altitude', 'conventions']) {
     assert.ok(text.includes(`\`${category}\``), `cleanup category ${category} missing`);
   }
@@ -593,6 +600,17 @@ test('code-review-lane.md carries the contracts', () => {
     !text.split(FINAL_LINE_CONTRACT).join('').includes('—'),
     'the final-line contract is the only em dash allowed in the lane prompt',
   );
+});
+
+test('code-review-lane.md node -e example keeps its quote escapes', () => {
+  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
+  const script = text.match(/^node -e '\n([\s\S]*?)\n'\n```/m);
+  assert.ok(script, 'the lane must show a node -e example whose script closes on its own line');
+  assert.ok(
+    !script[1].includes("'"),
+    "a bare ' inside the single-quoted node -e script ends the shell string early",
+  );
+  assert.ok(script[1].includes('\\u0027'), 'the example must show the \\u0027 escape for a quote');
 });
 
 test('the review skill routes agents by plan tier and degrades safely', () => {

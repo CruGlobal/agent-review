@@ -47,13 +47,14 @@ fenced JSON in between. Do not trim, reformat, shorten, or fix anything in it. S
 looks like an error. If the Skill tool itself is missing or refuses the call, save that error
 message instead. The review reads this file to prove /code-review ran.
 
-Then find the raw findings: the entries of the last fenced JSON block in the result that parses as
-an array, or as an object with a `findings` array. Each entry has `file`, `line`, `summary`, and
-`failure_scenario`, and may also have `category` and `verdict`. A result that says `No findings.`
-has zero raw findings.
+Then find the findings list. It is either the last fenced JSON block in the result that parses as
+an array (possibly `[]`) or as an object with a `findings` array, or a line that reads exactly
+`No findings.`, which means zero raw findings. The raw findings are that array's entries. Each
+entry has `file`, `line`, `summary`, and `failure_scenario`, and may also have `category` and
+`verdict`.
 
-If the result does not start with `Skill "code-review" completed`, or it has neither a findings
-list nor `No findings.`, then /code-review did not run. Stop here. Do not write
+If the result does not start with `Skill "code-review" completed`, or it has no findings list,
+then /code-review did not run. Stop here. Do not write
 `/tmp/agent_findings/code-review.json` or `/tmp/code_review_dropped.json`. Reply with the one line
 `/code-review did not run` and nothing else.
 
@@ -125,15 +126,17 @@ Score each finding as a whole number from 1 to 10 against these anchors:
 Then apply these three caps:
 
 1. Cleanup cap. A finding in a cleanup category scores 6 at most (see CATEGORY).
-2. Outside the reviewed range. The reviewed range is the change in {{DIFF_PATH}}. When the target
-   is a commit range (`<sha>..<sha>`), that means only the commits in that range, and "a line this
-   change adds or changes" means one changed within that range. /code-review also reports bugs it
-   notices outside what it was asked to review, labeled like
-   "(Pre-existing, outside the reviewed range)". A finding is outside the reviewed range when
-   /code-review labels it pre-existing or outside the range, or when no line in {{DIFF_PATH}}
-   adds it, changes it, or makes it reachable. Score it 6 at most, keep its original category,
-   and start `evidence` with `Outside the reviewed range: `. A review is never blocked by code it
-   was not asked to look at.
+2. Outside the reviewed range. The reviewed range is the change in {{DIFF_PATH}}, the diff for
+   this pass, whatever the target is. When the target is a commit range (`<a>..<b>`), that means
+   only the commits in that range, and "a line this change adds or changes" means one changed
+   within that range. A finding is outside the reviewed range when no line in {{DIFF_PATH}} adds
+   it, changes it, or makes it reachable. /code-review also reports bugs it notices outside what
+   it was asked to review, labeled like "(Pre-existing, outside the reviewed range)". That label
+   usually means the finding is outside, but when a changed line makes the failure reachable (for
+   example, new code calls an old buggy function), cite that line in `evidence` and score the
+   finding normally. A finding that is truly outside the reviewed range scores 6 at most, keeps
+   its original category, and starts `evidence` with `Outside the reviewed range: `. A review is
+   never blocked by code it was not asked to look at.
 3. The 7+ bar. A score of 7 or higher must clear all three of these:
    - it anchors to a line {{DIFF_PATH}} adds or changes, or its `evidence` cites the changed or
      deleted line that makes the failure reachable;
@@ -152,18 +155,18 @@ DROPPING A FINDING:
 Drop a raw finding in only two cases:
 
 1. It has `verdict: "REFUTED"`. Only `max` effort runs a verifier that sets verdicts. Its proof is
-   `REFUTED by /code-review's verifier`.
+   `REFUTED by the /code-review verifier`.
 2. You can prove it wrong, by the same bar /code-review's own verifier uses for REFUTED: the
    finding misreads the code, the failure cannot happen because a type, constant, or invariant
    rules it out, or this diff already handles it. The proof names which of those it is and quotes
    the exact line or lines that show it, with `file:line`, for example
-   `already handled: app/user.js:12 if (!user.profile) return user.name.trim();`.
+   `already handled: app/cart.js:18 if (!items) return [];`.
    "Speculative" or "depends on runtime state" is not proof when that state is realistic.
 
 Below `max` there is no verify step, so this is the only place a false alarm is removed. The
 report lists every drop with its proof, so a reader can check your work. A finding you doubt but
-cannot prove wrong stays: keep it with `confidence` `Low`, score it 6 at most, and say in
-`evidence` why you doubt it.
+cannot prove wrong stays: set `confidence` to `Low`, score it 4 at most (even where the 7+ bar
+would allow 6), and start `evidence` with `Doubted: <why>`.
 
 Each dropped finding goes in the dropped list as `{ file, line, summary, proof }`: `file` and
 `line` from the raw finding, `summary` copied word for word from the raw finding, and `proof` as
@@ -177,10 +180,13 @@ Each scored finding becomes one entry:
 - `category`: from CATEGORY
 - `severity`: the whole number from SEVERITY, after the caps
 - `file`: the repo-relative path as {{DIFF_PATH}} shows it (strip any absolute prefix)
-- `line`: the raw finding's `line` as a number, or `null` when it has none
+- `line`: the raw finding's `line` as a number; for a range such as `42-45`, use the first line
+  number (`42`); `null` only when it has no line at all
 - `message`: ≤ 2 sentences naming the defect and its consequence
 - `confidence`: `High`, `Medium`, or `Low`, from CONFIDENCE
-- `evidence`: any required prefix first, then the execution path or the reason for the score
+- `evidence`: any required prefixes first, in this order: `Outside the reviewed range: `,
+  `Recategorized from <original>: <why>`, `Doubted: <why>`; then the execution path or the
+  reason for the score
 - `recommendation`: what to change and why
 - `fix`: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
 
@@ -196,10 +202,12 @@ Before you write, check your work:
 - no finding in a cleanup category scores above 6;
 - every finding scored 7 or higher clears the 7+ bar;
 - every finding outside the reviewed range scores 6 or less, and its `evidence` starts with
-  `Outside the reviewed range: `.
+  `Outside the reviewed range: `;
+- every doubted finding has `confidence` `Low`, scores 4 or less, and carries `Doubted: <why>`.
 
 Write both files in one `node -e` call, building them with `JSON.stringify`. Never hand-escape
-JSON. The script sits inside single quotes, so it must not contain a `'` character: use double
+JSON. Raw summaries and quoted code often contain a `'`, and so does any text you copy from them.
+The script sits inside single quotes, so it must not contain a `'` character: use double
 quotes for JS strings, and write any `'` inside a string as `\u0027`.
 
 ```bash
@@ -218,8 +226,8 @@ const out = {
   overallConfidence: "High",
 };
 const dropped = [
-  { file: "app/user.js", line: 20, summary: "the raw summary, word for word",
-    proof: "already handled: app/user.js:18 if (!items) return [];" },
+  { file: "app/cart.js", line: 20, summary: "the raw summary, word for word",
+    proof: "already handled: app/cart.js:18 if (!items) return [];" },
 ];
 fs.mkdirSync("/tmp/agent_findings", { recursive: true });
 fs.writeFileSync("/tmp/agent_findings/code-review.json", JSON.stringify(out, null, 2));
