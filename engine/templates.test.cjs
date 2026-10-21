@@ -1623,3 +1623,11 @@ test('init never copies or stages the CI workflows outside a local-and-ci guard'
     }
   }
 });
+
+test('update-files handles local-only repos', () => {
+  const skill = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  for (const needle of ['agent-review config get reviews_run', 'required_status_checks', 'rules/branches',
+    'local-only', 'protection/required_status_checks']) {
+    assert.ok(skill.includes(needle), `update-files must mention ${needle}`);
+  }
+});

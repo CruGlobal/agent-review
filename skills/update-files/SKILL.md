@@ -39,6 +39,20 @@ grep -h '^# agent-review-template-version:' "$UPDATE_DIR"/*.yml | sort -u
 
 ## Stage 2 — Compare against the repo's copies
 
+First read where reviews run:
+
+```bash
+REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null || echo undefined)
+```
+
+`local` means a local-only repo. `local-and-ci` or `undefined` (a missing key) means CI reviews
+are on, which is the behavior described in the rest of this stage.
+
+**Local-only repo (`reviews_run` is `local`):** compare only `agent-review-approve.yml`. Do not
+compare or offer `agent-review.yml`, `agent-review-interact.yml`, or `agent-review-readiness.yml`,
+and say they were skipped because the repo is local-only. Then see Stage 4 for CI files that are
+still installed. Stage 3 applies to the approve file only.
+
 For each fetched template, look for the matching file in `.github/workflows/`:
 
 - **File exists**: read its `# agent-review-template-version:` marker (missing marker =
@@ -48,7 +62,8 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   gate) and `agent-review-approve.yml` (approval of locally posted reports; a stronger trust
   grant than the CI path) unless they want them.
 
-If every file is current, say so and stop here.
+If every file is current, say so and stop here. In a local-only repo, do not stop before the
+removal check in Stage 4 if any CI file is still installed.
 
 ## Stage 3 — Carry over the repo's own settings
 
@@ -78,6 +93,37 @@ and ask whether to keep it before writing.
 Write the merged results over `.github/workflows/agent-review*.yml`.
 
 ## Stage 4 — Show the diff and hand over
+
+### Local-only repo with CI files still installed
+
+Skip this part unless `reviews_run` is `local` and at least one of
+`.github/workflows/agent-review.yml`, `agent-review-interact.yml`, or `agent-review-readiness.yml`
+exists. Those files still run on labeled PRs and cost money, so offer to remove them in the same
+PR as any other changes.
+
+First check that removal will not block merges. Get the repo and its default branch, then read
+both places a required check can live:
+
+```bash
+REPO=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
+DEFAULT=$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)
+gh api "repos/$REPO/branches/$DEFAULT/protection/required_status_checks" --jq '.contexts, [.checks[].context]'
+gh api "repos/$REPO/rules/branches/$DEFAULT" --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'
+```
+
+The first call is classic branch protection (a 404 means none is set). The second lists
+rulesets that apply to the branch and may include a `required_status_checks` rule. These
+workflows produce checks named like the job or workflow: `review`, `agent-review`, `interact`,
+`readiness`. If any required context matches, warn the user which check it is and where it is
+required, and say that removing the workflow would leave that check pending forever and block
+merges until it is removed from the protection or ruleset. If a lookup fails for any reason
+other than a 404, say the check could not be verified rather than assuming it is safe.
+
+Then ask the user whether to remove the files, naming each one. Never remove a file without a
+yes. On a yes, run `git rm` on those files so the removal appears in the diff below. On a no,
+leave them and say they will keep running CI reviews on labeled PRs.
+
+### Diff and PR
 
 ```bash
 git diff -- .github/workflows/
