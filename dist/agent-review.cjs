@@ -19225,11 +19225,20 @@ var require_consensus = __commonJS({
       "conventions"
     ]);
     var CODE_REVIEW_CAP = 6;
-    function capCodeReviewFinding(f) {
-      if (f.severity < 7) return f;
+    var DOUBTED_CAP = 4;
+    var OUTSIDE_PREFIX = "Outside the reviewed range: ";
+    var DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /;
+    function codeReviewCap(f) {
+      const evidence = String(f.evidence || "").trimStart();
+      if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
       const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
-      if (cleanup || blockerBarFailure(f)) return { ...f, severity: CODE_REVIEW_CAP };
-      return f;
+      if (cleanup || evidence.startsWith(OUTSIDE_PREFIX)) return CODE_REVIEW_CAP;
+      if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
+      return null;
+    }
+    function capCodeReviewFinding(f) {
+      const cap = codeReviewCap(f);
+      return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
     }
     function canonicalOrder(a, b) {
       return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);

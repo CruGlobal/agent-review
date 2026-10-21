@@ -664,3 +664,39 @@ test('the code-review engine fails closed when the code-review lane was not laun
     'a plan with no engine block keeps the lanes it launched',
   );
 });
+
+test('code-review findings outside the reviewed range cap at 6', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'o.rb', evidence: 'Outside the reviewed range: old_helper drops the last row.' }),
+    crFinding({ file: 'l.rb', severity: 5, evidence: 'Outside the reviewed range: low already.' }),
+    crFinding({ file: 'i.rb', evidence: 'new code calls Outside the reviewed range: as a phrase mid-text' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'o.rb': 6, 'l.rb': 5, 'i.rb': 8 });
+});
+
+test('doubted code-review findings cap at 4 at any prefix boundary', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'a.rb', evidence: 'Doubted: depends on a caller I could not see.' }),
+    crFinding({ file: 'b.rb', severity: 6, category: 'conventions', evidence: 'Doubted: may be intended.' }),
+    crFinding({ file: 'c.rb', severity: 6, evidence: 'Outside the reviewed range: Doubted: the old path may be dead.' }),
+    crFinding({
+      file: 'd.rb',
+      category: 'security',
+      evidence: 'Recategorized from conventions: line 14 commits a key. Doubted: it may be a test fixture.',
+    }),
+    crFinding({ file: 'e.rb', evidence: 'Recategorized from reuse: drops writes\nDoubted: the queue may retry.' }),
+    crFinding({ file: 'f.rb', severity: 3, evidence: 'Doubted: minor.' }),
+    crFinding({ file: 'g.rb', evidence: 'input x reaches line 10; nobody doubted: the guard is gone' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'a.rb': 4, 'b.rb': 4, 'c.rb': 4, 'd.rb': 4, 'e.rb': 4, 'f.rb': 3, 'g.rb': 8 });
+});
+
+test('outside and doubted prefixes leave other lanes alone', () => {
+  const { findings } = runCr(
+    [crFinding({ evidence: 'Outside the reviewed range: Doubted: still a real bug in this lane.' })],
+    'correctness',
+  );
+  assert.equal(findings[0].severity, 8);
+});

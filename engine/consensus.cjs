@@ -140,15 +140,29 @@ const CLEANUP_CATEGORIES = new Set([
   'conventions',
 ]);
 const CODE_REVIEW_CAP = 6;
+const DOUBTED_CAP = 4;
+// The lane template's evidence prefixes, in order: Outside, Recategorized, Doubted.
+const OUTSIDE_PREFIX = 'Outside the reviewed range: ';
+// Recategorized's free-text reason ends at no fixed marker, so Doubted counts at
+// the start, at a line start, or right after a prior prefix or sentence ends.
+const DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /;
 
-// Applies only to the code-review lane, before validateFinding: cleanups never
-// block, and a 7+ that misses the blocker bar is kept as a suggestion at the cap
-// instead of being dropped by validateFinding.
-function capCodeReviewFinding(f) {
-  if (f.severity < 7) return f;
+function codeReviewCap(f) {
+  const evidence = String(f.evidence || '').trimStart();
+  if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
   const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
-  if (cleanup || blockerBarFailure(f)) return { ...f, severity: CODE_REVIEW_CAP };
-  return f;
+  if (cleanup || evidence.startsWith(OUTSIDE_PREFIX)) return CODE_REVIEW_CAP;
+  if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
+  return null;
+}
+
+// Applies only to the code-review lane, before validateFinding: cleanups,
+// out-of-range and doubted findings never block, and a 7+ that misses the
+// blocker bar is kept as a suggestion at the cap instead of being dropped by
+// validateFinding.
+function capCodeReviewFinding(f) {
+  const cap = codeReviewCap(f);
+  return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
 }
 
 // Canonical order for deterministic clique construction: agent id, then file,
