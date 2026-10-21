@@ -403,9 +403,11 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **Some config keys are accepted but not yet enforced.** `learning.scope`,
   `learning.approval_required`, and `enforcement.mode` pass validation and are reserved for future
   behavior; today promotion is always approval-gated and reviews never block a merge.
-- **"Suppress" learnings match less often under the `code-review` engine.** `/code-review`
-  rewords the same finding from run to run, so a suppress rule that matched the old wording may
-  miss the new one. Expect a dismissed finding to come back now and then, and dismiss it again.
+- **"Suppress" learnings mostly stop working under the `code-review` engine.** A suppress rule
+  only hides a finding from the same reviewer, in the same category, with nearly the same wording.
+  So rules learned from the `architecture` or `simplification` reviewer never match a `code-review`
+  finding. And `/code-review` rewords the same finding from run to run, so its findings rarely
+  match each other either. Expect dismissed findings to come back, and dismiss them again.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.

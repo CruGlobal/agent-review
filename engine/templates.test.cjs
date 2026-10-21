@@ -1675,3 +1675,17 @@ test('update-files handles local-only repos', () => {
   }
   assert.ok(skill.includes('git diff HEAD'), 'update-files must diff against HEAD so staged removals show');
 });
+
+test('README says plainly how suppress learnings behave under the code-review engine', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.ok(!readme.includes('match less often'), 'the soft "match less often" wording understates it');
+  const start = readme.indexOf('**"Suppress" learnings');
+  assert.notStrictEqual(start, -1, 'the README keeps a suppress-learnings limitation bullet');
+  const bullet = readme.slice(start, readme.indexOf('\n- **', start)).replace(/\s+/g, ' ');
+  assert.ok(bullet.includes('reviewer'), 'a suppress rule is tied to the reviewer that raised it');
+  assert.ok(bullet.includes('category'), 'a suppress rule is tied to the category');
+  assert.ok(/`architecture` or `simplification`[^.]*never match a `code-review` finding/.test(bullet),
+    'learnings from the replaced reviewers never match');
+  assert.ok(/rarely match/.test(bullet), 'reworded code-review findings rarely match each other');
+  assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
+});
