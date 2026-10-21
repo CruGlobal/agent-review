@@ -496,3 +496,37 @@ test('address parse prints lenient operations and rejects bare dismissals in str
   assert.match(strict.s, /invalid address syntax/);
   rmSync(dir, { recursive: true, force: true });
 });
+
+function optionsRoot() {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-opt-'));
+  mkdirSync(join(root, 'rd'), { recursive: true });
+  writeFileSync(join(root, 'rd', 'config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', '',
+  ].join('\n'));
+  return root;
+}
+
+test('options prints resolved JSON', () => {
+  const root = optionsRoot();
+  const { code, s } = run(['options', '--args', 'deep engine=agent-review', '--root', root, '--review-dir', 'rd']);
+  rmSync(root, { recursive: true, force: true });
+  assert.equal(code, 0);
+  const r = JSON.parse(s);
+  assert.equal(r.engine.value, 'agent-review');
+  assert.equal(r.mode.value, 'deep');
+});
+
+test('options reports errors', () => {
+  const root = optionsRoot();
+  const { code, s } = run(['options', '--args', 'effort=extreme', '--root', root, '--review-dir', 'rd']);
+  rmSync(root, { recursive: true, force: true });
+  assert.equal(code, 1);
+  assert.match(s, /^error: /);
+});

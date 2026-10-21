@@ -12,6 +12,7 @@ const {
 const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { loadConfig } = require('./loadConfig.cjs');
+const { resolveOptions } = require('./options.cjs');
 const { buildPlan, linesChangedFromStat } = require('./plan.cjs');
 const {
   loadOrBuildIndex,
@@ -200,6 +201,7 @@ const USAGE = `usage: agent-review <command>
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
@@ -279,6 +281,21 @@ function main(rawArgv) {
       const { files } = changedFiles(flag(rest, '--base'), C, cfg);
       out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
       return 0;
+    }
+    case 'options': {
+      try {
+        const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+        const resolved = resolveOptions({
+          args: flag(rest, '--args') || '',
+          config: cfg,
+          ci: rest.includes('--ci'),
+        });
+        out(JSON.stringify(resolved, null, 2));
+        return 0;
+      } catch (e) {
+        out(`error: ${e.message}`);
+        return 1;
+      }
     }
     case 'plan': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });

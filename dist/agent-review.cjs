@@ -16802,6 +16802,114 @@ var require_loadConfig = __commonJS({
   }
 });
 
+// engine/options.cjs
+var require_options = __commonJS({
+  "engine/options.cjs"(exports2, module2) {
+    "use strict";
+    var ENGINES = ["agent-review", "code-review"];
+    var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+    var MODES = ["auto", "quick", "standard", "deep"];
+    var ENGINE_DEFAULTS = {
+      effort: "xhigh",
+      model: "opus",
+      replaces: ["architecture", "simplification"],
+      always: ["security", "testing", "standards"]
+    };
+    var CI_NOTE = "The code-review engine runs locally only; CI ran agent-review's own reviewers as advice, and approval comes from the local review.";
+    function setOnce(state, key, value) {
+      if (state[key] != null && state[key] !== value) {
+        throw new Error(`conflicting ${key}= values ("${state[key]}" and "${value}")`);
+      }
+      state[key] = value;
+    }
+    function parseReviewArgs(raw) {
+      const tokens = String(raw || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const state = { mode: null, engine: null, effort: null };
+      const parsed = { ci: false, incremental: false, unknown: [] };
+      for (const tok of tokens) {
+        if (MODES.includes(tok)) setOnce(state, "mode", tok);
+        else if (tok === "ci") parsed.ci = true;
+        else if (tok === "incremental") parsed.incremental = true;
+        else if (/^(engine|effort)=.+$/.test(tok)) {
+          const [key, value] = [tok.slice(0, tok.indexOf("=")), tok.slice(tok.indexOf("=") + 1)];
+          setOnce(state, key, value);
+        } else parsed.unknown.push(tok);
+      }
+      return {
+        mode: state.mode,
+        ci: parsed.ci,
+        incremental: parsed.incremental,
+        engine: state.engine,
+        effort: state.effort,
+        unknown: parsed.unknown
+      };
+    }
+    function pick(argValue, configValue, defaultValue) {
+      if (argValue != null) return { value: argValue, source: "argument" };
+      if (configValue != null) return { value: configValue, source: "config" };
+      return { value: defaultValue, source: "default" };
+    }
+    function resolveOptions({ args, config, ci }) {
+      const parsed = parseReviewArgs(args);
+      const cfg = config || {};
+      const engineCfg = cfg.engine || {};
+      const crCfg = engineCfg.code_review || {};
+      const notes = [];
+      if (parsed.engine != null && !ENGINES.includes(parsed.engine)) {
+        throw new Error(`unknown engine "${parsed.engine}" (use agent-review or code-review)`);
+      }
+      if (parsed.effort != null && !EFFORTS.includes(parsed.effort)) {
+        throw new Error(`unknown effort "${parsed.effort}" (use low, medium, high, xhigh, or max)`);
+      }
+      const isCi = Boolean(ci) || parsed.ci;
+      let engine = pick(parsed.engine, engineCfg.name, "agent-review");
+      if (isCi && engine.value === "code-review") {
+        engine = { value: "agent-review", source: "ci" };
+        notes.push(CI_NOTE);
+      }
+      const mode = parsed.mode != null ? { value: parsed.mode, source: "argument" } : { value: "standard", source: "default" };
+      const reviewsRun = pick(null, cfg.reviews_run, "local-and-ci");
+      let effort = null;
+      let model = null;
+      let maxFindings = null;
+      let replaces = [];
+      let always = [];
+      if (engine.value === "code-review") {
+        effort = pick(parsed.effort, crCfg.effort, ENGINE_DEFAULTS.effort);
+        model = pick(null, crCfg.model, ENGINE_DEFAULTS.model);
+        if (crCfg.max_findings != null) maxFindings = { value: crCfg.max_findings, source: "config" };
+        replaces = (crCfg.replaces || ENGINE_DEFAULTS.replaces).slice();
+        always = (crCfg.always || ENGINE_DEFAULTS.always).slice();
+        const byId = new Map((cfg.agents || []).map((a) => [a.id, a]));
+        for (const id of always) {
+          const agent = byId.get(id);
+          if (!agent || agent.enabled === false) {
+            throw new Error(
+              `engine.code_review.always lists "${id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`
+            );
+          }
+        }
+      } else if (parsed.effort != null) {
+        notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
+      }
+      return {
+        mode,
+        engine,
+        effort,
+        model,
+        maxFindings,
+        replaces,
+        always,
+        reviewsRun,
+        incremental: parsed.incremental,
+        ci: isCi,
+        notes
+      };
+    }
+    module2.exports = { ENGINE_DEFAULTS, CI_NOTE, parseReviewArgs, resolveOptions };
+  }
+});
+
 // engine/args.cjs
 var require_args = __commonJS({
   "engine/args.cjs"(exports2, module2) {
@@ -19435,6 +19543,7 @@ var require_cli = __commonJS({
     var os = require("node:os");
     var { createHash } = require("node:crypto");
     var { loadConfig } = require_loadConfig();
+    var { resolveOptions } = require_options();
     var { buildPlan, linesChangedFromStat } = require_plan();
     var {
       loadOrBuildIndex,
@@ -19595,6 +19704,7 @@ var require_cli = __commonJS({
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
@@ -19667,6 +19777,21 @@ var require_cli = __commonJS({
           const { files } = changedFiles(flag(rest, "--base"), C, cfg);
           out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
           return 0;
+        }
+        case "options": {
+          try {
+            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const resolved = resolveOptions({
+              args: flag(rest, "--args") || "",
+              config: cfg,
+              ci: rest.includes("--ci")
+            });
+            out(JSON.stringify(resolved, null, 2));
+            return 0;
+          } catch (e) {
+            out(`error: ${e.message}`);
+            return 1;
+          }
         }
         case "plan": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
