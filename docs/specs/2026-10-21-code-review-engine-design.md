@@ -456,3 +456,7 @@ else stands.
   most, so a re-review cannot be blocked by code it was not asked to review.
 - Passing an effort level through the Skill tool does not change the developer's remembered
   `/code-review` level, so the start-up line needs no note about it.
+- The CI note (section 8) now reads: "The code-review engine runs locally only; CI ran
+  agent-review's own reviewers, and only the local review can approve." It no longer calls CI's
+  findings advice, because a developer's local review merges the bot's ledger, so those findings
+  carry into the local report.

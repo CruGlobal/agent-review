@@ -1689,3 +1689,14 @@ test('README says plainly how suppress learnings behave under the code-review en
   assert.ok(/rarely match/.test(bullet), 'reworded code-review findings rarely match each other');
   assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
 });
+
+test('README and spec describe CI findings under the code-review engine as more than advice', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const ci = readme.slice(readme.indexOf('**CI does not use this engine.**'), readme.indexOf('## Questions people ask'));
+  assert.ok(!ci.includes('as advice'), 'CI findings are merged into the local ledger, so they are not advice-only');
+  assert.ok(ci.includes('only the review you run locally can approve'));
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-21-code-review-engine-design.md'), 'utf8');
+  const amendments = spec.slice(spec.indexOf('## Amendments after the spike'));
+  const { CI_NOTE } = require('./options.cjs');
+  assert.ok(amendments.replace(/\s+/g, ' ').includes(CI_NOTE), 'the amendments record the new CI note wording');
+});

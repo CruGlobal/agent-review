@@ -24,7 +24,7 @@ function laneOverlapMessage(id, crCfg) {
 }
 
 const CI_NOTE =
-  "The code-review engine runs locally only; CI ran agent-review's own reviewers as advice, and approval comes from the local review.";
+  "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
 
 function setOnce(state, key, value) {
   if (state[key] != null && state[key] !== value) {

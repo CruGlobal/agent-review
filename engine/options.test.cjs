@@ -84,6 +84,13 @@ test('resolve: CI forces agent-review', () => {
   assert.deepEqual(quiet.notes, []);
 });
 
+test('resolve: the CI note says CI findings count and only the local review approves', () => {
+  assert.equal(
+    CI_NOTE,
+    "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.",
+  );
+});
+
 test('resolve: invalid values throw', () => {
   const config = { agents: FULL };
   assert.throws(

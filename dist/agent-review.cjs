@@ -16644,7 +16644,7 @@ var require_options = __commonJS({
       const key = (name) => crCfg[name] ? name : `${name} (default)`;
       return `engine.code_review lists ${id} in both ${key("always")} and ${key("replaces")}`;
     }
-    var CI_NOTE = "The code-review engine runs locally only; CI ran agent-review's own reviewers as advice, and approval comes from the local review.";
+    var CI_NOTE = "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
     function setOnce(state, key, value) {
       if (state[key] != null && state[key] !== value) {
         throw new Error(`conflicting ${key}= values ("${state[key]}" and "${value}")`);

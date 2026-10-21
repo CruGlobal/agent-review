@@ -191,8 +191,9 @@ message, update Claude Code, or run again with `engine=agent-review`.
 default for a reason.
 
 **CI does not use this engine.** If CI runs in a repo set to `code-review`, it ignores the
-setting, runs the old reviewers as advice, and says so in the report. It never approves in that
-repo. Approval comes from the review you ran locally.
+setting, runs agent-review's own reviewers, and says so in the report. Those findings still
+count: your next local review merges them into its own ledger. CI never approves in that repo,
+and neither does `@claude fix` or `@claude dismiss`; only the review you run locally can approve.
 
 ## Questions people ask
 
