@@ -225,3 +225,38 @@ test('escalates fallback warns exactly once; named-lane path never warns', () =>
     console.warn = originalWarn;
   }
 });
+
+function engineRefs(agents, codeReview) {
+  const cfg = parseConfig(MINIMAL);
+  cfg.agents = agents;
+  cfg.engine = { name: 'code-review', code_review: codeReview };
+  return validateConfigReferences(cfg, join(tmpdir(), 'config.yml'));
+}
+
+test('references: always id must exist and be enabled', () => {
+  const errors = engineRefs(
+    [{ id: 'security' }, { id: 'standards', enabled: false }],
+    { always: ['security', 'testing', 'standards'] },
+  );
+  assert.ok(errors.includes('engine.code_review.always references unknown agent: testing'));
+  assert.ok(errors.includes('engine.code_review.always references disabled agent: standards'));
+  assert.equal(errors.length, 2);
+});
+
+test('references: an id in both lists', () => {
+  const errors = engineRefs([{ id: 'security' }], { always: ['security'], replaces: ['security'] });
+  assert.deepEqual(errors, ['engine.code_review lists security in both always and replaces']);
+});
+
+test('references: unknown replaces id is ignored', () => {
+  assert.deepEqual(engineRefs([{ id: 'security' }], { replaces: ['nope'] }), []);
+});
+
+test('template config still validates', () => {
+  const { readFileSync } = require('node:fs');
+  const configPath = join(__dirname, '..', 'templates', 'config.yml');
+  const cfg = loadConfig({ configPath, schemaPath });
+  assert.equal(cfg.engine.name, 'agent-review');
+  assert.equal(cfg.reviews_run, 'local-and-ci');
+  assert.ok(readFileSync(configPath, 'utf8').includes('reviews_run'));
+});

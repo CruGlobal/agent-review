@@ -16650,6 +16650,24 @@ var require_loadConfig = __commonJS({
         if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
         ids.add(agent.id);
       }
+      const codeReview = configObj.engine && configObj.engine.code_review;
+      if (codeReview) {
+        const always = codeReview.always || [];
+        const replaces = codeReview.replaces || [];
+        const byId = new Map((configObj.agents || []).map((a) => [a.id, a]));
+        for (const id of always) {
+          if (!byId.has(id)) {
+            errors.push(`engine.code_review.always references unknown agent: ${id}`);
+          } else if (byId.get(id).enabled === false) {
+            errors.push(`engine.code_review.always references disabled agent: ${id}`);
+          }
+        }
+        for (const id of always) {
+          if (replaces.includes(id)) {
+            errors.push(`engine.code_review lists ${id} in both always and replaces`);
+          }
+        }
+      }
       const base = dirname(resolve(configPath));
       const references = [];
       for (const agent of configObj.agents || []) {

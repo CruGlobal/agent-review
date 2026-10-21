@@ -214,6 +214,21 @@ context:
   enabled: false
   manifest: context/repositories.json
 
+# Review engine: agent-review | code-review.
+# code_review keys: effort low|medium|high|xhigh|max, model opus|sonnet|haiku,
+# replaces and always are lists of agent ids, max_findings is an integer >= 1 or all.
+engine:
+  name: agent-review
+  code_review:
+    effort: xhigh
+    model: opus
+    replaces: [architecture, simplification]
+    always: [security, testing, standards]
+    max_findings: 15
+
+# Where reviews run: local | local-and-ci.
+reviews_run: local-and-ci
+
 # Reports approve by default (`advisory`). Set `shadow` to post advice only; the
 # review workflow refuses a caller whose rollout_mode disagrees with this value,
 # so change the caller templates and this key together. `agent-review rollout`
