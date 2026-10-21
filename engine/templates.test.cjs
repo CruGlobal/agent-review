@@ -1227,7 +1227,7 @@ test('interact.yml approves through the shared action, gated by auto_approve', (
   const doc = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
   const step = doc.jobs.publish.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.ok(step, 'publish job must call the shared approve action');
-  assert.equal(step.if, 'inputs.auto_approve');
+  assert.equal(step.if, "inputs.auto_approve && steps.engine.outputs.name != 'code-review'");
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.match(step.with.approval_body, /fixed or dismissed/);
   const body = readFileSync(INTERACT_WORKFLOW, 'utf8');
@@ -1591,6 +1591,25 @@ test('review.yml skips approval under the code-review engine', () => {
   assert.ok(step, 'review job needs a step with id engine');
   assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
   assert.ok(step.env.TRUSTED_REVIEW_DIR && step.env.RUNTIME_DIR, 'engine step reads its paths from env');
+});
+
+test('interact.yml skips approval under the code-review engine', () => {
+  const { parse } = require('yaml');
+  const wf = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
+  const steps = wf.jobs.publish.steps;
+  const engineIndex = steps.findIndex((s) => s.id === 'engine');
+  const approveIndex = steps.findIndex((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
+  assert.ok(engineIndex >= 0, 'publish job needs its own step with id engine');
+  assert.ok(engineIndex < approveIndex, 'the engine is read before the approve step');
+  const step = steps[engineIndex];
+  assert.ok(!String(step.if || '').includes('is_fork'), 'the engine read must run for forks too');
+  assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
+  assert.ok(step.env.BASE_SHA && step.env.RUNTIME_DIR && step.env.TRUSTED_DIR, 'engine step reads its inputs from env');
+  assert.ok(step.run.includes('git archive "$BASE_SHA" .claude/review'), 'engine comes from the trusted base-SHA config');
+  assert.ok(step.run.includes('config get engine.name'), 'engine step reads engine.name');
+  assert.ok(step.run.includes('ENGINE=agent-review'), 'engine defaults to agent-review');
+  assert.ok(step.run.includes('"$CONFIGURED" != "undefined"'), 'an unset engine keeps the default');
+  assert.equal(steps[approveIndex].if, "inputs.auto_approve && steps.engine.outputs.name != 'code-review'");
 });
 
 test('init asks engine, where reviews run, and approval', () => {
