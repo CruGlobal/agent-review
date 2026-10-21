@@ -71,3 +71,21 @@ test('the last fenced JSON array wins', () => {
   assert.equal(r.ok, true);
   assert.equal(r.findings.length, 2);
 });
+
+test('"No findings." counts only when the result has no fenced block', () => {
+  const broken = checkCodeReviewProof({
+    rawText: `${HEADER}\n\nResult:\n\`\`\`json\n[{"file":"app.js",\n\`\`\`\nNo findings.\n`,
+  });
+  assert.equal(broken.ok, false);
+  assert.match(broken.reason, /no findings list/);
+  assert.deepEqual(broken.findings, []);
+});
+
+test('a findings array must hold only objects', () => {
+  for (const list of ['[1,2]', '["app.js","lib.js"]', '[{"file":"a.js"},null]', '[[{"file":"a.js"}]]', '{"findings":[1]}']) {
+    const r = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n\`\`\`json\n${list}\n\`\`\`\n` });
+    assert.equal(r.ok, false, `${list} must not pass as a findings list`);
+    assert.match(r.reason, /no findings list/);
+    assert.deepEqual(r.findings, []);
+  }
+});

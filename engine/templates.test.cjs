@@ -602,6 +602,16 @@ test('code-review-lane.md carries the contracts', () => {
   );
 });
 
+test('code-review-lane.md finds the findings list the way the proof does', () => {
+  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
+  const step2 = text.slice(text.indexOf('STEP 2.'), text.indexOf('STEP 3.'));
+  assert.ok(step2.includes('array of objects'), 'a findings array holds only objects');
+  assert.ok(
+    /`No findings\.`[^.]*only when the result has no fenced block at all/.test(step2.replace(/\s+/g, ' ')),
+    '"No findings." counts only when the result has no fenced block at all',
+  );
+});
+
 test('code-review-lane.md node -e example keeps its quote escapes', () => {
   const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
   const script = text.match(/^node -e '\n([\s\S]*?)\n'\n```/m);

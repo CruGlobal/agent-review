@@ -18442,10 +18442,14 @@ var require_codeReviewProof = __commonJS({
       while ((m = re.exec(text)) !== null) blocks.push(m[1]);
       return blocks;
     }
+    function isPlainObject(value) {
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    }
     function asFindings(value) {
-      if (Array.isArray(value)) return value;
-      if (value && typeof value === "object" && Array.isArray(value.findings)) return value.findings;
-      return null;
+      let list = null;
+      if (Array.isArray(value)) list = value;
+      else if (isPlainObject(value) && Array.isArray(value.findings)) list = value.findings;
+      return list && list.every(isPlainObject) ? list : null;
     }
     function checkCodeReviewProof({ rawText }) {
       if (rawText === null || rawText === void 0 || String(rawText).trim() === "") {
@@ -18469,8 +18473,12 @@ var require_codeReviewProof = __commonJS({
         const findings = asFindings(parsed);
         if (findings) return { ok: true, reason: "ok", findings };
       }
-      if (/^\s*No findings\.?\s*$/m.test(text)) return { ok: true, reason: "ok", findings: [] };
-      return fail('/code-review returned no findings list: expected a fenced JSON array or "No findings."');
+      if (!/^```/m.test(text) && /^\s*No findings\.?\s*$/m.test(text)) {
+        return { ok: true, reason: "ok", findings: [] };
+      }
+      return fail(
+        '/code-review returned no findings list: expected a fenced JSON array of finding objects, or "No findings." with no fenced block'
+      );
     }
     module2.exports = { checkCodeReviewProof };
   }
