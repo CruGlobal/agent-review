@@ -105,6 +105,14 @@ Do these in order. Steps 5 and 6 are the ones people miss.
 
 To have CI review a PR without anyone typing anything, add the `agent-review` label to the PR.
 
+**Local-only setup.** If you do not want CI to review PRs, set `reviews_run: local` in
+`.claude/review/config.yml`. Then skip step 3 (no API key is needed) and install only
+`agent-review-approve.yml` in step 2. That one file is what lets the robot approve a review you
+ran in your terminal. Steps 4 to 6 still apply. `/agent-review:init` asks you which setup you
+want. If your repo already has the other workflow files, run `/agent-review:update-files`. It
+offers to remove them (it never removes anything without a yes) and warns you first if a branch
+rule requires a check those files produce.
+
 ## Three switches
 
 | Switch | Where | What it controls | Default |
@@ -115,6 +123,76 @@ To have CI review a PR without anyone typing anything, add the `agent-review` la
 
 The robot approves by default. To stop approvals in a repo, set `auto_approve: false` in
 `agent-review-approve.yml` (terminal reviews), `agent-review.yml` (CI reviews), or both.
+
+## Use /code-review as the engine
+
+By default, agent-review finds problems with its own team of specialist reviewers. You can
+switch to Claude Code's built-in `/code-review` as the main finder instead. Everything around
+the review stays the same: the numbered findings, the 1 to 10 severity, fix and dismiss, the
+re-review, and the approval.
+
+**Turn it on** in `.claude/review/config.yml`. These are the defaults, so
+`name: code-review` with no other keys behaves the same as this:
+
+```yaml
+engine:
+  name: code-review              # agent-review (default) | code-review
+  code_review:
+    effort: xhigh                # low | medium | high | xhigh | max
+    model: opus
+    replaces: [architecture, simplification]
+    always: [security, testing, standards]
+    # max_findings: 15           # leave out to use /code-review's own limit
+reviews_run: local               # local | local-and-ci (default: local-and-ci)
+```
+
+Or turn it on for one run, with `review`, `re-review`, or `yolo-review`:
+
+```
+/agent-review:review engine=code-review effort=high
+```
+
+The argument wins over the config, and the config wins over the built-in default
+(`agent-review` engine, `xhigh` effort). `effort=` does nothing with the `agent-review` engine,
+and the start-up line tells you so.
+
+**Every run prints what it is using.** Before any reviewer starts, you get two lines: the
+engine, effort, mode, scope, and the reviewers that will run, each with where the setting came
+from (argument, config, or default). The same facts go into the report, so the PR shows what ran.
+
+**Who runs.** `/code-review` takes the place of the `architecture` and `simplification`
+reviewers, and the debate rounds are skipped. These keep running: `security`, `testing`, and
+`standards` on every PR, plus any other reviewer your repo has (such as `data-integrity` or a
+repo-specific one) when its own triggers match. The depth words (`quick`, `standard`, `deep`)
+do not add or remove reviewers under this engine. `/code-review` has no security pass and never
+asks for tests, which is why those reviewers stay on.
+
+**How findings are scored.** The lane saves what `/code-review` returned, and then agent-review
+reads each finding, looks at the code, and scores it on its own 1 to 10 scale. A 7 means the
+same thing whichever engine found it. The rules:
+
+- Cleanups (simplification, efficiency, reuse, and similar) score 6 at most, so they never block.
+- To score 7 or more, a finding needs a changed line, High confidence, and evidence of how it
+  fails. Without those it stays as a suggestion at 6.
+- A finding is deleted only when it is proven wrong by quoting the exact code. If the scorer just
+  doubts it, the finding stays, at 4 or below, with a note.
+- Deleted findings are listed in the report, with the quote, so you can check the work.
+- On a re-review, a finding outside the new commits scores 6 at most. It shows up as a
+  suggestion and cannot block you.
+
+**It stops if `/code-review` did not really run.** If the saved output is missing or does not
+look like a `/code-review` result, the review stops and posts nothing. It never quietly falls
+back to the old reviewers, and it never approves without its main finder. It needs a Claude Code
+that has the built-in `/code-review` (this was built and tested on 2.1.306). If you see the stop
+message, update Claude Code, or run again with `engine=agent-review`.
+
+**`effort=max` works, but it is slow and costly.** It fans out to many helper agents. On a
+15-line diff, the test run used about 20 of them and took more than 15 minutes. `xhigh` is the
+default for a reason.
+
+**CI does not use this engine.** If CI runs in a repo set to `code-review`, it ignores the
+setting, runs the old reviewers as advice, and says so in the report. It never approves in that
+repo. Approval comes from the review you ran locally.
 
 ## Questions people ask
 
@@ -325,6 +403,9 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **Some config keys are accepted but not yet enforced.** `learning.scope`,
   `learning.approval_required`, and `enforcement.mode` pass validation and are reserved for future
   behavior; today promotion is always approval-gated and reviews never block a merge.
+- **"Suppress" learnings match less often under the `code-review` engine.** `/code-review`
+  rewords the same finding from run to run, so a suppress rule that matched the old wording may
+  miss the new one. Expect a dismissed finding to come back now and then, and dismiss it again.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.
