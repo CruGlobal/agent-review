@@ -392,3 +392,21 @@ Not a coding task. The controller brings this to Justin, because it spends usage
 - [ ] **Step 3:** Run the same PR with `engine=agent-review` and compare the two reports.
 - [ ] **Step 4:** With Justin's OK, run `npm run test:e2e` with `engine.name: code-review` in the fixture config. Confirm the lanes engine ran and the report carries the CI note.
 - [ ] **Step 5:** Propose the Jira ticket and PR title to Justin. Push and open the PR only after his yes.
+
+## Spike results
+
+Run 2026-10-21 on Claude Code 2.1.306, headless, in a scratch repo. Evidence lives in `/private/tmp/claude-502/-Users-justinsabelko-Work-rails/9b54ead0-8b00-4792-b25a-024db73347e0/scratchpad/cr-spike/` (not committed). The Skill tool runs `/code-review` as a forked general-purpose agent one level below the caller, so the recipe tag line is in the stream (`task_started` event, `spawn_depth` 2), not in the lane's context.
+
+- Q1 xhigh: YES. A `reviewer-code-review` subagent called Skill `code-review` and got 8 findings back; the fork's tag was `xhigh effort → 10 inline angles → dedup (no verify) → sweep → ≤15 findings` (evidence: `run-xhigh.jsonl`, `tag-xhigh.txt`, `skill-result-xhigh.txt`).
+- Q1 max: YES, fan-out ran inside a lane. The fork's tag was `max effort → 5+5 angles × 8 candidates → 1-vote verify → sweep → ≤15 findings`, and it started about 20 depth-3 agents (angles, verifiers, sweep). It did NOT finish inside the 15 minute cap on a 2-commit diff, so there is no max findings file (evidence: `run-max.jsonl`, `tag-max.txt`).
+- Q2: PARTIAL. The fork ran `git diff 7cef894..16910c5` and the function B bug was the headline, but it also reported both function A (firstN) bugs, labeled "(Pre-existing, outside the reviewed range)" (evidence: `skill-result-xhigh.txt`, `raw-xhigh.json`).
+- Q3: JSON. No ReportFindings call; the Skill result is a few lines of prose, then a fenced JSON array of `file`, `line`, `summary`, `failure_scenario`. The lane saved the array verbatim when told to (evidence: `skill-result-xhigh.txt`, `raw-xhigh.json`). A direct `/code-review` run instead printed a numbered prose list with no JSON (`run-nolevel.jsonl`).
+- Q4: NO CHANGE. `codeReviewLastEffort` in `~/.claude.json` was `xhigh` before and after, and a plain `/code-review` still said "reusing xhigh". Only the `max` run discriminates, because the level before the spike was already xhigh. `--max-findings` was not tested (evidence: `before.json`, `after.json`, `run-nolevel.jsonl`).
+- Q5: NOT FIRED at xhigh. The lane's only Skill call was `code-review`; no server, app run, or tests after the findings, in the lane or in the fork (evidence: `run-xhigh.jsonl`, fork transcript). The max run never reached the findings, so it is untested there (evidence: `run-max.jsonl`).
+- Q6: BUILT-IN. The Skill input was `code-review` (not `code-review:code-review`) in all three runs, and the fork prompt carried a built-in recipe tag (evidence: `run-xhigh.jsonl`, `run-max.jsonl`, `run-nolevel.jsonl`).
+
+CODE_REVIEW_PERSISTS_LEVEL = false
+
+max inside a lane: works
+
+Open items for Justin: the Skill result has no recipe tag, so the lane cannot copy it into the report. Max cost about 20 forked agents and more than 15 minutes on a tiny diff. Out-of-range findings leak through the commit range target.
