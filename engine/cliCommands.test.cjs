@@ -5,6 +5,7 @@ const {
   setLearningStatus,
   listLearnings,
   preflightSummary,
+  formatStartup,
 } = require('./cliCommands.cjs');
 
 const learnings = {
@@ -102,4 +103,110 @@ test('preflightSummary includes risk, reviewer, agents, blast radius', () => {
   assert.match(s, /financial/);
   assert.match(s, /blastRadius 166/);
   assert.match(s, /mode: standard/);
+});
+
+function startupInput(over = {}) {
+  return {
+    options: {
+      mode: { value: 'auto', source: 'default' },
+      engine: { value: 'code-review', source: 'config' },
+      effort: { value: 'xhigh', source: 'default' },
+      model: { value: 'opus', source: 'default' },
+      reviewsRun: { value: 'both', source: 'default' },
+      replaces: ['architecture', 'simplification'],
+      notes: [],
+    },
+    plan: {
+      mode: { requested: 'auto', resolved: 'standard' },
+      engine: { replaces: ['architecture', 'simplification'] },
+      agents: [
+        { id: 'code-review', matchedBy: 'engine' },
+        { id: 'security', matchedBy: 'engine-always' },
+        { id: 'testing', matchedBy: 'always' },
+        { id: 'standards', matchedBy: 'engine-always' },
+      ],
+    },
+    sliceManifest: {},
+    configAgents: [
+      { id: 'architecture' },
+      { id: 'simplification' },
+      { id: 'security' },
+      { id: 'testing' },
+      { id: 'standards' },
+      { id: 'data-integrity' },
+      { id: 'off', enabled: false },
+    ],
+    scopeLabel: 'since a1b2c3d (re-review)',
+    ciFilesPresent: false,
+    ...over,
+  };
+}
+
+test('startup: code-review engine', () => {
+  const [l1, l2] = formatStartup(startupInput()).split('\n');
+  assert.equal(
+    l1,
+    'agent-review · engine: code-review (config) · effort: xhigh (default) · mode: auto → standard · scope: since a1b2c3d (re-review)',
+  );
+  assert.equal(
+    l2,
+    'reviewers: code-review [opus], security [always], testing [always], standards [always], data-integrity [skipped: no trigger matched]',
+  );
+});
+
+test('startup: default engine omits effort', () => {
+  const input = startupInput();
+  input.options.engine = { value: 'agent-review', source: 'default' };
+  input.options.effort = null;
+  input.options.mode = { value: 'standard', source: 'argument' };
+  input.plan = {
+    mode: { requested: 'standard', resolved: 'standard' },
+    agents: [{ id: 'security', matchedBy: 'path:src/**' }],
+  };
+  input.scopeLabel = undefined;
+  const [l1, l2] = formatStartup(input).split('\n');
+  assert.equal(
+    l1,
+    'agent-review · engine: agent-review (default) · mode: standard · scope: full review',
+  );
+  assert.ok(!l1.includes('effort:'));
+  assert.match(l2, /security \[trigger\]/);
+  assert.match(l2, /architecture \[skipped: no trigger matched\]/);
+});
+
+test('startup: empty-slice lanes', () => {
+  const input = startupInput({
+    sliceManifest: { testing: { mode: 'empty', files: [], hunks: 0 } },
+  });
+  assert.match(
+    formatStartup(input).split('\n')[1],
+    /testing \[skipped: no matching hunks\]/,
+  );
+});
+
+test('startup: coverage lanes', () => {
+  const input = startupInput();
+  input.plan.agents.push({ id: 'data-integrity', matchedBy: 'unmatched-coverage' });
+  assert.match(formatStartup(input).split('\n')[1], /data-integrity \[coverage\]/);
+});
+
+test('startup: notes', () => {
+  const input = startupInput();
+  input.options.notes = ['first', 'second'];
+  const lines = formatStartup(input).split('\n');
+  assert.deepEqual(lines.slice(2), ['note: first', 'note: second']);
+});
+
+test('startup: leftover CI files', () => {
+  const input = startupInput({ ciFilesPresent: true });
+  input.options.reviewsRun = { value: 'local', source: 'config' };
+  assert.ok(
+    formatStartup(input)
+      .split('\n')
+      .includes(
+        'note: this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.',
+      ),
+  );
+  const both = startupInput({ ciFilesPresent: true });
+  assert.ok(!formatStartup(both).includes('local-only'));
 });

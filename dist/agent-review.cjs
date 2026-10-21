@@ -19566,7 +19566,52 @@ var require_cliCommands = __commonJS({
       }
       return lines.join("\n");
     }
-    module2.exports = { setLearningStatus, listLearnings, preflightSummary };
+    var LEFTOVER_CI_NOTE = "this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.";
+    function reviewerTag(agent, slice, model) {
+      if (slice && slice.mode === "empty") return "skipped: no matching hunks";
+      const by = agent.matchedBy || "";
+      if (by === "engine") return model || "engine";
+      if (by === "always" || by === "engine-always") return "always";
+      if (by === "unmatched-coverage") return "coverage";
+      return "trigger";
+    }
+    function formatStartup({
+      options,
+      plan,
+      sliceManifest,
+      configAgents,
+      scopeLabel,
+      ciFilesPresent
+    }) {
+      const withSource = (o) => `${o.value} (${o.source})`;
+      const head = ["agent-review", `engine: ${withSource(options.engine)}`];
+      if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
+      const { requested, resolved } = plan.mode;
+      head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
+      head.push(`scope: ${scopeLabel || "full review"}`);
+      const manifest = sliceManifest || {};
+      const model = options.model && options.model.value;
+      const reviewers = plan.agents.map(
+        (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`
+      );
+      const planned = new Set(plan.agents.map((a) => a.id));
+      const replaced = new Set(plan.engine && plan.engine.replaces || []);
+      for (const a of configAgents || []) {
+        if (a.enabled === false || planned.has(a.id) || replaced.has(a.id)) continue;
+        reviewers.push(`${a.id} [skipped: no trigger matched]`);
+      }
+      const lines = [head.join(" \xB7 "), `reviewers: ${reviewers.join(", ")}`];
+      for (const n of options.notes || []) lines.push(`note: ${n}`);
+      if (options.reviewsRun.value === "local" && ciFilesPresent)
+        lines.push(`note: ${LEFTOVER_CI_NOTE}`);
+      return lines.join("\n");
+    }
+    module2.exports = {
+      setLearningStatus,
+      listLearnings,
+      preflightSummary,
+      formatStartup
+    };
   }
 });
 
@@ -19633,7 +19678,8 @@ var require_cli = __commonJS({
     var {
       setLearningStatus,
       listLearnings,
-      preflightSummary
+      preflightSummary,
+      formatStartup
     } = require_cliCommands();
     var { repoRoot, reviewDir } = require_paths();
     function out(s) {
@@ -19749,6 +19795,7 @@ var require_cli = __commonJS({
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
   options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
+  startup --options <f> --plan <f> [--slices <f>] [--scope <label>]   print the one-line engine, effort, and reviewers summary
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
@@ -19831,6 +19878,28 @@ var require_cli = __commonJS({
               ci: rest.includes("--ci")
             });
             out(JSON.stringify(resolved, null, 2));
+            return 0;
+          } catch (e) {
+            out(`error: ${e.message}`);
+            return 1;
+          }
+        }
+        case "startup": {
+          try {
+            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const slicesPath = flag(rest, "--slices");
+            out(
+              formatStartup({
+                options: JSON.parse(readFileSync(flag(rest, "--options"), "utf8")),
+                plan: JSON.parse(readFileSync(flag(rest, "--plan"), "utf8")),
+                sliceManifest: slicesPath ? JSON.parse(readFileSync(slicesPath, "utf8")) : {},
+                configAgents: cfg.agents || [],
+                scopeLabel: flag(rest, "--scope"),
+                ciFilesPresent: existsSync(
+                  join(C.ROOT, ".github/workflows/agent-review.yml")
+                )
+              })
+            );
             return 0;
           } catch (e) {
             out(`error: ${e.message}`);

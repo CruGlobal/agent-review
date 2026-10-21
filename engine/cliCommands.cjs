@@ -49,4 +49,55 @@ function preflightSummary(plan, impact) {
   return lines.join('\n');
 }
 
-module.exports = { setLearningStatus, listLearnings, preflightSummary };
+const LEFTOVER_CI_NOTE =
+  'this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.';
+
+function reviewerTag(agent, slice, model) {
+  if (slice && slice.mode === 'empty') return 'skipped: no matching hunks';
+  const by = agent.matchedBy || '';
+  if (by === 'engine') return model || 'engine';
+  if (by === 'always' || by === 'engine-always') return 'always';
+  if (by === 'unmatched-coverage') return 'coverage';
+  return 'trigger';
+}
+
+function formatStartup({
+  options,
+  plan,
+  sliceManifest,
+  configAgents,
+  scopeLabel,
+  ciFilesPresent,
+}) {
+  const withSource = (o) => `${o.value} (${o.source})`;
+  const head = ['agent-review', `engine: ${withSource(options.engine)}`];
+  if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
+  const { requested, resolved } = plan.mode;
+  head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
+  head.push(`scope: ${scopeLabel || 'full review'}`);
+
+  const manifest = sliceManifest || {};
+  const model = options.model && options.model.value;
+  const reviewers = plan.agents.map(
+    (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`,
+  );
+  const planned = new Set(plan.agents.map((a) => a.id));
+  const replaced = new Set((plan.engine && plan.engine.replaces) || []);
+  for (const a of configAgents || []) {
+    if (a.enabled === false || planned.has(a.id) || replaced.has(a.id)) continue;
+    reviewers.push(`${a.id} [skipped: no trigger matched]`);
+  }
+
+  const lines = [head.join(' \u00b7 '), `reviewers: ${reviewers.join(', ')}`];
+  for (const n of options.notes || []) lines.push(`note: ${n}`);
+  if (options.reviewsRun.value === 'local' && ciFilesPresent)
+    lines.push(`note: ${LEFTOVER_CI_NOTE}`);
+  return lines.join('\n');
+}
+
+module.exports = {
+  setLearningStatus,
+  listLearnings,
+  preflightSummary,
+  formatStartup,
+};

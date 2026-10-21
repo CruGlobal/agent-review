@@ -59,6 +59,7 @@ const {
   setLearningStatus,
   listLearnings,
   preflightSummary,
+  formatStartup,
 } = require('./cliCommands.cjs');
 
 const { repoRoot, reviewDir } = require('./paths.cjs');
@@ -202,6 +203,7 @@ const USAGE = `usage: agent-review <command>
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
   options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
+  startup --options <f> --plan <f> [--slices <f>] [--scope <label>]   print the one-line engine, effort, and reviewers summary
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
@@ -291,6 +293,30 @@ function main(rawArgv) {
           ci: rest.includes('--ci'),
         });
         out(JSON.stringify(resolved, null, 2));
+        return 0;
+      } catch (e) {
+        out(`error: ${e.message}`);
+        return 1;
+      }
+    }
+    case 'startup': {
+      try {
+        const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+        const slicesPath = flag(rest, '--slices');
+        out(
+          formatStartup({
+            options: JSON.parse(readFileSync(flag(rest, '--options'), 'utf8')),
+            plan: JSON.parse(readFileSync(flag(rest, '--plan'), 'utf8')),
+            sliceManifest: slicesPath
+              ? JSON.parse(readFileSync(slicesPath, 'utf8'))
+              : {},
+            configAgents: cfg.agents || [],
+            scopeLabel: flag(rest, '--scope'),
+            ciFilesPresent: existsSync(
+              join(C.ROOT, '.github/workflows/agent-review.yml'),
+            ),
+          }),
+        );
         return 0;
       } catch (e) {
         out(`error: ${e.message}`);
