@@ -20,6 +20,8 @@ prose rule docs.
 /agent-review:review standard ci  # Non-interactive CI run (posts to the PR)
 /agent-review:review auto ci      # CI run, right-sized: skips no-risk diffs, quick for LOW,
                                   # standard for MEDIUM/HIGH, deep for CRITICAL
+/agent-review:review engine=code-review effort=high   # /code-review finds, agent-review scores
+                                  # (local only; engine=agent-review picks the specialist lanes)
 ```
 
 **Rough cost** (varies with diff size): quick ~$0.50 · standard ~$2-4 · deep varies with
@@ -46,6 +48,7 @@ Resolve them relative to THIS skill file — `skills/review/SKILL.md` — so the
 levels up:
 
 - archetype prompt: `../../templates/archetype.md`
+- code-review lane prompt: `../../templates/code-review-lane.md` (only under the code-review engine)
 - report skeleton: `../../templates/report.md`
 
 (If `${CLAUDE_PLUGIN_ROOT}` is set in the environment, `$CLAUDE_PLUGIN_ROOT/templates/…` is the
@@ -55,7 +58,7 @@ same file. Read the templates with the Read tool before substituting.)
 
 ## Stage 0A — Parse Review Mode & Initialize
 
-The first argument selects the mode; the literal argument `ci` (in any position) selects CI mode.
+A mode word (in any position) selects the mode; the literal argument `ci` (in any position) selects CI mode.
 
 - **quick** — 3 agents (testing, standards + the first triggered agent); model tiers per-agent (see plan)
 - **deep** — every enabled agent in config.yml; model tiers per-agent (see plan)
@@ -63,6 +66,14 @@ The first argument selects the mode; the literal argument `ci` (in any position)
   LOW → quick · MEDIUM/HIGH → standard · CRITICAL → deep
 - **standard** (default, recommended) — agents selected by the review engine from the diff; model
   per-agent from config.yml
+
+`engine=agent-review|code-review` and `effort=low|medium|high|xhigh|max` (in any position) pick
+the review engine. An argument beats `.claude/review/config.yml`, which beats the built-in default
+(`agent-review`; effort `xhigh`). `agent-review options` resolves the mode, engine, and effort into
+`/tmp/review_options.json`. Under the `code-review` engine, Claude Code's built-in `/code-review`
+replaces the lanes in `engine.replaces` and the debate rounds, and depth words no longer change who
+runs: quick drops no lane and deep adds none. They still set each lane's model tier, and `auto`
+still skips a score-0 diff. CI always runs the `agent-review` engine.
 
 CI mode is on when the `ci` argument was passed, or `$AGENT_REVIEW_CI` is set to anything
 non-empty. If so, follow **[CI Mode](#ci-mode)** below — it changes what several stages do.
@@ -77,27 +88,47 @@ operate on empty strings.
 
 Mode parsing, CI detection, config validation, and working directories are read-only setup with no
 required decision in between — one shell handles all of it, so a bwrap bind-race rerun replays it
-as a single unit:
+as a single unit. Before running it, set `REVIEW_ARGS` on its first assignment line to the full
+argument string this skill was invoked with, exactly as given (`""` when there were none):
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 set -e
+REVIEW_ARGS=""   # ← the full argument string this skill was invoked with, e.g. "auto incremental engine=code-review"
 
-# --- Determine Review Mode ---
-MODE="${1:-standard}"
-case "$MODE" in quick|deep|auto) ;; *) MODE="standard" ;; esac   # `ci` alone → standard mode
+# --- Detect CI Mode ---
+CI_MODE=""
+case " $REVIEW_ARGS " in *" ci "*) CI_MODE="true" ;; esac
+[ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
+
+# --- Verify the repo is set up ---
+agent-review config validate || {
+  echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
+  exit 1
+}
+
+# --- Resolve mode, engine, and effort (argument, then config, then default) ---
+agent-review options --args "$REVIEW_ARGS" ${CI_MODE:+--ci} > /tmp/review_options.json || {
+  cat /tmp/review_options.json
+  rm -f /tmp/review_options.json
+  exit 1
+}
+MODE=$(node -e 'console.log(require("/tmp/review_options.json").mode.value)')
+ENGINE=$(node -e 'console.log(require("/tmp/review_options.json").engine.value)')
+EFFORT=$(node -e 'const o = require("/tmp/review_options.json"); console.log(o.effort ? o.effort.value : "")')
+REVIEWS_RUN=$(node -e 'console.log(require("/tmp/review_options.json").reviewsRun.value)')
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 case "$MODE" in
   quick)
     echo "🏃 QUICK REVIEW MODE"
-    echo "• 3 agents (testing, standards + the first triggered agent)"
+    [ "$ENGINE" = "code-review" ] || echo "• 3 agents (testing, standards + the first triggered agent)"
     echo "• Model tiers: per-agent (see plan)"
     AGENT_MODE="quick"
     ;;
   deep)
     echo "🔬 DEEP REVIEW MODE"
-    echo "• Every enabled agent in config.yml"
+    [ "$ENGINE" = "code-review" ] || echo "• Every enabled agent in config.yml"
     echo "• Model tiers: per-agent (see plan)"
     AGENT_MODE="deep"
     ;;
@@ -114,6 +145,7 @@ case "$MODE" in
     AGENT_MODE="standard"
     ;;
 esac
+[ "$ENGINE" = "code-review" ] && echo "• Engine: code-review (/code-review at $EFFORT effort); the start-up line after planning lists every reviewer"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -125,6 +157,8 @@ echo ""
 # this run.
 rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
 rm -f /tmp/agent_findings/*.json 2>/dev/null || true
+# A stale /code-review result would pass Stage 2's proof check for a lane that never ran it.
+rm -f /tmp/code_review_raw.txt /tmp/code_review_dropped.json /tmp/code_review_proof.json
 # A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
 # run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a
 # launched-subset plan this run never wrote.
@@ -133,26 +167,17 @@ rm -rf /tmp/agent_slices 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> /tmp/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
+export ENGINE="$ENGINE" EFFORT="$EFFORT" REVIEWS_RUN="$REVIEWS_RUN"
 EOF
 
-# --- Detect CI Mode ---
-CI_MODE=""
-case " $* " in *" ci "*) CI_MODE="true" ;; esac
-[ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
 
 # --- Detect a local incremental request ---
 INCREMENTAL_REQUESTED=""
-case " $* " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac
+case " $REVIEW_ARGS " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac
 [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
 echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> /tmp/review_env.sh
-
-# --- Verify the repo is set up ---
-agent-review config validate || {
-  echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
-  exit 1
-}
 
 # --- Initialize Directories ---
 mkdir -p /tmp/automated_fixes
@@ -344,6 +369,7 @@ agent-review plan \
   --diff /tmp/pr_diff.txt \
   --scope "$REVIEW_SCOPE" \
   --mode "$MODE" \
+  --options /tmp/review_options.json \
   > /tmp/review_plan.json
 cat /tmp/review_plan.json
 
@@ -356,6 +382,14 @@ agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
   --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
 cat /tmp/slice_manifest.json
 
+# --- Start-up line: the options this run uses, where each came from, and who will review ---
+if [ -n "$INCREMENTAL" ]; then
+  STARTUP_SCOPE="since $(git rev-parse --short "$LAST_REVIEWED") (re-review)"
+else
+  STARTUP_SCOPE="full review"
+fi
+agent-review startup --options /tmp/review_options.json --plan /tmp/review_plan.json --slices /tmp/slice_manifest.json --scope "$STARTUP_SCOPE"
+
 # A second plan covers the full PR and is the source of truth for governance:
 # displayed risk, required reviewer, and the machine-readable approval status.
 if [ "$FULL_RANGE" = "$RANGE" ]; then
@@ -367,6 +401,7 @@ else
     --diff /tmp/pr_full_diff.txt \
     --scope "$REVIEW_SCOPE" \
     --mode "$MODE" \
+    --options /tmp/review_options.json \
     > /tmp/review_gate_plan.json
 fi
 cat /tmp/review_gate_plan.json
@@ -394,6 +429,10 @@ for (const repo of context.repositories || []) {
 }
 NODE
 ```
+
+Show the user the start-up lines (`agent-review · engine: …`, `reviewers: …`, and any `note:`
+lines) exactly as printed. They state what this run uses and who will review, so never restate
+them from memory.
 
 Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
 excluded from risk scoring and agent selection by the engine — agents should not raise findings
@@ -430,6 +469,11 @@ The plan JSON has this shape:
   ]
 }
 ```
+
+Under the `code-review` engine the plan also has an `engine` block (`name`, `effort`, `model`,
+`maxFindings`, `replaces`, `always`), and `agents[0]` is the `code-review` lane: `always: true`,
+`matchedBy: "engine"`, `tier` set to the engine's model, and `rules` listing the rule docs of the
+lanes it replaces. The lanes in `engine.replaces` are not in `agents[]`.
 
 ---
 
@@ -707,11 +751,18 @@ plan's `agents[]` has:
 - `tier` — the engine-resolved `opus`/`sonnet`/`haiku` subagent tier (see Stage 1's launch table)
 - `matchedBy` — why it was selected (`always`, `path:<glob>`, `content:<substring>`, or
   `unmatched-coverage` — the engine force-includes an escalating lane when the diff touches a
-  reviewable file none of the risk map's globs recognize and no otherwise-selected lane escalates)
+  reviewable file none of the risk map's globs recognize and no otherwise-selected lane escalates).
+  Under the `code-review` engine, also `engine` (the `code-review` lane) and `engine-always` (a
+  lane forced on by `engine.always`).
 - `rules` — rule docs to load into that agent's prompt, relative to `.claude/review/`
 
 **Mode semantics** — build the launch list as follows:
 
+- **`ENGINE` is `code-review`** (from `/tmp/review_env.sh`) → the plan's `agents[]`, exactly, in
+  every mode. Do not add, drop, or reorder. Quick does not apply its 3-agent cap and deep does not
+  add config-only lanes: the plan already holds the `code-review` lane, every `engine.always`
+  lane, and every other triggered lane outside `engine.replaces`. The bullets below apply only
+  when `ENGINE` is `agent-review`.
 - **standard** → the plan's `agents[]`, exactly. Do not add, drop, or reorder.
 - **deep** → every agent with `enabled: true` in config (`agent-review config get agents`), even
   ones whose triggers did not fire. For agents also present in the plan, use the plan's entry (its
@@ -737,6 +788,8 @@ Announce the selection, including each agent's `matchedBy` reason, e.g.:
 ✅ data-integrity — content:createClient
 ```
 
+Under the `code-review` engine the list starts with the `code-review` lane, whose reason is `engine`.
+
 ### Smoke-Test Tier Routing
 
 The launch table (Stage 1) selects a subagent type per agent's tier (`agent-review:reviewer-opus`
@@ -744,11 +797,15 @@ The launch table (Stage 1) selects a subagent type per agent's tier (`agent-revi
 before committing every later launch to them — a stale or partially-installed plugin might not
 expose them yet. Run this only once a review is actually about to launch agents (the resolved
 mode reached this point instead of exiting at a Stage 0 skip) — that keeps a score-0 auto skip at
-$0. Launch exactly one Task:
+$0. Launch exactly one Task (two under the `code-review` engine, see below):
 
 - **description**: `"routing smoke test"`
 - **subagent_type**: `"agent-review:reviewer-haiku"`
 - **prompt**: `"Reply with exactly: OK"`
+
+When `ENGINE` is `code-review`, launch a second Task in the same message, identical except for
+**subagent_type** `"agent-review:reviewer-code-review"`, to confirm the code-review lane's agent
+type resolves too. Both must pass.
 
 If the Task tool errors (unknown subagent type) or the reply is not exactly `OK`, degrade
 rather than fail the review — set `ROUTING="degraded"` below; every later launch table then falls
@@ -757,7 +814,7 @@ back to `subagent_type: "general-purpose"` for every agent, and Stage 6 notes th
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
-ROUTING=""   # ← change to "degraded" if the smoke-test Task above errored
+ROUTING=""   # ← change to "degraded" if any smoke-test Task above errored
 cat >> /tmp/review_env.sh <<EOF
 export ROUTING="$ROUTING"
 EOF
@@ -785,11 +842,25 @@ Display: "🚀 Launching [N] specialized review agents in parallel..."
 
 Before assembling prompts, fetch approved `rule` learnings (gated on the learning layer) and
 compute dependency impact (Stage 1B, gated on the index being enabled in config) — both are
-read-only lookups nothing else here depends on, so one shell handles both:
+read-only lookups nothing else here depends on, so one shell handles both. Under the
+`code-review` engine the same shell also prints the `code-review` lane's `/code-review` target:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 set -e
+
+# --- The code-review lane's /code-review target ---
+if [ "${ENGINE:-}" = "code-review" ]; then
+  if [ -n "$INCREMENTAL" ]; then
+    CODE_REVIEW_TARGET="$LAST_REVIEWED..$HEAD_REF"
+  elif [ -n "$PR_NUMBER" ]; then
+    CODE_REVIEW_TARGET="$PR_NUMBER"
+  else
+    CODE_REVIEW_TARGET="$(git branch --show-current)"
+    CODE_REVIEW_TARGET="${CODE_REVIEW_TARGET:-$RANGE}"
+  fi
+  echo "code-review target: $CODE_REVIEW_TARGET"
+fi
 
 # --- Approved learnings (learning layer) ---
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
@@ -818,7 +889,8 @@ human from prior review feedback.
 
 ### Assemble each agent prompt from the archetype template
 
-There are no per-agent prompts in this skill. Every agent gets the SAME prompt skeleton — the
+There are no per-agent prompts in this skill. Every agent except the `code-review` lane (see **The
+`code-review` lane's prompt** below) gets the SAME prompt skeleton — the
 plugin's `templates/archetype.md` (see the path note at the top of this file) — with eleven
 placeholders filled in. Read the template once, then for EACH entry in the launch list produce one
 filled copy:
@@ -869,6 +941,22 @@ Diff stat: <contents of /tmp/diff_stat.txt>" (spec R1 — the changed-file list 
 together, so a sliced lane can pull other hunks deliberately). Omit this line for `mode: "full"`
 lanes — they already have the whole diff.
 
+**The `code-review` lane's prompt.** Only when `ENGINE` is `code-review`. The `code-review` lane
+(`agents[0]`, `matchedBy: "engine"`) does not use the archetype. Read the plugin's
+`templates/code-review-lane.md` (`../../templates/code-review-lane.md` from this skill file) and
+fill its eight placeholders:
+
+| Placeholder               | Fill with                                                                                                                                                                                       |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `/tmp/review_env.sh`.                                                                                                                        |
+| `{{TARGET}}`              | The `code-review target:` value printed by the block above: `$LAST_REVIEWED..$HEAD_REF` for an incremental review, `$PR_NUMBER` for a full review, or the current branch name when no PR resolves. |
+| `{{MAX_FINDINGS_FLAG}}`   | ` --max-findings <n>`, with its leading space, when `plan.engine.maxFindings` is set (`<n>` is that value). Empty string when it is `null`.                                                       |
+| `{{RISK_CONTEXT}}`        | The same bullet block as the archetype's `{{RISK_CONTEXT}}`, for this lane (`Selected because: engine`, `Model tier: <its tier>`).                                                               |
+| `{{DIFF_PATH}}`           | `/tmp/pr_diff.txt`. This lane is `always: true`, so it always gets the whole diff, never a slice.                                                                                                |
+| `{{SCORING_RULES}}`       | The lane's `rules[]` (the replaced lanes' rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.                                                          |
+| `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
+| `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** above), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
+
 The launched-lane set (whatever remains after the empty-lane skip above — the plan's agents
 minus quick's cap or plus deep's config-only additions, per Stage 0B, minus any empty-slice skip)
 is exactly what Stage 2's cross-check and Stage 5's consensus `--plan` must use. It is derived
@@ -886,6 +974,17 @@ Then launch each one with the Task tool:
   use `"general-purpose"` for every agent instead.
 - **prompt**: the filled archetype text
 
+Under the `code-review` engine, launch the `code-review` lane in that same message, with:
+
+- **description**: `"Code review lane"`
+- **subagent_type**: `"agent-review:reviewer-code-review"`, or `"general-purpose"` if `$ROUTING`
+  is `degraded`
+- **model**: the lane's `tier` from the plan (the engine's model)
+- **prompt**: the filled `code-review-lane.md` text
+
+Every effort level, `max` included, runs inside this lane. At `max`, `/code-review` starts its own
+subagents and can run for 15 minutes or more; keep collecting the lane in Stage 2 like any other.
+
 The rule docs are authoritative for what each agent checks; they carry all repo-specific focus
 areas. Do not add repo-specific instructions here.
 
@@ -900,7 +999,9 @@ Stage 2's cross-check and Stage 5's consensus will consume.
 
 Replace the `launchedIds` array below with the exact ids launched above (e.g.
 `["testing","standards","security"]` for a quick-mode run — quick: <=3; standard: the plan agents
-minus any empty-slice skip; deep: every enabled config agent minus any empty-slice skip), and
+minus any empty-slice skip; deep: every enabled config agent minus any empty-slice skip; the
+`code-review` engine, in any mode: the plan agents, `code-review` included, minus any empty-slice
+skip), and
 replace `skippedIds` with the ids you tracked above as empty-slice skips (`[]` if none — this is
 the same list the "Skipping empty-slice lanes" note above uses for `Review detail & stats`), then
 run:
@@ -962,7 +1063,8 @@ The JSON report has these fields:
 - `truncated` — `true` if the traversal cap was hit
 
 **Display** `blastRadius` and `topImpacted` as the dependency-impact summary (flag `truncated` if
-set). **Feed** the actual dependent file names into the architecture and data-integrity agents by
+set). **Feed** the actual dependent file names into the architecture and data-integrity agents (and
+the `code-review` lane, in the architecture lane's place) by
 inlining them in `{{IMPACT}}` (Stage 1) — the agents never read this JSON themselves, so whatever
 you do not inline is invisible to them.
 
@@ -983,6 +1085,12 @@ check it against the findings file the agent actually wrote:
 - The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
   (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
   or `findings.length` does not equal the reported `<N>`.
+- **The `code-review` lane** must also prove `/code-review` ran. Run
+  `agent-review code-review-proof --raw /tmp/code_review_raw.txt > /tmp/code_review_proof.json`.
+  A non-zero exit fails the lane's cross-check even when its findings file passes, and so does a
+  reply of `/code-review did not run` in place of the `done` line. When the lane fails twice and
+  the proof failed, print the proof's `reason` (from `/tmp/code_review_proof.json`) right after
+  the loud line below; it names the fix.
 - On a failed cross-check: relaunch that lane once; a lane that fails twice fails the run —
   no report is posted. Use the lane's original Stage 1 prompt, unchanged, for the retry.
   Optionally append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create it if
@@ -1074,7 +1182,8 @@ described in the report as suggestions for a human to review and run locally.
 
 ## Stage 3 — Cross-Examination Debate (Round 1)
 
-**Skip this stage in CI mode unless `$AGENT_REVIEW_DEBATE` is exactly `true`.**
+**Skip this stage in CI mode unless `$AGENT_REVIEW_DEBATE` is exactly `true`.** Also skip it
+whenever `ENGINE` is `code-review`: that engine runs no debate rounds.
 
 Facilitate the first debate round where agents challenge each other.
 
@@ -1168,7 +1277,7 @@ Launch all debate agents in parallel.
 
 ## Stage 4 — Rebuttals (Debate Round 2)
 
-**Skip this stage whenever Stage 3 was skipped.**
+**Skip this stage whenever Stage 3 was skipped**, including under the `code-review` engine.
 
 Collect all challenges from Stage 3 and give each challenged agent a chance to respond.
 
@@ -1891,7 +2000,8 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 **Cross-stage state**
 
 Every bash block runs in its own shell. `/tmp/review_env.sh` is the only carrier between stages:
-Stage 0A truncates it and writes `MODE`/`AGENT_MODE`, then `CI_MODE`; Stage 0 adds `DAY_OF_WEEK`,
+Stage 0A truncates it and writes `MODE`/`AGENT_MODE`, `ENGINE`/`EFFORT`/`REVIEWS_RUN` (from
+`/tmp/review_options.json`; `EFFORT` is empty under the `agent-review` engine), then `CI_MODE`; Stage 0 adds `DAY_OF_WEEK`,
 `BASE_REF`, `RANGE`; the Stage 0B smoke test adds `ROUTING`; Stage 2B adds `FIX_COUNT`; Stage 5B
 adds `PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute
 itself begins with `. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the
@@ -1904,6 +2014,9 @@ discipline.
 | quick    | up to 3 (testing, standards, first triggered)    | per-agent tier (non-escalating `smart` → haiku)    | small, low-risk changes        |
 | standard | engine selection from the diff                  | per-agent tier (see plan)                          | normal feature work            |
 | deep     | every enabled agent                             | per-agent tier (escalating on HIGH/CRITICAL → opus) | high-risk or critical changes  |
+
+Under the `code-review` engine, every mode launches the plan's `agents[]` exactly (see Stage 0B);
+the mode still sets each lane's model tier.
 
 **Security posture**
 

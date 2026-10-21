@@ -1309,7 +1309,7 @@ test('the docs and skills know the approve template and the review-side auto_app
 test('the review skill runs the incremental path locally on the `incremental` argument', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('/agent-review:review auto incremental'), 'usage must show the local incremental form');
-  assert.ok(skill.includes('case " $* " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac'), 'the argument must be detected like `ci`');
+  assert.ok(skill.includes('case " $REVIEW_ARGS " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac'), 'the argument must be detected like `ci`');
   assert.ok(skill.includes('if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then'), 'the incremental gate must accept the local request');
   assert.ok(!skill.includes('# Incremental re-review (CI only)'), 'the CI-only comment is stale');
   assert.ok(skill.includes('push first'), 'unpushed local commits must stop an incremental review');
@@ -1346,6 +1346,98 @@ test('re-review and yolo-review are thin drivers over the review and address ski
   assert.ok(yolo.includes('cannot approve'), 'must say the session cannot approve');
   assert.ok(yolo.includes('git status --porcelain'), 'clean tree precondition');
   assert.ok(!yolo.includes('apply_all.sh --yes'));
+});
+
+// Each invocation of `name` in a bash block, with backslash continuations joined onto one line.
+function commandsIn(bash, name) {
+  const lines = bash.split('\n');
+  const found = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].trim().startsWith(`${name} `)) continue;
+    let cmd = lines[i].trim();
+    while (cmd.endsWith('\\') && i + 1 < lines.length) cmd = `${cmd.slice(0, -1).trim()} ${lines[++i].trim()}`;
+    found.push(cmd);
+  }
+  return found;
+}
+
+test('review skill wires the code-review engine', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const bash = bashBlocks(skill);
+
+  const init = stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest');
+  assert.ok(
+    bashBlocks(init).includes('agent-review options --args "$REVIEW_ARGS" ${CI_MODE:+--ci} > /tmp/review_options.json'),
+    'Initialize resolves options from the raw arguments, forcing the default engine in CI',
+  );
+  assert.ok(
+    init.indexOf('CI_MODE="true"') < init.indexOf('agent-review options --args'),
+    'CI is detected before options are resolved, so --ci reaches the resolver',
+  );
+  assert.match(
+    bashBlocks(init),
+    /^export ENGINE="\$ENGINE" EFFORT="\$EFFORT" REVIEWS_RUN="\$REVIEWS_RUN"$/m,
+    'ENGINE, EFFORT, and REVIEWS_RUN are persisted to review_env.sh for later stages',
+  );
+  assert.ok(init.includes('"$ENGINE" = "code-review"'), 'mode banners must not claim the quick cap or deep expansion under code-review');
+
+  const plans = commandsIn(bash, 'agent-review plan');
+  assert.strictEqual(plans.length, 2, 'expected the review plan and the gate plan');
+  for (const cmd of plans) {
+    assert.ok(cmd.includes('--options /tmp/review_options.json'), `plan call lacks the options file: ${cmd}`);
+    assert.ok(cmd.includes('--mode "$MODE"'), `plan call must take mode from MODE, not the options file: ${cmd}`);
+  }
+
+  const buildPlan = stageSlice(skill, '### Build the Review Plan & Load Evidence', '## CI Mode');
+  const startup = commandsIn(bashBlocks(buildPlan), 'agent-review startup');
+  assert.strictEqual(startup.length, 1, 'the plan block prints the start-up line once');
+  for (const part of [
+    '--options /tmp/review_options.json',
+    '--plan /tmp/review_plan.json',
+    '--slices /tmp/slice_manifest.json',
+    '--scope "$STARTUP_SCOPE"',
+  ]) {
+    assert.ok(startup[0].includes(part), `startup call lacks ${part}`);
+  }
+  assert.ok(
+    bashBlocks(buildPlan).indexOf('agent-review slice') < bashBlocks(buildPlan).indexOf('agent-review startup'),
+    'the start-up line reads the slice manifest, so it prints after slicing',
+  );
+
+  const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '### Smoke-Test Tier Routing').replace(/\s+/g, ' ');
+  assert.match(
+    stage0b,
+    /\*\*`ENGINE` is `code-review`\*\*.*?the plan's `agents\[\]`, exactly, in every mode/,
+    'under code-review the launch list is the plan, in every mode',
+  );
+
+  const smoke = stageSlice(skill, '### Smoke-Test Tier Routing', '## Stage 1 — Launch Specialized Review Agents');
+  assert.ok(smoke.includes('agent-review:reviewer-code-review'), 'the smoke test must confirm the code-review agent type resolves');
+
+  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  assert.ok(stage1.includes('templates/code-review-lane.md'), 'the code-review lane fills its own template');
+  assert.ok(stage1.includes('`"agent-review:reviewer-code-review"`'), 'the code-review lane launches on its own agent type');
+  for (const name of CODE_REVIEW_LANE_PLACEHOLDERS) {
+    assert.ok(stage1.includes(`\`{{${name}}}\``), `Stage 1 must say how to fill {{${name}}} for the code-review lane`);
+  }
+
+  const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
+  assert.ok(
+    stage2.includes('agent-review code-review-proof --raw /tmp/code_review_raw.txt > /tmp/code_review_proof.json'),
+    'Stage 2 proves /code-review ran before trusting the code-review lane',
+  );
+  assert.ok(stage2.includes('`reason`'), 'a second proof failure prints the proof reason');
+
+  const stage3 = stageSlice(skill, '## Stage 3 — Cross-Examination Debate', '### Debate Prompt Template');
+  assert.match(stage3, /ENGINE[^\n]*code-review/, 'debate is skipped under the code-review engine');
+});
+
+test('drivers pass engine tokens through', () => {
+  for (const name of ['re-review', 'yolo-review']) {
+    const text = readFileSync(join(ROOT, `skills/${name}/SKILL.md`), 'utf8');
+    assert.ok(text.includes('engine='), `skills/${name}/SKILL.md must pass engine= through`);
+    assert.ok(text.includes('effort='), `skills/${name}/SKILL.md must pass effort= through`);
+  }
 });
 
 test('templates ship advisory and approving by default, label gate kept, config agrees', () => {

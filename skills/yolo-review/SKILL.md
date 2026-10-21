@@ -10,7 +10,8 @@ real code changes committed to the PR branch, nothing is dismissed on the AI's j
 suggestions below severity 7 are left for a human, and the approval itself is the bot's.
 
 **Usage**: `/agent-review:yolo-review` (optionally `quick`, `standard`, or `deep` for the first
-review; re-reviews always run `auto incremental`).
+review; re-reviews always run `auto incremental`). `engine=agent-review|code-review` and
+`effort=low|medium|high|xhigh|max` pass through to every review.
 
 **Cost**: up to four reviews and three address passes on a bad branch; `auto` keeps the
 re-reviews cheap.
@@ -33,7 +34,8 @@ re-reviews cheap.
    ```
 
 2. **Review** — invoke `agent-review:review` with the argument `auto` (or the user's
-   mode). It posts the report and prints the findings.
+   mode), plus the user's `engine=` and `effort=` tokens, if any. It posts the report and prints
+   the findings.
 
 3. **Fix blockers** — read the posted ledger:
 
@@ -54,7 +56,8 @@ re-reviews cheap.
    Never dismiss — not with any code, not for any reason; a finding that cannot
    be fixed stays open and is reported at the end. If `OPEN` is 0, skip to step 6.
 
-4. **Re-review** — invoke `agent-review:review` with the arguments `auto incremental`.
+4. **Re-review** — invoke `agent-review:review` with the arguments `auto incremental`, plus the
+   user's `engine=` and `effort=` tokens, if any.
 
 5. **Bounded loop** — recompute `OPEN` as in step 3. If it is greater than 0 and any open
    blocker is one this run has not yet tried to fix, repeat steps 3-4, at most two more times
