@@ -58,7 +58,8 @@ same file. Read the templates with the Read tool before substituting.)
 
 ## Stage 0A — Parse Review Mode & Initialize
 
-A mode word (in any position) selects the mode; the literal argument `ci` (in any position) selects CI mode.
+A mode word (in any position) selects the mode; the argument `ci` (in any position) selects CI mode.
+Arguments are not case-sensitive: `agent-review options` resolves them all.
 
 - **quick** — 3 agents (testing, standards + the first triggered agent); model tiers per-agent (see plan)
 - **deep** — every enabled agent in config.yml; model tiers per-agent (see plan)
@@ -96,9 +97,8 @@ argument string this skill was invoked with, exactly as given (`""` when there w
 set -e
 REVIEW_ARGS=""   # ← the full argument string this skill was invoked with, e.g. "auto incremental engine=code-review"
 
-# --- Detect CI Mode ---
+# --- Detect CI Mode (the workflow's signal; a `ci` argument is resolved with the options) ---
 CI_MODE=""
-case " $REVIEW_ARGS " in *" ci "*) CI_MODE="true" ;; esac
 [ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
 
 # --- Verify the repo is set up ---
@@ -113,6 +113,7 @@ agent-review options --args "$REVIEW_ARGS" ${CI_MODE:+--ci} > /tmp/review_option
   rm -f /tmp/review_options.json
   exit 1
 }
+CI_MODE=$(node -e 'console.log(require("/tmp/review_options.json").ci ? "true" : "")')
 MODE=$(node -e 'console.log(require("/tmp/review_options.json").mode.value)')
 ENGINE=$(node -e 'console.log(require("/tmp/review_options.json").engine.value)')
 EFFORT=$(node -e 'const o = require("/tmp/review_options.json"); console.log(o.effort ? o.effort.value : "")')
@@ -174,8 +175,7 @@ EOF
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
 
 # --- Detect a local incremental request ---
-INCREMENTAL_REQUESTED=""
-case " $REVIEW_ARGS " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac
+INCREMENTAL_REQUESTED=$(node -e 'console.log(require("/tmp/review_options.json").incremental ? "true" : "")')
 [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
 echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> /tmp/review_env.sh
 

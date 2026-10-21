@@ -1323,7 +1323,11 @@ test('the docs and skills know the approve template and the review-side auto_app
 test('the review skill runs the incremental path locally on the `incremental` argument', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('/agent-review:review auto incremental'), 'usage must show the local incremental form');
-  assert.ok(skill.includes('case " $REVIEW_ARGS " in *" incremental "*) INCREMENTAL_REQUESTED="true" ;; esac'), 'the argument must be detected like `ci`');
+  assert.ok(
+    skill.includes('INCREMENTAL_REQUESTED=$(node -e \'console.log(require("/tmp/review_options.json").incremental ? "true" : "")\')'),
+    'the argument is read from the resolved options, like `ci`, so any case works',
+  );
+  assert.ok(!skill.includes('*" incremental "*)'), 'the skill must not re-parse incremental from the raw arguments');
   assert.ok(skill.includes('if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then'), 'the incremental gate must accept the local request');
   assert.ok(!skill.includes('# Incremental re-review (CI only)'), 'the CI-only comment is stale');
   assert.ok(skill.includes('push first'), 'unpushed local commits must stop an incremental review');
@@ -1389,6 +1393,10 @@ test('review skill wires the code-review engine', () => {
   assert.notStrictEqual(ciDetect, -1, 'Initialize must detect CI');
   assert.notStrictEqual(optionsCall, -1, 'Initialize must resolve options');
   assert.ok(ciDetect < optionsCall, 'CI is detected before options are resolved, so --ci reaches the resolver');
+  assert.ok(init.includes('[ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"'), 'the workflow signal still forces CI');
+  assert.ok(!init.includes('*" ci "*)'), 'the skill must not re-parse ci from the raw arguments');
+  const ciRead = init.indexOf('CI_MODE=$(node -e \'console.log(require("/tmp/review_options.json").ci ? "true" : "")\')');
+  assert.ok(ciRead > optionsCall, 'CI mode is read back from the resolved options, which lowercase the ci argument');
   assert.match(
     bashBlocks(init),
     /^export ENGINE="\$ENGINE" EFFORT="\$EFFORT" REVIEWS_RUN="\$REVIEWS_RUN"$/m,
