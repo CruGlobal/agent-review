@@ -655,7 +655,7 @@ Present the complete proposal:
 5. **Deterministic evidence** — every proposed ast-grep rule plus its tests, CI ingestion, and any
    related repositories with pinned SHAs/path budgets.
    Also show the three setup choices again, each with its answer, the recommendation, and what it
-   wrote: the **Review engine** (`engine.name`, plus effort, `always`, the lanes it replaces and
+   will write: the **Review engine** (`engine.name`, plus effort, `always`, the lanes it replaces and
    the lanes that keep running), **Where reviews run** (`reviews_run`), and **Should the bot
    approve PRs in this repo?** (`auto_approve`). The user can change any of them at this gate
    with `edit`.
@@ -698,13 +698,22 @@ mkdir -p .claude/review/rules .claude/review/learnings \
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
 cp "$TPL/workflows/agent-review-approve.yml" .github/workflows/agent-review-approve.yml
-# local-and-ci only:
-cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
-cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
-cp "$TPL/workflows/agent-review-readiness.yml" .github/workflows/agent-review-readiness.yml
 printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/learnings/feedback.jsonl
 : > .claude/review/evals/results/.gitkeep
+```
+
+Then the CI workflows. This block runs only for `local-and-ci`; set `REVIEWS_RUN` to the approved
+answer first, and never run the copies for `local`:
+
+```bash
+. /tmp/agent_review_init.sh 2>/dev/null || true
+REVIEWS_RUN=local-and-ci   # set to the approved answer: local | local-and-ci
+if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
+  cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
+  cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
+  cp "$TPL/workflows/agent-review-readiness.yml" .github/workflows/agent-review-readiness.yml
+fi
 ```
 
 - Apply the approval answer to every installed caller that carries `auto_approve:` (the approve
@@ -769,9 +778,11 @@ The cache regenerates on demand, so leave it out of the commit unless the team w
 
 ```bash
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
-# local-and-ci only:
-git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
-        .github/workflows/agent-review-readiness.yml
+REVIEWS_RUN=local-and-ci   # set to the approved answer: local | local-and-ci
+if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
+  git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
+          .github/workflows/agent-review-readiness.yml
+fi
 git status --short
 git commit -m "chore: bootstrap agent-review"
 ```

@@ -1600,3 +1600,20 @@ test('init asks engine, where reviews run, and approval', () => {
     assert.ok(init.includes(needle), `init must mention ${needle}`);
   }
 });
+
+test('init never copies or stages the CI workflows outside a local-and-ci guard', () => {
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  const blocks = [...init.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+  const guard = 'if [ "$REVIEWS_RUN" = "local-and-ci" ]; then';
+  let seen = 0;
+  for (const block of blocks) {
+    const stripped = block.replace(/agent-review-approve\.yml/g, '');
+    if (!/\b(cp|git add)\b[^\n]*(\n\s+[^\n]*)*agent-review(-interact|-readiness)?\.yml/.test(stripped)) continue;
+    seen += 1;
+    assert.ok(block.includes(guard), `CI workflow copy/add must sit in a local-and-ci guard:\n${block}`);
+    const before = block.slice(0, block.indexOf(guard));
+    assert.ok(!/agent-review(-interact|-readiness)?\.yml/.test(before.replace(/agent-review-approve\.yml/g, '')),
+      'no CI workflow may be copied or staged before the guard');
+  }
+  assert.ok(seen >= 2, 'expected the 3C copy block and the 3E git add block');
+});
