@@ -57,4 +57,41 @@ function checkCodeReviewProof({ rawText }) {
   );
 }
 
-module.exports = { checkCodeReviewProof };
+function parseJson(text) {
+  try {
+    return { value: JSON.parse(text) };
+  } catch {
+    return null;
+  }
+}
+
+// A null droppedText is a missing dropped file, which counts as zero drops.
+function checkFindingAccounting({ count, findingsText, droppedText }) {
+  const lane = findingsText == null ? null : parseJson(findingsText);
+  const value = lane && lane.value;
+  let scored = null;
+  if (Array.isArray(value)) scored = value;
+  else if (isPlainObject(value) && Array.isArray(value.findings)) scored = value.findings;
+  if (!scored) {
+    return { ok: false, reason: 'the code-review lane findings file is missing or has no findings list' };
+  }
+  let dropped = [];
+  if (droppedText != null) {
+    const parsed = parseJson(droppedText);
+    if (!parsed || !Array.isArray(parsed.value)) {
+      return { ok: false, reason: 'the code-review dropped file is not a JSON array' };
+    }
+    dropped = parsed.value;
+  }
+  if (count !== scored.length + dropped.length) {
+    return {
+      ok: false,
+      reason:
+        `/code-review found ${count}, but the lane scored ${scored.length} and dropped ${dropped.length}; ` +
+        'every raw finding must be scored or dropped exactly once',
+    };
+  }
+  return { ok: true, reason: 'ok' };
+}
+
+module.exports = { checkCodeReviewProof, checkFindingAccounting };

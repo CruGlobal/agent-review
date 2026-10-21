@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { checkCodeReviewProof } = require('./codeReviewProof.cjs');
+const { checkCodeReviewProof, checkFindingAccounting } = require('./codeReviewProof.cjs');
 
 const HEADER = 'Skill "code-review" completed (forked execution).';
 const FINDINGS = [
@@ -87,5 +87,49 @@ test('a findings array must hold only objects', () => {
     assert.equal(r.ok, false, `${list} must not pass as a findings list`);
     assert.match(r.reason, /no findings list/);
     assert.deepEqual(r.findings, []);
+  }
+});
+
+const J = (value) => JSON.stringify(value);
+
+test('accounting: every raw finding is scored or dropped', () => {
+  const scored = [{ file: 'a.js' }, { file: 'b.js' }];
+  const dropped = [{ file: 'c.js', proof: 'p' }];
+  assert.deepEqual(
+    checkFindingAccounting({ count: 3, findingsText: J({ findings: scored }), droppedText: J(dropped) }),
+    { ok: true, reason: 'ok' },
+  );
+  assert.equal(
+    checkFindingAccounting({ count: 2, findingsText: J(scored), droppedText: null }).ok,
+    true,
+    'a lane file may be a bare array, and a missing dropped file counts as 0',
+  );
+  assert.equal(checkFindingAccounting({ count: 0, findingsText: J({ findings: [] }), droppedText: '[]' }).ok, true);
+});
+
+test('accounting: an omitted finding fails with the numbers', () => {
+  const r = checkFindingAccounting({
+    count: 3,
+    findingsText: J({ findings: [{ file: 'a.js' }] }),
+    droppedText: J([{ file: 'c.js' }]),
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /found 3/);
+  assert.match(r.reason, /scored 1/);
+  assert.match(r.reason, /dropped 1/);
+  const extra = checkFindingAccounting({ count: 1, findingsText: J([{ file: 'a.js' }, { file: 'b.js' }]), droppedText: null });
+  assert.equal(extra.ok, false, 'an added finding is as wrong as an omitted one');
+});
+
+test('accounting: a missing or unreadable lane file, or an unreadable dropped file, fails', () => {
+  for (const findingsText of [null, '{"findings": [', J({ x: 1 })]) {
+    const r = checkFindingAccounting({ count: 0, findingsText, droppedText: '[]' });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /findings file/);
+  }
+  for (const droppedText of ['[{', J({ x: 1 })]) {
+    const r = checkFindingAccounting({ count: 0, findingsText: '[]', droppedText });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /dropped file/);
   }
 });

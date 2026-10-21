@@ -68,7 +68,8 @@ to follow its failure scenario. Open other files only when the scenario runs thr
 Every raw finding gets exactly one outcome: scored (it goes in `findings`) or dropped (it goes in
 the dropped list). Do not merge two raw findings, even when they point at the same line. Do not
 split one. Do not add a finding of your own, even when you notice a problem /code-review missed.
-The report says "found N, scored M, dropped K", and N must equal M + K.
+The report says "found N, scored M, dropped K", and N must equal M + K. The review checks this
+against your two files and fails the lane when they do not add up.
 
 SCORING CONTEXT:
 

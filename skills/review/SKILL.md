@@ -1088,12 +1088,13 @@ check it against the findings file the agent actually wrote:
 - The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
   (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
   or `findings.length` does not equal the reported `<N>`.
-- **The `code-review` lane** must also prove `/code-review` ran. Run
-  `agent-review code-review-proof --raw /tmp/code_review_raw.txt > /tmp/code_review_proof.json`.
+- **The `code-review` lane** must also prove `/code-review` ran, and that it scored or dropped
+  every raw finding. Run
+  `agent-review code-review-proof --raw /tmp/code_review_raw.txt --findings /tmp/agent_findings/code-review.json --dropped /tmp/code_review_dropped.json > /tmp/code_review_proof.json`.
   A non-zero exit fails the lane's cross-check even when its findings file passes, and so does a
   reply of `/code-review did not run` in place of the `done` line. When the lane fails twice and
   the proof failed, print the proof's `reason` (from `/tmp/code_review_proof.json`) right after
-  the loud line below; it names the fix.
+  the loud line below; it names the fix or the mismatch.
 - On a failed cross-check: relaunch that lane once; a lane that fails twice fails the run —
   no report is posted. Use the lane's original Stage 1 prompt, unchanged, for the retry.
   Optionally append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create it if

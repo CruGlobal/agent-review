@@ -1440,8 +1440,10 @@ test('review skill wires the code-review engine', () => {
 
   const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
   assert.ok(
-    stage2.includes('agent-review code-review-proof --raw /tmp/code_review_raw.txt > /tmp/code_review_proof.json'),
-    'Stage 2 proves /code-review ran before trusting the code-review lane',
+    stage2.includes(
+      'agent-review code-review-proof --raw /tmp/code_review_raw.txt --findings /tmp/agent_findings/code-review.json --dropped /tmp/code_review_dropped.json > /tmp/code_review_proof.json',
+    ),
+    'Stage 2 proves /code-review ran and that every raw finding was scored or dropped',
   );
   assert.ok(stage2.includes('`reason`'), 'a second proof failure prints the proof reason');
 

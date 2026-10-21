@@ -559,3 +559,33 @@ test('code-review-proof exit codes', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('code-review-proof checks found = scored + dropped when given both files', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
+  try {
+    const raw = join(dir, 'raw.txt');
+    const lane = join(dir, 'code-review.json');
+    const dropped = join(dir, 'dropped.json');
+    const findings = [{ file: 'a.js', line: 1 }, { file: 'b.js', line: 2 }];
+    writeFileSync(raw, `Skill "code-review" completed (forked execution).\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`);
+    writeFileSync(lane, JSON.stringify({ findings: [{ agent: 'code-review', severity: 8 }] }));
+    writeFileSync(dropped, JSON.stringify([{ file: 'b.js', line: 2, summary: 's', proof: 'p' }]));
+
+    const ok = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', dropped]);
+    assert.equal(ok.code, 0, ok.s);
+    assert.deepEqual(JSON.parse(ok.s), { ok: true, reason: 'ok', count: 2 });
+
+    const omitted = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', join(dir, 'none.json')]);
+    assert.equal(omitted.code, 1);
+    const bad = JSON.parse(omitted.s);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.count, 2);
+    assert.match(bad.reason, /found 2, but the lane scored 1 and dropped 0/);
+
+    const lone = run(['code-review-proof', '--raw', raw, '--findings', lane]);
+    assert.equal(lone.code, 1);
+    assert.match(lone.s, /^usage: agent-review code-review-proof --raw <f> \[--findings <f> --dropped <f>\]/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

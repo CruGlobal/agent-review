@@ -18480,7 +18480,39 @@ var require_codeReviewProof = __commonJS({
         '/code-review returned no findings list: expected a fenced JSON array of finding objects, or "No findings." with no fenced block'
       );
     }
-    module2.exports = { checkCodeReviewProof };
+    function parseJson(text) {
+      try {
+        return { value: JSON.parse(text) };
+      } catch {
+        return null;
+      }
+    }
+    function checkFindingAccounting({ count, findingsText, droppedText }) {
+      const lane = findingsText == null ? null : parseJson(findingsText);
+      const value = lane && lane.value;
+      let scored = null;
+      if (Array.isArray(value)) scored = value;
+      else if (isPlainObject(value) && Array.isArray(value.findings)) scored = value.findings;
+      if (!scored) {
+        return { ok: false, reason: "the code-review lane findings file is missing or has no findings list" };
+      }
+      let dropped = [];
+      if (droppedText != null) {
+        const parsed = parseJson(droppedText);
+        if (!parsed || !Array.isArray(parsed.value)) {
+          return { ok: false, reason: "the code-review dropped file is not a JSON array" };
+        }
+        dropped = parsed.value;
+      }
+      if (count !== scored.length + dropped.length) {
+        return {
+          ok: false,
+          reason: `/code-review found ${count}, but the lane scored ${scored.length} and dropped ${dropped.length}; every raw finding must be scored or dropped exactly once`
+        };
+      }
+      return { ok: true, reason: "ok" };
+    }
+    module2.exports = { checkCodeReviewProof, checkFindingAccounting };
   }
 });
 
@@ -19752,7 +19784,7 @@ var require_cli = __commonJS({
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
     var { evaluateApproval } = require_approval();
-    var { checkCodeReviewProof } = require_codeReviewProof();
+    var { checkCodeReviewProof, checkFindingAccounting } = require_codeReviewProof();
     var {
       MAX_RESULT_BYTES,
       prepareAddressRequest,
@@ -19903,7 +19935,7 @@ var require_cli = __commonJS({
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f>    prove /code-review ran and returned a findings list (JSON; exit 1 if not)
+  code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -20265,14 +20297,24 @@ var require_cli = __commonJS({
         }
         case "code-review-proof": {
           const rawPath = flag(rest, "--raw");
-          if (!rawPath) {
-            out("usage: agent-review code-review-proof --raw <f>");
+          const findingsPath = flag(rest, "--findings");
+          const droppedPath = flag(rest, "--dropped");
+          if (!rawPath || Boolean(findingsPath) !== Boolean(droppedPath)) {
+            out("usage: agent-review code-review-proof --raw <f> [--findings <f> --dropped <f>]");
             return 1;
           }
-          const rawText = existsSync(rawPath) ? readFileSync(rawPath, "utf8") : null;
-          const r = checkCodeReviewProof({ rawText });
-          out(JSON.stringify({ ok: r.ok, reason: r.reason, count: r.findings.length }));
-          return r.ok ? 0 : 1;
+          const readIfPresent = (p) => existsSync(p) ? readFileSync(p, "utf8") : null;
+          const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath) });
+          let { ok, reason } = r;
+          if (ok && findingsPath) {
+            ({ ok, reason } = checkFindingAccounting({
+              count: r.findings.length,
+              findingsText: readIfPresent(findingsPath),
+              droppedText: readIfPresent(droppedPath)
+            }));
+          }
+          out(JSON.stringify({ ok, reason, count: r.findings.length }));
+          return ok ? 0 : 1;
         }
         case "evidence": {
           const verifyComment = flag(rest, "--verify-comment");
