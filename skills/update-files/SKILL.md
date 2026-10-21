@@ -42,11 +42,13 @@ grep -h '^# agent-review-template-version:' "$UPDATE_DIR"/*.yml | sort -u
 First read where reviews run:
 
 ```bash
-REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null || echo undefined)
+REVIEWS_RUN=$(agent-review config get reviews_run) || REVIEWS_RUN=unknown
 ```
 
-`local` means a local-only repo. `local-and-ci` or `undefined` (a missing key) means CI reviews
-are on, which is the behavior described in the rest of this stage.
+`local` means a local-only repo. `local-and-ci`, or `undefined` printed by a command that
+succeeded (a missing key), means CI reviews are on, which is the behavior described in the rest
+of this stage. If the command itself failed (`unknown`), the value is unknown: say so and ask the
+user whether the repo is local-only before comparing or offering any CI files.
 
 **Local-only repo (`reviews_run` is `local`):** compare only `agent-review-approve.yml`. Do not
 compare or offer `agent-review.yml`, `agent-review-interact.yml`, or `agent-review-readiness.yml`,
@@ -114,24 +116,31 @@ gh api "repos/$REPO/rules/branches/$DEFAULT" --jq '[.[] | select(.type=="require
 The first call is classic branch protection (a 404 means none is set). The second lists
 rulesets that apply to the branch and may include a `required_status_checks` rule. These
 workflows produce checks named like the job or workflow: `review`, `agent-review`, `interact`,
-`readiness`. If any required context matches, warn the user which check it is and where it is
+`readiness`. Also treat any required context that contains `agent-review` as produced by these
+workflows, since caller job contexts usually look like `<caller job> / <reusable job>`. If any
+required context matches, warn the user which check it is and where it is
 required, and say that removing the workflow would leave that check pending forever and block
 merges until it is removed from the protection or ruleset. If a lookup fails for any reason
 other than a 404, say the check could not be verified rather than assuming it is safe.
 
 Then ask the user whether to remove the files, naming each one. Never remove a file without a
-yes. On a yes, run `git rm` on those files so the removal appears in the diff below. On a no,
+yes. On a yes, run `git rm` on those files; the diff below uses `git diff HEAD` so the staged
+removals show. On a no,
 leave them and say they will keep running CI reviews on labeled PRs.
 
 ### Diff and PR
 
 ```bash
-git diff -- .github/workflows/
+git diff HEAD -- .github/workflows/
 ```
 
-Walk the user through what changed and why (new inputs, permissions, version marker). Then ask
+Walk the user through what changed and why (new inputs, permissions, version marker), and name
+any removed CI files. Then ask
 before touching git history: offer to create a branch, commit with
-`chore: update agent-review workflows to v<LATEST>`, push, and open a PR. Never commit to the
+`chore: update agent-review workflows to v<LATEST>`, push, and open a PR. If the PR only removes
+CI files from a local-only repo, with no template updates, commit with
+`chore: remove agent-review CI workflows from a local-only repo` instead. If it does both, keep
+the update message and mention the removal in the PR body. Never commit to the
 default branch directly, and never push without the user's go-ahead.
 
 If nothing changed after the merge, leave the working tree clean and say the repo was already

@@ -1630,4 +1630,5 @@ test('update-files handles local-only repos', () => {
     'local-only', 'protection/required_status_checks']) {
     assert.ok(skill.includes(needle), `update-files must mention ${needle}`);
   }
+  assert.ok(skill.includes('git diff HEAD'), 'update-files must diff against HEAD so staged removals show');
 });
