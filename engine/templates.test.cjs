@@ -1592,3 +1592,11 @@ test('review.yml skips approval under the code-review engine', () => {
   assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
   assert.ok(step.env.TRUSTED_REVIEW_DIR && step.env.RUNTIME_DIR, 'engine step reads its paths from env');
 });
+
+test('init asks engine, where reviews run, and approval', () => {
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  for (const needle of ['engine:', 'reviews_run:', 'local-and-ci', 'auto_approve',
+    'Review engine', 'Where reviews run', 'Should the bot approve PRs in this repo?']) {
+    assert.ok(init.includes(needle), `init must mention ${needle}`);
+  }
+});

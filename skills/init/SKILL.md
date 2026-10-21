@@ -34,7 +34,7 @@ THIS skill file — `skills/init/SKILL.md` — so the plugin root is two levels 
 - consumer CI workflow: `../../templates/workflows/agent-review.yml`
 - fix/dismiss interaction workflow: `../../templates/workflows/agent-review-interact.yml`
 - rollout-readiness workflow: `../../templates/workflows/agent-review-readiness.yml`
-- local-post approval workflow (optional): `../../templates/workflows/agent-review-approve.yml`
+- local-post approval workflow (always installed): `../../templates/workflows/agent-review-approve.yml`
 - structural-rule starter: `../../templates/static/`
 - seeded-evaluation format: `../../templates/evals/`
 - SHA-pinned context manifest format: `../../templates/context/repositories.json`
@@ -582,6 +582,41 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
   identified. Pin each to a full commit SHA and allowlist only relevant paths; never use a branch.
 - `rollout` — `advisory` (approving) with the skeleton's sample/quality thresholds; propose `shadow` only when the team asked for advice-only.
 - `learning` and `enforcement` — leave at the skeleton's defaults.
+- `engine:` and `reviews_run:` come from the three setup choices below, for example:
+
+  ```yaml
+  engine:
+    name: code-review
+    code_review: { effort: xhigh, always: [security, testing, standards] }
+  reviews_run: local
+  ```
+
+**Ask the three setup choices.** Ask them before presenting the proposal, one at a time, in this
+order. Each shows a one-line trade-off and a recommendation. The user picks, and may override the
+recommendation. Do not skip a question because the recommendation looks obvious.
+
+1. **Review engine.** Trade-off: `/code-review` is one strong whole-diff pass plus the lanes below,
+   while `agent-review` runs its own specialist reviewers with debate rounds (slower, costs more).
+   Recommended: `/code-review`.
+   - `code-review` (recommended): also ask the effort level (`low|medium|high|xhigh|max`,
+     recommended `xhigh`) and the `always` list (recommended `security`, `testing`, `standards`).
+     Then show which lanes it replaces (`engine.code_review.replaces`, default `architecture`
+     and `simplification`) and which repo-specific lanes from the roster keep running on their
+     triggers. Write the answers to `engine.name: code-review` and `engine.code_review.effort`,
+     `.always`, `.replaces`. Leave `model` and `max_findings` at the skeleton's defaults.
+   - `agent-review`: write `engine.name: agent-review` and leave the `code_review` block at its
+     defaults.
+2. **Where reviews run.** Recommended: local only.
+   - **Local only:** reviews run from `/agent-review:review`, and only the approval workflow is
+     installed. No `ANTHROPIC_API_KEY` is needed. Write `reviews_run: local`.
+   - **Local + CI:** CI also reviews labeled PRs, so all four workflows are installed and the
+     `ANTHROPIC_API_KEY` secret is needed. Costs API usage on every labeled PR. Write
+     `reviews_run: local-and-ci`.
+3. **Should the bot approve PRs in this repo?** Recommended: yes. Recommend **no** for PCI-scope
+   repos and for `staff_accounting_app`, which keep human review under team policy; say so when
+   the repo looks like one of those. A yes means `auto_approve: true` on every installed caller,
+   a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every caller is `false`
+   whatever the answer.
 
 Draft a development evaluation suite in memory: at least five realistic seeded defects drawn from
 different mined categories plus two behavior-preserving clean controls. Each case needs a minimal
@@ -619,13 +654,21 @@ Present the complete proposal:
    team is least likely to have written down anywhere).
 5. **Deterministic evidence** — every proposed ast-grep rule plus its tests, CI ingestion, and any
    related repositories with pinned SHAs/path budgets.
+   Also show the three setup choices again, each with its answer, the recommendation, and what it
+   wrote: the **Review engine** (`engine.name`, plus effort, `always`, the lanes it replaces and
+   the lanes that keep running), **Where reviews run** (`reviews_run`), and **Should the bot
+   approve PRs in this repo?** (`auto_approve`). The user can change any of them at this gate
+   with `edit`.
 6. **Evaluation + rollout** — all seeded/clean cases, threshold values, and that reports approve
-   by default (`advisory`); how to turn that off (`auto_approve: false` on the callers, or
-   `rollout.mode: shadow` in config). Show the manual readiness workflow as optional.
-7. **CI workflows** — the review, fix/dismiss interaction, readiness, and (optional) local-post
-   approval workflow contents and where they land. Call out that every `auto_approve` is
-   `false` in shadow mode, and that the approval workflow trusts a collaborator's posted
-   report rather than the bot's.
+   by default (`advisory`) unless the approval answer was no; how to change that (`auto_approve`
+   on the callers, or `rollout.mode: shadow` in config). Show the manual readiness workflow as
+   optional when CI is installed, and omit it for local only.
+7. **CI workflows** — the workflows that will be installed and where they land: for `local`,
+   only `agent-review-approve.yml` (and say the CI files and the API key step are skipped); for
+   `local-and-ci`, the review, fix/dismiss interaction, readiness, and approval workflows. Show
+   the `auto_approve` value each one gets. Call out that every `auto_approve` is `false` in
+   shadow mode, and that the approval workflow trusts a collaborator's posted report rather
+   than the bot's.
 8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
 9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`.
@@ -648,16 +691,34 @@ mkdir -p .claude/review/rules .claude/review/learnings \
 ```
 
 - Write `.claude/review/config.yml` and each `.claude/review/rules/<agent>.md` with the Write tool.
-- Copy the CI workflow and scaffold the learning store:
+- Copy the workflows for the approved `reviews_run` answer and scaffold the learning store. The
+  approval workflow is always installed. The other three are copied only for `local-and-ci`;
+  for `local`, skip them and the `ANTHROPIC_API_KEY` step.
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
+cp "$TPL/workflows/agent-review-approve.yml" .github/workflows/agent-review-approve.yml
+# local-and-ci only:
 cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
 cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
 cp "$TPL/workflows/agent-review-readiness.yml" .github/workflows/agent-review-readiness.yml
 printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/learnings/feedback.jsonl
 : > .claude/review/evals/results/.gitkeep
+```
+
+- Apply the approval answer to every installed caller that carries `auto_approve:` (the approve
+  workflow, plus the review and interact workflows for `local-and-ci`): a yes keeps
+  `auto_approve: true`, a no (or `rollout.mode: shadow`) sets `auto_approve: false`. A no still
+  installs the approve workflow, so turning approval on later is a one-line change. In shadow
+  mode also set `rollout_mode: shadow` on the review caller.
+
+```bash
+# only when approval is off; touches only the workflow files that were installed
+for f in agent-review-approve agent-review-interact agent-review; do
+  [ -f ".github/workflows/$f.yml" ] && sed -i.bak 's/auto_approve: true/auto_approve: false/' ".github/workflows/$f.yml"
+done
+rm -f .github/workflows/*.bak
 ```
 
 - Write the approved repo-specific evaluation suite and patches. If structural analysis or
@@ -707,8 +768,9 @@ The cache regenerates on demand, so leave it out of the commit unless the team w
 ### 3E — Commit
 
 ```bash
-git add .claude/review .claude/settings.json \
-        .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
+git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
+# local-and-ci only:
+git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
         .github/workflows/agent-review-readiness.yml
 git status --short
 git commit -m "chore: bootstrap agent-review"
@@ -729,11 +791,17 @@ Risk patterns: [N]   Agents: [N] ([ids])
 Rule docs:     [N] ([filenames])
 PR history:    [N] PRs mined → [N] rules ([N] from AI-usage patterns)   [or: skipped — reason]
 
+Engine:        [agent-review | code-review (effort, always: ids)]
+Reviews run:   [local | local-and-ci]   Bot approval: [on | off]
+
 Next:
 1. Read .claude/review/rules/*.md and edit anything that misses the mark — they are plain prose.
 2. Run /agent-review:review on a branch to try it.
-3. Add ANTHROPIC_API_KEY to the repo's Actions secrets so CI reviews can run.
-4. As reviews accumulate, run /agent-review:learn to ratify learnings into rules.
+3. Merge the workflow files to the default branch. The approve workflow can only approve once it is there.
+4. In Settings > Actions > General, turn on "Allow GitHub Actions to create and approve pull requests".
+5. [local-and-ci only] Add ANTHROPIC_API_KEY to the repo's Actions secrets so CI reviews can run.
+   [local only] Skip this: no API key is needed.
+6. As reviews accumulate, run /agent-review:learn to ratify learnings into rules.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
