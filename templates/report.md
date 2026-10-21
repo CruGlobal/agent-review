@@ -109,6 +109,16 @@ breaking changes as reported by the agents]
 - `#[N]` — [Agent 1] (Severity: [X]/10): [their specific concern] · [Agent 2] (Severity:
   [Y]/10): [their specific concern]
 
+[IF engine is code-review]
+
+**Engine**: code-review · effort [requested effort] (from [source]) · model [model] (from [source])
+**/code-review findings**: found [N] · scored [M] · dropped [K] (scored findings under the
+profile's cutoff may not appear in the lists above)
+
+[FOR EACH dropped finding] - `[file:line]` · [summary] · proof: "[quoted proof]"
+
+[IF any options notes] **Notes**: [one bullet per note]
+
 **Debate summary** (omit this whole block if debate rounds were not run):
 
 - Rounds: [N] · Challenges raised: [N] (defended [N], conceded [N]) · Findings revised: [N] ·
@@ -125,6 +135,17 @@ breaking changes as reported by the agents]
 </details>
 
 <details><summary>💬 How to act on this review</summary>
+
+[IF reviews_run is local]
+
+Every finding above is numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
+dismissed** before this review counts as passed; lower severities are advisory. This repo runs
+reviews locally only, so work this ledger with `/agent-review:address` in a Claude Code session.
+It fixes or dismisses findings (a reason code and explanation are required for a dismissal) and
+keeps this comment in sync. Valid codes: `false-positive`, `intentional`, `pre-existing`,
+`deferred`, `duplicate`, `insufficient-evidence`, `other`.
+
+[ELSE, reviews_run is local-and-ci:]
 
 Every finding above is numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
 dismissed** before this review counts as passed; lower severities are advisory. Interact from a

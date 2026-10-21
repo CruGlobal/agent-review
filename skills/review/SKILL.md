@@ -1110,7 +1110,8 @@ check it against the findings file the agent actually wrote:
   - **Local (non-CI) mode:** report the failed lane to the user the same way — the loud line
     above — and stop; do not continue to debate, consensus, or the report.
 
-Display:
+Display (the `code-review` lane is titled `Code Review (/code-review <effort>)`, since the plan
+gives it no `title`):
 
 ```
 Agent Reviews Complete:
@@ -1732,6 +1733,21 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   the report cannot approve or block the PR. Fill deterministic evidence from
   `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
+- The `code-review` lane has no `title` in the plan. Wherever a lane title is shown (the header's
+  agents list, the summary table, the Stage 2 progress line), title it
+  `Code Review (/code-review <effort>)`, with `<effort>` from `/tmp/review_options.json`.
+- Fill the `[IF engine is code-review]` block only when `$ENGINE` is `code-review`. Engine,
+  effort and model, each with its `source`, come from `/tmp/review_options.json` (`engine`,
+  `effort`, `model`). `[N]` is `count` from `/tmp/code_review_proof.json`, `[M]` is
+  `findings.length` in `/tmp/agent_findings/code-review.json`, and `[K]` is the length of
+  `/tmp/code_review_dropped.json`; list one line per entry in that file (`file`, `line`,
+  `summary`, `proof`) and omit the list when `K` is 0. Fill `[IF any options notes]` from
+  `notes` in the options file and omit it when empty. Do not add a recipe tag.
+- Without an `engine` key in the config, omit both of those blocks, and render the rest exactly
+  as before.
+- When `$REVIEWS_RUN` is `local` (the config's `reviews_run`), use the `[IF reviews_run is local]`
+  variant of "How to act on this review". It names only `/agent-review:address`, never
+  `@claude fix` or `@claude dismiss`. Otherwise use the other variant.
 - Each finding's `agent` field is the primary (highest-severity) corroborating lane only — kept
   single so the ledger signature never shifts with corroboration count. Wherever a finding names
   its agent(s) for a human reader — the `_([agent])_` suffix on BLOCKERS/OTHER FINDINGS lines and
