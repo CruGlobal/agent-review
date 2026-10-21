@@ -54,7 +54,7 @@ const LEFTOVER_CI_NOTE =
 
 // The review skill's Stage 0B, not the plan, applies these under the agent-review engine.
 const DEFAULT_ENGINE_MODE_NOTES = {
-  quick: 'quick mode keeps at most 3 of these lanes (see Stage 0B).',
+  quick: 'quick mode keeps at most 3 of these lanes.',
   deep: 'deep mode also runs every enabled lane listed as skipped.',
 };
 
@@ -97,6 +97,10 @@ function formatStartup({
   const lines = [head.join(' \u00b7 '), `reviewers: ${reviewers.join(', ')}`];
   if (options.engine.value === 'agent-review' && DEFAULT_ENGINE_MODE_NOTES[resolved])
     lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
+  if (options.engine.value === 'code-review' && options.maxFindings)
+    lines.push(
+      `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`,
+    );
   for (const n of options.notes || []) lines.push(`note: ${n}`);
   if (options.reviewsRun.value === 'local' && ciFilesPresent)
     lines.push(`note: ${LEFTOVER_CI_NOTE}`);

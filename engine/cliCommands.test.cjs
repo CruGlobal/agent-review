@@ -190,7 +190,7 @@ function defaultEngineInput(resolved) {
   return input;
 }
 
-const QUICK_NOTE = 'note: quick mode keeps at most 3 of these lanes (see Stage 0B).';
+const QUICK_NOTE = 'note: quick mode keeps at most 3 of these lanes.';
 const DEEP_NOTE = 'note: deep mode also runs every enabled lane listed as skipped.';
 
 test('startup: default engine in quick mode says the 3-lane cap applies', () => {
@@ -219,6 +219,23 @@ test('startup: code-review engine never adds the quick or deep note', () => {
     assert.ok(!lines.includes(QUICK_NOTE), `quick note under code-review in ${resolved}`);
     assert.ok(!lines.includes(DEEP_NOTE), `deep note under code-review in ${resolved}`);
   }
+});
+
+const maxFindingsNote = (n) =>
+  `note: --max-findings ${n} is passed to /code-review on every run and may change your own remembered /code-review limit.`;
+
+test('startup: code-review engine warns when max_findings is set', () => {
+  for (const value of [15, 'all']) {
+    const input = startupInput();
+    input.options.maxFindings = { value, source: 'config' };
+    assert.ok(formatStartup(input).split('\n').includes(maxFindingsNote(value)), `note for ${value}`);
+  }
+  const unset = startupInput();
+  unset.options.maxFindings = null;
+  assert.ok(!formatStartup(unset).includes('--max-findings'));
+  const other = defaultEngineInput('standard');
+  other.options.maxFindings = { value: 15, source: 'config' };
+  assert.ok(!formatStartup(other).includes('--max-findings'), 'the agent-review engine never passes the flag');
 });
 
 test('startup: empty-slice lanes', () => {

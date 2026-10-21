@@ -19706,7 +19706,7 @@ var require_cliCommands = __commonJS({
     }
     var LEFTOVER_CI_NOTE = "this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.";
     var DEFAULT_ENGINE_MODE_NOTES = {
-      quick: "quick mode keeps at most 3 of these lanes (see Stage 0B).",
+      quick: "quick mode keeps at most 3 of these lanes.",
       deep: "deep mode also runs every enabled lane listed as skipped."
     };
     function reviewerTag(agent, slice, model) {
@@ -19745,6 +19745,10 @@ var require_cliCommands = __commonJS({
       const lines = [head.join(" \xB7 "), `reviewers: ${reviewers.join(", ")}`];
       if (options.engine.value === "agent-review" && DEFAULT_ENGINE_MODE_NOTES[resolved])
         lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
+      if (options.engine.value === "code-review" && options.maxFindings)
+        lines.push(
+          `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`
+        );
       for (const n of options.notes || []) lines.push(`note: ${n}`);
       if (options.reviewsRun.value === "local" && ciFilesPresent)
         lines.push(`note: ${LEFTOVER_CI_NOTE}`);
