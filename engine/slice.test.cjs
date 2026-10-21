@@ -276,3 +276,16 @@ test('an unparseable (quoted) diff --git path is included in every sliced agent\
   assert.ok(result.diff.includes('quoted file.js'));
   assert.ok(result.diff.includes('+new'));
 });
+
+test('code-review lane gets the full diff', () => {
+  const lane = {
+    id: 'code-review',
+    escalates: false,
+    always: true,
+    matchedBy: 'engine',
+    triggers: undefined,
+  };
+  const result = sliceForAgent({ agent: lane, diffText: DIFF });
+  assert.equal(result.mode, 'full');
+  assert.equal(result.diff, DIFF);
+});

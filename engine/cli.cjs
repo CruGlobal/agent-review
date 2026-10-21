@@ -200,7 +200,7 @@ const USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
-  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
   options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
@@ -316,8 +316,12 @@ function main(rawArgv) {
       const linesChanged = statPath
         ? linesChangedFromStat(readFileSync(statPath, 'utf8'))
         : 0;
+      const optionsPath = flag(rest, '--options');
+      const options = optionsPath
+        ? JSON.parse(readFileSync(optionsPath, 'utf8'))
+        : undefined;
       const plan = buildPlan(
-        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode },
+        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode, options },
         cfg,
       );
       out(JSON.stringify(plan, null, 2));

@@ -17082,26 +17082,31 @@ var require_selectAgents = __commonJS({
         return reviewed.length > 0;
       return reviewed.some((f) => !matchingPattern(f, config).matched);
     }
-    function selectAgents({ files, diffText, reviewDirRel }, config) {
+    function selectAgents({ files, diffText, reviewDirRel }, config, engine = null) {
+      const external = engine && engine.name === "code-review";
+      const replaced = new Set(external ? engine.replaces || [] : []);
+      const forcedIds = new Set(external ? engine.always || [] : []);
+      const candidates = config.agents.filter((a) => !replaced.has(a.id));
       const reviewed = files.filter((f) => !isExcluded(f, config));
       const contentText = codeDiff(diffText, config, reviewDirRel);
       const out = [];
-      for (const a of config.agents) {
+      for (const a of candidates) {
         if (a.enabled === false) continue;
-        const matchedBy = agentMatches(a, reviewed, contentText);
+        const forced = forcedIds.has(a.id);
+        const matchedBy = forced ? a.always ? "always" : "engine-always" : agentMatches(a, reviewed, contentText);
         if (matchedBy)
           out.push({
             id: a.id,
             model: a.model || "smart",
             escalates: a.escalates || false,
-            always: a.always || false,
+            always: forced || a.always || false,
             triggers: a.triggers,
             matchedBy
           });
       }
       const hasEscalating = out.some((a) => a.escalates);
       if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
-        const eligible = config.agents.filter((a) => a.enabled !== false);
+        const eligible = candidates.filter((a) => a.enabled !== false);
         const forced = eligible.find((a) => a.id === "security" && a.escalates === true) || eligible.find((a) => a.escalates === true) || eligible.find((a) => a.id === "security");
         if (forced && !out.some((o) => o.id === forced.id)) {
           out.push({
@@ -17243,10 +17248,19 @@ var require_plan = __commonJS({
       if (risk.level === "CRITICAL") return "deep";
       return "standard";
     }
-    function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel, mode = "standard" }, config) {
+    function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel, mode = "standard", options }, config) {
       const special = detectSpecial(diffText, files, config);
       const risk = scoreRisk({ files, linesChanged, scope, special }, config);
-      const selected = selectAgents({ files, diffText, reviewDirRel }, config);
+      const external = options && options.engine.value === "code-review";
+      const engine = external ? {
+        name: "code-review",
+        effort: options.effort.value,
+        model: options.model.value,
+        maxFindings: options.maxFindings ? options.maxFindings.value : null,
+        replaces: options.replaces,
+        always: options.always
+      } : null;
+      const selected = selectAgents({ files, diffText, reviewDirRel }, config, engine);
       const resolved = resolveMode(mode, risk);
       const tiered = resolveTiers({
         agents: selected,
@@ -17257,11 +17271,38 @@ var require_plan = __commonJS({
         ...a,
         rules: resolveRules(a.id, files, config)
       }));
+      if (!engine) {
+        return {
+          profile: config.profile,
+          risk: { ...risk, special },
+          mode: { requested: mode, resolved },
+          agents
+        };
+      }
+      const agentById = new Map(config.agents.map((a) => [a.id, a]));
+      const rules = [];
+      for (const id of engine.replaces) {
+        if (!agentById.has(id)) continue;
+        for (const r of resolveRules(id, files, config))
+          if (!rules.includes(r)) rules.push(r);
+      }
       return {
         profile: config.profile,
         risk: { ...risk, special },
         mode: { requested: mode, resolved },
-        agents
+        engine,
+        agents: [
+          {
+            id: "code-review",
+            model: engine.model,
+            escalates: false,
+            always: true,
+            matchedBy: "engine",
+            tier: engine.model,
+            rules
+          },
+          ...agents
+        ]
       };
     }
     function linesChangedFromStat(statText) {
@@ -19706,7 +19747,7 @@ var require_cli = __commonJS({
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
-  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
   options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
@@ -19810,8 +19851,10 @@ var require_cli = __commonJS({
           const files = readFileSync(filesPath, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
           const diffText = diffPath ? readFileSync(diffPath, "utf8") : "";
           const linesChanged = statPath ? linesChangedFromStat(readFileSync(statPath, "utf8")) : 0;
+          const optionsPath = flag(rest, "--options");
+          const options = optionsPath ? JSON.parse(readFileSync(optionsPath, "utf8")) : void 0;
           const plan = buildPlan(
-            { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode },
+            { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode, options },
             cfg
           );
           out(JSON.stringify(plan, null, 2));

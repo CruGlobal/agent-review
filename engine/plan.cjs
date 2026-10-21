@@ -20,12 +20,23 @@ function resolveMode(requested, risk) {
 }
 
 function buildPlan(
-  { files, diffText, linesChanged, scope, reviewDirRel, mode = 'standard' },
+  { files, diffText, linesChanged, scope, reviewDirRel, mode = 'standard', options },
   config,
 ) {
   const special = detectSpecial(diffText, files, config);
   const risk = scoreRisk({ files, linesChanged, scope, special }, config);
-  const selected = selectAgents({ files, diffText, reviewDirRel }, config);
+  const external = options && options.engine.value === 'code-review';
+  const engine = external
+    ? {
+        name: 'code-review',
+        effort: options.effort.value,
+        model: options.model.value,
+        maxFindings: options.maxFindings ? options.maxFindings.value : null,
+        replaces: options.replaces,
+        always: options.always,
+      }
+    : null;
+  const selected = selectAgents({ files, diffText, reviewDirRel }, config, engine);
   const resolved = resolveMode(mode, risk);
   const tiered = resolveTiers({
     agents: selected,
@@ -36,11 +47,38 @@ function buildPlan(
     ...a,
     rules: resolveRules(a.id, files, config),
   }));
+  if (!engine) {
+    return {
+      profile: config.profile,
+      risk: { ...risk, special },
+      mode: { requested: mode, resolved },
+      agents,
+    };
+  }
+  const agentById = new Map(config.agents.map((a) => [a.id, a]));
+  const rules = [];
+  for (const id of engine.replaces) {
+    if (!agentById.has(id)) continue;
+    for (const r of resolveRules(id, files, config))
+      if (!rules.includes(r)) rules.push(r);
+  }
   return {
     profile: config.profile,
     risk: { ...risk, special },
     mode: { requested: mode, resolved },
-    agents,
+    engine,
+    agents: [
+      {
+        id: 'code-review',
+        model: engine.model,
+        escalates: false,
+        always: true,
+        matchedBy: 'engine',
+        tier: engine.model,
+        rules,
+      },
+      ...agents,
+    ],
   };
 }
 

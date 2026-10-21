@@ -257,3 +257,13 @@ test('identifier content triggers do not match inside larger identifiers', () =>
   assert.equal(contentMatches('+ process.env.SECRET\n', 'process.env'), true);
   assert.equal(contentMatches('+ total.round(2)\n', '.round('), true);
 });
+
+test('engine: replaced lanes are skipped and always lanes forced', () => {
+  const engine = { name: 'code-review', replaces: ['architecture'], always: ['security'] };
+  const sel = selectAgents({ files: ['src/x.ts'], diffText: '+x' }, config, engine);
+  const ids = sel.map((a) => a.id);
+  assert.ok(!ids.includes('architecture'));
+  const sec = sel.find((a) => a.id === 'security');
+  assert.equal(sec.matchedBy, 'engine-always');
+  assert.equal(sec.always, true);
+});
