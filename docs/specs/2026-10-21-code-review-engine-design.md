@@ -436,3 +436,23 @@ title; Justin supplies or approves the ticket.
   level, and the start-up line says so when it does.
 - Under this engine, "suppress" learnings will match less often, because `/code-review` rewords
   findings between runs. The README says so.
+
+## Amendments after the spike (2026-10-21)
+
+The spike (plan Task 0, results in the plan's "Spike results") changed three details. Everything
+else stands.
+
+- **No recipe tag.** The Skill tool runs `/code-review` as a forked agent. The lane gets back text
+  that starts `Skill "code-review" completed (forked execution).`, then a short prose summary and
+  a fenced JSON array of findings. The recipe tag stays inside the fork. So the lane saves that
+  whole result to `/tmp/code_review_raw.txt`, and the proof check (section 5) requires the
+  `Skill "code-review" completed` header and a parseable findings list instead of a tag. The
+  report (section 7) shows the requested effort instead of a recipe tag.
+- **`max` works inside a lane** (it fans out and verifies there), but it is slow: about 20 forked
+  agents and more than 15 minutes on a 15-line diff. It stays allowed, and the README says so.
+- **Commit ranges are reviewed but not fenced.** `/code-review` reviews the range and also reports
+  bugs it notices outside it, labeled as pre-existing. On a commit-range target, the scorer treats
+  "an added or changed line" as changed within the range and scores anything outside it at 6 at
+  most, so a re-review cannot be blocked by code it was not asked to review.
+- Passing an effort level through the Skill tool does not change the developer's remembered
+  `/code-review` level, so the start-up line needs no note about it.

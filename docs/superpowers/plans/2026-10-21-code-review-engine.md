@@ -16,7 +16,7 @@
 - Any change under `engine/` is followed by `npm run build` before committing. `engine/templates.test.cjs` runs `bin/agent-review help` (the dist bundle), so new subcommands must appear in `USAGE` (`engine/cli.cjs:198`) and in a rebuilt `dist/`.
 - A config with no `engine` key must produce byte-identical plans, reports, and behavior to 1.0.0.
 - Literal values (from the spec): engine names `agent-review` | `code-review`; efforts `low|medium|high|xhigh|max`; default effort `xhigh`; default model `opus`; default `replaces` `[architecture, simplification]`; default `always` `[security, testing, standards]`; `reviews_run` `local|local-and-ci`, default `local-and-ci`; lane id `code-review`; cleanup categories `simplification, efficiency, reuse, altitude, conventions`; cleanup cap 6; release version `1.1.0`.
-- Lane handoff files: `/tmp/code_review_raw.json`, `/tmp/code_review_tag.txt`, `/tmp/code_review_dropped.json`, `/tmp/agent_findings/code-review.json`.
+- Lane handoff files: `/tmp/code_review_raw.txt` (the Skill tool's result, verbatim), `/tmp/code_review_dropped.json`, `/tmp/agent_findings/code-review.json`. The spike showed the Skill tool runs `/code-review` as a forked agent and returns text that starts `Skill "code-review" completed`, then `Result:`, a short prose summary, and a fenced JSON array of `file`, `line`, `summary`, `failure_scenario`. The recipe tag never reaches the lane, so nothing in this plan reads or writes one.
 - CI note, verbatim: `The code-review engine runs locally only; CI ran agent-review's own reviewers as advice, and approval comes from the local review.`
 - The lane's final reply keeps the existing contract string exactly: `done — <N> findings, max severity <X>`.
 - Comments only state a constraint the code cannot express (an invariant, a hazard, an external contract). Design rationale goes in the commit message. New prose in skills, templates, and the README uses no em dashes (the contract string above is the only exception).
@@ -143,7 +143,7 @@ Answers the spec's six spike questions before anything is built. Runs headless C
 ### Task 4: Start-up line
 
 **Files:**
-- Modify: `engine/cliCommands.cjs` (new `formatStartup`, constant `CODE_REVIEW_PERSISTS_LEVEL`)
+- Modify: `engine/cliCommands.cjs` (new `formatStartup`)
 - Modify: `engine/cli.cjs` (new `startup` case, `USAGE` line)
 - Test: `engine/cliCommands.test.cjs`
 
@@ -159,7 +159,7 @@ Answers the spec's six spike questions before anything is built. Runs headless C
   - `startup: empty-slice lanes`: a plan lane whose manifest entry is `mode: 'empty'` shows `[skipped: no matching hunks]`.
   - `startup: notes`: each `options.notes` entry is its own `note: <text>` line.
   - `startup: leftover CI files` (Review Focus 5): `reviewsRun` `local` and `ciFilesPresent: true` adds `note: this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.`
-  - `startup: remembered level`: when `CODE_REVIEW_PERSISTS_LEVEL` is true and the engine is `code-review`, adds `note: this run sets your remembered /code-review level to xhigh.` (set the constant from Task 0's result; the test stubs both values).
+  - Reviewer tags: `always`/`engine-always` show `[always]`, path or content matches show `[trigger]`, `unmatched-coverage` shows `[coverage]`, the `code-review` lane shows its model.
 - [ ] **Step 2: Run** `npm test`. Expected: FAIL.
 - [ ] **Step 3: Implement** `formatStartup` and the CLI case. Lanes in `replaces` are not listed.
 - [ ] **Step 4: Run** `npm test`. Expected: PASS.
@@ -197,18 +197,17 @@ Answers the spec's six spike questions before anything is built. Runs headless C
 
 **Interfaces:**
 - Produces:
-  - `checkCodeReviewProof({ rawText, tagText, effort }) -> { ok: boolean, reason: string }`
-  - CLI: `agent-review code-review-proof --raw <f> --tag <f> --effort <level>` prints `reason`, returns 0 when `ok`, else 1. A missing file is read as `null`.
+  - `checkCodeReviewProof({ rawText }) -> { ok: boolean, reason: string, findings: object[] }` (`findings` is `[]` when not ok)
+  - CLI: `agent-review code-review-proof --raw <f>` prints `{"ok":…,"reason":…,"count":<findings.length>}` as JSON, returns 0 when `ok`, else 1. A missing file is read as `null`.
 
-- [ ] **Step 1: Write the failing tests.**
-  - `missing raw output fails with the fix` (Review Focus 1): `rawText: null` gives `ok: false` and a `reason` containing `did not run`, `update Claude Code`, and `engine=agent-review`.
-  - `unparseable or wrong-shape raw fails`: `'{'` fails; `'{"x":1}'` fails; `'[]'` and `'{"level":"xhigh","findings":[]}'` pass with a valid tag.
-  - `missing tag fails`.
-  - `tag must name the requested effort`: tag `` `high effort → 8 inline angles → dedup (no verify) → ≤10 findings` `` with `effort: 'xhigh'` fails; tag `` `xhigh effort → 10 inline angles → dedup (no verify) → sweep → ≤15 findings` `` with `effort: 'xhigh'` passes; a tag naming no level (`` `minimal prompt → single careful diff pass → ≤15 findings` ``) passes.
-  - `degraded max fails`: `effort: 'max'` with a tag containing `tool unavailable` fails with a reason containing `max`.
-  - In `engine/cli.test.cjs`: `code-review-proof exit codes` (0 for a passing pair of temp files, 1 when `--raw` points at a missing file).
+- [ ] **Step 1: Write the failing tests.** Use this fixture shape (from the spike) for a passing result: a first line `Skill "code-review" completed (forked execution).`, a blank line, `Result:`, two lines of prose, then a fenced ```` ```json ```` block holding an array of two `{ file, line, summary, failure_scenario }` objects.
+  - `missing raw output fails with the fix` (Review Focus 1): `rawText: null` and `rawText: ''` give `ok: false` and a `reason` containing `did not run`, `update Claude Code`, and `engine=agent-review`.
+  - `the Skill header is required`: the fixture with its first line removed fails with a reason containing `Skill "code-review"`.
+  - `a findings list is required`: the header plus prose and no JSON fails with a reason containing `no findings list`; a fenced block holding `{"x":1}` fails the same way.
+  - `passing results`: the fixture passes with `findings.length === 2`; the header plus a fenced `[]` passes with `0`; the header plus `No findings.` passes with `0`; when there are several fenced blocks, the last JSON array wins.
+  - In `engine/cli.test.cjs`: `code-review-proof exit codes` (0 and `count: 2` for the fixture in a temp file, 1 when `--raw` points at a missing file).
 - [ ] **Step 2: Run** `npm test`. Expected: FAIL.
-- [ ] **Step 3: Implement.** Effort detection regex: `/\b(low|medium|xhigh|high|max) effort\b/`.
+- [ ] **Step 3: Implement.** Header check: `/^Skill "code-review" completed/m` within the first three lines.
 - [ ] **Step 4: Run** `npm test`. Expected: PASS.
 - [ ] **Step 5: Commit.** `npm run build`, then `git add engine dist && git commit -m "feat(engine): fail closed when /code-review did not run"`.
 
@@ -222,17 +221,18 @@ Answers the spec's six spike questions before anything is built. Runs headless C
 - Test: `engine/templates.test.cjs`
 
 **Interfaces:**
-- Produces: subagent type `agent-review:reviewer-code-review`; template placeholders exactly `{{EFFORT}}`, `{{TARGET}}`, `{{MAX_FINDINGS_FLAG}}`, `{{RISK_CONTEXT}}`, `{{DIFF_PATH}}`, `{{SCORING_RULES}}`, `{{LEARNINGS}}`, `{{IMPACT}}`. Output files: `/tmp/code_review_raw.json`, `/tmp/code_review_tag.txt`, `/tmp/code_review_dropped.json` (array of `{ file, line, summary, proof }`), `/tmp/agent_findings/code-review.json`.
+- Produces: subagent type `agent-review:reviewer-code-review`; template placeholders exactly `{{EFFORT}}`, `{{TARGET}}`, `{{MAX_FINDINGS_FLAG}}`, `{{RISK_CONTEXT}}`, `{{DIFF_PATH}}`, `{{SCORING_RULES}}`, `{{LEARNINGS}}`, `{{IMPACT}}`. Output files: `/tmp/code_review_raw.txt` (the Skill tool result, verbatim), `/tmp/code_review_dropped.json` (array of `{ file, line, summary, proof }`), `/tmp/agent_findings/code-review.json`.
 
 - [ ] **Step 1: Write the failing tests.**
   - `reviewer-code-review pins opus and no effort`: frontmatter has `name: reviewer-code-review` and `model: opus`, no `effort:` line, and the body does not contain `Keep reasoning brief`.
   - `code-review-lane.md uses exactly the documented placeholders` (same approach as the existing archetype test).
-  - `code-review-lane.md carries the contracts`: contains `skill: "code-review"`, the four handoff paths, the literal `done — <N> findings, max severity <X>`, `Recategorized from `, each of the five cleanup categories, and the four severity anchor lines copied verbatim from `templates/archetype.md`.
+  - `code-review-lane.md carries the contracts`: contains `skill: "code-review"`, the three handoff paths, the literal `done — <N> findings, max severity <X>`, `Recategorized from `, `Outside the reviewed range: `, each of the five cleanup categories, and the four severity anchor lines copied verbatim from `templates/archetype.md`.
 - [ ] **Step 2: Run** `npm test`. Expected: FAIL.
 - [ ] **Step 3: Write both files.** The template follows spec section 5, steps 1 to 4, in order:
   - The Skill call is `args: "{{EFFORT}} {{TARGET}}{{MAX_FINDINGS_FLAG}}"`. Never pass `--fix` or `--comment`. No run or verify hand-off, no posting, no artifact.
-  - Save the raw output and the recipe's first line verbatim.
+  - Save the Skill tool's whole result, verbatim, to `/tmp/code_review_raw.txt` before doing anything else with it.
   - The scoring rules: anchors, cleanup cap, recategorization with an `evidence` prefix `Recategorized from <original>: <why>`, the 7+ bar, REFUTED drops, the prove-it-wrong drop rule with a quoted line written to `/tmp/code_review_dropped.json`, no new findings, and `{{SCORING_RULES}}`/`{{LEARNINGS}}`/`{{IMPACT}}` used for severity only.
+  - On a commit-range target, "an added or changed line" means changed within that range. `/code-review` also reports bugs it sees outside the range (the spike saw them labeled "Pre-existing, outside the reviewed range"). Score those at 6 at most, with an `evidence` prefix `Outside the reviewed range: `, so a re-review can never be blocked by code it was not asked to look at.
   - The lane-format JSON written with `node -e` and `JSON.stringify` (same pattern as `templates/archetype.md`), then the final-line contract.
 - [ ] **Step 4: Run** `npm test`. Expected: PASS.
 - [ ] **Step 5: Commit.** `git add agents templates engine/templates.test.cjs && git commit -m "feat(review): code-review lane agent and prompt"`.
@@ -266,8 +266,8 @@ Answers the spec's six spike questions before anything is built. Runs headless C
     - `{{SCORING_RULES}}` is the lane's `rules[]`, rendered like `{{RULES}}`.
     - `{{LEARNINGS}}` is the entries whose `agent` is in `plan.engine.replaces` or is `code-review`.
     - `{{IMPACT}}` is the block the architecture lane would have received.
-    - Launch it with `subagent_type: "agent-review:reviewer-code-review"` and `model: <its tier>`. Apply Task 0's `max` result here: route `max` to the main-session fallback or reject it with the message from Task 0.
-  - **Stage 2:** for the `code-review` lane, the cross-check also runs `agent-review code-review-proof --raw /tmp/code_review_raw.json --tag /tmp/code_review_tag.txt --effort "$EFFORT"`. A non-zero exit is a failed cross-check (relaunch once; a second failure stops the run and prints the proof's reason).
+    - Launch it with `subagent_type: "agent-review:reviewer-code-review"` and `model: <its tier>`. Every effort level, `max` included, runs inside the lane (the spike confirmed `max` fans out there).
+  - **Stage 2:** for the `code-review` lane, the cross-check also runs `agent-review code-review-proof --raw /tmp/code_review_raw.txt > /tmp/code_review_proof.json`. A non-zero exit is a failed cross-check (relaunch once; a second failure stops the run and prints the proof's `reason`).
   - **Stages 3 and 4:** skipped when `ENGINE` is `code-review`.
 - [ ] **Step 4: Edit the drivers.** `re-review` invokes `agent-review:review` with `auto incremental` plus every other token the user gave (mode word replaces `auto`). `yolo-review` passes the user's `engine=`/`effort=` tokens to the first review and to every re-review.
 - [ ] **Step 5: Run** `npm test`. Expected: PASS.
@@ -283,17 +283,17 @@ Answers the spec's six spike questions before anything is built. Runs headless C
 - Test: `engine/templates.test.cjs`
 
 **Interfaces:**
-- Consumes: `/tmp/review_options.json`, `/tmp/code_review_tag.txt`, `/tmp/code_review_raw.json`, `/tmp/code_review_dropped.json`, `plan.engine`, `agent-review config get reviews_run`.
+- Consumes: `/tmp/review_options.json`, `/tmp/code_review_proof.json` (its `count`), `/tmp/code_review_dropped.json`, `plan.engine`, `agent-review config get reviews_run`.
 
 - [ ] **Step 1: Write the failing test** `report skeleton covers the code-review engine`. `templates/report.md` contains:
-  - an `[IF engine is code-review]` block in "Review detail & stats" that names the engine, effort, model, the source of each, the recipe tag, and `found <N> · scored <M> · dropped <K>`, plus a `[FOR EACH dropped finding]` line with its quoted proof;
+  - an `[IF engine is code-review]` block in "Review detail & stats" that names the engine, the requested effort, the model, the source of each, and `found <N> · scored <M> · dropped <K>`, plus a `[FOR EACH dropped finding]` line with its quoted proof;
   - an `[IF any options notes]` block;
   - an `[IF reviews_run is local]` variant of the footer that omits `@claude fix` and names only `/agent-review:address`.
 - [ ] **Step 2: Run** `npm test`. Expected: FAIL.
 - [ ] **Step 3: Edit.**
   - The header's agents list and the agent summary table include the `code-review` lane, titled `Code Review (/code-review <effort>)`.
   - The debate block stays omitted when debate was skipped.
-  - Stage 6 tells the model which files feed each new block. N is the raw finding count, M is the lane's findings count, and K is the dropped count.
+  - Stage 6 tells the model which files feed each new block. N is `count` from `/tmp/code_review_proof.json`, M is the lane's findings count, and K is the dropped count.
 - [ ] **Step 4: Run** `npm test`. Expected: PASS.
 - [ ] **Step 5: Commit.** `git add templates/report.md skills/review/SKILL.md engine/templates.test.cjs && git commit -m "feat(report): show what the code-review engine ran"`.
 
@@ -366,6 +366,8 @@ Answers the spec's six spike questions before anything is built. Runs headless C
   - which lanes are replaced and which keep running;
   - the scoring rules in one paragraph;
   - fail-closed behavior and the Claude Code version it needs;
+  - that `effort=max` works but is slow and costly (the spike saw about 20 forked agents and more than 15 minutes on a 15-line diff);
+  - that on a re-review, findings outside the new commits show up as suggestions only;
   - that CI ignores the engine and never approves under it.
   Add the `reviews_run: local` setup to "Set up a repo". Add the caveat that "suppress" learnings match less often under this engine because `/code-review` rewords findings between runs.
 - [ ] **Step 2: Release steps.** Bump `version` to `1.1.0` in `.claude-plugin/plugin.json` and `package.json` and in the four `# agent-review-template-version:` markers. Then run `npm install --package-lock-only`, then `npm run stamp-templates`.
@@ -409,4 +411,4 @@ CODE_REVIEW_PERSISTS_LEVEL = false
 
 max inside a lane: works
 
-Open items for Justin: the Skill result has no recipe tag, so the lane cannot copy it into the report. Max cost about 20 forked agents and more than 15 minutes on a tiny diff. Out-of-range findings leak through the commit range target.
+Open items, resolved by controller rulings (see the spec's "Amendments after the spike"): no recipe tag reaches the lane, so the proof check reads the Skill tool's own header and findings list instead (Task 6), and the report shows the requested effort instead of a tag (Task 9). `max` stays allowed and the README says it is slow (Task 13). Out-of-range findings on a re-review are scored 6 at most (Task 7).
