@@ -1243,7 +1243,7 @@ test('review.yml approves only when the caller opts in and the review job succee
   const job = doc.jobs.approve;
   assert.ok(job, 'review.yml must define an approve job');
   assert.equal(job.needs, 'review', 'a failed or skipped review must never reach the approver');
-  assert.equal(job.if, 'inputs.auto_approve');
+  assert.equal(job.if, "inputs.auto_approve && needs.review.outputs.engine != 'code-review'");
   assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' }, 'the runtime checkout needs contents: read');
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
@@ -1578,4 +1578,17 @@ test('report skeleton covers the code-review engine', () => {
   assert.ok(skill.includes('Code Review (/code-review <effort>)'));
   assert.ok(!/omit both of those blocks/.test(skill), 'notes must not be tied to the engine block');
   assert.ok(/follows the\s+`notes` field alone, under any engine/.test(skill), 'notes block follows `notes` alone');
+});
+
+test('review.yml skips approval under the code-review engine', () => {
+  const { parse } = require('yaml');
+  const wf = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
+  assert.ok(wf.jobs.review.outputs && wf.jobs.review.outputs.engine, 'review job must expose an engine output');
+  const cond = String(wf.jobs.approve.if);
+  assert.ok(cond.includes('inputs.auto_approve'), 'approve must still honor auto_approve');
+  assert.ok(cond.includes("needs.review.outputs.engine != 'code-review'"), 'approve must skip under the code-review engine');
+  const step = wf.jobs.review.steps.find((s) => s.id === 'engine');
+  assert.ok(step, 'review job needs a step with id engine');
+  assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
+  assert.ok(step.env.TRUSTED_REVIEW_DIR && step.env.RUNTIME_DIR, 'engine step reads its paths from env');
 });

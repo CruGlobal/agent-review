@@ -33,6 +33,8 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.engine.outputs.name }}
     permissions:
       contents: read
       checks: read
@@ -79,6 +81,20 @@ jobs:
             echo "::error::Caller requested $REQUESTED_MODE but trusted base config requires $CONFIGURED_MODE. Merge the config policy first, then change the caller in a follow-up PR."
             exit 1
           fi
+      - name: Read the trusted review engine
+        id: engine
+        env:
+          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
+          TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
+        run: |
+          ENGINE=agent-review
+          if [ -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
+            CONFIGURED=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
+              --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR" \
+              config get engine.name)
+            if [ "$CONFIGURED" != "undefined" ]; then ENGINE=$CONFIGURED; fi
+          fi
+          echo "name=$ENGINE" >> "$GITHUB_OUTPUT"
       - name: Load the previous trusted report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -425,7 +441,7 @@ jobs:
   # a plain `if:` means a failed or skipped review never reaches this job.
   approve:
     needs: review
-    if: inputs.auto_approve
+    if: inputs.auto_approve && needs.review.outputs.engine != 'code-review'
     runs-on: ubuntu-latest
     permissions:
       contents: read
