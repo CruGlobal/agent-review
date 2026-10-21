@@ -11,6 +11,18 @@ const ENGINE_DEFAULTS = {
   always: ['security', 'testing', 'standards'],
 };
 
+function codeReviewLanes(crCfg) {
+  return {
+    always: crCfg.always || ENGINE_DEFAULTS.always,
+    replaces: crCfg.replaces || ENGINE_DEFAULTS.replaces,
+  };
+}
+
+function laneOverlapMessage(id, crCfg) {
+  const key = (name) => (crCfg[name] ? name : `${name} (default)`);
+  return `engine.code_review lists ${id} in both ${key('always')} and ${key('replaces')}`;
+}
+
 const CI_NOTE =
   "The code-review engine runs locally only; CI ran agent-review's own reviewers as advice, and approval comes from the local review.";
 
@@ -86,8 +98,9 @@ function resolveOptions({ args, config, ci }) {
     effort = pick(parsed.effort, crCfg.effort, ENGINE_DEFAULTS.effort);
     model = pick(null, crCfg.model, ENGINE_DEFAULTS.model);
     if (crCfg.max_findings != null) maxFindings = { value: crCfg.max_findings, source: 'config' };
-    replaces = (crCfg.replaces || ENGINE_DEFAULTS.replaces).slice();
-    always = (crCfg.always || ENGINE_DEFAULTS.always).slice();
+    const lanes = codeReviewLanes(crCfg);
+    replaces = lanes.replaces.slice();
+    always = lanes.always.slice();
     const byId = new Map((cfg.agents || []).map((a) => [a.id, a]));
     for (const id of always) {
       const agent = byId.get(id);
@@ -95,6 +108,9 @@ function resolveOptions({ args, config, ci }) {
         throw new Error(
           `engine.code_review.always lists "${id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`,
         );
+      }
+      if (replaces.includes(id)) {
+        throw new Error(`${laneOverlapMessage(id, crCfg)}; a lane cannot both run and be replaced`);
       }
     }
   } else if (parsed.effort != null) {
@@ -120,4 +136,11 @@ function resolveOptions({ args, config, ci }) {
   };
 }
 
-module.exports = { ENGINE_DEFAULTS, CI_NOTE, parseReviewArgs, resolveOptions };
+module.exports = {
+  ENGINE_DEFAULTS,
+  CI_NOTE,
+  codeReviewLanes,
+  laneOverlapMessage,
+  parseReviewArgs,
+  resolveOptions,
+};

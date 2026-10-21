@@ -248,6 +248,22 @@ test('references: an id in both lists', () => {
   assert.deepEqual(errors, ['engine.code_review lists security in both always and replaces']);
 });
 
+test('references: replaces overlapping the default always list', () => {
+  const agents = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }, { id: 'architecture' }];
+  const errors = engineRefs(agents, { replaces: ['architecture', 'simplification', 'security'] });
+  assert.deepEqual(errors, ['engine.code_review lists security in both always (default) and replaces']);
+});
+
+test('references: always overlapping the default replaces list', () => {
+  const agents = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }, { id: 'architecture' }];
+  const errors = engineRefs(agents, { always: ['security', 'testing', 'standards', 'architecture'] });
+  assert.deepEqual(errors, ['engine.code_review lists architecture in both always and replaces (default)']);
+});
+
+test('references: the default lists alone do not overlap', () => {
+  assert.deepEqual(engineRefs([{ id: 'security' }], { effort: 'high' }), []);
+});
+
 test('references: unknown replaces id is ignored', () => {
   assert.deepEqual(engineRefs([{ id: 'security' }], { replaces: ['nope'] }), []);
 });

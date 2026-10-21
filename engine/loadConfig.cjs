@@ -5,6 +5,7 @@ const { parse } = require('yaml');
 const Ajv = require('ajv/dist/2020');
 const { upgradeConfig } = require('./upgradeConfig.cjs');
 const { validateContextManifest } = require('./contextPack.cjs');
+const { codeReviewLanes, laneOverlapMessage } = require('./options.cjs');
 
 function parseConfig(yamlText) {
   return parse(yamlText);
@@ -32,20 +33,17 @@ function validateConfigReferences(configObj, configPath) {
 
   const codeReview = configObj.engine && configObj.engine.code_review;
   if (codeReview) {
-    const always = codeReview.always || [];
-    const replaces = codeReview.replaces || [];
+    const { always, replaces } = codeReviewLanes(codeReview);
     const byId = new Map((configObj.agents || []).map((a) => [a.id, a]));
     for (const id of always) {
-      if (!byId.has(id)) {
+      // Default always lanes are checked at resolve time, so a repo that keeps
+      // the agent-review engine still loads without them.
+      if (codeReview.always && !byId.has(id)) {
         errors.push(`engine.code_review.always references unknown agent: ${id}`);
-      } else if (byId.get(id).enabled === false) {
+      } else if (codeReview.always && byId.get(id).enabled === false) {
         errors.push(`engine.code_review.always references disabled agent: ${id}`);
       }
-    }
-    for (const id of always) {
-      if (replaces.includes(id)) {
-        errors.push(`engine.code_review lists ${id} in both always and replaces`);
-      }
+      if (replaces.includes(id)) errors.push(laneOverlapMessage(id, codeReview));
     }
   }
 

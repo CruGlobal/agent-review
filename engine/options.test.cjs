@@ -96,6 +96,20 @@ test('resolve: invalid values throw', () => {
   );
 });
 
+test('resolve: a lane in both effective lists throws, defaults included', () => {
+  const replacesSecurity = { agents: FULL, engine: { code_review: { replaces: ['architecture', 'simplification', 'security'] } } };
+  assert.throws(
+    () => resolveOptions({ args: 'engine=code-review', config: replacesSecurity }),
+    (e) => e.message.includes('security') && e.message.includes('always (default)') && e.message.includes('replaces'),
+  );
+  const alwaysArchitecture = { agents: FULL, engine: { code_review: { always: ['security', 'testing', 'standards', 'architecture'] } } };
+  assert.throws(
+    () => resolveOptions({ args: 'engine=code-review', config: alwaysArchitecture }),
+    (e) => e.message.includes('architecture') && e.message.includes('always') && e.message.includes('replaces (default)'),
+  );
+  assert.doesNotThrow(() => resolveOptions({ args: 'engine=agent-review', config: replacesSecurity }));
+});
+
 test('resolve: missing or disabled always lane throws', () => {
   const missing = { agents: lanes(['security', 'standards']) };
   assert.throws(
