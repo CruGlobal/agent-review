@@ -1741,7 +1741,8 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   `effort`, `model`). `[N]` is `count` from `/tmp/code_review_proof.json`, `[M]` is
   `findings.length` in `/tmp/agent_findings/code-review.json`, and `[K]` is the length of
   `/tmp/code_review_dropped.json`; list one line per entry in that file (`file`, `line`,
-  `summary`, `proof`) and omit the list when `K` is 0. Fill `[IF any options notes]` from
+  `summary`, `proof`) and omit the list when `K` is 0. A missing `/tmp/code_review_dropped.json`
+  also means `K` is 0. Fill `[IF any options notes]` from
   `notes` in the options file and omit it when empty. Do not add a recipe tag.
 - Without an `engine` key in the config, omit both of those blocks, and render the rest exactly
   as before.

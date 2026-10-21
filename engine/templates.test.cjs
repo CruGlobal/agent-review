@@ -1558,10 +1558,20 @@ test('report skeleton covers the code-review engine', () => {
   assert.ok(report.includes('found [N] · scored [M] · dropped [K]'));
   assert.ok(report.includes('[FOR EACH dropped finding]'));
   assert.ok(report.includes('[IF any options notes]'));
-  const local = report.slice(report.indexOf('[IF reviews_run is local]'));
-  assert.ok(report.includes('[IF reviews_run is local]'));
-  assert.ok(/\/agent-review:address/.test(local));
-  assert.ok(!/@claude fix/.test(local.split('\n').slice(0, 4).join('\n')), 'local footer must omit @claude fix');
+  const localStart = report.indexOf('[IF reviews_run is local]');
+  const elseStart = report.indexOf('[ELSE', localStart);
+  const endIf = report.indexOf('[END IF reviews_run is local]');
+  assert.ok(localStart > 0 && elseStart > localStart && endIf > elseStart, 'footer variants need an end marker');
+  const localText = report.slice(localStart, elseStart);
+  assert.ok(localText.includes('/agent-review:address'));
+  assert.ok(!localText.includes('@claude'), 'local footer must omit @claude');
+  assert.ok(report.slice(elseStart, endIf).includes('@claude fix'));
+  assert.ok(report.indexOf('[IF UNRESOLVED DEBATES') > endIf, 'the debate note must sit outside both variants');
+  const engStart = report.indexOf('[IF engine is code-review]');
+  const engEnd = report.indexOf('[END IF engine is code-review]');
+  const notes = report.indexOf('[IF any options notes');
+  assert.ok(engEnd > engStart && notes > engEnd, 'the notes directive must sit outside the engine block');
+  assert.ok(/under any engine/.test(report.slice(notes, notes + 200)));
   for (const f of ['/tmp/review_options.json', '/tmp/code_review_proof.json', '/tmp/code_review_dropped.json', 'reviews_run']) {
     assert.ok(skill.slice(skill.indexOf('### Write the report')).includes(f), `Stage 6 must name ${f}`);
   }

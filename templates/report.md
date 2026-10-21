@@ -117,7 +117,10 @@ profile's cutoff may not appear in the lists above)
 
 [FOR EACH dropped finding] - `[file:line]` · [summary] · proof: "[quoted proof]"
 
-[IF any options notes] **Notes**: [one bullet per note]
+[END IF engine is code-review]
+
+[IF any options notes] **Notes**: [one bullet per note in `notes`; this line is not part of the
+engine block and renders under any engine whenever `notes` is non-empty]
 
 **Debate summary** (omit this whole block if debate rounds were not run):
 
@@ -162,7 +165,9 @@ codes: `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
 
 Or locally: `/agent-review:address` pulls this ledger into a Claude Code session.
 
-[IF UNRESOLVED DEBATES: note that ledger items marked needs-human should be resolved by a senior
+[END IF reviews_run is local]
+
+[IF UNRESOLVED DEBATES, both variants: note that ledger items marked needs-human should be resolved by a senior
 developer, not dismissed reflexively.]
 
 </details>
