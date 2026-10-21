@@ -1576,4 +1576,6 @@ test('report skeleton covers the code-review engine', () => {
     assert.ok(skill.slice(skill.indexOf('### Write the report')).includes(f), `Stage 6 must name ${f}`);
   }
   assert.ok(skill.includes('Code Review (/code-review <effort>)'));
+  assert.ok(!/omit both of those blocks/.test(skill), 'notes must not be tied to the engine block');
+  assert.ok(/follows the\s+`notes` field alone, under any engine/.test(skill), 'notes block follows `notes` alone');
 });

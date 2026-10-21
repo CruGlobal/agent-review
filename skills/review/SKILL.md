@@ -1744,8 +1744,9 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   `summary`, `proof`) and omit the list when `K` is 0. A missing `/tmp/code_review_dropped.json`
   also means `K` is 0. Fill `[IF any options notes]` from
   `notes` in the options file and omit it when empty. Do not add a recipe tag.
-- Without an `engine` key in the config, omit both of those blocks, and render the rest exactly
-  as before.
+- Omit the `[IF engine is code-review]` block when the config has no `engine` key or the engine is
+  `agent-review`. The `[IF any options notes]` block does not depend on the engine: it follows the
+  `notes` field alone, under any engine. Render the rest exactly as before.
 - When `$REVIEWS_RUN` is `local` (the config's `reviews_run`), use the `[IF reviews_run is local]`
   variant of "How to act on this review". It names only `/agent-review:address`, never
   `@claude fix` or `@claude dismiss`. Otherwise use the other variant.
