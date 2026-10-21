@@ -101,6 +101,10 @@ function resolveOptions({ args, config, ci }) {
     notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
   }
 
+  if (parsed.unknown.length) {
+    notes.push(`ignored unknown argument(s): ${parsed.unknown.join(', ')}`);
+  }
+
   return {
     mode,
     engine,

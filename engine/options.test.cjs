@@ -125,3 +125,13 @@ test('resolve: mode defaults to standard', () => {
   assert.deepEqual(resolveOptions({ args: '', config: {} }).mode, { value: 'standard', source: 'default' });
   assert.deepEqual(resolveOptions({ args: 'deep', config: {} }).mode, { value: 'deep', source: 'argument' });
 });
+
+test('resolve: unknown tokens become a note', () => {
+  const r = resolveOptions({ args: 'auto engin=code-review frobnicate', config: { agents: FULL } });
+  assert.deepEqual(
+    r.notes.filter((n) => n.startsWith('ignored unknown')),
+    ['ignored unknown argument(s): engin=code-review, frobnicate'],
+  );
+  const clean = resolveOptions({ args: 'auto', config: { agents: FULL } });
+  assert.equal(clean.notes.some((n) => n.startsWith('ignored unknown')), false);
+});

@@ -16892,6 +16892,9 @@ var require_options = __commonJS({
       } else if (parsed.effort != null) {
         notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
       }
+      if (parsed.unknown.length) {
+        notes.push(`ignored unknown argument(s): ${parsed.unknown.join(", ")}`);
+      }
       return {
         mode,
         engine,
