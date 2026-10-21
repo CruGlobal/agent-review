@@ -530,3 +530,32 @@ test('options reports errors', () => {
   assert.equal(code, 1);
   assert.match(s, /^error: /);
 });
+
+test('code-review-proof exit codes', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
+  try {
+    const findings = [
+      { file: 'a.js', line: 1, summary: 's', failure_scenario: 'f' },
+      { file: 'b.js', line: 2, summary: 's', failure_scenario: 'f' },
+    ];
+    const file = join(dir, 'raw.txt');
+    writeFileSync(
+      file,
+      `Skill "code-review" completed (forked execution).\n\nResult:\nProse.\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`,
+    );
+    const ok = run(['code-review-proof', '--raw', file]);
+    assert.equal(ok.code, 0);
+    const parsed = JSON.parse(ok.s);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.count, 2);
+
+    const missing = run(['code-review-proof', '--raw', join(dir, 'nope.txt')]);
+    assert.equal(missing.code, 1);
+    const bad = JSON.parse(missing.s);
+    assert.equal(bad.ok, false);
+    assert.equal(bad.count, 0);
+    assert.match(bad.reason, /did not run/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

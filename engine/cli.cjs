@@ -34,6 +34,7 @@ const {
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
 const { evaluateApproval } = require('./approval.cjs');
+const { checkCodeReviewProof } = require('./codeReviewProof.cjs');
 const {
   MAX_RESULT_BYTES,
   prepareAddressRequest,
@@ -212,6 +213,7 @@ const USAGE = `usage: agent-review <command>
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
+  code-review-proof --raw <f>    prove /code-review ran and returned a findings list (JSON; exit 1 if not)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -594,6 +596,17 @@ function main(rawArgv) {
       }
       out(JSON.stringify(evaluateApproval(readFileSync(reportPath, 'utf8'), { head })));
       return 0;
+    }
+    case 'code-review-proof': {
+      const rawPath = flag(rest, '--raw');
+      if (!rawPath) {
+        out('usage: agent-review code-review-proof --raw <f>');
+        return 1;
+      }
+      const rawText = existsSync(rawPath) ? readFileSync(rawPath, 'utf8') : null;
+      const r = checkCodeReviewProof({ rawText });
+      out(JSON.stringify({ ok: r.ok, reason: r.reason, count: r.findings.length }));
+      return r.ok ? 0 : 1;
     }
     case 'evidence': {
       const verifyComment = flag(rest, '--verify-comment');

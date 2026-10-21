@@ -18410,6 +18410,55 @@ var require_approval = __commonJS({
   }
 });
 
+// engine/codeReviewProof.cjs
+var require_codeReviewProof = __commonJS({
+  "engine/codeReviewProof.cjs"(exports2, module2) {
+    "use strict";
+    var FIX = "update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes";
+    function fail(reason) {
+      return { ok: false, reason, findings: [] };
+    }
+    function fencedBlocks(text) {
+      const blocks = [];
+      const re = /^```[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm;
+      let m;
+      while ((m = re.exec(text)) !== null) blocks.push(m[1]);
+      return blocks;
+    }
+    function asFindings(value) {
+      if (Array.isArray(value)) return value;
+      if (value && typeof value === "object" && Array.isArray(value.findings)) return value.findings;
+      return null;
+    }
+    function checkCodeReviewProof({ rawText }) {
+      if (rawText === null || rawText === void 0 || String(rawText).trim() === "") {
+        return fail(`/code-review did not run: its raw output is missing. Fix: ${FIX}.`);
+      }
+      const text = String(rawText);
+      const head = text.split("\n").slice(0, 3).join("\n");
+      if (!/^Skill "code-review" completed/m.test(head)) {
+        return fail(
+          `/code-review did not run: the output lacks the Skill "code-review" completed header. Fix: ${FIX}.`
+        );
+      }
+      const blocks = fencedBlocks(text);
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        let parsed;
+        try {
+          parsed = JSON.parse(blocks[i]);
+        } catch {
+          continue;
+        }
+        const findings = asFindings(parsed);
+        if (findings) return { ok: true, reason: "ok", findings };
+      }
+      if (/^\s*No findings\.?\s*$/m.test(text)) return { ok: true, reason: "ok", findings: [] };
+      return fail('/code-review returned no findings list: expected a fenced JSON array or "No findings."');
+    }
+    module2.exports = { checkCodeReviewProof };
+  }
+});
+
 // engine/addressState.cjs
 var require_addressState = __commonJS({
   "engine/addressState.cjs"(exports2, module2) {
@@ -19672,6 +19721,7 @@ var require_cli = __commonJS({
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
     var { evaluateApproval } = require_approval();
+    var { checkCodeReviewProof } = require_codeReviewProof();
     var {
       MAX_RESULT_BYTES,
       prepareAddressRequest,
@@ -19822,6 +19872,7 @@ var require_cli = __commonJS({
   ledger --findings <f> [--previous <f>]   merge stable incremental finding state
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
+  code-review-proof --raw <f>    prove /code-review ran and returned a findings list (JSON; exit 1 if not)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -20180,6 +20231,17 @@ var require_cli = __commonJS({
           }
           out(JSON.stringify(evaluateApproval(readFileSync(reportPath, "utf8"), { head })));
           return 0;
+        }
+        case "code-review-proof": {
+          const rawPath = flag(rest, "--raw");
+          if (!rawPath) {
+            out("usage: agent-review code-review-proof --raw <f>");
+            return 1;
+          }
+          const rawText = existsSync(rawPath) ? readFileSync(rawPath, "utf8") : null;
+          const r = checkCodeReviewProof({ rawText });
+          out(JSON.stringify({ ok: r.ok, reason: r.reason, count: r.findings.length }));
+          return r.ok ? 0 : 1;
         }
         case "evidence": {
           const verifyComment = flag(rest, "--verify-comment");
