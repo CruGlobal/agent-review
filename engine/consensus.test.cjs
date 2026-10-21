@@ -650,3 +650,17 @@ test('other lanes are unchanged', () => {
   assert.equal(dropped.findings.length, 0);
   assert.equal(dropped.stats.droppedInvalid.length, 1);
 });
+
+test('the code-review engine fails closed when the code-review lane was not launched', () => {
+  const findingsByAgent = { security: [], 'code-review': [] };
+  const plan = (ids) => ({ engine: { name: 'code-review' }, agents: ids.map((id) => ({ id })) });
+  assert.throws(
+    () => consensusFrom({ plan: plan(['security', 'testing']), findingsByAgent: { security: [], testing: [] } }),
+    /code-review engine.*code-review lane was not launched/,
+  );
+  assert.doesNotThrow(() => consensusFrom({ plan: plan(['code-review', 'security']), findingsByAgent }));
+  assert.doesNotThrow(
+    () => consensusFrom({ plan: { agents: [{ id: 'security' }] }, findingsByAgent: { security: [] } }),
+    'a plan with no engine block keeps the lanes it launched',
+  );
+});

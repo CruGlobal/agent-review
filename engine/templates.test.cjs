@@ -775,6 +775,10 @@ test('the launched-subset plan derives at Stage 1 launch time, from lanes actual
     /synthesiz/i.test(stage1),
     'deep mode config-only lanes (no plan entry) need a synthesized minimal plan entry documented',
   );
+  assert.ok(
+    stage1.includes('fs.writeFileSync("/tmp/review_plan_launched.json", JSON.stringify({ ...plan, agents }, null, 2));'),
+    'the launched plan keeps every plan field, engine included, so consensus can require the code-review lane',
+  );
   const buildPlanBlock = stageSlice(
     skill,
     '### Build the Review Plan & Load Evidence',

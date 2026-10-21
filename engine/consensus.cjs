@@ -405,6 +405,11 @@ function consensusFrom({
     plan && Array.isArray(plan.agents)
       ? plan.agents.map((a) => a.id)
       : Object.keys(findingsByAgent);
+  if (plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE && !laneIds.includes(CODE_REVIEW_LANE)) {
+    throw new Error(
+      'consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review',
+    );
+  }
 
   const errors = [];
   const perLane = {};
