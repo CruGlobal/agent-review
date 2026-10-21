@@ -528,6 +528,73 @@ test('the plugin ships one thin reviewer agent per model tier', () => {
   }
 });
 
+const CODE_REVIEW_AGENT = join(ROOT, 'agents/reviewer-code-review.md');
+const CODE_REVIEW_LANE = join(ROOT, 'templates/code-review-lane.md');
+const CODE_REVIEW_LANE_PLACEHOLDERS = [
+  'EFFORT',
+  'TARGET',
+  'MAX_FINDINGS_FLAG',
+  'RISK_CONTEXT',
+  'DIFF_PATH',
+  'SCORING_RULES',
+  'LEARNINGS',
+  'IMPACT',
+];
+const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
+
+test('reviewer-code-review pins opus and no effort', () => {
+  const body = readFileSync(CODE_REVIEW_AGENT, 'utf8');
+  const frontmatter = body.match(/^---\n([\s\S]*?)\n---\n/);
+  assert.ok(frontmatter, 'reviewer-code-review must open with YAML frontmatter');
+  assert.match(frontmatter[1], /^name: reviewer-code-review$/m);
+  assert.match(frontmatter[1], /^model: opus$/m);
+  assert.doesNotMatch(frontmatter[1], /^effort:/m, 'an effort cap would weaken the /code-review recipe');
+  assert.ok(!body.includes('Keep reasoning brief'), 'the brevity nudge would weaken the scoring');
+  assert.ok(!body.includes('—'), 'new prose uses no em dashes');
+});
+
+test('code-review-lane.md uses exactly the documented placeholders', () => {
+  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
+  const found = new Set(
+    [...text.matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]),
+  );
+  assert.deepStrictEqual(
+    [...found].sort(),
+    [...CODE_REVIEW_LANE_PLACEHOLDERS].sort(),
+    'code-review lane placeholder vocabulary drifted from the documented set',
+  );
+});
+
+test('code-review-lane.md carries the contracts', () => {
+  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
+  for (const needle of [
+    'skill: "code-review"',
+    '/tmp/code_review_raw.txt',
+    '/tmp/code_review_dropped.json',
+    '/tmp/agent_findings/code-review.json',
+    FINAL_LINE_CONTRACT,
+    'Recategorized from ',
+    'Outside the reviewed range: ',
+  ]) {
+    assert.ok(text.includes(needle), `code-review lane must contain ${JSON.stringify(needle)}`);
+  }
+  for (const category of ['simplification', 'efficiency', 'reuse', 'altitude', 'conventions']) {
+    assert.ok(text.includes(`\`${category}\``), `cleanup category ${category} missing`);
+  }
+  const anchors = readFileSync(ARCHETYPE, 'utf8')
+    .split('\n')
+    .filter((line) => /^\s*- (9-10|7-8|5-6|3-4): /.test(line))
+    .map((line) => line.trim());
+  assert.strictEqual(anchors.length, 4, 'archetype must still carry four severity anchor lines');
+  for (const anchor of anchors) {
+    assert.ok(text.includes(anchor), `severity anchor not copied verbatim: ${anchor}`);
+  }
+  assert.ok(
+    !text.split(FINAL_LINE_CONTRACT).join('').includes('—'),
+    'the final-line contract is the only em dash allowed in the lane prompt',
+  );
+});
+
 test('the review skill routes agents by plan tier and degrades safely', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('agent-review:reviewer-'), 'launch table must select tier subagent types');
