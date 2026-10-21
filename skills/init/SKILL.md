@@ -703,12 +703,12 @@ printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/evals/results/.gitkeep
 ```
 
-Then the CI workflows. This block runs only for `local-and-ci`; set `REVIEWS_RUN` to the approved
-answer first, and never run the copies for `local`:
+Then the CI workflows. The copies run only when the `reviews_run` just written to `config.yml` is
+exactly `local-and-ci`; anything else, including an empty read, copies nothing:
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
-REVIEWS_RUN=local-and-ci   # set to the approved answer: local | local-and-ci
+REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null)   # from the config written above
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
   cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
@@ -778,7 +778,7 @@ The cache regenerates on demand, so leave it out of the commit unless the team w
 
 ```bash
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
-REVIEWS_RUN=local-and-ci   # set to the approved answer: local | local-and-ci
+REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null)   # from the config written above
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

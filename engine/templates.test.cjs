@@ -1616,4 +1616,10 @@ test('init never copies or stages the CI workflows outside a local-and-ci guard'
       'no CI workflow may be copied or staged before the guard');
   }
   assert.ok(seen >= 2, 'expected the 3C copy block and the 3E git add block');
+  for (const block of blocks) {
+    assert.ok(!/^\s*REVIEWS_RUN=local-and-ci\b/m.test(block), 'REVIEWS_RUN must never be hardcoded to local-and-ci');
+    if (block.includes(guard)) {
+      assert.ok(block.includes('REVIEWS_RUN=$(agent-review config get reviews_run'), 'REVIEWS_RUN must come from agent-review config get reviews_run');
+    }
+  }
 });
