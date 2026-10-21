@@ -19091,22 +19091,39 @@ var require_consensus = __commonJS({
         fix: raw.fix != null ? String(raw.fix) : ""
       };
     }
+    function blockerBarFailure(f) {
+      if (f.line === null) return "severity >= 7 requires a line anchor";
+      if (String(f.confidence || "").toLowerCase() !== "high") {
+        return "severity >= 7 requires High confidence";
+      }
+      if (!String(f.evidence || "").trim()) {
+        return "severity >= 7 requires concrete evidence";
+      }
+      return null;
+    }
     function validateFinding(f) {
       if (!f.file) return "missing file";
       if (!f.message) return "missing message";
       if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
         return `invalid severity: ${f.severity}`;
       }
-      if (f.severity >= 7) {
-        if (f.line === null) return "severity >= 7 requires a line anchor";
-        if (String(f.confidence || "").toLowerCase() !== "high") {
-          return "severity >= 7 requires High confidence";
-        }
-        if (!String(f.evidence || "").trim()) {
-          return "severity >= 7 requires concrete evidence";
-        }
-      }
+      if (f.severity >= 7) return blockerBarFailure(f);
       return null;
+    }
+    var CODE_REVIEW_LANE = "code-review";
+    var CLEANUP_CATEGORIES = /* @__PURE__ */ new Set([
+      "simplification",
+      "efficiency",
+      "reuse",
+      "altitude",
+      "conventions"
+    ]);
+    var CODE_REVIEW_CAP = 6;
+    function capCodeReviewFinding(f) {
+      if (f.severity < 7) return f;
+      const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
+      if (cleanup || blockerBarFailure(f)) return { ...f, severity: CODE_REVIEW_CAP };
+      return f;
     }
     function canonicalOrder(a, b) {
       return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
@@ -19294,7 +19311,8 @@ var require_consensus = __commonJS({
       const droppedInvalid = [];
       for (const laneId of laneIds) {
         for (const raw of perLane[laneId]) {
-          const finding = normalizeFinding(raw, laneId);
+          const normalized = normalizeFinding(raw, laneId);
+          const finding = laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized) : normalized;
           const reason = validateFinding(finding);
           if (reason) {
             const messageSlice = String(finding.message || "").slice(0, 200);
@@ -19329,7 +19347,7 @@ var require_consensus = __commonJS({
       };
       return { findings, candidates, stats };
     }
-    module2.exports = { consensusFrom, tokenize, jaccard, parseLane };
+    module2.exports = { consensusFrom, capCodeReviewFinding, tokenize, jaccard, parseLane };
   }
 });
 

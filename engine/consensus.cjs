@@ -103,6 +103,17 @@ function normalizeFinding(raw, laneId) {
   };
 }
 
+function blockerBarFailure(f) {
+  if (f.line === null) return 'severity >= 7 requires a line anchor';
+  if (String(f.confidence || '').toLowerCase() !== 'high') {
+    return 'severity >= 7 requires High confidence';
+  }
+  if (!String(f.evidence || '').trim()) {
+    return 'severity >= 7 requires concrete evidence';
+  }
+  return null;
+}
+
 // Per-finding validation, run after normalizeFinding, mirroring reportState.cjs's
 // cleanFinding/blocker rules so a finding that would later throw inside cleanFinding
 // (invalid severity, or a severity >= 7 "blocker" missing the evidence bar) is caught
@@ -116,16 +127,28 @@ function validateFinding(f) {
   if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
     return `invalid severity: ${f.severity}`;
   }
-  if (f.severity >= 7) {
-    if (f.line === null) return 'severity >= 7 requires a line anchor';
-    if (String(f.confidence || '').toLowerCase() !== 'high') {
-      return 'severity >= 7 requires High confidence';
-    }
-    if (!String(f.evidence || '').trim()) {
-      return 'severity >= 7 requires concrete evidence';
-    }
-  }
+  if (f.severity >= 7) return blockerBarFailure(f);
   return null;
+}
+
+const CODE_REVIEW_LANE = 'code-review';
+const CLEANUP_CATEGORIES = new Set([
+  'simplification',
+  'efficiency',
+  'reuse',
+  'altitude',
+  'conventions',
+]);
+const CODE_REVIEW_CAP = 6;
+
+// Applies only to the code-review lane, before validateFinding: cleanups never
+// block, and a 7+ that misses the blocker bar is kept as a suggestion at the cap
+// instead of being dropped by validateFinding.
+function capCodeReviewFinding(f) {
+  if (f.severity < 7) return f;
+  const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
+  if (cleanup || blockerBarFailure(f)) return { ...f, severity: CODE_REVIEW_CAP };
+  return f;
 }
 
 // Canonical order for deterministic clique construction: agent id, then file,
@@ -400,7 +423,9 @@ function consensusFrom({
   const droppedInvalid = [];
   for (const laneId of laneIds) {
     for (const raw of perLane[laneId]) {
-      const finding = normalizeFinding(raw, laneId);
+      const normalized = normalizeFinding(raw, laneId);
+      const finding =
+        laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized) : normalized;
       const reason = validateFinding(finding);
       if (reason) {
         const messageSlice = String(finding.message || '').slice(0, 200);
@@ -446,4 +471,4 @@ function consensusFrom({
   return { findings, candidates, stats };
 }
 
-module.exports = { consensusFrom, tokenize, jaccard, parseLane };
+module.exports = { consensusFrom, capCodeReviewFinding, tokenize, jaccard, parseLane };

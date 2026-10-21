@@ -602,3 +602,51 @@ test('(invalid) a run with no invalid findings at all reports an empty droppedIn
   const { stats } = consensusFrom({ findingsByAgent, profile: 'standard' });
   assert.deepEqual(stats.droppedInvalid, []);
 });
+
+const crFinding = (over) => ({
+  file: 'a.rb',
+  line: 10,
+  severity: 8,
+  category: 'correctness',
+  confidence: 'High',
+  message: 'something is wrong here',
+  evidence: 'concrete evidence',
+  ...over,
+});
+const runCr = (findings, lane = 'code-review') =>
+  consensusFrom({ findingsByAgent: { [lane]: findings }, profile: 'standard' });
+
+test('code-review cleanup findings cap at 6', () => {
+  const { findings } = runCr([crFinding({ category: 'conventions' })]);
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].severity, 6);
+});
+
+test('cap ignores case and whitespace', () => {
+  const { findings } = runCr([
+    crFinding({ category: ' Reuse ', file: 'r.rb', message: 'reuse the helper' }),
+    crFinding({ category: 'Conventions', file: 'c.rb', message: 'follow the naming rule' }),
+    crFinding({ category: 'test-coverage', file: 't.rb', message: 'no test for branch' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'r.rb': 6, 'c.rb': 6, 't.rb': 8 });
+});
+
+test('a 7+ without the blocker bar is capped, not dropped', () => {
+  const { findings, stats } = runCr([
+    crFinding({ line: null, file: 'n.rb', message: 'no line anchor' }),
+    crFinding({ confidence: 'Medium', file: 'm.rb', message: 'medium confidence' }),
+    crFinding({ evidence: '  ', file: 'e.rb', message: 'no evidence here' }),
+  ]);
+  assert.equal(findings.length, 3);
+  assert.ok(findings.every((f) => f.severity === 6));
+  assert.deepEqual(stats.droppedInvalid, []);
+});
+
+test('other lanes are unchanged', () => {
+  const kept = runCr([crFinding({ category: 'simplification', severity: 7 })], 'simplification');
+  assert.equal(kept.findings[0].severity, 7);
+  const dropped = runCr([crFinding({ line: null })], 'correctness');
+  assert.equal(dropped.findings.length, 0);
+  assert.equal(dropped.stats.droppedInvalid.length, 1);
+});
