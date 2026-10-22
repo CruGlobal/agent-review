@@ -190,3 +190,31 @@ test('a missing header keeps the did-not-run reason', () => {
   assert.match(r.reason, /did not run/);
   assert.match(r.reason, /update Claude Code/);
 });
+
+test('plain text is read only when the result has no fenced block', () => {
+  const line = 'a.js:1 — x';
+  const cases = [
+    `${HEADER}\n\nResult:\n${line}\n\n\`\`\`json\n[{"file":"a.js",\n\`\`\`\n`,
+    `${HEADER}\n\nResult:\n\`\`\`json\n[{"file":"a.js",\n${line}\n`,
+    `${HEADER}\n\nResult:\n${line}\n\n\`\`\`json\n[1,2]\n\`\`\`\n`,
+  ];
+  for (const rawText of cases) {
+    const r = checkCodeReviewProof({ rawText });
+    assert.equal(r.ok, false, rawText);
+    assert.equal(r.reason, NEW_REASON);
+    assert.deepEqual(r.findings, []);
+  }
+});
+
+test('an unbackticked colon is not a finding separator', () => {
+  const raw = `${HEADER}\n\nResult:\nERROR:12: boom\nlocalhost:3000: server started\n`;
+  const r = checkCodeReviewProof({ rawText: raw });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, NEW_REASON);
+});
+
+test('text findings need the Result: marker', () => {
+  const r = checkCodeReviewProof({ rawText: `${HEADER}\n\napp.js:13 — something.\n` });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, NEW_REASON);
+});

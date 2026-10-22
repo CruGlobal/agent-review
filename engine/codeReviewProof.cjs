@@ -27,13 +27,17 @@ function asFindings(value) {
   return list && list.every(isPlainObject) ? list : null;
 }
 
-const FINDING_LINE =
-  /^\s*(?:[-*]|\d+\.)?\s*`?([^\s`:]+):(\d+)\S*?`?\s*(?:[\u2014\u2013]|\s-\s|:)\s*(\S.*?)\s*$/;
+const MARKER = String.raw`^\s*(?:[-*]|\d+\.)?\s*`;
+const TEXT = String.raw`\s*(\S.*?)\s*$`;
+const DASH = String.raw`(?:[\u2014\u2013]|\s-\s)`;
+const BACKTICKED_LINE = new RegExp(`${MARKER}\`([^\\s\`:]+):(\\d+)[^\`]*\`\\s*(?:${DASH}|:)${TEXT}`);
+const BARE_LINE = new RegExp(`${MARKER}([^\\s\`:]+):(\\d+)\\S*?\\s*${DASH}${TEXT}`);
 const SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
 
 function textFindings(text) {
   const resultAt = text.search(/^Result:/m);
-  const lines = (resultAt >= 0 ? text.slice(resultAt) : text).split('\n').slice(1);
+  if (resultAt < 0) return [];
+  const lines = text.slice(resultAt).split('\n').slice(1);
   const findings = [];
   for (const line of lines) {
     const scenario = SCENARIO_LINE.exec(line);
@@ -41,7 +45,7 @@ function textFindings(text) {
       findings[findings.length - 1].failure_scenario = scenario[1];
       continue;
     }
-    const m = FINDING_LINE.exec(line);
+    const m = BACKTICKED_LINE.exec(line) || BARE_LINE.exec(line);
     if (m) findings.push({ file: m[1], line: Number(m[2]), summary: m[3] });
   }
   return findings;
@@ -72,7 +76,7 @@ function checkCodeReviewProof({ rawText }) {
   if (!/^```/m.test(text) && /^\s*(?:No findings\.|\(none\))\s*$/m.test(text)) {
     return { ok: true, reason: 'ok', findings: [] };
   }
-  const lines = textFindings(text);
+  const lines = /^```/m.test(text) ? [] : textFindings(text);
   if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
   return fail(
     '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review',

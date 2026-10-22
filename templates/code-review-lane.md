@@ -55,10 +55,11 @@ Then find the findings list. Try these in order and use the first that applies:
    and `verdict`.
 2. A line that reads exactly `No findings.` or `(none)`, but only when the result has no fenced
    block at all. That means zero raw findings.
-3. One-line findings in the text after `Result:`. A line is a finding when it reads
-   `file:line`, then an em dash, an en dash, or ` - `, then the summary. `file:line` may be wrapped
-   in backticks, and the line may start with `-`, `*`, or `N.`. The numbered form
-   ``N. `file:line`: summary`` also counts. An indented `Failure scenario: ...` line right after a
+3. One-line findings in the text after `Result:`, but only when the result has no fenced block at
+   all. A line is a finding when it reads `file:line`, then an em dash, an en dash, or ` - `, then
+   the summary. `file:line` may be wrapped in backticks, and the line may start with `-`, `*`, or
+   `N.`. A colon in place of the dash counts only when `file:line` is in backticks, as in
+   ``N. `file:line`: summary``. An indented `Failure scenario: ...` line right after a
    finding is that finding's `failure_scenario`. Each raw finding is `file`, `line` (the first
    number), `summary`, and `failure_scenario` when given. Ignore lines that do not match. At
    least one matching line counts as a findings list.
