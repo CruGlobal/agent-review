@@ -1583,6 +1583,11 @@ test('report skeleton covers the code-review engine', () => {
   const block = report.slice(report.indexOf('[IF engine is code-review'));
   assert.ok(report.includes('[IF engine is code-review]'));
   assert.ok(/effort/.test(block) && /model/.test(block) && /source/.test(block));
+  assert.ok(
+    report.includes('**Engine**: code-review (from [engine source]) · effort [requested effort] (from [effort source]) · model [model] (from [model source])'),
+    'the engine line names where the engine setting came from',
+  );
+  assert.ok(skill.includes('`engine.source`'), 'Stage 6 fills the engine source from options.engine.source');
   assert.ok(report.includes('found [N] · scored [M] · dropped [K]'));
   assert.ok(report.includes('[FOR EACH dropped finding]'));
   assert.ok(report.includes('[IF any options notes]'));

@@ -111,7 +111,7 @@ breaking changes as reported by the agents]
 
 [IF engine is code-review]
 
-**Engine**: code-review · effort [requested effort] (from [source]) · model [model] (from [source])
+**Engine**: code-review (from [engine source]) · effort [requested effort] (from [effort source]) · model [model] (from [model source])
 **/code-review findings**: found [N] · scored [M] · dropped [K] (scored findings under the
 profile's cutoff may not appear in the lists above)
 

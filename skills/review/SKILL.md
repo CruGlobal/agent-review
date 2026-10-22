@@ -1739,7 +1739,8 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   `Code Review (/code-review <effort>)`, with `<effort>` from `/tmp/review_options.json`.
 - Fill the `[IF engine is code-review]` block only when `$ENGINE` is `code-review`. Engine,
   effort and model, each with its `source`, come from `/tmp/review_options.json` (`engine`,
-  `effort`, `model`). `[N]` is `count` from `/tmp/code_review_proof.json`, `[M]` is
+  `effort`, `model`). `[engine source]` is `engine.source`, and the effort and model sources are
+  `effort.source` and `model.source`. `[N]` is `count` from `/tmp/code_review_proof.json`, `[M]` is
   `findings.length` in `/tmp/agent_findings/code-review.json`, and `[K]` is the length of
   `/tmp/code_review_dropped.json`; list one line per entry in that file (`file`, `line`,
   `summary`, `proof`) and omit the list when `K` is 0. A missing `/tmp/code_review_dropped.json`
