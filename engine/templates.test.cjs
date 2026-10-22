@@ -607,9 +607,13 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
   const step2 = text.slice(text.indexOf('STEP 2.'), text.indexOf('STEP 3.'));
   assert.ok(step2.includes('array of objects'), 'a findings array holds only objects');
   assert.ok(
-    /`No findings\.`[^.]*only when the result has no fenced block at all/.test(step2.replace(/\s+/g, ' ')),
-    '"No findings." counts only when the result has no fenced block at all',
+    /`No findings\.` or `\(none\)`, but only when the result has no fenced block at all/.test(step2.replace(/\s+/g, ' ')),
+    '"No findings." and "(none)" count only when the result has no fenced block at all',
   );
+  const flat = step2.replace(/\s+/g, ' ');
+  assert.ok(flat.indexOf('last fenced JSON block') < flat.indexOf('`(none)`'), 'JSON first, then the no-findings line');
+  assert.ok(flat.indexOf('`(none)`') < flat.indexOf('after `Result:`'), 'no-findings line before one-line findings');
+  assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));
 });
 
 test('code-review-lane.md node -e example keeps its quote escapes', () => {

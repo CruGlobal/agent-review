@@ -47,14 +47,26 @@ fenced JSON in between. Do not trim, reformat, shorten, or fix anything in it. S
 looks like an error. If the Skill tool itself is missing or refuses the call, save that error
 message instead. The review reads this file to prove /code-review ran.
 
-Then find the findings list. It is the last fenced JSON block in the result that parses as an
-array of objects (possibly `[]`) or as an object with a `findings` array of objects. A line that
-reads exactly `No findings.` means zero raw findings, but only when the result has no fenced block
-at all. The raw findings are that array's entries. Each entry has `file`, `line`, `summary`, and
-`failure_scenario`, and may also have `category` and `verdict`.
+Then find the findings list. Try these in order and use the first that applies:
 
-If the result does not start with `Skill "code-review" completed`, or it has no findings list,
-then /code-review did not run. Stop here. Do not write
+1. The last fenced JSON block in the result that parses as an array of objects (possibly `[]`) or
+   as an object with a `findings` array of objects. The raw findings are that array's entries.
+   Each entry has `file`, `line`, `summary`, and `failure_scenario`, and may also have `category`
+   and `verdict`.
+2. A line that reads exactly `No findings.` or `(none)`, but only when the result has no fenced
+   block at all. That means zero raw findings.
+3. One-line findings in the text after `Result:`. A line is a finding when it reads
+   `file:line`, then an em dash, an en dash, or ` - `, then the summary. `file:line` may be wrapped
+   in backticks, and the line may start with `-`, `*`, or `N.`. The numbered form
+   ``N. `file:line`: summary`` also counts. An indented `Failure scenario: ...` line right after a
+   finding is that finding's `failure_scenario`. Each raw finding is `file`, `line` (the first
+   number), `summary`, and `failure_scenario` when given. Ignore lines that do not match. At
+   least one matching line counts as a findings list.
+
+A raw finding from text may have no `failure_scenario`. Score it from its `summary` and the code.
+
+If the result does not start with `Skill "code-review" completed`, or none of the three shapes
+above applies, then /code-review did not run. Stop here. Do not write
 `/tmp/agent_findings/code-review.json` or `/tmp/code_review_dropped.json`. Reply with the one line
 `/code-review did not run` and nothing else.
 
