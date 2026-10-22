@@ -27,6 +27,26 @@ function asFindings(value) {
   return list && list.every(isPlainObject) ? list : null;
 }
 
+const FINDING_LINE =
+  /^\s*(?:[-*]|\d+\.)?\s*`?([^\s`:]+):(\d+)\S*?`?\s*(?:[\u2014\u2013]|\s-\s|:)\s*(\S.*?)\s*$/;
+const SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
+
+function textFindings(text) {
+  const resultAt = text.search(/^Result:/m);
+  const lines = (resultAt >= 0 ? text.slice(resultAt) : text).split('\n').slice(1);
+  const findings = [];
+  for (const line of lines) {
+    const scenario = SCENARIO_LINE.exec(line);
+    if (scenario && findings.length > 0) {
+      findings[findings.length - 1].failure_scenario = scenario[1];
+      continue;
+    }
+    const m = FINDING_LINE.exec(line);
+    if (m) findings.push({ file: m[1], line: Number(m[2]), summary: m[3] });
+  }
+  return findings;
+}
+
 function checkCodeReviewProof({ rawText }) {
   if (rawText === null || rawText === undefined || String(rawText).trim() === '') {
     return fail(`/code-review did not run: its raw output is missing. Fix: ${FIX}.`);
@@ -49,11 +69,13 @@ function checkCodeReviewProof({ rawText }) {
     const findings = asFindings(parsed);
     if (findings) return { ok: true, reason: 'ok', findings };
   }
-  if (!/^```/m.test(text) && /^\s*No findings\.?\s*$/m.test(text)) {
+  if (!/^```/m.test(text) && /^\s*(?:No findings\.|\(none\))\s*$/m.test(text)) {
     return { ok: true, reason: 'ok', findings: [] };
   }
+  const lines = textFindings(text);
+  if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
   return fail(
-    '/code-review returned no findings list: expected a fenced JSON array of finding objects, or "No findings." with no fenced block',
+    '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review',
   );
 }
 

@@ -133,3 +133,60 @@ test('accounting: a missing or unreadable lane file, or an unreadable dropped fi
     assert.match(r.reason, /dropped file/);
   }
 });
+
+const NEW_REASON = '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review';
+
+test('low effort: the exact "(none)" result passes with zero findings', () => {
+  const r = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n(none)\n` });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.findings, []);
+});
+
+test('low effort: file:line lines parse into findings', () => {
+  const raw = `${HEADER}\n\nResult:\napp.js:13 — No fallback to user.name; displayName({name:"Ann"}) throws.\n\`lib/x.js:4\` – firstN loops one too far.\n- src/a.rb:7 - old marker form.\n`;
+  const r = checkCodeReviewProof({ rawText: raw });
+  assert.equal(r.ok, true);
+  assert.equal(r.findings.length, 3);
+  assert.deepEqual(r.findings[0], { file: 'app.js', line: 13, summary: 'No fallback to user.name; displayName({name:"Ann"}) throws.' });
+  assert.equal(r.findings[1].file, 'lib/x.js');
+  assert.equal(r.findings[1].line, 4);
+  assert.equal(r.findings[2].file, 'src/a.rb');
+  assert.equal(r.findings[2].line, 7);
+});
+
+test('rendered numbered list with Failure scenario lines', () => {
+  const raw = `${HEADER}\n\nResult:\n2 findings, most severe first:\n\n1. \`app.js:13\`: No fallback to user.name.\n   Failure scenario: displayName({ name: "Ann" }) throws.\n2. \`app.js:4\`: firstN loops one too far.\n`;
+  const r = checkCodeReviewProof({ rawText: raw });
+  assert.equal(r.ok, true);
+  assert.equal(r.findings.length, 2);
+  assert.deepEqual(r.findings[0], {
+    file: 'app.js',
+    line: 13,
+    summary: 'No fallback to user.name.',
+    failure_scenario: 'displayName({ name: "Ann" }) throws.',
+  });
+  assert.equal('failure_scenario' in r.findings[1], false);
+});
+
+test('a fenced JSON findings block wins over finding-shaped text', () => {
+  const raw = `${HEADER}\n\nResult:\nother.js:1 — a stray line.\n\n\`\`\`json\n${JSON.stringify(FINDINGS)}\n\`\`\`\n`;
+  const r = checkCodeReviewProof({ rawText: raw });
+  assert.equal(r.ok, true);
+  assert.equal(r.findings.length, 2);
+  assert.equal(r.findings[0].failure_scenario, FINDINGS[0].failure_scenario);
+});
+
+test('header present but nothing parses: the reason is not "update Claude Code"', () => {
+  const r = checkCodeReviewProof({ rawText: `${HEADER}\n\n${PROSE}\n` });
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, NEW_REASON);
+  assert.doesNotMatch(r.reason, /update Claude Code/);
+  assert.deepEqual(r.findings, []);
+});
+
+test('a missing header keeps the did-not-run reason', () => {
+  const r = checkCodeReviewProof({ rawText: 'Result:\napp.js:13 — something.\n' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /did not run/);
+  assert.match(r.reason, /update Claude Code/);
+});

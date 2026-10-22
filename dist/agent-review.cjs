@@ -18451,6 +18451,23 @@ var require_codeReviewProof = __commonJS({
       else if (isPlainObject(value) && Array.isArray(value.findings)) list = value.findings;
       return list && list.every(isPlainObject) ? list : null;
     }
+    var FINDING_LINE = /^\s*(?:[-*]|\d+\.)?\s*`?([^\s`:]+):(\d+)\S*?`?\s*(?:[\u2014\u2013]|\s-\s|:)\s*(\S.*?)\s*$/;
+    var SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
+    function textFindings(text) {
+      const resultAt = text.search(/^Result:/m);
+      const lines = (resultAt >= 0 ? text.slice(resultAt) : text).split("\n").slice(1);
+      const findings = [];
+      for (const line of lines) {
+        const scenario = SCENARIO_LINE.exec(line);
+        if (scenario && findings.length > 0) {
+          findings[findings.length - 1].failure_scenario = scenario[1];
+          continue;
+        }
+        const m = FINDING_LINE.exec(line);
+        if (m) findings.push({ file: m[1], line: Number(m[2]), summary: m[3] });
+      }
+      return findings;
+    }
     function checkCodeReviewProof({ rawText }) {
       if (rawText === null || rawText === void 0 || String(rawText).trim() === "") {
         return fail(`/code-review did not run: its raw output is missing. Fix: ${FIX}.`);
@@ -18473,11 +18490,13 @@ var require_codeReviewProof = __commonJS({
         const findings = asFindings(parsed);
         if (findings) return { ok: true, reason: "ok", findings };
       }
-      if (!/^```/m.test(text) && /^\s*No findings\.?\s*$/m.test(text)) {
+      if (!/^```/m.test(text) && /^\s*(?:No findings\.|\(none\))\s*$/m.test(text)) {
         return { ok: true, reason: "ok", findings: [] };
       }
+      const lines = textFindings(text);
+      if (lines.length > 0) return { ok: true, reason: "ok", findings: lines };
       return fail(
-        '/code-review returned no findings list: expected a fenced JSON array of finding objects, or "No findings." with no fenced block'
+        "/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review"
       );
     }
     function parseJson(text) {
