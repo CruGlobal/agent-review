@@ -19394,11 +19394,12 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
-    function codeReviewBlockerOf(m) {
-      if (m._codeReviewBlocker !== void 0) return m._codeReviewBlocker;
-      return m.agent === CODE_REVIEW_LANE && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+    function provenBlockerOf(m, anyLane) {
+      if (m._provenBlocker !== void 0) return m._provenBlocker;
+      const counts = anyLane || m.agent === CODE_REVIEW_LANE;
+      return counts && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
     }
-    function combineMembers(members) {
+    function combineMembers(members, anyLane) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
         (best, m) => m.severity > best.severity ? m : best,
@@ -19434,17 +19435,17 @@ var require_consensus = __commonJS({
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const crBlocker = ordered.reduce((best, m) => {
-        const candidate = codeReviewBlockerOf(m);
+      const blocker = ordered.reduce((best, m) => {
+        const candidate = provenBlockerOf(m, anyLane);
         return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
       }, null);
-      const raised = crBlocker !== null && crBlocker.severity > meanSeverity;
-      const lead = raised ? crBlocker : primary;
+      const raised = blocker !== null && blocker.severity > meanSeverity;
+      const lead = raised ? blocker : primary;
       return {
         agent: lead.agent,
         agents: agents.join(","),
         category: lead.category,
-        severity: raised ? crBlocker.severity : meanSeverity,
+        severity: raised ? blocker.severity : meanSeverity,
         file: lead.file,
         line: lead.line,
         message: lead.message,
@@ -19457,7 +19458,7 @@ var require_consensus = __commonJS({
         _minSeverity: minSeverity,
         _maxSeverity: maxSeverity,
         _meanSeverity: meanSeverity,
-        _codeReviewBlocker: crBlocker
+        _provenBlocker: blocker
       };
     }
     function unionFind(n) {
@@ -19505,7 +19506,7 @@ var require_consensus = __commonJS({
       }
       return candidates;
     }
-    function applyDecisions(entries, decisions) {
+    function applyDecisions(entries, decisions, anyLane) {
       if (!Array.isArray(decisions)) {
         throw new Error("consensus: decisions must be an array");
       }
@@ -19531,11 +19532,11 @@ var require_consensus = __commonJS({
         groupsByRoot.get(root).push(entries[i]);
       }
       return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members)
+        (members) => members.length === 1 ? members[0] : combineMembers(members, anyLane)
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, _codeReviewBlocker, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, _meanSeverity, _provenBlocker, ...rest } = entry;
       return rest;
     }
     function consensusFrom({
@@ -19545,7 +19546,8 @@ var require_consensus = __commonJS({
       decisions
     } = {}) {
       const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
-      if (plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE && !laneIds.includes(CODE_REVIEW_LANE)) {
+      const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE);
+      if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
         throw new Error(
           "consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review"
         );
@@ -19581,14 +19583,14 @@ var require_consensus = __commonJS({
         }
       }
       let entries = buildCliques(all).map(
-        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
       );
       const beforeCutoff = entries.length;
       entries = applyProfileCutoff(entries, profile);
       const droppedByProfile = beforeCutoff - entries.length;
       entries = sortEntries(entries);
       if (decisions !== void 0) {
-        entries = sortEntries(applyDecisions(entries, decisions));
+        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
       }
       const candidates = buildCandidates(entries);
       const findings = entries.map(stripInternal);

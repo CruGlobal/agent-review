@@ -223,10 +223,12 @@ function toEntry(m) {
 }
 
 // A combined entry's agent and severity come from an earlier merge, so only its
-// tracked `_codeReviewBlocker` counts; raw and singleton members are tested directly.
-function codeReviewBlockerOf(m) {
-  if (m._codeReviewBlocker !== undefined) return m._codeReviewBlocker;
-  return m.agent === CODE_REVIEW_LANE && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+// tracked `_provenBlocker` counts; raw and singleton members are tested directly.
+// `anyLane` is true only under the code-review engine.
+function provenBlockerOf(m, anyLane) {
+  if (m._provenBlocker !== undefined) return m._provenBlocker;
+  const counts = anyLane || m.agent === CODE_REVIEW_LANE;
+  return counts && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
 }
 
 // Combines >=2 members (raw findings on first grouping, or already-combined
@@ -236,8 +238,9 @@ function codeReviewBlockerOf(m) {
 // per field), line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
-// Exception: a code-review member at 7+ that passes the blocker bar keeps its
-// severity when the mean would be lower, and is then the primary.
+// Exception: a member at 7+ that passes the blocker bar keeps its severity when
+// the mean would be lower, and is then the primary. Under the code-review engine
+// a member of any lane qualifies; otherwise only a code-review member does.
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
@@ -245,7 +248,7 @@ function codeReviewBlockerOf(m) {
 // wins. reduce() with a strict `>` comparison always keeps the first member it
 // saw on a tie, so sorting a local copy of `members` by agent id ascending
 // first is sufficient to make every tie-break deterministic.
-function combineMembers(members) {
+function combineMembers(members, anyLane) {
   const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
   const primary = ordered.reduce(
     (best, m) => (m.severity > best.severity ? m : best),
@@ -292,25 +295,24 @@ function combineMembers(members) {
   // Weighted by each member's own corroboration count (default 1 for a raw/singleton
   // member) — otherwise re-merging an already-corroborated group with a singleton via
   // `decisions` silently discounts the group's weight down to a single vote.
-  // A group raised by its code-review member is weighted at its own mean, so the
-  // raise is never counted twice.
+  // A raised group is weighted at its own mean, so the raise is never counted twice.
   const weightedSum = ordered.reduce(
     (sum, m) =>
       sum + (m._meanSeverity !== undefined ? m._meanSeverity : m.severity) * (m.corroboration || 1),
     0,
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
-  const crBlocker = ordered.reduce((best, m) => {
-    const candidate = codeReviewBlockerOf(m);
+  const blocker = ordered.reduce((best, m) => {
+    const candidate = provenBlockerOf(m, anyLane);
     return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
   }, null);
-  const raised = crBlocker !== null && crBlocker.severity > meanSeverity;
-  const lead = raised ? crBlocker : primary;
+  const raised = blocker !== null && blocker.severity > meanSeverity;
+  const lead = raised ? blocker : primary;
   return {
     agent: lead.agent,
     agents: agents.join(','),
     category: lead.category,
-    severity: raised ? crBlocker.severity : meanSeverity,
+    severity: raised ? blocker.severity : meanSeverity,
     file: lead.file,
     line: lead.line,
     message: lead.message,
@@ -323,7 +325,7 @@ function combineMembers(members) {
     _minSeverity: minSeverity,
     _maxSeverity: maxSeverity,
     _meanSeverity: meanSeverity,
-    _codeReviewBlocker: crBlocker,
+    _provenBlocker: blocker,
   };
 }
 
@@ -392,7 +394,7 @@ function buildCandidates(entries) {
 // they stay union-find: a `merge` decision is a deliberate instruction to
 // combine those two entries (and, transitively, anything else a decision also
 // merges them with), unlike the clique-restricted automatic pass above.
-function applyDecisions(entries, decisions) {
+function applyDecisions(entries, decisions, anyLane) {
   if (!Array.isArray(decisions)) {
     throw new Error('consensus: decisions must be an array');
   }
@@ -425,12 +427,12 @@ function applyDecisions(entries, decisions) {
     groupsByRoot.get(root).push(entries[i]);
   }
   return [...groupsByRoot.values()].map((members) =>
-    members.length === 1 ? members[0] : combineMembers(members),
+    members.length === 1 ? members[0] : combineMembers(members, anyLane),
   );
 }
 
 function stripInternal(entry) {
-  const { _minSeverity, _maxSeverity, _meanSeverity, _codeReviewBlocker, ...rest } = entry;
+  const { _minSeverity, _maxSeverity, _meanSeverity, _provenBlocker, ...rest } = entry;
   return rest;
 }
 
@@ -444,7 +446,8 @@ function consensusFrom({
     plan && Array.isArray(plan.agents)
       ? plan.agents.map((a) => a.id)
       : Object.keys(findingsByAgent);
-  if (plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE && !laneIds.includes(CODE_REVIEW_LANE)) {
+  const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE);
+  if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
     throw new Error(
       'consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review',
     );
@@ -488,7 +491,7 @@ function consensusFrom({
   // order findings were flattened in (laneIds order, dict key order, etc.)
   // because buildCliques re-sorts canonically before assigning.
   let entries = buildCliques(all).map((members) =>
-    members.length === 1 ? toEntry(members[0]) : combineMembers(members),
+    members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine),
   );
 
   const beforeCutoff = entries.length;
@@ -497,7 +500,7 @@ function consensusFrom({
   entries = sortEntries(entries);
 
   if (decisions !== undefined) {
-    entries = sortEntries(applyDecisions(entries, decisions));
+    entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
   }
 
   const candidates = buildCandidates(entries);

@@ -771,7 +771,7 @@ test('(code-review blocker) a financial 4 cannot pull a proven code-review 7 bel
   assert.equal(f.message, REFUND);
   assert.equal(f.fix, 'subtract fees before rounding');
   assert.equal(f.confidence, 'High');
-  assert.equal('_codeReviewBlocker' in f, false);
+  assert.equal('_provenBlocker' in f, false);
 
   const ledger = mergeLedger([], findings);
   assert.equal(ledger[0].severity, 7, 'the merged entry still passes the ledger blocker rules');
@@ -899,7 +899,7 @@ test('(code-review blocker) a decisions merge remembers a proven code-review mem
   assert.equal(merged[0].severity, 7, 'weighted mean (8*2+1)/3 rounds to 6; the code-review 7 wins');
   assert.deepEqual([merged[0].agent, merged[0].line, merged[0].message], ['code-review', 20, REFUND]);
   assert.equal(merged[0].confidence, 'High');
-  assert.equal('_codeReviewBlocker' in merged[0], false);
+  assert.equal('_provenBlocker' in merged[0], false);
 });
 
 test('(code-review blocker) a raised group joins a later decisions merge at its own mean, not the raised severity', () => {
@@ -942,4 +942,125 @@ test('(code-review blocker) with two proven code-review members, the stronger on
     [findings[0].agent, findings[0].line, findings[0].message, findings[0].fix],
     ['code-review', 21, 'refund amount is rounded before fees are removed', 'use decimal math'],
   );
+});
+
+// --- under the code-review engine, a proven blocker from any lane keeps its severity ---
+
+const crEnginePlan = (ids) => ({ engine: { name: 'code-review' }, agents: ids.map((id) => ({ id })) });
+const securityBlocker = (over) =>
+  crBlocker({
+    line: 21,
+    severity: 8,
+    category: 'security',
+    message: 'refund amount is rounded before fees are removed',
+    fix: 'use decimal math',
+    ...over,
+  });
+const doubtedCr = (over) =>
+  crBlocker({ severity: 4, confidence: 'Low', evidence: 'Doubted: the caller may round first.', ...over });
+
+test('(proven blocker) a doubted code-review 4 cannot pull a proven security 8 below the bar', () => {
+  const { findings } = consensusFrom({
+    plan: crEnginePlan(['code-review', 'security']),
+    findingsByAgent: { 'code-review': [doubtedCr()], security: [securityBlocker()] },
+    profile: 'standard',
+  });
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].corroboration, 2);
+  assert.equal(findings[0].severity, 8, 'the mean is 6; the proven security 8 holds');
+  assert.deepEqual(
+    [findings[0].agent, findings[0].line, findings[0].message, findings[0].fix],
+    ['security', 21, 'refund amount is rounded before fees are removed', 'use decimal math'],
+  );
+  assert.equal(Object.keys(findings[0]).some((k) => k.startsWith('_')), false);
+  assert.equal(mergeLedger([], findings)[0].severity, 8);
+});
+
+test('(proven blocker) the reverse, a proven code-review 8 with a security 4, still gives 8', () => {
+  const { findings } = consensusFrom({
+    plan: crEnginePlan(['code-review', 'security']),
+    findingsByAgent: {
+      'code-review': [crBlocker({ severity: 8 })],
+      security: [securityBlocker({ severity: 4, confidence: 'Medium' })],
+    },
+    profile: 'standard',
+  });
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].severity, 8);
+  assert.deepEqual([findings[0].agent, findings[0].line, findings[0].message], ['code-review', 20, REFUND]);
+});
+
+test('(proven blocker) the same groups with no engine keep today\'s result', () => {
+  for (const plan of [undefined, { agents: [{ id: 'code-review' }, { id: 'security' }] }]) {
+    const repro = consensusFrom({
+      plan,
+      findingsByAgent: { 'code-review': [doubtedCr()], security: [securityBlocker()] },
+      profile: 'standard',
+    }).findings;
+    assert.equal(repro.length, 1);
+    assert.equal(repro[0].severity, 6, 'only a code-review member keeps its score without the engine');
+    assert.equal(repro[0].agent, 'security');
+
+    const reverse = consensusFrom({
+      plan,
+      findingsByAgent: {
+        'code-review': [crBlocker({ severity: 8 })],
+        security: [securityBlocker({ severity: 4, confidence: 'Medium' })],
+      },
+      profile: 'standard',
+    }).findings;
+    assert.equal(reverse[0].severity, 8, 'the proven code-review member already kept its score');
+  }
+
+  const defaultEngine = consensusFrom({
+    plan: { agents: [{ id: 'correctness' }, { id: 'security' }] },
+    findingsByAgent: { correctness: [crBlocker({ severity: 4, confidence: 'Low' })], security: [securityBlocker()] },
+    profile: 'standard',
+  }).findings;
+  assert.equal(defaultEngine[0].severity, 6, 'the default engine keeps the rounded mean');
+});
+
+test('(proven blocker) a decisions merge follows the same rule', () => {
+  const findingsByAgent = {
+    'code-review': [doubtedCr({ line: 16, message: 'ledger export skips the currency column' })],
+    security: [securityBlocker({ line: 10 })],
+  };
+  const plan = crEnginePlan(['code-review', 'security']);
+  const first = consensusFrom({ plan, findingsByAgent, profile: 'standard' });
+  assert.equal(first.findings.length, 2);
+  assert.equal(first.candidates.length, 1);
+  const { a, b } = first.candidates[0];
+
+  const merged = consensusFrom({ plan, findingsByAgent, profile: 'standard', decisions: [{ merge: [a, b] }] }).findings;
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].severity, 8, 'the mean is 6; the proven security 8 holds');
+  assert.deepEqual([merged[0].agent, merged[0].line], ['security', 10]);
+
+  const control = consensusFrom({
+    plan: { agents: plan.agents },
+    findingsByAgent,
+    profile: 'standard',
+    decisions: [{ merge: [a, b] }],
+  }).findings;
+  assert.equal(control[0].severity, 6, 'without the engine a decisions merge keeps the rounded mean');
+});
+
+test('(proven blocker) a raised group keeps the proven severity through a later decisions merge', () => {
+  const findingsByAgent = {
+    'code-review': [doubtedCr()],
+    security: [securityBlocker()],
+    financial: [financialNote({ line: 28, severity: 2, message: 'ledger export skips the currency column' })],
+  };
+  const plan = crEnginePlan(['code-review', 'security', 'financial']);
+  const first = consensusFrom({ plan, findingsByAgent, profile: 'standard' });
+  const group = first.findings.findIndex((f) => f.corroboration === 2);
+  const single = first.findings.findIndex((f) => f.corroboration === 1);
+  assert.equal(first.findings[group].severity, 8);
+
+  const merged = consensusFrom({ plan, findingsByAgent, profile: 'standard', decisions: [{ merge: [group, single] }] }).findings;
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].corroboration, 3);
+  assert.equal(merged[0].severity, 8);
+  assert.equal(merged[0].agent, 'security');
+  assert.equal(merged[0].needsHumanReview, true);
 });
