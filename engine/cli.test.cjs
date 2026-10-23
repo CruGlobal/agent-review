@@ -424,6 +424,48 @@ test('run still rejects an unrecognized mode', () => {
   }
 });
 
+function writeEngineConfig(root, engineName) {
+  const dir = join(root, '.claude', 'review');
+  mkdirSync(dir, { recursive: true });
+  const lanes = ['security', 'testing', 'standards', 'architecture', 'simplification'];
+  writeFileSync(join(dir, 'config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', ...lanes.flatMap((id) => [`  - id: ${id}`, '    always: true']),
+    `engine: { name: ${engineName} }`,
+    'excluded_paths: []', '',
+  ].join('\n'));
+}
+
+test('run plans with the review options, so a code-review repo previews and saves its own lanes', () => {
+  const root = tmpGitRepo();
+  try {
+    writeEngineConfig(root, 'code-review');
+    const { code, s } = run(['run', '--root', root, '--no-launch', 'quick']);
+    assert.equal(code, 0, s);
+    const plan = JSON.parse(readFileSync(planTmpPath(root), 'utf8'));
+    assert.equal(plan.engine.name, 'code-review');
+    assert.deepEqual(plan.agents.map((a) => a.id), ['code-review', 'security', 'testing', 'standards']);
+    assert.equal(plan.mode.requested, 'quick');
+    assert.match(s, /^ {2}- code-review \[engine\]$/m);
+    assert.doesNotMatch(s, /- architecture \[/);
+
+    writeEngineConfig(root, 'agent-review');
+    const plain = run(['run', '--root', root, '--no-launch']);
+    assert.equal(plain.code, 0, plain.s);
+    const defaultPlan = JSON.parse(readFileSync(planTmpPath(root), 'utf8'));
+    assert.equal('engine' in defaultPlan, false, 'the agent-review engine plan has no engine block');
+    assert.ok(defaultPlan.agents.some((a) => a.id === 'architecture'));
+    assert.equal(defaultPlan.agents.some((a) => a.id === 'code-review'), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('resolveMinSupport defaults from cfg.learning.min_support, else 3; explicit flag wins', () => {
   assert.deepEqual(resolveMinSupport({}, undefined), { minSupport: 3 });
   assert.deepEqual(

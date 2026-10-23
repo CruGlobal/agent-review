@@ -829,6 +829,7 @@ function main(rawArgv) {
         ['-C', C.ROOT, 'diff', '--stat', `${b}...HEAD`],
         { encoding: 'utf8' },
       );
+      const options = resolveOptions({ args: mode, config: cfg, ci: false });
       const plan = buildPlan(
         {
           files,
@@ -837,6 +838,7 @@ function main(rawArgv) {
           scope,
           reviewDirRel: C.reviewDirRel,
           mode,
+          options,
         },
         cfg,
       );

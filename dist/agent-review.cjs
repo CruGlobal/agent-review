@@ -20679,6 +20679,7 @@ var require_cli = __commonJS({
             ["-C", C.ROOT, "diff", "--stat", `${b}...HEAD`],
             { encoding: "utf8" }
           );
+          const options = resolveOptions({ args: mode, config: cfg, ci: false });
           const plan = buildPlan(
             {
               files,
@@ -20686,7 +20687,8 @@ var require_cli = __commonJS({
               linesChanged: linesChangedFromStat(stat),
               scope,
               reviewDirRel: C.reviewDirRel,
-              mode
+              mode,
+              options
             },
             cfg
           );
