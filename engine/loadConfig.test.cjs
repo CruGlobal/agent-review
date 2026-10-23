@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
-const { mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync } = require('node:fs');
 const { stringify } = require('yaml');
 const {
   parseConfig,
@@ -297,20 +297,39 @@ test('references: under the code-review engine the default always lanes must exi
   assert.deepEqual(refsWith(agents, { name: 'code-review', code_review: { effort: 'high' } }), expected, 'no always key');
 });
 
-test('references: under the agent-review engine the default always lanes are not checked', () => {
-  const agents = [{ id: 'standards' }];
+test('references: under any other engine the code_review lanes are not checked', () => {
+  const agents = [{ id: 'standards' }, { id: 'testing', enabled: false }];
   for (const engine of [
     undefined,
     { name: 'agent-review' },
     { name: 'agent-review', code_review: { effort: 'high' } },
     { code_review: { replaces: ['architecture'] } },
+    { name: 'agent-review', code_review: { always: ['security', 'testing', 'standards'] } },
+    { code_review: { always: ['security'] } },
+    { name: 'agent-review', code_review: { always: ['standards'], replaces: ['standards'] } },
+    { code_review: { replaces: ['architecture', 'simplification', 'security'] } },
   ]) {
     assert.deepEqual(refsWith(agents, engine), [], JSON.stringify(engine));
   }
-  assert.deepEqual(
-    refsWith(agents, { name: 'agent-review', code_review: { always: ['security'] } }),
-    ['engine.code_review.always references unknown agent: security'],
-    'an explicit always list is still checked, as before',
+});
+
+test('the template config loads under the agent-review engine with testing disabled', () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-template-'));
+  cpSync(join(__dirname, '..', 'templates', 'rules'), join(root, 'rules'), { recursive: true });
+  const cfg = parseConfig(readFileSync(join(__dirname, '..', 'templates', 'config.yml'), 'utf8'));
+  assert.equal(cfg.engine.name, 'agent-review');
+  assert.deepEqual(cfg.engine.code_review.always, ['security', 'testing', 'standards']);
+  cfg.agents.find((a) => a.id === 'testing').enabled = false;
+  const configPath = join(root, 'config.yml');
+  writeFileSync(configPath, stringify(cfg));
+  assert.doesNotThrow(() => loadConfig({ configPath, schemaPath }));
+
+  cfg.engine.name = 'code-review';
+  writeFileSync(configPath, stringify(cfg));
+  assert.throws(
+    () => loadConfig({ configPath, schemaPath }),
+    /engine\.code_review\.always references disabled agent: testing/,
+    'the code-review engine still checks the list',
   );
 });
 
@@ -324,7 +343,6 @@ test('loadConfig rejects a code-review config whose default security lane is dis
 });
 
 test('template config still validates', () => {
-  const { readFileSync } = require('node:fs');
   const configPath = join(__dirname, '..', 'templates', 'config.yml');
   const cfg = loadConfig({ configPath, schemaPath });
   assert.equal(cfg.engine.name, 'agent-review');

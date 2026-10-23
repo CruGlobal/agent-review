@@ -34,15 +34,17 @@ function validateConfigReferences(configObj, configPath) {
     }
   }
 
+  // Under any other engine the code_review block is checked only by the schema, so
+  // the template's explicit always list never stops a default-engine repo loading.
   const engine = configObj.engine || {};
-  if (engine.code_review || engine.name === 'code-review') {
+  if (engine.name === 'code-review') {
     const codeReview = engine.code_review || {};
-    // Under the agent-review engine only an explicit always list is checked, so a
-    // repo that keeps that engine still loads without the default lanes.
-    const checkLanes = engine.name === 'code-review' || Boolean(codeReview.always);
     for (const { id, kind } of alwaysLaneProblems(codeReview, configObj.agents)) {
-      if (kind === 'overlap') errors.push(laneOverlapMessage(id, codeReview));
-      else if (checkLanes) errors.push(`engine.code_review.always references ${kind} agent: ${id}`);
+      errors.push(
+        kind === 'overlap'
+          ? laneOverlapMessage(id, codeReview)
+          : `engine.code_review.always references ${kind} agent: ${id}`,
+      );
     }
   }
 

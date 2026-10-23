@@ -16796,12 +16796,12 @@ var require_loadConfig = __commonJS({
         }
       }
       const engine = configObj.engine || {};
-      if (engine.code_review || engine.name === "code-review") {
+      if (engine.name === "code-review") {
         const codeReview = engine.code_review || {};
-        const checkLanes = engine.name === "code-review" || Boolean(codeReview.always);
         for (const { id, kind } of alwaysLaneProblems(codeReview, configObj.agents)) {
-          if (kind === "overlap") errors.push(laneOverlapMessage(id, codeReview));
-          else if (checkLanes) errors.push(`engine.code_review.always references ${kind} agent: ${id}`);
+          errors.push(
+            kind === "overlap" ? laneOverlapMessage(id, codeReview) : `engine.code_review.always references ${kind} agent: ${id}`
+          );
         }
       }
       const base = dirname(resolve(configPath));
