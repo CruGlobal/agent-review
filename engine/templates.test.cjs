@@ -624,6 +624,17 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
   assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));
 });
 
+test('code-review-lane.md says how the proof matches each drop to its raw finding', () => {
+  const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
+  for (const needle of [
+    '`file` exactly as the raw finding gives it',
+    '`line` as a number (the first number for a range such as `42-45`), or `null` only when the raw finding has no line',
+    'The review matches each dropped entry to its own raw finding by `file` and `line`',
+  ]) {
+    assert.ok(flat.includes(needle), `code-review lane must say ${JSON.stringify(needle)}`);
+  }
+});
+
 test('code-review-lane.md node -e example keeps its quote escapes', () => {
   const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
   const script = text.match(/^node -e '\n([\s\S]*?)\n'\n```/m);

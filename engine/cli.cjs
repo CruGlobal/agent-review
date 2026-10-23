@@ -611,7 +611,7 @@ function main(rawArgv) {
       let { ok, reason } = r;
       if (ok && findingsPath) {
         ({ ok, reason } = checkFindingAccounting({
-          count: r.findings.length,
+          rawFindings: r.findings,
           findingsText: readIfPresent(findingsPath),
           droppedText: readIfPresent(droppedPath),
         }));

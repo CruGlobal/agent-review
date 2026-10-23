@@ -115,8 +115,48 @@ function parseJson(text) {
   }
 }
 
+// A raw line range such as "42-45" counts as its first line, as the lane template tells the scorer.
+function rawLine(finding) {
+  if (Number.isInteger(finding.line)) return finding.line;
+  const m = /^\s*(\d+)/.exec(typeof finding.line === 'string' ? finding.line : '');
+  return m ? Number(m[1]) : null;
+}
+
+function isText(value) {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function droppedEntryProblem(entry) {
+  if (!hasFile(entry)) return 'needs a non-empty string file';
+  if (entry.line !== null && !Number.isInteger(entry.line)) {
+    return 'needs an integer line, or null when the raw finding has no line';
+  }
+  if (!isText(entry.summary)) return 'needs a non-empty summary';
+  if (!isText(entry.proof)) return 'needs a non-empty proof';
+  return null;
+}
+
+function unmatchedDrop(rawFindings, dropped) {
+  const claimed = new Set();
+  for (const [i, entry] of dropped.entries()) {
+    const label = `the code-review dropped entry ${i + 1}`;
+    const problem = droppedEntryProblem(entry);
+    if (problem) return `${label} ${problem}`;
+    const where = entry.line === null ? `${entry.file}, no line` : `${entry.file}:${entry.line}`;
+    const spots = rawFindings
+      .map((raw, index) => ({ raw, index }))
+      .filter(({ raw }) => raw.file === entry.file && rawLine(raw) === entry.line);
+    if (spots.length === 0) return `${label} (${where}) matches no raw /code-review finding at that file and line`;
+    const free = spots.find(({ index }) => !claimed.has(index));
+    if (!free) return `${label} (${where}) matches a raw finding that another dropped entry already accounts for`;
+    claimed.add(free.index);
+  }
+  return null;
+}
+
 // A null droppedText is a missing dropped file, which counts as zero drops.
-function checkFindingAccounting({ count, findingsText, droppedText }) {
+function checkFindingAccounting({ rawFindings, findingsText, droppedText }) {
+  const count = rawFindings.length;
   const lane = findingsText == null ? null : parseJson(findingsText);
   const scored = lane && unwrapFindings(lane.value);
   if (!scored) {
@@ -138,6 +178,8 @@ function checkFindingAccounting({ count, findingsText, droppedText }) {
         'every raw finding must be scored or dropped exactly once',
     };
   }
+  const problem = unmatchedDrop(rawFindings, dropped);
+  if (problem) return { ok: false, reason: problem };
   return { ok: true, reason: 'ok' };
 }
 

@@ -582,6 +582,12 @@ test('code-review-proof checks found = scored + dropped when given both files', 
     assert.equal(bad.count, 2);
     assert.match(bad.reason, /found 2, but the lane scored 1 and dropped 0/);
 
+    const emptyDrop = join(dir, 'empty-drop.json');
+    writeFileSync(emptyDrop, JSON.stringify([{}]));
+    const unproven = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', emptyDrop]);
+    assert.equal(unproven.code, 1, 'a drop with no file, line, summary, or proof fails even when the counts add up');
+    assert.match(JSON.parse(unproven.s).reason, /dropped entry 1 needs a non-empty string file/);
+
     const lone = run(['code-review-proof', '--raw', raw, '--findings', lane]);
     assert.equal(lone.code, 1);
     assert.match(lone.s, /^usage: agent-review code-review-proof --raw <f> \[--findings <f> --dropped <f>\]/);

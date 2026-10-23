@@ -103,46 +103,116 @@ test('a findings array must hold only objects, each with a non-empty string file
 
 const J = (value) => JSON.stringify(value);
 
+const RAW = (...spots) => spots.map(([file, line]) => ({ file, line, summary: `${file} summary`, failure_scenario: 'f' }));
+const drop = (file, line, over = {}) => ({ file, line, summary: `${file} summary`, proof: `already handled: ${file}:1 return;`, ...over });
+
 test('accounting: every raw finding is scored or dropped', () => {
   const scored = [{ file: 'a.js' }, { file: 'b.js' }];
-  const dropped = [{ file: 'c.js', proof: 'p' }];
+  const dropped = [drop('c.js', 9)];
   assert.deepEqual(
-    checkFindingAccounting({ count: 3, findingsText: J({ findings: scored }), droppedText: J(dropped) }),
+    checkFindingAccounting({
+      rawFindings: RAW(['a.js', 1], ['b.js', 2], ['c.js', 9]),
+      findingsText: J({ findings: scored }),
+      droppedText: J(dropped),
+    }),
     { ok: true, reason: 'ok' },
   );
   assert.equal(
-    checkFindingAccounting({ count: 2, findingsText: J(scored), droppedText: null }).ok,
+    checkFindingAccounting({ rawFindings: RAW(['a.js', 1], ['b.js', 2]), findingsText: J(scored), droppedText: null }).ok,
     true,
     'a lane file may be a bare array, and a missing dropped file counts as 0',
   );
-  assert.equal(checkFindingAccounting({ count: 0, findingsText: J({ findings: [] }), droppedText: '[]' }).ok, true);
+  assert.equal(checkFindingAccounting({ rawFindings: [], findingsText: J({ findings: [] }), droppedText: '[]' }).ok, true);
 });
 
 test('accounting: an omitted finding fails with the numbers', () => {
   const r = checkFindingAccounting({
-    count: 3,
+    rawFindings: RAW(['a.js', 1], ['b.js', 2], ['c.js', 3]),
     findingsText: J({ findings: [{ file: 'a.js' }] }),
-    droppedText: J([{ file: 'c.js' }]),
+    droppedText: J([drop('c.js', 3)]),
   });
   assert.equal(r.ok, false);
   assert.match(r.reason, /found 3/);
   assert.match(r.reason, /scored 1/);
   assert.match(r.reason, /dropped 1/);
-  const extra = checkFindingAccounting({ count: 1, findingsText: J([{ file: 'a.js' }, { file: 'b.js' }]), droppedText: null });
+  const extra = checkFindingAccounting({
+    rawFindings: RAW(['a.js', 1]),
+    findingsText: J([{ file: 'a.js' }, { file: 'b.js' }]),
+    droppedText: null,
+  });
   assert.equal(extra.ok, false, 'an added finding is as wrong as an omitted one');
 });
 
 test('accounting: a missing or unreadable lane file, or an unreadable dropped file, fails', () => {
   for (const findingsText of [null, '{"findings": [', J({ x: 1 })]) {
-    const r = checkFindingAccounting({ count: 0, findingsText, droppedText: '[]' });
+    const r = checkFindingAccounting({ rawFindings: [], findingsText, droppedText: '[]' });
     assert.equal(r.ok, false);
     assert.match(r.reason, /findings file/);
   }
   for (const droppedText of ['[{', J({ x: 1 })]) {
-    const r = checkFindingAccounting({ count: 0, findingsText: '[]', droppedText });
+    const r = checkFindingAccounting({ rawFindings: [], findingsText: '[]', droppedText });
     assert.equal(r.ok, false);
     assert.match(r.reason, /dropped file/);
   }
+});
+
+const dropCheck = (rawFindings, dropped, scored = []) =>
+  checkFindingAccounting({ rawFindings, findingsText: J({ findings: scored }), droppedText: J(dropped) });
+
+test('accounting: each dropped entry needs a file, a line, a summary, and a proof', () => {
+  const raw = RAW(['a.js', 4]);
+  const cases = [
+    [{}, /dropped entry 1 needs a non-empty string file/],
+    ['a.js:4', /dropped entry 1 needs a non-empty string file/],
+    [null, /dropped entry 1 needs a non-empty string file/],
+    [drop('', 4), /dropped entry 1 needs a non-empty string file/],
+    [drop(7, 4), /dropped entry 1 needs a non-empty string file/],
+    [drop('a.js', '4'), /dropped entry 1 needs an integer line, or null when the raw finding has no line/],
+    [drop('a.js', 4.5), /dropped entry 1 needs an integer line/],
+    [drop('a.js', undefined), /dropped entry 1 needs an integer line/],
+    [drop('a.js', 4, { summary: '  ' }), /dropped entry 1 needs a non-empty summary/],
+    [drop('a.js', 4, { summary: undefined }), /dropped entry 1 needs a non-empty summary/],
+    [drop('a.js', 4, { proof: '' }), /dropped entry 1 needs a non-empty proof/],
+    [drop('a.js', 4, { proof: undefined }), /dropped entry 1 needs a non-empty proof/],
+  ];
+  for (const [entry, reason] of cases) {
+    const r = dropCheck(raw, [entry]);
+    assert.equal(r.ok, false, JSON.stringify(entry));
+    assert.match(r.reason, reason, JSON.stringify(entry));
+  }
+});
+
+test('accounting: each dropped entry matches its own raw finding by file and line', () => {
+  const raw = RAW(['a.js', 4], ['b.js', null]);
+  const scored = [{ file: 'x.js' }];
+
+  const elsewhere = dropCheck(raw, [drop('a.js', 5)], scored);
+  assert.equal(elsewhere.ok, false);
+  assert.match(elsewhere.reason, /dropped entry 1 \(a\.js:5\) matches no raw \/code-review finding at that file and line/);
+
+  const otherFile = dropCheck(raw, [drop('c.js', 4)], scored);
+  assert.equal(otherFile.ok, false);
+  assert.match(otherFile.reason, /\(c\.js:4\) matches no raw/);
+
+  const lineless = dropCheck(raw, [drop('a.js', null)], scored);
+  assert.equal(lineless.ok, false, 'null fits only a raw finding with no line');
+  assert.match(lineless.reason, /\(a\.js, no line\) matches no raw/);
+
+  const twice = dropCheck(RAW(['a.js', 4], ['b.js', 2]), [drop('a.js', 4), drop('a.js', 4)]);
+  assert.equal(twice.ok, false, 'one raw finding cannot cover two drops');
+  assert.match(twice.reason, /dropped entry 2 \(a\.js:4\) matches a raw finding that another dropped entry already accounts for/);
+
+  assert.deepEqual(dropCheck(raw, [drop('b.js', null)], scored), { ok: true, reason: 'ok' });
+  assert.deepEqual(
+    dropCheck(RAW(['a.js', 4], ['a.js', 4]), [drop('a.js', 4), drop('a.js', 4)]),
+    { ok: true, reason: 'ok' },
+    'two raw findings at one spot can each be dropped',
+  );
+  assert.deepEqual(
+    dropCheck([{ file: 'r.js', line: '42-45', summary: 's' }], [drop('r.js', 42)]),
+    { ok: true, reason: 'ok' },
+    'a raw line range matches its first line',
+  );
 });
 
 const NEW_REASON = '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review';
