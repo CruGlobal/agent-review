@@ -605,14 +605,22 @@ test('code-review-lane.md carries the contracts', () => {
 test('code-review-lane.md finds the findings list the way the proof does', () => {
   const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
   const step2 = text.slice(text.indexOf('STEP 2.'), text.indexOf('STEP 3.'));
-  assert.ok(step2.includes('array of objects'), 'a findings array holds only objects');
-  assert.ok(
-    /`No findings\.` or `\(none\)`, but only when the result has no fenced block at all/.test(step2.replace(/\s+/g, ' ')),
-    '"No findings." and "(none)" count only when the result has no fenced block at all',
-  );
   const flat = step2.replace(/\s+/g, ' ');
-  assert.ok(flat.indexOf('last fenced JSON block') < flat.indexOf('`(none)`'), 'JSON first, then the no-findings line');
-  assert.ok(flat.indexOf('`(none)`') < flat.indexOf('after `Result:`'), 'no-findings line before one-line findings');
+  assert.ok(flat.includes('array of objects'), 'a findings array holds only objects');
+  assert.ok(flat.includes('every object has a non-empty string `file`'), 'a qualifying list names a file in every entry');
+  const json = flat.indexOf('The last fenced block labeled `json`, or with no label');
+  const lines = flat.indexOf('One-line findings in the text after `Result:`');
+  const none = flat.indexOf('`No findings.` or `(none)`, but only when step 2 found no finding lines');
+  assert.ok(json >= 0 && lines >= 0 && none >= 0, 'all three shapes are listed');
+  assert.ok(json < lines && lines < none, 'JSON list first, then finding lines, then the no-findings line');
+  assert.ok(
+    flat.includes('Steps 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled `json` or has no label.'),
+    'a broken JSON list fails closed instead of falling back to text',
+  );
+  assert.ok(
+    flat.includes('A block with any other label, such as `js` or `ruby`, is a code example'),
+    'code examples neither qualify nor stop the text parse',
+  );
   assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));
 });
 

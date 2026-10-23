@@ -9,22 +9,51 @@ function fail(reason) {
   return { ok: false, reason, findings: [] };
 }
 
-// A fence opens at the start of a line and closes at the next bare fence line.
-function fencedBlocks(text) {
+// A fence closes only at a bare fence line at least as long as its opener; one left open runs
+// to the end of the text and never qualifies as the findings list.
+function scanFences(text) {
   const blocks = [];
-  const re = /^```[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm;
-  let m;
-  while ((m = re.exec(text)) !== null) blocks.push(m[1]);
-  return blocks;
+  const outside = [];
+  let open = null;
+  for (const line of text.split('\n').map((l) => l.replace(/\r$/, ''))) {
+    if (open) {
+      const close = /^(`{3,})[ \t]*$/.exec(line);
+      if (close && close[1].length >= open.fence.length) {
+        blocks.push({ info: open.info, body: open.body.join('\n'), closed: true });
+        open = null;
+      } else {
+        open.body.push(line);
+      }
+      continue;
+    }
+    const start = /^(`{3,})[ \t]*([^`]*)$/.exec(line);
+    if (start) open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [] };
+    else outside.push(line);
+  }
+  if (open) blocks.push({ info: open.info, body: open.body.join('\n'), closed: false });
+  return { blocks, outside };
 }
+
+const LIST_INFO = new Set(['json', '']);
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function asFindings(value) {
-  const list = unwrapFindings(value);
-  return list && list.every(isPlainObject) ? list : null;
+function hasFile(value) {
+  return isPlainObject(value) && typeof value.file === 'string' && value.file.trim() !== '';
+}
+
+function qualifyingList(block) {
+  if (!block.closed) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(block.body);
+  } catch {
+    return null;
+  }
+  const list = unwrapFindings(parsed);
+  return list && list.every(hasFile) ? list : null;
 }
 
 const MARKER = String.raw`^\s*(?:[-*]|\d+\.)?\s*`;
@@ -33,13 +62,13 @@ const DASH = String.raw`(?:[\u2014\u2013]|\s-\s)`;
 const BACKTICKED_LINE = new RegExp(`${MARKER}\`([^\\s\`:]+):(\\d+)[^\`]*\`\\s*(?:${DASH}|:)${TEXT}`);
 const BARE_LINE = new RegExp(`${MARKER}([^\\s\`:]+):(\\d+)\\S*?\\s*${DASH}${TEXT}`);
 const SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
+const NO_FINDINGS_LINE = /^\s*(?:No findings\.|\(none\))\s*$/;
 
-function textFindings(text) {
-  const resultAt = text.search(/^Result:/m);
+function textFindings(lines) {
+  const resultAt = lines.findIndex((line) => /^Result:/.test(line));
   if (resultAt < 0) return [];
-  const lines = text.slice(resultAt).split('\n').slice(1);
   const findings = [];
-  for (const line of lines) {
+  for (const line of lines.slice(resultAt + 1)) {
     const scenario = SCENARIO_LINE.exec(line);
     if (scenario && findings.length > 0) {
       findings[findings.length - 1].failure_scenario = scenario[1];
@@ -62,22 +91,17 @@ function checkCodeReviewProof({ rawText }) {
       `/code-review did not run: the output lacks the Skill "code-review" completed header. Fix: ${FIX}.`,
     );
   }
-  const blocks = fencedBlocks(text);
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    let parsed;
-    try {
-      parsed = JSON.parse(blocks[i]);
-    } catch {
-      continue;
-    }
-    const findings = asFindings(parsed);
+  const { blocks, outside } = scanFences(text);
+  const listBlocks = blocks.filter((b) => LIST_INFO.has(b.info));
+  for (let i = listBlocks.length - 1; i >= 0; i--) {
+    const findings = qualifyingList(listBlocks[i]);
     if (findings) return { ok: true, reason: 'ok', findings };
   }
-  if (!/^```/m.test(text) && /^\s*(?:No findings\.|\(none\))\s*$/m.test(text)) {
-    return { ok: true, reason: 'ok', findings: [] };
+  if (listBlocks.length === 0) {
+    const lines = textFindings(outside);
+    if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
+    if (outside.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: 'ok', findings: [] };
   }
-  const lines = /^```/m.test(text) ? [] : textFindings(text);
-  if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
   return fail(
     '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review',
   );

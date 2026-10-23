@@ -49,20 +49,26 @@ message instead. The review reads this file to prove /code-review ran.
 
 Then find the findings list. Try these in order and use the first that applies:
 
-1. The last fenced JSON block in the result that parses as an array of objects (possibly `[]`) or
-   as an object with a `findings` array of objects. The raw findings are that array's entries.
-   Each entry has `file`, `line`, `summary`, and `failure_scenario`, and may also have `category`
-   and `verdict`.
-2. A line that reads exactly `No findings.` or `(none)`, but only when the result has no fenced
-   block at all. That means zero raw findings.
-3. One-line findings in the text after `Result:`, but only when the result has no fenced block at
-   all. A line is a finding when it reads `file:line`, then an em dash, an en dash, or ` - `, then
-   the summary. `file:line` may be wrapped in backticks, and the line may start with `-`, `*`, or
-   `N.`. A colon in place of the dash counts only when `file:line` is in backticks, as in
-   ``N. `file:line`: summary``. An indented `Failure scenario: ...` line right after a
-   finding is that finding's `failure_scenario`. Each raw finding is `file`, `line` (the first
-   number), `summary`, and `failure_scenario` when given. Ignore lines that do not match. At
-   least one matching line counts as a findings list.
+1. The last fenced block labeled `json`, or with no label, that parses as an array of objects
+   (possibly `[]`) or as an object with a `findings` array of objects, where every object has a
+   non-empty string `file`. The raw findings are that array's entries. Each entry has `file`,
+   `line`, `summary`, and `failure_scenario`, and may also have `category` and `verdict`.
+2. One-line findings in the text after `Result:`. A line is a finding when it reads `file:line`,
+   then an em dash, an en dash, or ` - `, then the summary. `file:line` may be wrapped in
+   backticks, and the line may start with `-`, `*`, or `N.`. A colon in place of the dash counts
+   only when `file:line` is in backticks, as in ``N. `file:line`: summary``. An indented
+   `Failure scenario: ...` line right after a finding is that finding's `failure_scenario`. Each
+   raw finding is `file`, `line` (the first number), `summary`, and `failure_scenario` when
+   given. Ignore lines that do not match. At least one matching line counts as a findings list.
+3. A line that reads exactly `No findings.` or `(none)`, but only when step 2 found no finding
+   lines. That means zero raw findings. A `(none)` under one heading never cancels a finding line
+   under another.
+
+Steps 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled
+`json` or has no label. A `json` or unlabeled block that step 1 cannot use, such as a list cut off
+partway or a quote of some file's contents, means the findings list did not come through whole, so
+none of the three shapes applies. A block with any other label, such as `js` or `ruby`, is a code
+example: skip it. It is never the findings list, and it does not stop steps 2 and 3.
 
 A raw finding from text may have no `failure_scenario`. Score it from its `summary` and the code.
 
