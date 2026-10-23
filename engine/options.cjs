@@ -151,7 +151,6 @@ module.exports = {
   ENGINE_DEFAULTS,
   CI_NOTE,
   alwaysLaneProblems,
-  codeReviewLanes,
   laneOverlapMessage,
   parseReviewArgs,
   resolveOptions,
