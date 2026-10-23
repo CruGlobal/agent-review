@@ -675,6 +675,36 @@ test('a code-review severity outside 1 to 10 is clamped, not dropped', () => {
   assert.deepEqual(stats.droppedInvalid, []);
 });
 
+test('a code-review severity that is not a number is dropped, never clamped to 1', () => {
+  const { findings, stats } = runCr([
+    crFinding({ file: 'kept.rb', severity: 8 }),
+    crFinding({ file: 'ratio.rb', severity: '8/10', message: 'a ratio is not a score' }),
+    crFinding({ file: 'missing.rb', severity: undefined, message: 'no score at all' }),
+    crFinding({ file: 'null.rb', severity: null, message: 'a null score' }),
+    crFinding({ file: 'blank.rb', severity: '', message: 'a blank score' }),
+  ]);
+  assert.deepEqual(findings.map((f) => [f.file, f.severity]), [['kept.rb', 8]]);
+  assert.deepEqual(
+    stats.droppedInvalid.map((d) => [d.lane, d.message]),
+    [
+      ['code-review', 'a ratio is not a score'],
+      ['code-review', 'no score at all'],
+      ['code-review', 'a null score'],
+      ['code-review', 'a blank score'],
+    ],
+  );
+  assert.ok(stats.droppedInvalid.every((d) => /^invalid severity: /.test(d.reason)));
+});
+
+test('a numeric-string code-review severity is still floored and capped', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'str.rb', severity: '8' }),
+    crFinding({ file: 'clean.rb', severity: '9', category: 'reuse', message: 'reuse the helper' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'str.rb': 8, 'clean.rb': 6 });
+});
+
 test('severities outside 1 to 10 from another lane are still dropped', () => {
   const { findings, stats } = runCr(
     [

@@ -954,7 +954,7 @@ lanes — they already have the whole diff.
 **The `code-review` lane's prompt.** Only when `ENGINE` is `code-review`. The `code-review` lane
 (`agents[0]`, `matchedBy: "engine"`) does not use the archetype. Read the plugin's
 `templates/code-review-lane.md` (`../../templates/code-review-lane.md` from this skill file) and
-fill its eight placeholders:
+fill its nine placeholders:
 
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -966,6 +966,7 @@ fill its eight placeholders:
 | `{{SCORING_RULES}}`       | The lane's `rules[]` (the `path_rules` this diff matches, then each enabled replaced lane's rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.       |
 | `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** above), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
+| `{{EXCLUDED_PATHS}}`      | The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.                                                                          |
 
 The launched-lane set (whatever remains after the empty-lane skip above — the plan's agents
 minus quick's cap or plus deep's config-only additions, per Stage 0B (neither applies under the
@@ -1097,7 +1098,9 @@ check it against the findings file the agent actually wrote:
   (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
   or `findings.length` does not equal the reported `<N>`.
 - **The `code-review` lane** must also prove `/code-review` ran, and that it scored or dropped
-  every raw finding. Run
+  every raw finding. Each scored finding needs a numeric severity from 1 to 10 and one of the nine
+  category names, and an `excluded path: <glob>` drop needs a glob from `excluded_paths` that
+  matches its file. Run
   `agent-review code-review-proof --raw /tmp/code_review_raw.txt --findings /tmp/agent_findings/code-review.json --dropped /tmp/code_review_dropped.json > /tmp/code_review_proof.json`.
   A non-zero exit fails the lane's cross-check even when its findings file passes, and so does a
   reply of `/code-review did not run` in place of the `done` line. When the lane fails twice and

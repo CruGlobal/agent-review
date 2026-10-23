@@ -610,10 +610,21 @@ function main(rawArgv) {
       const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath) });
       let { ok, reason } = r;
       if (ok && findingsPath) {
+        let excludedPaths;
+        try {
+          excludedPaths = existsSync(C.CONFIG)
+            ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || []
+            : [];
+        } catch (e) {
+          reason = `could not read excluded_paths from the review config: ${e.message}`;
+          out(JSON.stringify({ ok: false, reason, count: r.findings.length }));
+          return 1;
+        }
         ({ ok, reason } = checkFindingAccounting({
           rawFindings: r.findings,
           findingsText: readIfPresent(findingsPath),
           droppedText: readIfPresent(droppedPath),
+          excludedPaths,
         }));
       }
       out(JSON.stringify({ ok, reason, count: r.findings.length }));

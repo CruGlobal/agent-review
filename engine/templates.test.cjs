@@ -539,6 +539,7 @@ const CODE_REVIEW_LANE_PLACEHOLDERS = [
   'SCORING_RULES',
   'LEARNINGS',
   'IMPACT',
+  'EXCLUDED_PATHS',
 ];
 const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
 
@@ -719,6 +720,34 @@ test('code-review-lane.md says how the proof matches each drop to its raw findin
   ]) {
     assert.ok(flat.includes(needle), `code-review lane must say ${JSON.stringify(needle)}`);
   }
+});
+
+test('code-review-lane.md drops findings on excluded paths with a checkable proof', () => {
+  const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
+  const dropping = flat.slice(flat.indexOf('DROPPING A FINDING:'), flat.indexOf('STEP 4.'));
+  assert.ok(dropping.includes('Drop a raw finding in only three cases:'), dropping);
+  assert.ok(
+    dropping.includes('3. Its `file` matches one of the excluded paths below. Its proof is exactly `excluded path: <glob>`, with the glob copied exactly as listed, for example `excluded path: dist/**`.'),
+    'an excluded-path drop names its glob',
+  );
+  assert.ok(
+    dropping.includes('EXCLUDED PATHS (one glob per line, or `none`): {{EXCLUDED_PATHS}}'),
+    'the lane sees the excluded globs',
+  );
+  assert.ok(
+    flat.includes('every raw finding whose `file` matches an excluded path is dropped with `excluded path: <glob>`;'),
+    'the self-check covers excluded paths',
+  );
+  assert.ok(flat.includes('every `severity` is a whole number from 1 to 10;'), 'the self-check covers severity');
+
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('fill its nine placeholders:'), 'the skill counts the new placeholder');
+  const row = skill.split('\n').find((line) => line.startsWith('| `{{EXCLUDED_PATHS}}`'));
+  assert.ok(row, 'the skill documents {{EXCLUDED_PATHS}}');
+  assert.ok(
+    row.replace(/\s+/g, ' ').includes('The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.'),
+    row,
+  );
 });
 
 test('code-review-lane.md node -e example keeps its quote escapes', () => {

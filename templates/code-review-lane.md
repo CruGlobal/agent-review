@@ -198,7 +198,7 @@ injection is 9-10.
 
 DROPPING A FINDING:
 
-Drop a raw finding in only two cases:
+Drop a raw finding in only three cases:
 
 1. It has `verdict: "REFUTED"`. Only `max` effort runs a verifier that sets verdicts. Its proof is
    `REFUTED by the /code-review verifier`.
@@ -208,6 +208,15 @@ Drop a raw finding in only two cases:
    the exact line or lines that show it, with `file:line`, for example
    `already handled: app/cart.js:18 if (!items) return [];`.
    "Speculative" or "depends on runtime state" is not proof when that state is realistic.
+3. Its `file` matches one of the excluded paths below. Its proof is exactly
+   `excluded path: <glob>`, with the glob copied exactly as listed, for example
+   `excluded path: dist/**`. This repository keeps these paths out of review, so drop every raw
+   finding on one, even a real bug. The review checks that the glob is in the repository's
+   `excluded_paths` and that `file` matches it.
+
+EXCLUDED PATHS (one glob per line, or `none`):
+
+{{EXCLUDED_PATHS}}
 
 Below `max` there is no verify step, so this is the only place a false alarm is removed. The
 report lists every drop with its proof, so a reader can check your work. A finding you doubt but
@@ -248,6 +257,8 @@ Keep every finding tight:
 Before you write, check your work:
 
 - every raw finding is in exactly one of `findings` or the dropped list;
+- every raw finding whose `file` matches an excluded path is dropped with `excluded path: <glob>`;
+- every `severity` is a whole number from 1 to 10;
 - every `category` is one of the nine names in CATEGORY;
 - no finding in a cleanup category scores above 6;
 - every finding scored 7 or higher clears the 7+ bar;

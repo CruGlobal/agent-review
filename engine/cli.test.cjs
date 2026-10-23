@@ -610,7 +610,7 @@ test('code-review-proof checks found = scored + dropped when given both files', 
     const dropped = join(dir, 'dropped.json');
     const findings = [{ file: 'a.js', line: 1 }, { file: 'b.js', line: 2 }];
     writeFileSync(raw, `Skill "code-review" completed (forked execution).\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`);
-    writeFileSync(lane, JSON.stringify({ findings: [{ agent: 'code-review', severity: 8 }] }));
+    writeFileSync(lane, JSON.stringify({ findings: [{ agent: 'code-review', category: 'correctness', severity: 8, file: 'a.js', line: 1 }] }));
     writeFileSync(dropped, JSON.stringify([{ file: 'b.js', line: 2, summary: 's', proof: 'p' }]));
 
     const ok = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', dropped]);
@@ -635,6 +635,38 @@ test('code-review-proof checks found = scored + dropped when given both files', 
     assert.match(lone.s, /^usage: agent-review code-review-proof --raw <f> \[--findings <f> --dropped <f>\]/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof reads excluded_paths from the repo config', () => {
+  const root = optionsRoot();
+  const configPath = join(root, 'rd', 'config.yml');
+  writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('excluded_paths: []', 'excluded_paths: ["dist/**"]'));
+  try {
+    const raw = join(root, 'raw.txt');
+    const lane = join(root, 'code-review.json');
+    const dropped = join(root, 'dropped.json');
+    const findings = [{ file: 'dist/app.js', line: 4 }, { file: 'src/a.js', line: 2 }];
+    writeFileSync(raw, `Skill "code-review" completed (forked execution).\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`);
+    writeFileSync(lane, JSON.stringify({ findings: [{ agent: 'code-review', category: 'correctness', severity: 5, file: 'src/a.js', line: 2 }] }));
+    writeFileSync(dropped, JSON.stringify([{ file: 'dist/app.js', line: 4, summary: 's', proof: 'excluded path: dist/**' }]));
+    const args = ['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', dropped];
+
+    const ok = run([...args, '--root', root, '--review-dir', 'rd']);
+    assert.equal(ok.code, 0, ok.s);
+    assert.deepEqual(JSON.parse(ok.s), { ok: true, reason: 'ok', count: 2 });
+
+    const otherDir = run([...args, '--root', root, '--review-dir', 'nowhere']);
+    assert.equal(otherDir.code, 1, 'with no config there are no excluded paths');
+    assert.match(JSON.parse(otherDir.s).reason, /cites excluded path "dist\/\*\*", which is not in the config's excluded_paths/);
+
+    writeFileSync(configPath, 'version: [');
+    const broken = run([...args, '--root', root, '--review-dir', 'rd']);
+    assert.equal(broken.code, 1);
+    const reason = JSON.parse(broken.s).reason;
+    assert.match(reason, /^could not read excluded_paths from the review config: /);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

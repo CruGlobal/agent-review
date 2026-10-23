@@ -1,5 +1,6 @@
 'use strict';
 
+const { minimatch } = require('minimatch');
 const { unwrapFindings } = require('./unwrapFindings.cjs');
 
 const FIX =
@@ -145,6 +146,52 @@ function isText(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
+const CATEGORIES = [
+  'correctness',
+  'security',
+  'data-integrity',
+  'testing',
+  'simplification',
+  'efficiency',
+  'reuse',
+  'altitude',
+  'conventions',
+];
+const EXCLUDED_PREFIX = 'excluded path: ';
+
+function spot(file, line) {
+  return line == null ? `${file}, no line` : `${file}:${line}`;
+}
+
+function shown(value) {
+  return value === undefined ? 'none' : JSON.stringify(value);
+}
+
+function scoredEntryProblem(entry, index) {
+  const { file, line, severity, category } = isPlainObject(entry) ? entry : {};
+  const label = `the code-review scored finding ${index + 1} (${spot(file, line)})`;
+  if (typeof severity !== 'number' || !Number.isFinite(severity) || severity < 1 || severity > 10) {
+    return `${label} needs a numeric severity from 1 to 10, not ${shown(severity)}`;
+  }
+  if (!CATEGORIES.includes(category)) {
+    return `${label} has category ${shown(category)}, which is not one of the nine names: ${CATEGORIES.join(', ')}`;
+  }
+  return null;
+}
+
+// Globs match as selectAgents matches excluded_paths.
+function excludedDropProblem(entry, excludedPaths) {
+  if (!entry.proof.startsWith(EXCLUDED_PREFIX)) return null;
+  const glob = entry.proof.slice(EXCLUDED_PREFIX.length).trim();
+  if (!excludedPaths.includes(glob)) {
+    return `cites excluded path ${JSON.stringify(glob)}, which is not in the config's excluded_paths`;
+  }
+  if (!minimatch(entry.file, glob, { dot: true })) {
+    return `cites excluded path ${JSON.stringify(glob)}, which ${entry.file} does not match`;
+  }
+  return null;
+}
+
 function droppedEntryProblem(entry) {
   if (!hasFile(entry)) return 'needs a non-empty string file';
   if (entry.line !== null && !Number.isInteger(entry.line)) {
@@ -155,13 +202,15 @@ function droppedEntryProblem(entry) {
   return null;
 }
 
-function unmatchedDrop(rawFindings, dropped) {
+function unmatchedDrop(rawFindings, dropped, excludedPaths) {
   const claimed = new Set();
   for (const [i, entry] of dropped.entries()) {
     const label = `the code-review dropped entry ${i + 1}`;
     const problem = droppedEntryProblem(entry);
     if (problem) return `${label} ${problem}`;
-    const where = entry.line === null ? `${entry.file}, no line` : `${entry.file}:${entry.line}`;
+    const where = spot(entry.file, entry.line);
+    const excluded = excludedDropProblem(entry, excludedPaths);
+    if (excluded) return `${label} (${where}) ${excluded}`;
     const spots = rawFindings
       .map((raw, index) => ({ raw, index }))
       .filter(({ raw }) => raw.file === entry.file && rawLine(raw) === entry.line);
@@ -174,7 +223,7 @@ function unmatchedDrop(rawFindings, dropped) {
 }
 
 // A null droppedText is a missing dropped file, which counts as zero drops.
-function checkFindingAccounting({ rawFindings, findingsText, droppedText }) {
+function checkFindingAccounting({ rawFindings, findingsText, droppedText, excludedPaths = [] }) {
   const count = rawFindings.length;
   const lane = findingsText == null ? null : parseJson(findingsText);
   const scored = lane && unwrapFindings(lane.value);
@@ -197,7 +246,11 @@ function checkFindingAccounting({ rawFindings, findingsText, droppedText }) {
         'every raw finding must be scored or dropped exactly once',
     };
   }
-  const problem = unmatchedDrop(rawFindings, dropped);
+  for (const [i, entry] of scored.entries()) {
+    const problem = scoredEntryProblem(entry, i);
+    if (problem) return { ok: false, reason: problem };
+  }
+  const problem = unmatchedDrop(rawFindings, dropped, excludedPaths);
   if (problem) return { ok: false, reason: problem };
   return { ok: true, reason: 'ok' };
 }

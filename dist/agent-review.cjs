@@ -18477,6 +18477,7 @@ var require_approval = __commonJS({
 var require_codeReviewProof = __commonJS({
   "engine/codeReviewProof.cjs"(exports2, module2) {
     "use strict";
+    var { minimatch } = require_commonjs3();
     var { unwrapFindings } = require_unwrapFindings();
     var FIX = "update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes";
     function fail(reason) {
@@ -18594,6 +18595,46 @@ var require_codeReviewProof = __commonJS({
     function isText(value) {
       return typeof value === "string" && value.trim() !== "";
     }
+    var CATEGORIES = [
+      "correctness",
+      "security",
+      "data-integrity",
+      "testing",
+      "simplification",
+      "efficiency",
+      "reuse",
+      "altitude",
+      "conventions"
+    ];
+    var EXCLUDED_PREFIX = "excluded path: ";
+    function spot(file, line) {
+      return line == null ? `${file}, no line` : `${file}:${line}`;
+    }
+    function shown(value) {
+      return value === void 0 ? "none" : JSON.stringify(value);
+    }
+    function scoredEntryProblem(entry, index) {
+      const { file, line, severity, category } = isPlainObject(entry) ? entry : {};
+      const label = `the code-review scored finding ${index + 1} (${spot(file, line)})`;
+      if (typeof severity !== "number" || !Number.isFinite(severity) || severity < 1 || severity > 10) {
+        return `${label} needs a numeric severity from 1 to 10, not ${shown(severity)}`;
+      }
+      if (!CATEGORIES.includes(category)) {
+        return `${label} has category ${shown(category)}, which is not one of the nine names: ${CATEGORIES.join(", ")}`;
+      }
+      return null;
+    }
+    function excludedDropProblem(entry, excludedPaths) {
+      if (!entry.proof.startsWith(EXCLUDED_PREFIX)) return null;
+      const glob = entry.proof.slice(EXCLUDED_PREFIX.length).trim();
+      if (!excludedPaths.includes(glob)) {
+        return `cites excluded path ${JSON.stringify(glob)}, which is not in the config's excluded_paths`;
+      }
+      if (!minimatch(entry.file, glob, { dot: true })) {
+        return `cites excluded path ${JSON.stringify(glob)}, which ${entry.file} does not match`;
+      }
+      return null;
+    }
     function droppedEntryProblem(entry) {
       if (!hasFile(entry)) return "needs a non-empty string file";
       if (entry.line !== null && !Number.isInteger(entry.line)) {
@@ -18603,13 +18644,15 @@ var require_codeReviewProof = __commonJS({
       if (!isText(entry.proof)) return "needs a non-empty proof";
       return null;
     }
-    function unmatchedDrop(rawFindings, dropped) {
+    function unmatchedDrop(rawFindings, dropped, excludedPaths) {
       const claimed = /* @__PURE__ */ new Set();
       for (const [i, entry] of dropped.entries()) {
         const label = `the code-review dropped entry ${i + 1}`;
         const problem = droppedEntryProblem(entry);
         if (problem) return `${label} ${problem}`;
-        const where = entry.line === null ? `${entry.file}, no line` : `${entry.file}:${entry.line}`;
+        const where = spot(entry.file, entry.line);
+        const excluded = excludedDropProblem(entry, excludedPaths);
+        if (excluded) return `${label} (${where}) ${excluded}`;
         const spots = rawFindings.map((raw, index) => ({ raw, index })).filter(({ raw }) => raw.file === entry.file && rawLine(raw) === entry.line);
         if (spots.length === 0) return `${label} (${where}) matches no raw /code-review finding at that file and line`;
         const free = spots.find(({ index }) => !claimed.has(index));
@@ -18618,7 +18661,7 @@ var require_codeReviewProof = __commonJS({
       }
       return null;
     }
-    function checkFindingAccounting({ rawFindings, findingsText, droppedText }) {
+    function checkFindingAccounting({ rawFindings, findingsText, droppedText, excludedPaths = [] }) {
       const count = rawFindings.length;
       const lane = findingsText == null ? null : parseJson(findingsText);
       const scored = lane && unwrapFindings(lane.value);
@@ -18639,7 +18682,11 @@ var require_codeReviewProof = __commonJS({
           reason: `/code-review found ${count}, but the lane scored ${scored.length} and dropped ${dropped.length}; every raw finding must be scored or dropped exactly once`
         };
       }
-      const problem = unmatchedDrop(rawFindings, dropped);
+      for (const [i, entry] of scored.entries()) {
+        const problem2 = scoredEntryProblem(entry, i);
+        if (problem2) return { ok: false, reason: problem2 };
+      }
+      const problem = unmatchedDrop(rawFindings, dropped, excludedPaths);
       if (problem) return { ok: false, reason: problem };
       return { ok: true, reason: "ok" };
     }
@@ -19368,7 +19415,12 @@ var require_consensus = __commonJS({
       if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
       return null;
     }
-    function capCodeReviewFinding(input) {
+    function isNumericSeverity(value) {
+      if (typeof value === "number") return Number.isFinite(value);
+      return typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value));
+    }
+    function capCodeReviewFinding(input, rawSeverity) {
+      if (!isNumericSeverity(rawSeverity)) return input;
       const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
       const f = severity === input.severity ? input : { ...input, severity };
       const cap = codeReviewCap(f);
@@ -19580,7 +19632,7 @@ var require_consensus = __commonJS({
       for (const laneId of laneIds) {
         for (const raw of perLane[laneId]) {
           const normalized = normalizeFinding(raw, laneId);
-          const finding = laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized) : normalized;
+          const finding = laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
           const reason = validateFinding(finding);
           if (reason) {
             const messageSlice = String(finding.message || "").slice(0, 200);
@@ -20474,10 +20526,19 @@ var require_cli = __commonJS({
           const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath) });
           let { ok, reason } = r;
           if (ok && findingsPath) {
+            let excludedPaths;
+            try {
+              excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+            } catch (e) {
+              reason = `could not read excluded_paths from the review config: ${e.message}`;
+              out(JSON.stringify({ ok: false, reason, count: r.findings.length }));
+              return 1;
+            }
             ({ ok, reason } = checkFindingAccounting({
               rawFindings: r.findings,
               findingsText: readIfPresent(findingsPath),
-              droppedText: readIfPresent(droppedPath)
+              droppedText: readIfPresent(droppedPath),
+              excludedPaths
             }));
           }
           out(JSON.stringify({ ok, reason, count: r.findings.length }));

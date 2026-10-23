@@ -158,12 +158,20 @@ function codeReviewCap(f) {
   return null;
 }
 
+function isNumericSeverity(value) {
+  if (typeof value === 'number') return Number.isFinite(value);
+  return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value));
+}
+
 // Applies only to the code-review lane, before validateFinding: cleanups,
 // out-of-range and doubted findings never block, and a 7+ that misses the
 // blocker bar is kept as a suggestion at the cap instead of being dropped by
 // validateFinding. Flooring and clamping must come first: the cap and the bar
 // judge the whole 1 to 10 severity, and a half point never makes a blocker.
-function capCodeReviewFinding(input) {
+// The raw severity decides whether to clamp, since normalizeFinding turns a
+// missing or non-numeric one into 0, which validateFinding must still drop.
+function capCodeReviewFinding(input, rawSeverity) {
+  if (!isNumericSeverity(rawSeverity)) return input;
   const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
   const f = severity === input.severity ? input : { ...input, severity };
   const cap = codeReviewCap(f);
@@ -472,7 +480,7 @@ function consensusFrom({
     for (const raw of perLane[laneId]) {
       const normalized = normalizeFinding(raw, laneId);
       const finding =
-        laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized) : normalized;
+        laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
       const reason = validateFinding(finding);
       if (reason) {
         const messageSlice = String(finding.message || '').slice(0, 200);

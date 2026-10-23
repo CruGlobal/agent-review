@@ -104,11 +104,12 @@ test('a findings array must hold only objects, each with a non-empty string file
 
 const J = (value) => JSON.stringify(value);
 
+const scoredAt = (file, over = {}) => ({ file, line: 1, severity: 5, category: 'correctness', ...over });
 const RAW = (...spots) => spots.map(([file, line]) => ({ file, line, summary: `${file} summary`, failure_scenario: 'f' }));
 const drop = (file, line, over = {}) => ({ file, line, summary: `${file} summary`, proof: `already handled: ${file}:1 return;`, ...over });
 
 test('accounting: every raw finding is scored or dropped', () => {
-  const scored = [{ file: 'a.js' }, { file: 'b.js' }];
+  const scored = [scoredAt('a.js'), scoredAt('b.js')];
   const dropped = [drop('c.js', 9)];
   assert.deepEqual(
     checkFindingAccounting({
@@ -129,7 +130,7 @@ test('accounting: every raw finding is scored or dropped', () => {
 test('accounting: an omitted finding fails with the numbers', () => {
   const r = checkFindingAccounting({
     rawFindings: RAW(['a.js', 1], ['b.js', 2], ['c.js', 3]),
-    findingsText: J({ findings: [{ file: 'a.js' }] }),
+    findingsText: J({ findings: [scoredAt('a.js')] }),
     droppedText: J([drop('c.js', 3)]),
   });
   assert.equal(r.ok, false);
@@ -138,7 +139,7 @@ test('accounting: an omitted finding fails with the numbers', () => {
   assert.match(r.reason, /dropped 1/);
   const extra = checkFindingAccounting({
     rawFindings: RAW(['a.js', 1]),
-    findingsText: J([{ file: 'a.js' }, { file: 'b.js' }]),
+    findingsText: J([scoredAt('a.js'), scoredAt('b.js')]),
     droppedText: null,
   });
   assert.equal(extra.ok, false, 'an added finding is as wrong as an omitted one');
@@ -157,8 +158,8 @@ test('accounting: a missing or unreadable lane file, or an unreadable dropped fi
   }
 });
 
-const dropCheck = (rawFindings, dropped, scored = []) =>
-  checkFindingAccounting({ rawFindings, findingsText: J({ findings: scored }), droppedText: J(dropped) });
+const dropCheck = (rawFindings, dropped, scored = [], excludedPaths = []) =>
+  checkFindingAccounting({ rawFindings, findingsText: J({ findings: scored }), droppedText: J(dropped), excludedPaths });
 
 test('accounting: each dropped entry needs a file, a line, a summary, and a proof', () => {
   const raw = RAW(['a.js', 4]);
@@ -185,7 +186,7 @@ test('accounting: each dropped entry needs a file, a line, a summary, and a proo
 
 test('accounting: each dropped entry matches its own raw finding by file and line', () => {
   const raw = RAW(['a.js', 4], ['b.js', null]);
-  const scored = [{ file: 'x.js' }];
+  const scored = [scoredAt('x.js')];
 
   const elsewhere = dropCheck(raw, [drop('a.js', 5)], scored);
   assert.equal(elsewhere.ok, false);
@@ -223,6 +224,80 @@ test('accounting: only a number at the start of a raw line counts', () => {
   assert.match(numbered.reason, /\(r\.js:42\) matches no raw/);
   assert.deepEqual(dropCheck(raw, [drop('r.js', null)]), { ok: true, reason: 'ok' });
   assert.deepEqual(dropCheck([{ file: 'r.js', line: ' 42 ', summary: 's' }], [drop('r.js', 42)]), { ok: true, reason: 'ok' });
+});
+
+test('accounting: every scored finding needs a numeric severity from 1 to 10', () => {
+  const raw = RAW(['a.js', 1], ['b.js', 2]);
+  const check = (severity) =>
+    checkFindingAccounting({
+      rawFindings: raw,
+      findingsText: J({ findings: [scoredAt('a.js'), scoredAt('b.js', { line: 2, severity })] }),
+      droppedText: '[]',
+    });
+  for (const severity of [1, 10, 7.5, 6.5]) {
+    assert.deepEqual(check(severity), { ok: true, reason: 'ok' }, String(severity));
+  }
+  for (const [severity, shown] of [['8/10', '"8/10"'], ['8', '"8"'], [undefined, 'none'], [null, 'null'], [0, '0'], [11, '11'], [-2, '-2'], [true, 'true']]) {
+    const r = check(severity);
+    assert.equal(r.ok, false, String(severity));
+    assert.equal(
+      r.reason,
+      `the code-review scored finding 2 (b.js:2) needs a numeric severity from 1 to 10, not ${shown}`,
+      String(severity),
+    );
+  }
+  const unanchored = checkFindingAccounting({
+    rawFindings: RAW(['a.js', null]),
+    findingsText: J([scoredAt('a.js', { line: null, severity: 'high' })]),
+    droppedText: null,
+  });
+  assert.match(unanchored.reason, /scored finding 1 \(a\.js, no line\) needs a numeric severity/);
+});
+
+test('accounting: every scored finding names one of the nine categories', () => {
+  const raw = RAW(['a.js', 1]);
+  const check = (category) =>
+    checkFindingAccounting({ rawFindings: raw, findingsText: J([scoredAt('a.js', { category })]), droppedText: '[]' });
+  for (const category of ['correctness', 'security', 'data-integrity', 'testing', 'simplification', 'efficiency', 'reuse', 'altitude', 'conventions']) {
+    assert.deepEqual(check(category), { ok: true, reason: 'ok' }, category);
+  }
+  for (const [category, shown] of [['bug', '"bug"'], ['Correctness', '"Correctness"'], [' reuse', '" reuse"'], [undefined, 'none']]) {
+    const r = check(category);
+    assert.equal(r.ok, false, String(category));
+    assert.equal(
+      r.reason,
+      `the code-review scored finding 1 (a.js:1) has category ${shown}, which is not one of the nine names: correctness, security, data-integrity, testing, simplification, efficiency, reuse, altitude, conventions`,
+    );
+  }
+});
+
+test('accounting: an excluded-path drop needs a configured glob that matches the file', () => {
+  const raw = RAW(['dist/app.js', 4], ['src/a.js', 2]);
+  const excluded = (file, line, glob) => drop(file, line, { proof: `excluded path: ${glob}` });
+  const config = ['dist/**', 'vendor/**', '**/*.min.js'];
+
+  assert.deepEqual(dropCheck(raw, [excluded('dist/app.js', 4, 'dist/**')], [scoredAt('src/a.js', { line: 2 })], config), { ok: true, reason: 'ok' });
+  assert.deepEqual(
+    dropCheck(RAW(['.cache/x.js', 1]), [excluded('.cache/x.js', 1, '**/*.js')], [], ['**/*.js']),
+    { ok: true, reason: 'ok' },
+    'globs match dotfiles, as selectAgents does',
+  );
+
+  const unlisted = dropCheck(raw, [excluded('dist/app.js', 4, 'dist/*')], [scoredAt('src/a.js', { line: 2 })], config);
+  assert.equal(unlisted.ok, false);
+  assert.equal(unlisted.reason, 'the code-review dropped entry 1 (dist/app.js:4) cites excluded path "dist/*", which is not in the config\'s excluded_paths');
+
+  const none = dropCheck(raw, [excluded('dist/app.js', 4, 'dist/**')], [scoredAt('src/a.js', { line: 2 })]);
+  assert.equal(none.ok, false, 'a repo with no excluded_paths accepts no excluded-path drop');
+  assert.match(none.reason, /cites excluded path "dist\/\*\*", which is not in the config's excluded_paths/);
+
+  const mismatch = dropCheck(raw, [excluded('src/a.js', 2, 'dist/**')], [scoredAt('dist/app.js', { line: 4 })], config);
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.reason, 'the code-review dropped entry 1 (src/a.js:2) cites excluded path "dist/**", which src/a.js does not match');
+
+  const elsewhere = dropCheck(raw, [excluded('dist/app.js', 9, 'dist/**')], [scoredAt('src/a.js', { line: 2 })], config);
+  assert.equal(elsewhere.ok, false, 'an excluded-path drop still matches its own raw finding');
+  assert.match(elsewhere.reason, /\(dist\/app\.js:9\) matches no raw/);
 });
 
 const NEW_REASON = '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review';
