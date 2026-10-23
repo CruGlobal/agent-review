@@ -193,10 +193,11 @@ cannot prove wrong stays: set `confidence` to `Low`, score it 4 at most (even wh
 would allow 6), and start `evidence` with `Doubted: <why>`.
 
 Each dropped finding goes in the dropped list as `{ file, line, summary, proof }`: `file` exactly
-as the raw finding gives it, `line` as a number (the first number for a range such as `42-45`), or
-`null` only when the raw finding has no line, `summary` copied word for word from the raw finding,
-and `proof` as above. The review matches each dropped entry to its own raw finding by `file` and
-`line`, and fails the lane when an entry matches none or leaves a field empty.
+as the raw finding gives it, `line` as the number the raw finding's `line` starts with (for
+`42-45`, use 42), or `null` when it does not start with a number, `summary` copied word for word
+from the raw finding, and `proof` as above. The review matches each dropped entry to its own raw
+finding by `file` and `line`, and fails the lane when an entry matches none or leaves a field
+empty.
 
 STEP 4. WRITE THE FILES
 

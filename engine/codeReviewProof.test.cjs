@@ -215,6 +215,15 @@ test('accounting: each dropped entry matches its own raw finding by file and lin
   );
 });
 
+test('accounting: only a number at the start of a raw line counts', () => {
+  const raw = [{ file: 'r.js', line: 'L42', summary: 's' }];
+  const numbered = dropCheck(raw, [drop('r.js', 42)]);
+  assert.equal(numbered.ok, false, '"L42" does not start with a number, so it has no line');
+  assert.match(numbered.reason, /\(r\.js:42\) matches no raw/);
+  assert.deepEqual(dropCheck(raw, [drop('r.js', null)]), { ok: true, reason: 'ok' });
+  assert.deepEqual(dropCheck([{ file: 'r.js', line: ' 42 ', summary: 's' }], [drop('r.js', 42)]), { ok: true, reason: 'ok' });
+});
+
 const NEW_REASON = '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review';
 
 test('low effort: the exact "(none)" result passes with zero findings', () => {

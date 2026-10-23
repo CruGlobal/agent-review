@@ -122,7 +122,8 @@ function parseJson(text) {
   }
 }
 
-// A raw line range such as "42-45" counts as its first line, as the lane template tells the scorer.
+// Only a number at the start counts ("42-45" is 42, "L42" is no line), as the lane template's
+// dropped-list rule tells the scorer.
 function rawLine(finding) {
   if (Number.isInteger(finding.line)) return finding.line;
   const m = /^\s*(\d+)/.exec(typeof finding.line === 'string' ? finding.line : '');

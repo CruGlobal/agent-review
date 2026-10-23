@@ -652,7 +652,7 @@ test('code-review-lane.md says how the proof matches each drop to its raw findin
   const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
   for (const needle of [
     '`file` exactly as the raw finding gives it',
-    '`line` as a number (the first number for a range such as `42-45`), or `null` only when the raw finding has no line',
+    '`line` as the number the raw finding\'s `line` starts with (for `42-45`, use 42), or `null` when it does not start with a number',
     'The review matches each dropped entry to its own raw finding by `file` and `line`',
   ]) {
     assert.ok(flat.includes(needle), `code-review lane must say ${JSON.stringify(needle)}`);
