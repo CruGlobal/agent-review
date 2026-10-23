@@ -16644,6 +16644,18 @@ var require_options = __commonJS({
       const key = (name) => crCfg[name] ? name : `${name} (default)`;
       return `engine.code_review lists ${id} in both ${key("always")} and ${key("replaces")}`;
     }
+    function alwaysLaneProblems(crCfg, agents) {
+      const { always, replaces } = codeReviewLanes(crCfg);
+      const byId = new Map((agents || []).map((a) => [a.id, a]));
+      const problems = [];
+      for (const id of always) {
+        const agent = byId.get(id);
+        if (!agent) problems.push({ id, kind: "unknown" });
+        else if (agent.enabled === false) problems.push({ id, kind: "disabled" });
+        if (replaces.includes(id)) problems.push({ id, kind: "overlap" });
+      }
+      return problems;
+    }
     var CI_NOTE = "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
     function setOnce(state, key, value) {
       if (state[key] != null && state[key] !== value) {
@@ -16710,17 +16722,14 @@ var require_options = __commonJS({
         const lanes = codeReviewLanes(crCfg);
         replaces = lanes.replaces.slice();
         always = lanes.always.slice();
-        const byId = new Map((cfg.agents || []).map((a) => [a.id, a]));
-        for (const id of always) {
-          const agent = byId.get(id);
-          if (!agent || agent.enabled === false) {
-            throw new Error(
-              `engine.code_review.always lists "${id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`
-            );
-          }
-          if (replaces.includes(id)) {
-            throw new Error(`${laneOverlapMessage(id, crCfg)}; a lane cannot both run and be replaced`);
-          }
+        const [problem] = alwaysLaneProblems(crCfg, cfg.agents);
+        if (problem && problem.kind === "overlap") {
+          throw new Error(`${laneOverlapMessage(problem.id, crCfg)}; a lane cannot both run and be replaced`);
+        }
+        if (problem) {
+          throw new Error(
+            `engine.code_review.always lists "${problem.id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`
+          );
         }
       } else if (parsed.effort != null) {
         notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
@@ -16745,6 +16754,7 @@ var require_options = __commonJS({
     module2.exports = {
       ENGINE_DEFAULTS,
       CI_NOTE,
+      alwaysLaneProblems,
       codeReviewLanes,
       laneOverlapMessage,
       parseReviewArgs,
@@ -16763,7 +16773,7 @@ var require_loadConfig = __commonJS({
     var Ajv = require__();
     var { upgradeConfig } = require_upgradeConfig();
     var { validateContextManifest } = require_contextPack();
-    var { codeReviewLanes, laneOverlapMessage } = require_options();
+    var { alwaysLaneProblems, laneOverlapMessage } = require_options();
     function parseConfig(yamlText) {
       return parse(yamlText);
     }
@@ -16782,18 +16792,17 @@ var require_loadConfig = __commonJS({
       for (const agent of configObj.agents || []) {
         if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
         ids.add(agent.id);
+        if (agent.id === "code-review") {
+          errors.push('agent id "code-review" is reserved for the code-review engine');
+        }
       }
-      const codeReview = configObj.engine && configObj.engine.code_review;
-      if (codeReview) {
-        const { always, replaces } = codeReviewLanes(codeReview);
-        const byId = new Map((configObj.agents || []).map((a) => [a.id, a]));
-        for (const id of always) {
-          if (codeReview.always && !byId.has(id)) {
-            errors.push(`engine.code_review.always references unknown agent: ${id}`);
-          } else if (codeReview.always && byId.get(id).enabled === false) {
-            errors.push(`engine.code_review.always references disabled agent: ${id}`);
-          }
-          if (replaces.includes(id)) errors.push(laneOverlapMessage(id, codeReview));
+      const engine = configObj.engine || {};
+      if (engine.code_review || engine.name === "code-review") {
+        const codeReview = engine.code_review || {};
+        const checkLanes = engine.name === "code-review" || Boolean(codeReview.always);
+        for (const { id, kind } of alwaysLaneProblems(codeReview, configObj.agents)) {
+          if (kind === "overlap") errors.push(laneOverlapMessage(id, codeReview));
+          else if (checkLanes) errors.push(`engine.code_review.always references ${kind} agent: ${id}`);
         }
       }
       const base = dirname(resolve(configPath));

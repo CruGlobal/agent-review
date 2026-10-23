@@ -5,7 +5,7 @@ const { parse } = require('yaml');
 const Ajv = require('ajv/dist/2020');
 const { upgradeConfig } = require('./upgradeConfig.cjs');
 const { validateContextManifest } = require('./contextPack.cjs');
-const { codeReviewLanes, laneOverlapMessage } = require('./options.cjs');
+const { alwaysLaneProblems, laneOverlapMessage } = require('./options.cjs');
 
 function parseConfig(yamlText) {
   return parse(yamlText);
@@ -29,21 +29,20 @@ function validateConfigReferences(configObj, configPath) {
   for (const agent of configObj.agents || []) {
     if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
     ids.add(agent.id);
+    if (agent.id === 'code-review') {
+      errors.push('agent id "code-review" is reserved for the code-review engine');
+    }
   }
 
-  const codeReview = configObj.engine && configObj.engine.code_review;
-  if (codeReview) {
-    const { always, replaces } = codeReviewLanes(codeReview);
-    const byId = new Map((configObj.agents || []).map((a) => [a.id, a]));
-    for (const id of always) {
-      // Default always lanes are checked at resolve time, so a repo that keeps
-      // the agent-review engine still loads without them.
-      if (codeReview.always && !byId.has(id)) {
-        errors.push(`engine.code_review.always references unknown agent: ${id}`);
-      } else if (codeReview.always && byId.get(id).enabled === false) {
-        errors.push(`engine.code_review.always references disabled agent: ${id}`);
-      }
-      if (replaces.includes(id)) errors.push(laneOverlapMessage(id, codeReview));
+  const engine = configObj.engine || {};
+  if (engine.code_review || engine.name === 'code-review') {
+    const codeReview = engine.code_review || {};
+    // Under the agent-review engine only an explicit always list is checked, so a
+    // repo that keeps that engine still loads without the default lanes.
+    const checkLanes = engine.name === 'code-review' || Boolean(codeReview.always);
+    for (const { id, kind } of alwaysLaneProblems(codeReview, configObj.agents)) {
+      if (kind === 'overlap') errors.push(laneOverlapMessage(id, codeReview));
+      else if (checkLanes) errors.push(`engine.code_review.always references ${kind} agent: ${id}`);
     }
   }
 

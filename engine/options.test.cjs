@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { ENGINE_DEFAULTS, CI_NOTE, parseReviewArgs, resolveOptions } = require('./options.cjs');
+const { ENGINE_DEFAULTS, CI_NOTE, alwaysLaneProblems, parseReviewArgs, resolveOptions } = require('./options.cjs');
 
 const lanes = (ids) => ids.map((id) => ({ id, enabled: true }));
 const FULL = lanes(['security', 'testing', 'standards', 'architecture', 'simplification']);
@@ -155,4 +155,17 @@ test('resolve: unknown tokens become a note', () => {
   );
   const clean = resolveOptions({ args: 'auto', config: { agents: FULL } });
   assert.equal(clean.notes.some((n) => n.startsWith('ignored unknown')), false);
+});
+
+test('alwaysLaneProblems is the one always-lane rule that resolve and validate share', () => {
+  assert.deepEqual(alwaysLaneProblems({}, FULL), []);
+  assert.deepEqual(
+    alwaysLaneProblems({}, [...lanes(['security', 'standards']), { id: 'testing', enabled: false }]),
+    [{ id: 'testing', kind: 'disabled' }],
+  );
+  assert.deepEqual(
+    alwaysLaneProblems({ always: ['security', 'nope'], replaces: ['security'] }, FULL),
+    [{ id: 'security', kind: 'overlap' }, { id: 'nope', kind: 'unknown' }],
+  );
+  assert.deepEqual(alwaysLaneProblems({}, undefined).map((p) => p.kind), ['unknown', 'unknown', 'unknown']);
 });

@@ -23,6 +23,20 @@ function laneOverlapMessage(id, crCfg) {
   return `engine.code_review lists ${id} in both ${key('always')} and ${key('replaces')}`;
 }
 
+// Each problem is { id, kind }, where kind is 'unknown', 'disabled', or 'overlap'.
+function alwaysLaneProblems(crCfg, agents) {
+  const { always, replaces } = codeReviewLanes(crCfg);
+  const byId = new Map((agents || []).map((a) => [a.id, a]));
+  const problems = [];
+  for (const id of always) {
+    const agent = byId.get(id);
+    if (!agent) problems.push({ id, kind: 'unknown' });
+    else if (agent.enabled === false) problems.push({ id, kind: 'disabled' });
+    if (replaces.includes(id)) problems.push({ id, kind: 'overlap' });
+  }
+  return problems;
+}
+
 const CI_NOTE =
   "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
 
@@ -101,17 +115,14 @@ function resolveOptions({ args, config, ci }) {
     const lanes = codeReviewLanes(crCfg);
     replaces = lanes.replaces.slice();
     always = lanes.always.slice();
-    const byId = new Map((cfg.agents || []).map((a) => [a.id, a]));
-    for (const id of always) {
-      const agent = byId.get(id);
-      if (!agent || agent.enabled === false) {
-        throw new Error(
-          `engine.code_review.always lists "${id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`,
-        );
-      }
-      if (replaces.includes(id)) {
-        throw new Error(`${laneOverlapMessage(id, crCfg)}; a lane cannot both run and be replaced`);
-      }
+    const [problem] = alwaysLaneProblems(crCfg, cfg.agents);
+    if (problem && problem.kind === 'overlap') {
+      throw new Error(`${laneOverlapMessage(problem.id, crCfg)}; a lane cannot both run and be replaced`);
+    }
+    if (problem) {
+      throw new Error(
+        `engine.code_review.always lists "${problem.id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`,
+      );
     }
   } else if (parsed.effort != null) {
     notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
@@ -139,6 +150,7 @@ function resolveOptions({ args, config, ci }) {
 module.exports = {
   ENGINE_DEFAULTS,
   CI_NOTE,
+  alwaysLaneProblems,
   codeReviewLanes,
   laneOverlapMessage,
   parseReviewArgs,
