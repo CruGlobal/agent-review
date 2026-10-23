@@ -100,10 +100,16 @@ function nearLine(a, b) {
   return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
 }
 
+function isStaticFinding(finding) {
+  return finding.agent === 'static-analysis' || finding.category.startsWith('static-analysis/');
+}
+
 // Blockers are excluded so a real or regressed blocker never hides behind an older entry.
+// Static findings are excluded because every static signature must reach the ledger.
 function matchesEarlierSpot(finding, previous) {
   return (
     finding.severity < 7 &&
+    !isStaticFinding(finding) &&
     previous.some(
       (entry) =>
         entry.file === finding.file &&

@@ -904,3 +904,24 @@ test('(code-review blocker) a raised group joins a later decisions merge at its 
   assert.equal(merged[0].severity, 7, 'mean of 7, 4, 9 is 6.67; counting the raised 7 twice would give 8');
   assert.equal(merged[0].agent, 'security');
 });
+
+test('(code-review blocker) with two proven code-review members, the stronger one sets the severity and leads', () => {
+  const { findings } = consensusFrom({
+    findingsByAgent: {
+      'code-review': [
+        crBlocker(),
+        crBlocker({ line: 21, severity: 9, message: 'refund amount is rounded before fees are removed', fix: 'use decimal math' }),
+      ],
+      financial: [financialNote({ line: 22, severity: 2, message: 'refund amount is rounded before the fees are subtracted' })],
+      testing: [financialNote({ line: 23, severity: 2, category: 'testing', message: 'the refund amount is rounded before fees are subtracted' })],
+    },
+    profile: 'standard',
+  });
+  assert.equal(findings.length, 1);
+  assert.equal(findings[0].corroboration, 4);
+  assert.equal(findings[0].severity, 9, 'rounded mean is 5; the stronger code-review member is 9');
+  assert.deepEqual(
+    [findings[0].agent, findings[0].line, findings[0].message, findings[0].fix],
+    ['code-review', 21, 'refund amount is rounded before fees are removed', 'use decimal math'],
+  );
+});

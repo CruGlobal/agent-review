@@ -18322,8 +18322,11 @@ var require_reportState = __commonJS({
       if (a === null && b === null) return true;
       return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
     }
+    function isStaticFinding(finding) {
+      return finding.agent === "static-analysis" || finding.category.startsWith("static-analysis/");
+    }
     function matchesEarlierSpot(finding, previous) {
-      return finding.severity < 7 && previous.some(
+      return finding.severity < 7 && !isStaticFinding(finding) && previous.some(
         (entry) => entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line)
       );
     }

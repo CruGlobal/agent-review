@@ -206,3 +206,20 @@ test('the default ledger merge ignores location, with or without an options obje
   assert.equal(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation: false })), plain);
   assert.deepEqual(JSON.parse(plain).map((entry) => entry.n), [3, 4, 5]);
 });
+
+test('location mode never skips a static finding, so every static signature reaches the ledger', () => {
+  const staticFinding = (over = {}) => finding({
+    signature: 'static-new',
+    agent: 'static-analysis',
+    category: 'static-analysis/no-raw-sql',
+    severity: 6,
+    line: 41,
+    message: 'raw SQL built from interpolated input',
+    ...over,
+  });
+  const previous = [{ n: 3, ...staticFinding({ signature: 'static-old', line: 40, message: 'avoid raw SQL strings' }), status: 'open' }];
+  for (const next of [staticFinding(), staticFinding({ agent: 'no-raw-sql' })]) {
+    const ledger = mergeLedger(previous, [next], BY_LOCATION);
+    assert.deepEqual(ledger.map((entry) => [entry.n, entry.signature]), [[3, 'static-old'], [4, 'static-new']], next.agent);
+  }
+});

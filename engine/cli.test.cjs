@@ -593,29 +593,32 @@ test('code-review-proof checks found = scored + dropped when given both files', 
 test('ledger --match-suggestions-by-location skips reworded suggestions; without it the merge is unchanged', () => {
   const { mergeLedger } = require('./reportState.cjs');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-'));
-  const previous = [{
-    n: 1, signature: 'old-sig', agent: 'code-review', category: 'correctness',
-    severity: 5, file: 'a.rb', line: 10, message: 'old words', status: 'open',
-  }];
-  const findings = { kept: [{
-    signature: 'new-sig', agent: 'code-review', category: 'correctness',
-    severity: 4, file: 'a.rb', line: 12, message: 'new words',
-  }] };
-  const prevPath = join(dir, 'previous.json');
-  const findingsPath = join(dir, 'findings.json');
-  writeFileSync(prevPath, JSON.stringify(previous));
-  writeFileSync(findingsPath, JSON.stringify(findings));
+  try {
+    const previous = [{
+      n: 1, signature: 'old-sig', agent: 'code-review', category: 'correctness',
+      severity: 5, file: 'a.rb', line: 10, message: 'old words', status: 'open',
+    }];
+    const findings = { kept: [{
+      signature: 'new-sig', agent: 'code-review', category: 'correctness',
+      severity: 4, file: 'a.rb', line: 12, message: 'new words',
+    }] };
+    const prevPath = join(dir, 'previous.json');
+    const findingsPath = join(dir, 'findings.json');
+    writeFileSync(prevPath, JSON.stringify(previous));
+    writeFileSync(findingsPath, JSON.stringify(findings));
 
-  const plain = run(['ledger', '--findings', findingsPath, '--previous', prevPath]);
-  assert.equal(plain.code, 0);
-  assert.equal(plain.s, JSON.stringify(mergeLedger(previous, findings), null, 2) + '\n');
-  assert.deepEqual(JSON.parse(plain.s).map((entry) => entry.n), [1, 2]);
+    const plain = run(['ledger', '--findings', findingsPath, '--previous', prevPath]);
+    assert.equal(plain.code, 0);
+    assert.equal(plain.s, JSON.stringify(mergeLedger(previous, findings), null, 2) + '\n');
+    assert.deepEqual(JSON.parse(plain.s).map((entry) => entry.n), [1, 2]);
 
-  const byLocation = run(['ledger', '--findings', findingsPath, '--previous', prevPath, '--match-suggestions-by-location']);
-  assert.equal(byLocation.code, 0);
-  assert.deepEqual(JSON.parse(byLocation.s).map((entry) => entry.n), [1]);
+    const byLocation = run(['ledger', '--findings', findingsPath, '--previous', prevPath, '--match-suggestions-by-location']);
+    assert.equal(byLocation.code, 0);
+    assert.deepEqual(JSON.parse(byLocation.s).map((entry) => entry.n), [1]);
 
-  const help = run(['help']);
-  assert.match(help.s, /^ {2}ledger --findings <f> \[--previous <f>\] \[--match-suggestions-by-location\] {3}/m);
-  rmSync(dir, { recursive: true, force: true });
+    const help = run(['help']);
+    assert.match(help.s, /^ {2}ledger --findings <f> \[--previous <f>\] \[--match-suggestions-by-location\] {3}/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
