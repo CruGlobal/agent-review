@@ -128,3 +128,81 @@ test('status carries the deterministic CI snapshot without changing review pass 
   assert.equal(status.pass, true);
   assert.deepEqual(status.ci, { total: 2, success: 1, failed: 1, pending: 0, neutral: 0 });
 });
+
+const BY_LOCATION = { matchSuggestionsByLocation: true };
+
+function oldEntry(over = {}) {
+  return {
+    n: 3,
+    ...finding({
+      signature: 'old-sig',
+      agent: 'code-review',
+      category: 'Correctness',
+      severity: 5,
+      line: 40,
+      message: 'cache is never invalidated',
+    }),
+    status: 'open',
+    ...over,
+  };
+}
+
+function reworded(over = {}) {
+  return finding({
+    signature: 'new-sig',
+    agent: 'code-review',
+    category: ' correctness ',
+    severity: 4,
+    line: 44,
+    message: 'stale cache entries survive updates',
+    ...over,
+  });
+}
+
+test('location mode skips a reworded suggestion near an old entry of any status; default mode appends it', () => {
+  for (const status of ['open', 'fixed', 'dismissed']) {
+    const previous = [oldEntry({ status })];
+    const byLocation = mergeLedger(previous, [reworded()], BY_LOCATION);
+    assert.deepEqual(byLocation.map((entry) => entry.n), [3], `status ${status}`);
+
+    const plain = mergeLedger(previous, [reworded()]);
+    assert.deepEqual(plain.map((entry) => [entry.n, entry.signature]), [[3, 'old-sig'], [4, 'new-sig']]);
+  }
+  const unanchored = mergeLedger([oldEntry({ line: null })], [reworded({ line: null })], BY_LOCATION);
+  assert.equal(unanchored.length, 1, 'two unanchored entries in the same file and category match');
+});
+
+test('location mode never folds a reworded blocker into an old entry', () => {
+  const previous = [oldEntry({ severity: 8, status: 'fixed', sha: 'abc1234' })];
+  const ledger = mergeLedger(previous, [reworded({ severity: 7, line: 42 })], BY_LOCATION);
+  assert.deepEqual(ledger.map((entry) => [entry.n, entry.signature, entry.status]), [
+    [3, 'old-sig', 'fixed'],
+    [4, 'new-sig', 'open'],
+  ]);
+});
+
+test('location mode appends a suggestion in another category, file, or more than 5 lines away', () => {
+  const previous = [oldEntry()];
+  const cases = {
+    'different category': reworded({ category: 'performance' }),
+    'different file': reworded({ file: 'app/other.rb' }),
+    '6 lines away': reworded({ line: 46 }),
+    '6 lines before': reworded({ line: 34 }),
+    'one line missing': reworded({ line: null }),
+  };
+  for (const [label, next] of Object.entries(cases)) {
+    const ledger = mergeLedger(previous, [next], BY_LOCATION);
+    assert.deepEqual(ledger.map((entry) => entry.n), [3, 4], label);
+  }
+  assert.equal(mergeLedger(previous, [reworded({ line: 45 })], BY_LOCATION).length, 1, 'exactly 5 lines away matches');
+  assert.equal(mergeLedger(previous, [reworded({ line: 35 })], BY_LOCATION).length, 1, 'exactly 5 lines before matches');
+});
+
+test('the default ledger merge ignores location, with or without an options object', () => {
+  const previous = [oldEntry()];
+  const findings = [reworded(), reworded({ signature: 'other-sig', line: 41, severity: 3 })];
+  const plain = JSON.stringify(mergeLedger(previous, findings));
+  assert.equal(JSON.stringify(mergeLedger(previous, findings, {})), plain);
+  assert.equal(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation: false })), plain);
+  assert.deepEqual(JSON.parse(plain).map((entry) => entry.n), [3, 4, 5]);
+});

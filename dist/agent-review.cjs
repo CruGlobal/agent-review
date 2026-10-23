@@ -18314,7 +18314,20 @@ var require_reportState = __commonJS({
         return clean;
       });
     }
-    function mergeLedger(previousInput, findingsInput) {
+    var LOCATION_WINDOW = 5;
+    function sameCategory(a, b) {
+      return a.trim().toLowerCase() === b.trim().toLowerCase();
+    }
+    function nearLine(a, b) {
+      if (a === null && b === null) return true;
+      return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+    }
+    function matchesEarlierSpot(finding, previous) {
+      return finding.severity < 7 && previous.some(
+        (entry) => entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line)
+      );
+    }
+    function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
       const previous = cleanPrevious(previousInput || []);
       const seen = new Set(previous.map((entry) => entry.signature));
       let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
@@ -18326,6 +18339,7 @@ var require_reportState = __commonJS({
       const merged = [...previous];
       for (const finding of additions) {
         if (seen.has(finding.signature)) continue;
+        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
         seen.add(finding.signature);
         merged.push({ n: next++, ...finding, status: "open" });
       }
@@ -19974,7 +19988,7 @@ var require_cli = __commonJS({
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>]   merge stable incremental finding state
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older entries by file, category, and nearby line)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
@@ -20295,13 +20309,14 @@ var require_cli = __commonJS({
         case "ledger": {
           const findingsPath = flag(rest, "--findings");
           if (!findingsPath) {
-            out("usage: agent-review ledger --findings <file> [--previous <file>]");
+            out("usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location]");
             return 1;
           }
           const previousPath = flag(rest, "--previous");
           const previous = previousPath ? JSON.parse(readFileSync(previousPath, "utf8")) : [];
           const findings = JSON.parse(readFileSync(findingsPath, "utf8"));
-          out(JSON.stringify(mergeLedger(previous, findings), null, 2));
+          const matchSuggestionsByLocation = rest.includes("--match-suggestions-by-location");
+          out(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation }), null, 2));
           return 0;
         }
         case "status": {

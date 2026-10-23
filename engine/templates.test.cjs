@@ -1709,3 +1709,35 @@ test('README and spec describe CI findings under the code-review engine as more 
   const { CI_NOTE } = require('./options.cjs');
   assert.ok(amendments.replace(/\s+/g, ' ').includes(CI_NOTE), 'the amendments record the new CI note wording');
 });
+
+test('the review skill matches ledger suggestions by location only under the code-review engine', () => {
+  const usage = execFileSync(process.execPath, [join(ROOT, 'bin/agent-review'), 'help'], { encoding: 'utf8' });
+  const ledgerUsage = usage.split('\n').find((line) => line.trim().startsWith('ledger '));
+  assert.ok(ledgerUsage && ledgerUsage.includes('[--match-suggestions-by-location]'), 'the CLI usage lists the ledger flag');
+
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const all = bashBlocks(skill);
+  const stage6 = bashBlocks(stageSlice(skill, '## Stage 6 — Generate Review Report', '### Build the findings ledger'));
+  assert.ok(stage6.startsWith('. /tmp/review_env.sh'), 'Stage 6 reads ENGINE from review_env.sh');
+  const calls = commandsIn(stage6, 'agent-review ledger');
+  assert.strictEqual(calls.length, 1, 'Stage 6 builds the ledger once');
+  assert.ok(
+    calls[0].includes('${LEDGER_BY_LOCATION:+--match-suggestions-by-location}'),
+    `the Stage 6 ledger call passes the flag through the guard: ${calls[0]}`,
+  );
+  const assignments = [...all.matchAll(/^.*LEDGER_BY_LOCATION=.*$/gm)].map((m) => m[0].trim());
+  assert.deepStrictEqual(
+    assignments,
+    ['LEDGER_BY_LOCATION=""', '[ "$ENGINE" = "code-review" ] && LEDGER_BY_LOCATION=1'],
+    'the guard is set only under the code-review engine',
+  );
+  assert.ok(
+    stage6.indexOf('LEDGER_BY_LOCATION=""') < stage6.indexOf('agent-review ledger'),
+    'the guard is reset before the ledger call',
+  );
+  assert.strictEqual(
+    all.split('--match-suggestions-by-location').length - 1,
+    1,
+    'no other ledger call passes the flag',
+  );
+});

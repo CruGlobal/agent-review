@@ -210,7 +210,7 @@ const USAGE = `usage: agent-review <command>
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>]   merge stable incremental finding state
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older entries by file, category, and nearby line)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
@@ -551,7 +551,7 @@ function main(rawArgv) {
     case 'ledger': {
       const findingsPath = flag(rest, '--findings');
       if (!findingsPath) {
-        out('usage: agent-review ledger --findings <file> [--previous <file>]');
+        out('usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location]');
         return 1;
       }
       const previousPath = flag(rest, '--previous');
@@ -559,7 +559,8 @@ function main(rawArgv) {
         ? JSON.parse(readFileSync(previousPath, 'utf8'))
         : [];
       const findings = JSON.parse(readFileSync(findingsPath, 'utf8'));
-      out(JSON.stringify(mergeLedger(previous, findings), null, 2));
+      const matchSuggestionsByLocation = rest.includes('--match-suggestions-by-location');
+      out(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation }), null, 2));
       return 0;
     }
     case 'status': {

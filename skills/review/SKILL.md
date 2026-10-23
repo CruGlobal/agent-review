@@ -1601,9 +1601,12 @@ if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then
   [ -s /tmp/previous_agent_review_ledger.json ] \
     || echo '[]' > /tmp/previous_agent_review_ledger.json
 fi
+LEDGER_BY_LOCATION=""
+[ "$ENGINE" = "code-review" ] && LEDGER_BY_LOCATION=1
 agent-review ledger \
   --findings /tmp/review_filtered.json \
   --previous /tmp/previous_agent_review_ledger.json \
+  ${LEDGER_BY_LOCATION:+--match-suggestions-by-location} \
   > /tmp/agent_review_ledger.json
 ```
 
@@ -1634,6 +1637,10 @@ the feedback store):
   on incremental runs, then call `agent-review ledger`. It preserves prior numbers/statuses,
   appends only new signatures, and fails closed on malformed state. A finding's absence from an
   incremental review does **not** prove it was fixed; only `/agent-review:address` may close it.
+- Under the `code-review` engine the call adds `--match-suggestions-by-location`, because
+  `/code-review` rewords the same suggestion on every run. A new finding below 7 that sits within
+  5 lines of an older entry (any status) in the same file and category is treated as that entry
+  and gets no new number. Blockers are never matched this way.
 - The ledger also carries bounded `evidence` and `recommendation` fields. This preserves enough
   context to address an older open finding after the visible report is updated by a later run.
 

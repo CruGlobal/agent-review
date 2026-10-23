@@ -89,7 +89,31 @@ function cleanPrevious(raw) {
   });
 }
 
-function mergeLedger(previousInput, findingsInput) {
+const LOCATION_WINDOW = 5;
+
+function sameCategory(a, b) {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function nearLine(a, b) {
+  if (a === null && b === null) return true;
+  return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+}
+
+// Blockers are excluded so a real or regressed blocker never hides behind an older entry.
+function matchesEarlierSpot(finding, previous) {
+  return (
+    finding.severity < 7 &&
+    previous.some(
+      (entry) =>
+        entry.file === finding.file &&
+        sameCategory(entry.category, finding.category) &&
+        nearLine(entry.line, finding.line),
+    )
+  );
+}
+
+function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
   const previous = cleanPrevious(previousInput || []);
   const seen = new Set(previous.map((entry) => entry.signature));
   let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
@@ -107,6 +131,7 @@ function mergeLedger(previousInput, findingsInput) {
   const merged = [...previous];
   for (const finding of additions) {
     if (seen.has(finding.signature)) continue;
+    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
     seen.add(finding.signature);
     merged.push({ n: next++, ...finding, status: 'open' });
   }
