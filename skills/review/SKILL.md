@@ -113,11 +113,21 @@ agent-review options --args "$REVIEW_ARGS" ${CI_MODE:+--ci} > /tmp/review_option
   rm -f /tmp/review_options.json
   exit 1
 }
-CI_MODE=$(node -e 'console.log(require("/tmp/review_options.json").ci ? "true" : "")')
-MODE=$(node -e 'console.log(require("/tmp/review_options.json").mode.value)')
-ENGINE=$(node -e 'console.log(require("/tmp/review_options.json").engine.value)')
-EFFORT=$(node -e 'const o = require("/tmp/review_options.json"); console.log(o.effort ? o.effort.value : "")')
-REVIEWS_RUN=$(node -e 'console.log(require("/tmp/review_options.json").reviewsRun.value)')
+OPTION_VARS=$(node -e '
+const o = require("/tmp/review_options.json");
+const vars = {
+  CI_MODE: o.ci ? "true" : "",
+  MODE: o.mode.value,
+  ENGINE: o.engine.value,
+  EFFORT: o.effort ? o.effort.value : "",
+  REVIEWS_RUN: o.reviewsRun.value,
+  INCREMENTAL_REQUESTED: o.incremental ? "true" : "",
+};
+for (const [name, value] of Object.entries(vars)) {
+  console.log(name + "=" + JSON.stringify(String(value)).replace(/[$`]/g, "\\$&"));
+}
+')
+eval "$OPTION_VARS"
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 case "$MODE" in
@@ -175,7 +185,6 @@ EOF
 echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
 
 # --- Detect a local incremental request ---
-INCREMENTAL_REQUESTED=$(node -e 'console.log(require("/tmp/review_options.json").incremental ? "true" : "")')
 [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
 echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> /tmp/review_env.sh
 

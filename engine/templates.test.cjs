@@ -1409,7 +1409,7 @@ test('the review skill runs the incremental path locally on the `incremental` ar
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('/agent-review:review auto incremental'), 'usage must show the local incremental form');
   assert.ok(
-    skill.includes('INCREMENTAL_REQUESTED=$(node -e \'console.log(require("/tmp/review_options.json").incremental ? "true" : "")\')'),
+    skill.includes('  INCREMENTAL_REQUESTED: o.incremental ? "true" : "",'),
     'the argument is read from the resolved options, like `ci`, so any case works',
   );
   assert.ok(!skill.includes('*" incremental "*)'), 'the skill must not re-parse incremental from the raw arguments');
@@ -1464,6 +1464,55 @@ function commandsIn(bash, name) {
   return found;
 }
 
+test('Initialize reads the options file once and evals quoted assignments', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const init = bashBlocks(stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest'));
+  assert.equal(init.split('require("/tmp/review_options.json")').length - 1, 1, 'one node -e reads the options file');
+  const start = init.indexOf('OPTION_VARS=$(node -e \'');
+  const end = init.indexOf('eval "$OPTION_VARS"');
+  assert.ok(start >= 0 && end > start, 'the assignments are captured first, so set -e still stops on a failed read');
+  const read = init.slice(start, end);
+  for (const line of [
+    '  CI_MODE: o.ci ? "true" : "",',
+    '  MODE: o.mode.value,',
+    '  ENGINE: o.engine.value,',
+    '  EFFORT: o.effort ? o.effort.value : "",',
+    '  REVIEWS_RUN: o.reviewsRun.value,',
+    '  INCREMENTAL_REQUESTED: o.incremental ? "true" : "",',
+  ]) {
+    assert.ok(read.includes(line), `the one read sets ${line.trim()}`);
+  }
+  assert.ok(
+    read.includes('console.log(name + "=" + JSON.stringify(String(value)).replace(/[$`]/g, "\\\\$&"));'),
+    'each value is double-quoted with $ and backtick escaped',
+  );
+  assert.ok(!/\b(CI_MODE|MODE|ENGINE|EFFORT|REVIEWS_RUN|INCREMENTAL_REQUESTED)=\$\(node -e/.test(init), 'no per-field node -e reads remain');
+  const script = read.slice(read.indexOf("node -e '") + 9, read.lastIndexOf("'"));
+  assert.ok(!script.includes("'"), 'the single-quoted script holds no quote of its own');
+
+  const { execFileSync } = require('node:child_process');
+  const { mkdtempSync, writeFileSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'review-options-'));
+  const file = join(dir, 'review_options.json');
+  writeFileSync(file, JSON.stringify({
+    ci: false,
+    mode: { value: 'auto' },
+    engine: { value: 'code-review' },
+    effort: { value: 'x$(touch pwned)`id`"\\' },
+    reviewsRun: { value: 'local' },
+    incremental: true,
+  }));
+  const run = (path) =>
+    execFileSync(
+      'bash',
+      ['-c', 'set -e; OPTION_VARS=$(node -e "$1"); eval "$OPTION_VARS"; printf "%s|" "$CI_MODE" "$MODE" "$ENGINE" "$EFFORT" "$REVIEWS_RUN" "$INCREMENTAL_REQUESTED"', 'bash', script.split('/tmp/review_options.json').join(path)],
+      { cwd: dir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    );
+  assert.equal(run(file), '|auto|code-review|x$(touch pwned)`id`"\\|local|true|', 'values round-trip without running anything');
+  assert.throws(() => run(join(dir, 'missing.json')), 'a failed read stops the shell');
+});
+
 test('review skill wires the code-review engine', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const bash = bashBlocks(skill);
@@ -1480,7 +1529,7 @@ test('review skill wires the code-review engine', () => {
   assert.ok(ciDetect < optionsCall, 'CI is detected before options are resolved, so --ci reaches the resolver');
   assert.ok(init.includes('[ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"'), 'the workflow signal still forces CI');
   assert.ok(!init.includes('*" ci "*)'), 'the skill must not re-parse ci from the raw arguments');
-  const ciRead = init.indexOf('CI_MODE=$(node -e \'console.log(require("/tmp/review_options.json").ci ? "true" : "")\')');
+  const ciRead = init.indexOf('  CI_MODE: o.ci ? "true" : "",');
   assert.ok(ciRead > optionsCall, 'CI mode is read back from the resolved options, which lowercase the ci argument');
   assert.match(
     bashBlocks(init),
