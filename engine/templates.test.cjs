@@ -565,6 +565,16 @@ test('code-review-lane.md uses exactly the documented placeholders', () => {
   );
 });
 
+test('the lane always passes --max-findings, so a remembered /code-review limit never caps it', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const row = skill.split('\n').find((line) => line.startsWith('| `{{MAX_FINDINGS_FLAG}}`'));
+  assert.ok(row, 'the skill documents {{MAX_FINDINGS_FLAG}}');
+  const flat = row.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('` --max-findings <n>`, with its leading space, when `plan.engine.maxFindings` is set'), row);
+  assert.ok(flat.includes('` --max-findings default`, with its leading space, when it is `null`'), row);
+  assert.ok(!/Empty string/i.test(row), 'the flag is never left out');
+});
+
 test('code-review-lane.md carries the contracts', () => {
   const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
   for (const needle of [
