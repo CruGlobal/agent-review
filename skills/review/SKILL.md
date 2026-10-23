@@ -431,7 +431,7 @@ for (const repo of context.repositories || []) {
 NODE
 ```
 
-The start-up line prints after **Auto Mode Resolution** below, once the final mode is known.
+The start-up line prints in **Start-up Line** below, once the final mode is known.
 
 Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
 excluded from risk scoring and agent selection by the engine — agents should not raise findings
@@ -601,8 +601,7 @@ a finding. Never search outside those roots.
 ### Auto Mode Resolution
 
 **Only when `MODE` is `auto`.** The placeholder mode is resolved here, from the engine's risk
-score — never from your own judgment of the diff. The same block then prints the start-up line in
-every mode, with the final mode:
+score — never from your own judgment of the diff:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
@@ -687,9 +686,18 @@ if [ "$MODE" = "auto" ]; then
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE"
 EOF
 fi
+```
 
-# --- Start-up line, in every mode: the options this run uses, where each came from, the final
-# mode, and the planned reviewers ---
+The start-up line comes next, in every mode; act on the result only after it prints.
+
+### Start-up Line
+
+**Every mode, not only `auto`.** Run this right after Auto Mode Resolution, before acting on a
+skip. It states the options this run uses, where each came from, the final mode, and the planned
+reviewers:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
 if [ -n "$INCREMENTAL" ]; then
   STARTUP_SCOPE="since $(git rev-parse --short "$LAST_REVIEWED") (re-review)"
 else

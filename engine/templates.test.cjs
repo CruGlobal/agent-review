@@ -1119,7 +1119,7 @@ test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff
   );
 });
 
-test('the CI path uses at most 13 bash turns (Stage 0A through Stage 6)', () => {
+test('the CI path uses at most 14 bash turns (Stage 0A through Stage 6)', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0AStart = skill.indexOf('## Stage 0A — Parse Review Mode & Initialize');
   const stage7Start = skill.indexOf('## Stage 7 — Post, Print & Metrics');
@@ -1153,9 +1153,12 @@ test('the CI path uses at most 13 bash turns (Stage 0A through Stage 6)', () => 
   // Task calls, so it cannot be folded into the pre-launch "Approved learnings & dependency
   // impact" bash block (which must run BEFORE those Task calls, to feed the archetype prompts) —
   // it is an unavoidable extra turn, +1 over the previous budget.
+  //
+  // 14, not 13 (round-3 controller ruling): the start-up line is its own every-mode turn after
+  // Auto Mode Resolution, because a model skips that auto-only section on a standard run.
   const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
   const count = countBashFences(ciPath);
-  assert.ok(count <= 13, `CI-path bash fence count is ${count}, expected <= 13`);
+  assert.ok(count <= 14, `CI-path bash fence count is ${count}, expected <= 14`);
 });
 
 test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {
@@ -1205,8 +1208,8 @@ test('every Task-4-consolidated block sources review_env.sh as its first non-com
 test('Auto Mode Resolution remains its own bash turn — its output gates whether agents launch at all', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const start = skill.indexOf('### Auto Mode Resolution');
-  const end = skill.indexOf('### Risk Assessment', start);
-  assert.ok(start !== -1 && end !== -1, 'Auto Mode Resolution / Risk Assessment anchors not found');
+  const end = skill.indexOf('### Start-up Line', start);
+  assert.ok(start !== -1 && end !== -1, 'Auto Mode Resolution / Start-up Line anchors not found');
   const section = skill.slice(start, end);
   assert.strictEqual(
     countBashFences(section),
@@ -1630,19 +1633,26 @@ test('review skill wires the code-review engine', () => {
   ]) {
     assert.ok(startup[0].includes(part), `startup call lacks ${part}`);
   }
-  const autoSection = stageSlice(skill, '### Auto Mode Resolution', '### Risk Assessment');
-  const autoBash = bashBlocks(autoSection);
-  const resolvedAt = autoBash.indexOf('MODE="$RESOLVED" AGENT_MODE="$RESOLVED"');
-  const startupAt = autoBash.indexOf('agent-review startup');
-  assert.ok(resolvedAt >= 0 && startupAt > resolvedAt, 'the start-up line prints after auto mode resolves');
-  const autoEnd = autoBash.indexOf('export MODE="$MODE" AGENT_MODE="$AGENT_MODE"\nEOF\nfi\n');
-  assert.ok(autoEnd >= 0 && startupAt > autoEnd, 'the start-up line prints after the auto-only branch closes, so in every mode');
-  const flatAuto = autoSection.replace(/\s+/g, ' ');
-  assert.ok(flatAuto.includes('The same block then prints the start-up line in every mode, with the final mode:'), flatAuto);
-  assert.ok(flatAuto.includes('On a real skip the `reviewers:` line reads `none (no-risk diff skipped)`.'));
+  const autoOnly = stageSlice(skill, '### Auto Mode Resolution', '### Start-up Line');
+  assert.ok(!autoOnly.includes('agent-review startup'), 'the auto-only section does not print the start-up line');
+  const startupSection = stageSlice(skill, '### Start-up Line', '### Risk Assessment');
+  assert.strictEqual(countBashFences(startupSection), 1, 'the start-up line is its own bash turn');
+  const startupBash = bashBlocks(startupSection);
+  assert.ok(startupBash.startsWith('. /tmp/review_env.sh 2>/dev/null || true'), 'it reads the final MODE from review_env.sh');
+  assert.ok(!startupBash.includes('if [ "$MODE" = "auto" ]'), 'it runs in every mode');
+  assert.ok(startupBash.includes('agent-review startup'));
+  const flatStartup = startupSection.replace(/\s+/g, ' ');
   assert.ok(
-    flatAuto.indexOf('agent-review startup') < flatAuto.indexOf('If auto resolved to `skip`:'),
+    flatStartup.includes('**Every mode, not only `auto`.** Run this right after Auto Mode Resolution, before acting on a skip.'),
+    flatStartup,
+  );
+  assert.ok(flatStartup.includes('On a real skip the `reviewers:` line reads `none (no-risk diff skipped)`.'));
+  assert.ok(
+    flatStartup.indexOf('agent-review startup') < flatStartup.indexOf('If auto resolved to `skip`:'),
     'a skip still prints the start-up line before it stops',
+  );
+  assert.ok(
+    autoOnly.replace(/\s+/g, ' ').includes('The start-up line comes next, in every mode; act on the result only after it prints.'),
   );
 
   const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '### Smoke-Test Tier Routing').replace(/\s+/g, ' ');
