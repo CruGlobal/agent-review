@@ -40,8 +40,6 @@ function scanFences(text) {
   return { blocks, outside };
 }
 
-// A json block is always a list candidate; an unlabeled one only when its content opens like
-// JSON, so an unlabeled code snippet is an ordinary code example.
 function isListBlock(block) {
   if (block.info === 'json') return true;
   return block.info === '' && /^[[{]/.test(block.body.trim());
