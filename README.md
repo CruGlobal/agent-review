@@ -196,9 +196,11 @@ message, update Claude Code, or run again with `engine=agent-review`.
 default for a reason.
 
 **CI does not use this engine.** If CI runs in a repo set to `code-review`, it ignores the
-setting, runs agent-review's own reviewers, and says so in the report. Those findings still
-count: your next local review merges them into its own ledger. CI never approves in that repo,
-and neither does `@claude fix` or `@claude dismiss`; only the review you run locally can approve.
+setting, runs agent-review's own reviewers, and says so in the report. Until you post a local
+report, your next local review merges CI's findings into its own ledger. After that, local
+re-reviews read your own report's ledger, so findings from later CI runs do not carry in. CI
+never approves in that repo, and neither does `@claude fix` or `@claude dismiss`;
+only the review you run locally can approve.
 
 ## Questions people ask
 
@@ -414,6 +416,9 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   So rules learned from the `architecture` or `simplification` reviewer never match a `code-review`
   finding. And `/code-review` rewords the same finding from run to run, so its findings rarely
   match each other either. Expect dismissed findings to come back, and dismiss them again.
+- **The `/code-review` proof is written by the reviewer it checks.** Only the reviewing subagent
+  sees what the Skill tool returns, so that subagent saves `/tmp/code_review_raw.txt` itself. The
+  engine checks the file's shape, but it cannot prove the subagent did not make it up.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.

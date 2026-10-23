@@ -1739,6 +1739,28 @@ test('README and spec describe CI findings under the code-review engine as more 
   assert.ok(amendments.replace(/\s+/g, ' ').includes(CI_NOTE), 'the amendments record the new CI note wording');
 });
 
+test('README says CI findings carry in only until you post your own local report', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const ci = readme
+    .slice(readme.indexOf('**CI does not use this engine.**'), readme.indexOf('## Questions people ask'))
+    .replace(/\s+/g, ' ');
+  assert.ok(!ci.includes('Those findings still count'), 'CI findings do not always count');
+  assert.ok(ci.includes('Until you post a local report, your next local review merges CI\'s findings into its own ledger.'), ci);
+  assert.ok(ci.includes('findings from later CI runs do not carry in'), ci);
+  assert.ok(!ci.includes('—'), 'new prose uses no em dashes');
+});
+
+test('README names the self-written proof file as a known limitation', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const limits = readme.slice(readme.indexOf('## Known limitations'), readme.indexOf('## Repo layout'));
+  const start = limits.indexOf('**The `/code-review` proof is written by the reviewer it checks.**');
+  assert.notStrictEqual(start, -1, 'the known limitations list the proof file');
+  const bullet = limits.slice(start, limits.indexOf('\n- **', start)).replace(/\s+/g, ' ');
+  assert.ok(bullet.includes('`/tmp/code_review_raw.txt`'));
+  assert.ok(bullet.includes('cannot prove'), bullet);
+  assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
+});
+
 test('the review skill matches ledger suggestions by location only under the code-review engine', () => {
   const usage = execFileSync(process.execPath, [join(ROOT, 'bin/agent-review'), 'help'], { encoding: 'utf8' });
   const ledgerUsage = usage.split('\n').find((line) => line.trim().startsWith('ledger '));
