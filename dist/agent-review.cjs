@@ -16731,6 +16731,10 @@ var require_options = __commonJS({
             `engine.code_review.always lists "${problem.id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`
           );
         }
+        const known = new Set((cfg.agents || []).map((a) => a.id));
+        for (const id of crCfg.replaces || []) {
+          if (!known.has(id)) notes.push(`engine.code_review.replaces lists an unknown lane: ${id}`);
+        }
       } else if (parsed.effort != null) {
         notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
       }

@@ -169,3 +169,23 @@ test('alwaysLaneProblems is the one always-lane rule that resolve and validate s
   );
   assert.deepEqual(alwaysLaneProblems({}, undefined).map((p) => p.kind), ['unknown', 'unknown', 'unknown']);
 });
+
+test('resolve: a replaces id the repo lacks is a note under the code-review engine', () => {
+  const NOTE = 'engine.code_review.replaces lists an unknown lane: architecure';
+  const unknownNotes = (r) => r.notes.filter((n) => n.startsWith('engine.code_review.replaces lists an unknown lane'));
+  const typo = { agents: FULL, engine: { code_review: { replaces: ['architecure', 'simplification'] } } };
+  assert.deepEqual(unknownNotes(resolveOptions({ args: 'engine=code-review', config: typo })), [NOTE]);
+
+  const valid = { agents: FULL, engine: { code_review: { replaces: ['architecture', 'simplification'] } } };
+  assert.deepEqual(unknownNotes(resolveOptions({ args: 'engine=code-review', config: valid })), []);
+
+  const defaults = { agents: lanes(['security', 'testing', 'standards']) };
+  assert.deepEqual(
+    unknownNotes(resolveOptions({ args: 'engine=code-review', config: defaults })),
+    [],
+    'the built-in default list is not something the repo wrote',
+  );
+
+  assert.deepEqual(unknownNotes(resolveOptions({ args: 'engine=agent-review', config: typo })), []);
+  assert.deepEqual(unknownNotes(resolveOptions({ args: 'engine=code-review', config: typo, ci: true })), []);
+});
