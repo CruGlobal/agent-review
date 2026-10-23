@@ -18502,7 +18502,10 @@ var require_codeReviewProof = __commonJS({
       if (open) blocks.push({ info: open.info, body: open.body.join("\n"), closed: false });
       return { blocks, outside };
     }
-    var LIST_INFO = /* @__PURE__ */ new Set(["json", ""]);
+    function isListBlock(block) {
+      if (block.info === "json") return true;
+      return block.info === "" && /^[[{]/.test(block.body.trim());
+    }
     function isPlainObject(value) {
       return value !== null && typeof value === "object" && !Array.isArray(value);
     }
@@ -18555,11 +18558,11 @@ var require_codeReviewProof = __commonJS({
       );
       const { blocks, outside } = scanFences(text);
       if (blocks.some((b) => !b.closed)) return noList;
-      const listBlocks = blocks.filter((b) => LIST_INFO.has(b.info));
-      for (let i = listBlocks.length - 1; i >= 0; i--) {
-        const findings = qualifyingList(listBlocks[i]);
-        if (findings) return { ok: true, reason: "ok", findings };
-      }
+      const listBlocks = blocks.filter(isListBlock);
+      const lists = listBlocks.map(qualifyingList).filter(Boolean);
+      const nonEmpty = lists.filter((list) => list.length > 0);
+      if (nonEmpty.length > 0) return { ok: true, reason: "ok", findings: nonEmpty[nonEmpty.length - 1] };
+      if (lists.length > 0) return { ok: true, reason: "ok", findings: [] };
       const resultAt = outside.findIndex((line) => /^Result:/.test(line));
       if (listBlocks.length > 0 || resultAt < 0) return noList;
       const afterResult = outside.slice(resultAt + 1);

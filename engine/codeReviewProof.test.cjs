@@ -281,7 +281,7 @@ test('a missing header keeps the did-not-run reason', () => {
   assert.match(r.reason, /update Claude Code/);
 });
 
-test('plain text is read only when the result has no JSON or unlabeled fenced block', () => {
+test('plain text is read only when the result has no list block', () => {
   const line = 'a.js:1 — x';
   const cases = [
     `${HEADER}\n\nResult:\n${line}\n\n\`\`\`json\n[{"file":"a.js",\n\`\`\`\n`,
@@ -370,14 +370,63 @@ test('a JSON block that quotes file contents is not the findings list', () => {
   }
 });
 
-test('an unlabeled block follows the json rules', () => {
+test('an unlabeled block that starts with [ or { follows the json rules', () => {
   const real = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n${block('', JSON.stringify(FINDINGS))}` });
   assert.equal(real.ok, true);
   assert.equal(real.findings.length, 2);
 
+  const indented = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n${block('', `  ${JSON.stringify(FINDINGS, null, 2)}`)}` });
+  assert.equal(indented.ok, true, 'the content is trimmed before the check');
+  assert.equal(indented.findings.length, 2);
+
+  for (const quoted of ['[{"name":"a"}]', '{"name":"a"}', '{ name: "a" }', '[1,2']) {
+    const r = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\n${block('', quoted)}` });
+    assert.equal(r.ok, false, `${quoted} must fail closed`);
+    assert.equal(r.reason, NEW_REASON);
+    assert.deepEqual(r.findings, []);
+  }
+});
+
+test('an unlabeled code snippet neither qualifies nor stops the text parse', () => {
   const code = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\n${block('', 'return user.name;')}` });
-  assert.equal(code.ok, false);
-  assert.equal(code.reason, NEW_REASON);
+  assert.equal(code.ok, true);
+  assert.deepEqual(code.findings, [{
+    file: 'app.js',
+    line: 13,
+    summary: 'No fallback to user.name.',
+    failure_scenario: 'displayName({ name: "Ann" }) throws.',
+  }]);
+
+  const inside = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n(none)\n\n${block('', '- app.js:3 - stale comment')}` });
+  assert.equal(inside.ok, true, 'lines inside the snippet are never finding lines');
+  assert.deepEqual(inside.findings, []);
+
+  const empty = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n(none)\n\n${block('', '')}` });
+  assert.equal(empty.ok, true);
+  assert.deepEqual(empty.findings, []);
+
+  const unclosed = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\n\`\`\`\nreturn user.name;\n` });
+  assert.equal(unclosed.ok, false, 'an unclosed snippet still fails closed');
+  assert.equal(unclosed.reason, NEW_REASON);
+});
+
+test('a later [] never replaces a real findings list', () => {
+  const real = block('json', JSON.stringify(FINDINGS));
+  for (const empty of [block('json', '[]'), block('', '[]'), block('json', '{"findings":[]}')]) {
+    for (const rawText of [`${HEADER}\n\nResult:\n${real}\nSuggested fix:\n${empty}`, `${HEADER}\n\nResult:\n${empty}\n${real}`]) {
+      const r = checkCodeReviewProof({ rawText });
+      assert.equal(r.ok, true, rawText);
+      assert.deepEqual(r.findings, FINDINGS, rawText);
+    }
+  }
+
+  const other = [{ file: 'lib.js', line: 2, summary: 'a later real list' }];
+  const last = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n${real}\n${block('json', '[]')}\n${block('json', JSON.stringify(other))}` });
+  assert.deepEqual(last.findings, other, 'the last non-empty list wins');
+
+  const lone = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nAll good.\n\n${block('json', '[]')}` });
+  assert.equal(lone.ok, true, 'a lone [] still passes');
+  assert.deepEqual(lone.findings, []);
 });
 
 test('a truncated JSON list fails closed over prose, finding lines, and "(none)"', () => {

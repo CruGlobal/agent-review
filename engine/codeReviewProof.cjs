@@ -40,7 +40,12 @@ function scanFences(text) {
   return { blocks, outside };
 }
 
-const LIST_INFO = new Set(['json', '']);
+// A json block is always a list candidate; an unlabeled one only when its content opens like
+// JSON, so an unlabeled code snippet is an ordinary code example.
+function isListBlock(block) {
+  if (block.info === 'json') return true;
+  return block.info === '' && /^[[{]/.test(block.body.trim());
+}
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -100,11 +105,12 @@ function checkCodeReviewProof({ rawText }) {
   const { blocks, outside } = scanFences(text);
   // An unclosed fence of any label means the output was cut short.
   if (blocks.some((b) => !b.closed)) return noList;
-  const listBlocks = blocks.filter((b) => LIST_INFO.has(b.info));
-  for (let i = listBlocks.length - 1; i >= 0; i--) {
-    const findings = qualifyingList(listBlocks[i]);
-    if (findings) return { ok: true, reason: 'ok', findings };
-  }
+  const listBlocks = blocks.filter(isListBlock);
+  const lists = listBlocks.map(qualifyingList).filter(Boolean);
+  // A quoted `[]`, such as one in a suggested fix, must never replace a real list.
+  const nonEmpty = lists.filter((list) => list.length > 0);
+  if (nonEmpty.length > 0) return { ok: true, reason: 'ok', findings: nonEmpty[nonEmpty.length - 1] };
+  if (lists.length > 0) return { ok: true, reason: 'ok', findings: [] };
   const resultAt = outside.findIndex((line) => /^Result:/.test(line));
   if (listBlocks.length > 0 || resultAt < 0) return noList;
   const afterResult = outside.slice(resultAt + 1);

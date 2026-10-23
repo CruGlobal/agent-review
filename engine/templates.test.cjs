@@ -618,7 +618,15 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
   const flat = step2.replace(/\s+/g, ' ');
   assert.ok(flat.includes('array of objects'), 'a findings array holds only objects');
   assert.ok(flat.includes('every object has a non-empty string `file`'), 'a qualifying list names a file in every entry');
-  const json = flat.indexOf('The last fenced block labeled `json`, or with no label');
+  assert.ok(
+    flat.includes('a list block is a fenced block labeled `json`, or one with no label whose first non-blank character is `[` or `{`.'),
+    'an unlabeled block is a list candidate only when it opens like JSON',
+  );
+  assert.ok(
+    flat.includes('A later `[]`, such as one quoted in a fix, never replaces a real list.'),
+    'an empty list counts only when no list block holds a finding',
+  );
+  const json = flat.indexOf('The last list block that parses as an array of objects');
   const lines = flat.indexOf('One-line findings in the text after `Result:`');
   const none = flat.indexOf('A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found no finding lines');
   assert.ok(json >= 0 && lines >= 0 && none >= 0, 'all three shapes are listed');
@@ -633,15 +641,15 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
     'fences follow CommonMark',
   );
   assert.ok(
-    flat.includes('Items 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled `json` or has no label.'),
+    flat.includes('Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list block.'),
     'a broken JSON list fails closed instead of falling back to text',
   );
   assert.ok(
-    flat.includes('when item 1 finds no list, a `json` or unlabeled block that item 1 cannot use'),
+    flat.includes('when item 1 finds no list, a list block that item 1 cannot use'),
     'an unusable JSON block stops the lane only when no real list was found',
   );
   assert.ok(
-    flat.includes('A block with any other label, such as `js` or `ruby`, is a code example'),
+    flat.includes('Any other fenced block, such as one labeled `js` or `ruby`, or an unlabeled block of code that does not start with `[` or `{`, is a code example'),
     'code examples neither qualify nor stop the text parse',
   );
   assert.ok(!/\b[Ss]teps? [1-3]\b/.test(flat), 'list items are "item N", never "step N", beside the STEP headings');
