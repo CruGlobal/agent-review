@@ -656,6 +656,22 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
   assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));
 });
 
+test('code-review-lane.md limits category to the names the engine knows', () => {
+  const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
+  const categories = flat.slice(flat.indexOf('CATEGORY:'), flat.indexOf('CONFIDENCE:'));
+  assert.ok(
+    categories.includes(
+      '`category` must be exactly one of these nine names: `correctness`, `security`, `data-integrity`, `testing`, `simplification`, `efficiency`, `reuse`, `altitude`, or `conventions`.',
+    ),
+    'the scorer may not invent a category name',
+  );
+  assert.ok(
+    categories.includes('a cleanup finding must use one of these five names'),
+    'an invented cleanup name would dodge the engine cap',
+  );
+  assert.ok(flat.includes('every `category` is one of the nine names'), 'the self-check repeats the rule');
+});
+
 test('code-review-lane.md says how the proof matches each drop to its raw finding', () => {
   const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
   for (const needle of [
