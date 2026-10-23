@@ -67,23 +67,11 @@ function reviewerTag(agent, slice, model) {
   return 'trigger';
 }
 
-function formatStartup({
-  options,
-  plan,
-  sliceManifest,
-  configAgents,
-  scopeLabel,
-  ciFilesPresent,
-}) {
-  const withSource = (o) => `${o.value} (${o.source})`;
-  const head = ['agent-review', `engine: ${withSource(options.engine)}`];
-  if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
-  const { requested, resolved } = plan.mode;
-  head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
-  head.push(`scope: ${scopeLabel || 'full review'}`);
+const MAX_FINDINGS_RESET_NOTE =
+  'this run passes --max-findings default, which resets any /code-review limit you set earlier in this Claude Code session.';
 
+function reviewerList({ plan, sliceManifest, configAgents, model }) {
   const manifest = sliceManifest || {};
-  const model = options.model && options.model.value;
   const reviewers = plan.agents.map(
     (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`,
   );
@@ -93,13 +81,41 @@ function formatStartup({
     if (a.enabled === false || planned.has(a.id) || replaced.has(a.id)) continue;
     reviewers.push(`${a.id} [skipped: no trigger matched]`);
   }
+  return reviewers.join(', ');
+}
 
-  const lines = [head.join(' \u00b7 '), `reviewers: ${reviewers.join(', ')}`];
+// `mode` is the mode after the review skill's auto resolution, which can differ from the plan's.
+function formatStartup({
+  options,
+  plan,
+  sliceManifest,
+  configAgents,
+  scopeLabel,
+  ciFilesPresent,
+  mode,
+}) {
+  const withSource = (o) => `${o.value} (${o.source})`;
+  const head = ['agent-review', `engine: ${withSource(options.engine)}`];
+  if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
+  const { requested } = plan.mode;
+  const resolved = mode || plan.mode.resolved;
+  head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
+  head.push(`scope: ${scopeLabel || 'full review'}`);
+
+  const model = options.model && options.model.value;
+  const reviewers =
+    resolved === 'skip'
+      ? 'none (no-risk diff skipped)'
+      : reviewerList({ plan, sliceManifest, configAgents, model });
+
+  const lines = [head.join(' \u00b7 '), `reviewers: ${reviewers}`];
   if (options.engine.value === 'agent-review' && DEFAULT_ENGINE_MODE_NOTES[resolved])
     lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
-  if (options.engine.value === 'code-review' && options.maxFindings)
+  if (options.engine.value === 'code-review')
     lines.push(
-      `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`,
+      options.maxFindings
+        ? `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`
+        : `note: ${MAX_FINDINGS_RESET_NOTE}`,
     );
   for (const n of options.notes || []) lines.push(`note: ${n}`);
   if (options.reviewsRun.value === 'local' && ciFilesPresent)

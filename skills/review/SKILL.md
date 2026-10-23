@@ -391,14 +391,6 @@ agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
   --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
 cat /tmp/slice_manifest.json
 
-# --- Start-up line: the options this run uses, where each came from, and the planned reviewers ---
-if [ -n "$INCREMENTAL" ]; then
-  STARTUP_SCOPE="since $(git rev-parse --short "$LAST_REVIEWED") (re-review)"
-else
-  STARTUP_SCOPE="full review"
-fi
-agent-review startup --options /tmp/review_options.json --plan /tmp/review_plan.json --slices /tmp/slice_manifest.json --scope "$STARTUP_SCOPE"
-
 # A second plan covers the full PR and is the source of truth for governance:
 # displayed risk, required reviewer, and the machine-readable approval status.
 if [ "$FULL_RANGE" = "$RANGE" ]; then
@@ -439,11 +431,7 @@ for (const repo of context.repositories || []) {
 NODE
 ```
 
-Show the user the start-up lines (`agent-review · engine: …`, `reviewers: …`, and any `note:`
-lines) exactly as printed. They state the options this run uses and where each came from. Under
-the `code-review` engine the `reviewers:` line is exactly who will review, so never restate it
-from memory. Under the `agent-review` engine it lists the plan's lanes; Stage 0B still decides the
-final launch list, and a `note:` line says when quick or deep changes it.
+The start-up line prints after **Auto Mode Resolution** below, once the final mode is known.
 
 Paths listed under `excluded_paths` in config (`agent-review config get excluded_paths`) are
 excluded from risk scoring and agent selection by the engine — agents should not raise findings
@@ -613,7 +601,8 @@ a finding. Never search outside those roots.
 ### Auto Mode Resolution
 
 **Only when `MODE` is `auto`.** The placeholder mode is resolved here, from the engine's risk
-score — never from your own judgment of the diff:
+score — never from your own judgment of the diff. The same block then prints the start-up line in
+every mode, with the final mode:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
@@ -698,7 +687,22 @@ if [ "$MODE" = "auto" ]; then
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE"
 EOF
 fi
+
+# --- Start-up line, in every mode: the options this run uses, where each came from, the final
+# mode, and the planned reviewers ---
+if [ -n "$INCREMENTAL" ]; then
+  STARTUP_SCOPE="since $(git rev-parse --short "$LAST_REVIEWED") (re-review)"
+else
+  STARTUP_SCOPE="full review"
+fi
+agent-review startup --options /tmp/review_options.json --plan /tmp/review_plan.json --slices /tmp/slice_manifest.json --scope "$STARTUP_SCOPE" --mode "$MODE"
 ```
+
+Show the user the start-up lines (`agent-review · engine: …`, `reviewers: …`, and any `note:`
+lines) exactly as printed. Under the `code-review` engine the `reviewers:` line is exactly who
+will review, so never restate it from memory. Under the `agent-review` engine it lists the plan's
+lanes; Stage 0B still decides the final launch list, and a `note:` line says when quick or deep
+changes it. On a real skip the `reviewers:` line reads `none (no-risk diff skipped)`.
 
 If auto resolved to `skip`: in CI, run the **[CI Mode posting step](#post-the-report-to-the-pr-create-or-update)**
 with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally

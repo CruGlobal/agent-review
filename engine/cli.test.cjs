@@ -640,6 +640,70 @@ test('the reserved code-review id fails config validate only under the code-revi
   }
 });
 
+function startupRoot({ reviewsRun, workflows = [] } = {}) {
+  const root = optionsRoot();
+  if (reviewsRun) {
+    const configPath = join(root, 'rd', 'config.yml');
+    writeFileSync(configPath, `${readFileSync(configPath, 'utf8')}reviews_run: ${reviewsRun}\n`);
+  }
+  mkdirSync(join(root, '.github/workflows'), { recursive: true });
+  for (const name of workflows) writeFileSync(join(root, '.github/workflows', name), 'name: x\n');
+  const options = run(['options', '--args', 'auto', '--root', root, '--review-dir', 'rd']);
+  writeFileSync(join(root, 'options.json'), options.s);
+  writeFileSync(join(root, 'plan.json'), JSON.stringify({
+    mode: { requested: 'auto', resolved: 'skip' },
+    agents: [{ id: 'standards', matchedBy: 'always' }],
+  }));
+  return root;
+}
+
+const startupArgs = (root, ...extra) => [
+  'startup', '--options', join(root, 'options.json'), '--plan', join(root, 'plan.json'),
+  '--root', root, '--review-dir', 'rd', ...extra,
+];
+
+test('startup --mode shows the final mode, and a real skip lists no reviewers', () => {
+  const root = startupRoot();
+  try {
+    const skip = run(startupArgs(root, '--mode', 'skip'));
+    assert.equal(skip.code, 0, skip.s);
+    const [l1, l2] = skip.s.split('\n');
+    assert.match(l1, / · mode: auto → skip · /);
+    assert.equal(l2, 'reviewers: none (no-risk diff skipped)');
+
+    const standard = run(startupArgs(root, '--mode', 'standard'));
+    assert.equal(standard.code, 0, standard.s);
+    assert.match(standard.s, / · mode: auto → standard · /);
+    assert.match(standard.s.split('\n')[1], /^reviewers: standards \[always\]/);
+
+    const bad = run(startupArgs(root, '--mode', 'auto'));
+    assert.equal(bad.code, 1);
+    assert.equal(bad.s, 'error: unknown final mode "auto" (use skip/quick/standard/deep)\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('startup notes leftover CI files when any of the three CI workflows remains', () => {
+  const NOTE = 'note: this repo is local-only but still has CI review workflows';
+  for (const name of ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml']) {
+    const root = startupRoot({ reviewsRun: 'local', workflows: [name, 'agent-review-approve.yml'] });
+    try {
+      const r = run(startupArgs(root, '--mode', 'standard'));
+      assert.equal(r.code, 0, r.s);
+      assert.ok(r.s.includes(NOTE), name);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+  const approveOnly = startupRoot({ reviewsRun: 'local', workflows: ['agent-review-approve.yml'] });
+  try {
+    assert.ok(!run(startupArgs(approveOnly, '--mode', 'standard')).s.includes(NOTE), 'the approve workflow is not a CI review');
+  } finally {
+    rmSync(approveOnly, { recursive: true, force: true });
+  }
+});
+
 test('code-review-proof exit codes', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
   try {

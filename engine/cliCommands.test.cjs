@@ -232,7 +232,7 @@ test('startup: code-review engine warns when max_findings is set', () => {
   }
   const unset = startupInput();
   unset.options.maxFindings = null;
-  assert.ok(!formatStartup(unset).includes('--max-findings'));
+  assert.ok(!formatStartup(unset).includes('is passed to /code-review on every run'));
   const other = defaultEngineInput('standard');
   other.options.maxFindings = { value: 15, source: 'config' };
   assert.ok(!formatStartup(other).includes('--max-findings'), 'the agent-review engine never passes the flag');
@@ -256,9 +256,63 @@ test('startup: coverage lanes', () => {
 
 test('startup: notes', () => {
   const input = startupInput();
+  input.options.maxFindings = { value: 15, source: 'config' };
   input.options.notes = ['first', 'second'];
   const lines = formatStartup(input).split('\n');
-  assert.deepEqual(lines.slice(2), ['note: first', 'note: second']);
+  assert.deepEqual(lines.slice(3), ['note: first', 'note: second']);
+});
+
+const RESET_NOTE =
+  'note: this run passes --max-findings default, which resets any /code-review limit you set earlier in this Claude Code session.';
+
+test('startup: code-review engine says when it resets the remembered --max-findings limit', () => {
+  for (const maxFindings of [null, undefined]) {
+    const input = startupInput();
+    input.options.maxFindings = maxFindings;
+    const lines = formatStartup(input).split('\n');
+    assert.ok(lines.includes(RESET_NOTE), String(maxFindings));
+    assert.ok(!lines.some((l) => l.startsWith('note: --max-findings ')), String(maxFindings));
+  }
+  const set = startupInput();
+  set.options.maxFindings = { value: 15, source: 'config' };
+  const lines = formatStartup(set).split('\n');
+  assert.ok(lines.includes(maxFindingsNote(15)));
+  assert.ok(!lines.includes(RESET_NOTE), 'a set limit keeps the existing note only');
+  assert.ok(!formatStartup(defaultEngineInput('standard')).includes('--max-findings'), 'the agent-review engine never passes the flag');
+});
+
+test('startup: the final mode replaces the plan\'s resolved mode', () => {
+  const input = startupInput({ mode: 'standard' });
+  input.plan.mode = { requested: 'auto', resolved: 'skip' };
+  const [l1, l2] = formatStartup(input).split('\n');
+  assert.match(l1, / · mode: auto → standard · /, 'auto with static findings runs standard, not skip');
+  assert.match(l2, /^reviewers: code-review \[opus\], security \[always\]/);
+
+  const quick = defaultEngineInput('standard');
+  quick.plan.mode = { requested: 'auto', resolved: 'standard' };
+  quick.mode = 'quick';
+  const lines = formatStartup(quick).split('\n');
+  assert.match(lines[0], / · mode: auto → quick · /);
+  assert.ok(lines.includes(QUICK_NOTE), 'the mode notes follow the final mode');
+
+  const same = defaultEngineInput('deep');
+  same.mode = 'deep';
+  assert.match(formatStartup(same).split('\n')[0], / · mode: deep · /);
+});
+
+test('startup: a real skip lists no reviewers', () => {
+  for (const engine of ['code-review', 'agent-review']) {
+    const input = engine === 'code-review' ? startupInput() : defaultEngineInput('standard');
+    input.plan.mode = { requested: 'auto', resolved: 'skip' };
+    input.mode = 'skip';
+    const lines = formatStartup(input).split('\n');
+    assert.match(lines[0], / · mode: auto → skip · /, engine);
+    assert.equal(lines[1], 'reviewers: none (no-risk diff skipped)', engine);
+    assert.ok(!lines.includes(QUICK_NOTE) && !lines.includes(DEEP_NOTE), engine);
+  }
+  const unresolved = startupInput();
+  unresolved.plan.mode = { requested: 'auto', resolved: 'skip' };
+  assert.equal(formatStartup(unresolved).split('\n')[1], 'reviewers: none (no-risk diff skipped)', 'with no --mode the plan\'s skip counts');
 });
 
 test('startup: leftover CI files', () => {

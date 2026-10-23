@@ -1617,21 +1617,33 @@ test('review skill wires the code-review engine', () => {
   }
 
   const buildPlan = stageSlice(skill, '### Build the Review Plan & Load Evidence', '## CI Mode');
-  const startup = commandsIn(bashBlocks(buildPlan), 'agent-review startup');
-  assert.strictEqual(startup.length, 1, 'the plan block prints the start-up line once');
+  assert.strictEqual(commandsIn(bashBlocks(buildPlan), 'agent-review startup').length, 0, 'the plan block no longer prints the start-up line');
+  assert.ok(bashBlocks(buildPlan).includes('agent-review slice'), 'the plan block must slice the diff');
+  const startup = commandsIn(bash, 'agent-review startup');
+  assert.strictEqual(startup.length, 1, 'the skill prints the start-up line once');
   for (const part of [
     '--options /tmp/review_options.json',
     '--plan /tmp/review_plan.json',
     '--slices /tmp/slice_manifest.json',
     '--scope "$STARTUP_SCOPE"',
+    '--mode "$MODE"',
   ]) {
     assert.ok(startup[0].includes(part), `startup call lacks ${part}`);
   }
-  const sliceCall = bashBlocks(buildPlan).indexOf('agent-review slice');
-  const startupCall = bashBlocks(buildPlan).indexOf('agent-review startup');
-  assert.notStrictEqual(sliceCall, -1, 'the plan block must slice the diff');
-  assert.notStrictEqual(startupCall, -1, 'the plan block must print the start-up line');
-  assert.ok(sliceCall < startupCall, 'the start-up line reads the slice manifest, so it prints after slicing');
+  const autoSection = stageSlice(skill, '### Auto Mode Resolution', '### Risk Assessment');
+  const autoBash = bashBlocks(autoSection);
+  const resolvedAt = autoBash.indexOf('MODE="$RESOLVED" AGENT_MODE="$RESOLVED"');
+  const startupAt = autoBash.indexOf('agent-review startup');
+  assert.ok(resolvedAt >= 0 && startupAt > resolvedAt, 'the start-up line prints after auto mode resolves');
+  const autoEnd = autoBash.indexOf('export MODE="$MODE" AGENT_MODE="$AGENT_MODE"\nEOF\nfi\n');
+  assert.ok(autoEnd >= 0 && startupAt > autoEnd, 'the start-up line prints after the auto-only branch closes, so in every mode');
+  const flatAuto = autoSection.replace(/\s+/g, ' ');
+  assert.ok(flatAuto.includes('The same block then prints the start-up line in every mode, with the final mode:'), flatAuto);
+  assert.ok(flatAuto.includes('On a real skip the `reviewers:` line reads `none (no-risk diff skipped)`.'));
+  assert.ok(
+    flatAuto.indexOf('agent-review startup') < flatAuto.indexOf('If auto resolved to `skip`:'),
+    'a skip still prints the start-up line before it stops',
+  );
 
   const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '### Smoke-Test Tier Routing').replace(/\s+/g, ' ');
   assert.match(

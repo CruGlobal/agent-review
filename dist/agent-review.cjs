@@ -19925,22 +19925,9 @@ var require_cliCommands = __commonJS({
       if (by === "unmatched-coverage") return "coverage";
       return "trigger";
     }
-    function formatStartup({
-      options,
-      plan,
-      sliceManifest,
-      configAgents,
-      scopeLabel,
-      ciFilesPresent
-    }) {
-      const withSource = (o) => `${o.value} (${o.source})`;
-      const head = ["agent-review", `engine: ${withSource(options.engine)}`];
-      if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
-      const { requested, resolved } = plan.mode;
-      head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
-      head.push(`scope: ${scopeLabel || "full review"}`);
+    var MAX_FINDINGS_RESET_NOTE = "this run passes --max-findings default, which resets any /code-review limit you set earlier in this Claude Code session.";
+    function reviewerList({ plan, sliceManifest, configAgents, model }) {
       const manifest = sliceManifest || {};
-      const model = options.model && options.model.value;
       const reviewers = plan.agents.map(
         (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`
       );
@@ -19950,12 +19937,32 @@ var require_cliCommands = __commonJS({
         if (a.enabled === false || planned.has(a.id) || replaced.has(a.id)) continue;
         reviewers.push(`${a.id} [skipped: no trigger matched]`);
       }
-      const lines = [head.join(" \xB7 "), `reviewers: ${reviewers.join(", ")}`];
+      return reviewers.join(", ");
+    }
+    function formatStartup({
+      options,
+      plan,
+      sliceManifest,
+      configAgents,
+      scopeLabel,
+      ciFilesPresent,
+      mode
+    }) {
+      const withSource = (o) => `${o.value} (${o.source})`;
+      const head = ["agent-review", `engine: ${withSource(options.engine)}`];
+      if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
+      const { requested } = plan.mode;
+      const resolved = mode || plan.mode.resolved;
+      head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
+      head.push(`scope: ${scopeLabel || "full review"}`);
+      const model = options.model && options.model.value;
+      const reviewers = resolved === "skip" ? "none (no-risk diff skipped)" : reviewerList({ plan, sliceManifest, configAgents, model });
+      const lines = [head.join(" \xB7 "), `reviewers: ${reviewers}`];
       if (options.engine.value === "agent-review" && DEFAULT_ENGINE_MODE_NOTES[resolved])
         lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
-      if (options.engine.value === "code-review" && options.maxFindings)
+      if (options.engine.value === "code-review")
         lines.push(
-          `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`
+          options.maxFindings ? `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.` : `note: ${MAX_FINDINGS_RESET_NOTE}`
         );
       for (const n of options.notes || []) lines.push(`note: ${n}`);
       if (options.reviewsRun.value === "local" && ciFilesPresent)
@@ -20064,6 +20071,8 @@ var require_cli = __commonJS({
       };
     }
     var MODES = ["auto", "quick", "standard", "deep"];
+    var FINAL_MODES = ["skip", "quick", "standard", "deep"];
+    var CI_REVIEW_WORKFLOWS = ["agent-review.yml", "agent-review-interact.yml", "agent-review-readiness.yml"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
@@ -20152,7 +20161,7 @@ var require_cli = __commonJS({
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
   options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
-  startup --options <f> --plan <f> [--slices <f>] [--scope <label>]   print the one-line engine, effort, and reviewers summary
+  startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
@@ -20251,6 +20260,11 @@ var require_cli = __commonJS({
         }
         case "startup": {
           try {
+            const mode = flag(rest, "--mode");
+            if (mode !== void 0 && !FINAL_MODES.includes(mode)) {
+              out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join("/")})`);
+              return 1;
+            }
             const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
             const slicesPath = flag(rest, "--slices");
             out(
@@ -20260,9 +20274,10 @@ var require_cli = __commonJS({
                 sliceManifest: slicesPath ? JSON.parse(readFileSync(slicesPath, "utf8")) : {},
                 configAgents: cfg.agents || [],
                 scopeLabel: flag(rest, "--scope"),
-                ciFilesPresent: existsSync(
-                  join(C.ROOT, ".github/workflows/agent-review.yml")
-                )
+                ciFilesPresent: CI_REVIEW_WORKFLOWS.some(
+                  (name) => existsSync(join(C.ROOT, ".github/workflows", name))
+                ),
+                mode
               })
             );
             return 0;

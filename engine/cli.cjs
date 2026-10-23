@@ -96,6 +96,8 @@ function ctx(argv) {
 // M1 (final review): `plan` and `run` validate the same mode vocabulary —
 // one constant, not two copies that can drift apart.
 const MODES = ['auto', 'quick', 'standard', 'deep'];
+const FINAL_MODES = ['skip', 'quick', 'standard', 'deep'];
+const CI_REVIEW_WORKFLOWS = ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
 function learningPaths(cfg, C) {
@@ -204,7 +206,7 @@ const USAGE = `usage: agent-review <command>
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
   options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
-  startup --options <f> --plan <f> [--slices <f>] [--scope <label>]   print the one-line engine, effort, and reviewers summary
+  startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
@@ -309,6 +311,11 @@ function main(rawArgv) {
     }
     case 'startup': {
       try {
+        const mode = flag(rest, '--mode');
+        if (mode !== undefined && !FINAL_MODES.includes(mode)) {
+          out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join('/')})`);
+          return 1;
+        }
         const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
         const slicesPath = flag(rest, '--slices');
         out(
@@ -320,9 +327,10 @@ function main(rawArgv) {
               : {},
             configAgents: cfg.agents || [],
             scopeLabel: flag(rest, '--scope'),
-            ciFilesPresent: existsSync(
-              join(C.ROOT, '.github/workflows/agent-review.yml'),
+            ciFilesPresent: CI_REVIEW_WORKFLOWS.some((name) =>
+              existsSync(join(C.ROOT, '.github/workflows', name)),
             ),
+            mode,
           }),
         );
         return 0;
