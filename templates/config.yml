@@ -214,20 +214,22 @@ context:
   enabled: false
   manifest: context/repositories.json
 
-# Review engine: agent-review | code-review.
+# Review engine: agent-review (the default) | code-review. Leave this block out for
+# agent-review. Uncomment it only for code-review: plugin 1.0.0 cannot load a config that has it.
 # code_review keys: effort low|medium|high|xhigh|max, model opus|sonnet|haiku,
 # replaces and always are lists of agent ids; max_findings is optional (an integer >= 1 or all).
-engine:
-  name: agent-review
-  code_review:
-    effort: xhigh
-    model: opus
-    replaces: [architecture, simplification]
-    always: [security, testing, standards]
-    # max_findings: 15   # optional; leave out to use /code-review's own cap
+# engine:
+#   name: code-review
+#   code_review:
+#     effort: xhigh
+#     model: opus
+#     replaces: [architecture, simplification]
+#     always: [security, testing, standards]
+#     # max_findings: 15   # optional; leave out to use /code-review's own cap
 
-# Where reviews run: local | local-and-ci.
-reviews_run: local-and-ci
+# Where reviews run: local | local-and-ci (the default). Leave this key out for local-and-ci.
+# Uncomment it only for local: plugin 1.0.0 cannot load a config that has it.
+# reviews_run: local
 
 # Reports approve by default (`advisory`). Set `shadow` to post advice only; the
 # review workflow refuses a caller whose rollout_mode disagrees with this value,

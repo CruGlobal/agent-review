@@ -1862,6 +1862,38 @@ test('init asks engine, where reviews run, and approval', () => {
   }
 });
 
+test('init writes engine and reviews_run only for a non-default answer', () => {
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  const flat = init.replace(/\s+/g, ' ');
+  assert.ok(
+    flat.includes('Write them only for a non-default answer: the `engine:` block only for the code-review engine, and `reviews_run: local` only for local only.'),
+    '3A writes the new keys only when they differ from the default',
+  );
+  assert.ok(flat.includes('a teammate on plugin 1.0.0 can still load a config that leaves them out'), '3A says why');
+  assert.ok(flat.includes('`agent-review`: write no `engine:` block'), 'the default engine writes nothing');
+  assert.ok(flat.includes('Write no `reviews_run:` key; `local-and-ci` is the default.'), 'local-and-ci writes nothing');
+  assert.ok(!flat.includes('write `engine.name: agent-review`'), 'the old default write is gone');
+
+  const blocks = [...init.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+  const guarded = blocks.filter((block) => block.includes('if [ "$REVIEWS_RUN" = "local-and-ci" ]; then'));
+  assert.equal(guarded.length, 2, 'the 3C copy block and the 3E git add block');
+  for (const block of guarded) {
+    const mapping = '[ "$REVIEWS_RUN" = "undefined" ] && REVIEWS_RUN=local-and-ci   # a missing key is the default';
+    assert.ok(block.includes(mapping), `a missing reviews_run still installs CI:\n${block}`);
+    assert.ok(block.indexOf('config get reviews_run') < block.indexOf(mapping), 'the mapping reads the config first');
+    assert.ok(block.indexOf(mapping) < block.indexOf('if [ "$REVIEWS_RUN"'), 'the mapping comes before the guard');
+  }
+  assert.ok(
+    flat.includes('The copies run only when the `reviews_run` just written to `config.yml` is `local-and-ci`, or is left out (the default, which `config get` prints as `undefined`); anything else, including an empty read, copies nothing:'),
+  );
+
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(
+    readme.includes('Repos that use the code-review engine or `reviews_run: local` need everyone on plugin 1.1.0 or later.'),
+    'README names the version floor',
+  );
+});
+
 test('init never copies or stages the CI workflows outside a local-and-ci guard', () => {
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const blocks = [...init.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);

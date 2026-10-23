@@ -267,10 +267,28 @@ test('loadConfig loads a code-review config whose default security lane is disab
   assert.doesNotThrow(() => loadFixtureWith({ agents: [...agents, { id: 'code-review' }] }), 'the reserved id loads');
 });
 
-test('template config still validates', () => {
+test('template config still validates, with the 1.1.0 keys left out', () => {
   const configPath = join(__dirname, '..', 'templates', 'config.yml');
   const cfg = loadConfig({ configPath, schemaPath });
-  assert.equal(cfg.engine.name, 'agent-review');
-  assert.equal(cfg.reviews_run, 'local-and-ci');
-  assert.ok(readFileSync(configPath, 'utf8').includes('reviews_run'));
+  assert.equal('engine' in cfg, false, 'plugin 1.0.0 cannot load a config with an engine key');
+  assert.equal('reviews_run' in cfg, false, 'plugin 1.0.0 cannot load a config with a reviews_run key');
+});
+
+test('the template\'s commented engine and reviews_run examples are valid once uncommented', () => {
+  const text = readFileSync(join(__dirname, '..', 'templates', 'config.yml'), 'utf8');
+  const lines = text.split('\n');
+  const start = lines.indexOf('# engine:');
+  const end = lines.indexOf('# reviews_run: local');
+  assert.ok(start >= 0 && end > start, 'the template shows both blocks as commented examples');
+  const example = new Set(lines.slice(start, end + 1).filter((line) => /^# (engine:|reviews_run:| {2})/.test(line)));
+  const live = lines.map((line) => (example.has(line) ? line.slice(2) : line)).join('\n');
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-template-'));
+  cpSync(join(__dirname, '..', 'templates', 'rules'), join(root, 'rules'), { recursive: true });
+  const configPath = join(root, 'config.yml');
+  writeFileSync(configPath, live);
+  const cfg = loadConfig({ configPath, schemaPath });
+  assert.equal(cfg.engine.name, 'code-review');
+  assert.deepEqual(cfg.engine.code_review.always, ['security', 'testing', 'standards']);
+  assert.deepEqual(cfg.engine.code_review.replaces, ['architecture', 'simplification']);
+  assert.equal(cfg.reviews_run, 'local');
 });

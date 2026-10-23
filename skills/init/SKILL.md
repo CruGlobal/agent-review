@@ -582,7 +582,12 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
   identified. Pin each to a full commit SHA and allowlist only relevant paths; never use a branch.
 - `rollout` — `advisory` (approving) with the skeleton's sample/quality thresholds; propose `shadow` only when the team asked for advice-only.
 - `learning` and `enforcement` — leave at the skeleton's defaults.
-- `engine:` and `reviews_run:` come from the three setup choices below, for example:
+- `engine:` and `reviews_run:` come from the three setup choices below. Write them only for a
+  non-default answer: the `engine:` block only for the code-review engine, and
+  `reviews_run: local` only for local only. The skeleton shows both as commented examples;
+  uncomment the one you need and fill it in. Leave the rest commented, so a teammate on plugin
+  1.0.0 can still load a config that leaves them out. For example, for code-review and local
+  only:
 
   ```yaml
   engine:
@@ -602,16 +607,16 @@ recommendation. Do not skip a question because the recommendation looks obvious.
      recommended `xhigh`) and the `always` list (recommended `security`, `testing`, `standards`).
      Then show which lanes it replaces (`engine.code_review.replaces`, default `architecture`
      and `simplification`) and which repo-specific lanes from the roster keep running on their
-     triggers. Write the answers to `engine.name: code-review` and `engine.code_review.effort`,
-     `.always`, `.replaces`. Leave `model` and `max_findings` at the skeleton's defaults.
-   - `agent-review`: write `engine.name: agent-review` and leave the `code_review` block at its
-     defaults.
+     triggers. Uncomment the skeleton's `engine:` example and write the answers to
+     `engine.name: code-review` and `engine.code_review.effort`, `.always`, `.replaces`. Leave
+     `model` and `max_findings` at the example's values.
+   - `agent-review`: write no `engine:` block; leave the skeleton's example commented.
 2. **Where reviews run.** Recommended: local only.
    - **Local only:** reviews run from `/agent-review:review`, and only the approval workflow is
      installed. No `ANTHROPIC_API_KEY` is needed. Write `reviews_run: local`.
    - **Local + CI:** CI also reviews labeled PRs, so all four workflows are installed and the
-     `ANTHROPIC_API_KEY` secret is needed. Costs API usage on every labeled PR. Write
-     `reviews_run: local-and-ci`.
+     `ANTHROPIC_API_KEY` secret is needed. Costs API usage on every labeled PR. Write no
+     `reviews_run:` key; `local-and-ci` is the default.
 3. **Should the bot approve PRs in this repo?** Recommended: yes. Recommend **no** for PCI-scope
    repos and for `staff_accounting_app`, which keep human review under team policy; say so when
    the repo looks like one of those. A yes means `auto_approve: true` on every installed caller,
@@ -704,11 +709,13 @@ printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 ```
 
 Then the CI workflows. The copies run only when the `reviews_run` just written to `config.yml` is
-exactly `local-and-ci`; anything else, including an empty read, copies nothing:
+`local-and-ci`, or is left out (the default, which `config get` prints as `undefined`); anything
+else, including an empty read, copies nothing:
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
 REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null)   # from the config written above
+[ "$REVIEWS_RUN" = "undefined" ] && REVIEWS_RUN=local-and-ci   # a missing key is the default
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
   cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
@@ -779,6 +786,7 @@ The cache regenerates on demand, so leave it out of the commit unless the team w
 ```bash
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
 REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null)   # from the config written above
+[ "$REVIEWS_RUN" = "undefined" ] && REVIEWS_RUN=local-and-ci   # a missing key is the default
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

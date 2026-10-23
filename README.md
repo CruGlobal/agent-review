@@ -146,6 +146,9 @@ engine:
 reviews_run: local               # local | local-and-ci (default: local-and-ci)
 ```
 
+Repos that use the code-review engine or `reviews_run: local` need everyone on plugin 1.1.0 or
+later.
+
 When `max_findings` is not set, the lane passes `--max-findings default`, which resets any limit
 you set earlier in the same Claude Code session.
 
