@@ -565,6 +565,20 @@ test('code-review-lane.md uses exactly the documented placeholders', () => {
   );
 });
 
+test('with no PR, /code-review gets the same range the lanes review', () => {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const bash = bashBlocks(skill);
+  assert.ok(
+    bash.includes('  elif [ -n "$PR_NUMBER" ]; then\n    CODE_REVIEW_TARGET="$PR_NUMBER"\n  else\n    CODE_REVIEW_TARGET="$RANGE"\n  fi'),
+    'the no-PR target is $RANGE',
+  );
+  assert.ok(!bash.includes('git branch --show-current'), 'a branch name lets /code-review pick its own base');
+  const row = skill.split('\n').find((line) => line.startsWith('| `{{TARGET}}`'));
+  assert.ok(row, 'the skill documents {{TARGET}}');
+  assert.ok(row.includes("`$RANGE`, the same range the lanes' diff uses, when no PR resolves"), row);
+  assert.ok(!row.includes('branch name'), row);
+});
+
 test('the lane always passes --max-findings, so a remembered /code-review limit never caps it', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const row = skill.split('\n').find((line) => line.startsWith('| `{{MAX_FINDINGS_FLAG}}`'));

@@ -858,8 +858,7 @@ if [ "${ENGINE:-}" = "code-review" ]; then
   elif [ -n "$PR_NUMBER" ]; then
     CODE_REVIEW_TARGET="$PR_NUMBER"
   else
-    CODE_REVIEW_TARGET="$(git branch --show-current)"
-    CODE_REVIEW_TARGET="${CODE_REVIEW_TARGET:-$RANGE}"
+    CODE_REVIEW_TARGET="$RANGE"
   fi
   echo "code-review target: $CODE_REVIEW_TARGET"
 fi
@@ -951,7 +950,7 @@ fill its eight placeholders:
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `/tmp/review_env.sh`.                                                                                                                        |
-| `{{TARGET}}`              | The `code-review target:` value printed by the block above: `$LAST_REVIEWED..$HEAD_REF` for an incremental review, `$PR_NUMBER` for a full review, or the current branch name when no PR resolves. |
+| `{{TARGET}}`              | The `code-review target:` value printed by the block above: `$LAST_REVIEWED..$HEAD_REF` for an incremental review, `$PR_NUMBER` for a full review, or `$RANGE`, the same range the lanes' diff uses, when no PR resolves. |
 | `{{MAX_FINDINGS_FLAG}}`   | ` --max-findings <n>`, with its leading space, when `plan.engine.maxFindings` is set (`<n>` is that value). ` --max-findings default`, with its leading space, when it is `null`: /code-review remembers a developer's last `--max-findings` choice, and leaving the flag out would let that choice cap this lane. |
 | `{{RISK_CONTEXT}}`        | The same bullet block as the archetype's `{{RISK_CONTEXT}}`, for this lane (`Selected because: engine`, `Model tier: <its tier>`).                                                               |
 | `{{DIFF_PATH}}`           | `/tmp/pr_diff.txt`. This lane is `always: true`, so it always gets the whole diff, never a slice.                                                                                                |
