@@ -955,7 +955,7 @@ fill its eight placeholders:
 | `{{MAX_FINDINGS_FLAG}}`   | ` --max-findings <n>`, with its leading space, when `plan.engine.maxFindings` is set (`<n>` is that value). ` --max-findings default`, with its leading space, when it is `null`: /code-review remembers a developer's last `--max-findings` choice, and leaving the flag out would let that choice cap this lane. |
 | `{{RISK_CONTEXT}}`        | The same bullet block as the archetype's `{{RISK_CONTEXT}}`, for this lane (`Selected because: engine`, `Model tier: <its tier>`).                                                               |
 | `{{DIFF_PATH}}`           | `/tmp/pr_diff.txt`. This lane is `always: true`, so it always gets the whole diff, never a slice.                                                                                                |
-| `{{SCORING_RULES}}`       | The lane's `rules[]` (the replaced lanes' rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.                                                          |
+| `{{SCORING_RULES}}`       | The lane's `rules[]` (the `path_rules` this diff matches, then each enabled replaced lane's rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.       |
 | `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** above), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
 

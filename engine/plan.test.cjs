@@ -260,3 +260,29 @@ test('code-review: quick mode keeps the lane list', () => {
     if (!a.escalates && a.model === 'smart') assert.equal(a.tier, 'haiku');
   }
 });
+
+test('code-review: path_rules reach the lane, even with nothing replaced', () => {
+  const cfg = { ...crConfig, path_rules: [{ paths: ['src/other/**'], rules: ['rules/other.md'] }] };
+  const none = buildPlan({ ...crInput, options: crOptions({ replaces: [] }) }, cfg);
+  assert.equal(none.agents[0].id, 'code-review');
+  assert.deepEqual(none.agents[0].rules, ['rules/other.md']);
+
+  const replaced = buildPlan({ ...crInput, options: crOptions() }, cfg);
+  assert.deepEqual(
+    replaced.agents[0].rules,
+    ['rules/other.md', 'rules/architecture.md', 'rules/simplification.md'],
+    'deduplicated, in first-seen order',
+  );
+
+  const unmatched = buildPlan({ ...crInput, files: ['lib/a.ts'], options: crOptions({ replaces: [] }) }, cfg);
+  assert.deepEqual(unmatched.agents[0].rules, [], 'a path rule applies only when a changed file matches');
+});
+
+test('code-review: a disabled replaced lane lends the lane no rules', () => {
+  const cfg = {
+    ...crConfig,
+    agents: crConfig.agents.map((a) => (a.id === 'simplification' ? { ...a, enabled: false } : a)),
+  };
+  const plan = buildPlan({ ...crInput, options: crOptions() }, cfg);
+  assert.deepEqual(plan.agents[0].rules, ['rules/architecture.md']);
+});

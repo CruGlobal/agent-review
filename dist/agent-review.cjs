@@ -17309,9 +17309,12 @@ var require_plan = __commonJS({
         };
       }
       const agentById = new Map(config.agents.map((a) => [a.id, a]));
+      const sources = [
+        "code-review",
+        ...engine.replaces.filter((id) => agentById.has(id) && agentById.get(id).enabled !== false)
+      ];
       const rules = [];
-      for (const id of engine.replaces) {
-        if (!agentById.has(id)) continue;
+      for (const id of sources) {
         for (const r of resolveRules(id, files, config))
           if (!rules.includes(r)) rules.push(r);
       }
