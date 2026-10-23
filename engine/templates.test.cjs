@@ -2118,6 +2118,26 @@ test('the spec records the fixes made after the PR\'s /code-review run', () => {
   assert.ok(added.every((line) => !line.includes('—')), 'new prose uses no em dashes');
 });
 
+test('README and the spec record the third /code-review round', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(
+    readme.includes('- On every review, not only re-reviews, a reworded suggestion within 5 lines of an older open or dismissed finding from the same reviewer, in the same file and category, that says much the same thing is not added again, so the PR comment stops growing.'),
+    'location matching applies to every review and needs similar wording',
+  );
+  assert.ok(
+    readme.includes('- If another reviewer flags the same spot with a lower score, a proven 7 or more from any reviewer keeps its score through the merge instead of being averaged down.'),
+    'any lane\'s proven 7+ keeps its score',
+  );
+  assert.ok(!readme.includes('On a re-review, a reworded suggestion'), 'the re-review-only wording is gone');
+
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-21-code-review-engine-design.md'), 'utf8');
+  const round3 = spec.split('\n- ').find((item) => item.startsWith('A third /code-review run on the PR on 2026-10-23 (round 3)'));
+  assert.ok(round3, 'the spec has one round-3 amendment line');
+  const flat = round3.replace(/\s+/g, ' ');
+  for (const part of ['A:', 'B:', 'C:', 'D:', 'E:', 'F:']) assert.ok(flat.includes(` ${part} `), `round 3 covers ${part}`);
+  assert.ok(!round3.includes('\u2014'), 'new prose uses no em dashes');
+});
+
 test('the review skill matches ledger suggestions by location only under the code-review engine', () => {
   const usage = execFileSync(process.execPath, [join(ROOT, 'bin/agent-review'), 'help'], { encoding: 'utf8' });
   const ledgerUsage = usage.split('\n').find((line) => line.trim().startsWith('ledger '));

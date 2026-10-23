@@ -475,3 +475,17 @@ else stands.
   approves only when it reads exactly `agent-review` from a base commit it can find, so a missing
   base commit means no approval. Under the `code-review` engine, a proven 7+ from any lane keeps
   its score through a merge.
+- A third /code-review run on the PR on 2026-10-23 (round 3) changed six more. A: the proof fails
+  closed when any list-like fenced block does not qualify, ignores a JSON block that is not
+  list-like, and reads a bare finding line only when its file holds a `/` or a `.`, keeping a line
+  range in the location. B: the lane check fails a scored finding whose severity is not a number
+  from 1 to 10 or whose category is not one of the nine names, consensus drops a missing or
+  non-numeric code-review severity instead of clamping it to 1, and the lane drops findings on
+  `excluded_paths` with a proof the check verifies. C: ledger location matching also needs a
+  token Jaccard of 0.3 or more between the two messages. D: the engine's `always` checks and the
+  reserved `code-review` id apply only in `config validate` and when the `code-review` engine
+  runs, and the config template leaves `engine` and `reviews_run` out unless init needs them. E:
+  CI reads the engine through one composite action that outputs `unknown` instead of failing
+  when it cannot read the config. F: the start-up line prints after auto mode resolves, shows the
+  final mode and a skip, notes the `--max-findings` reset whenever `max_findings` is not set, and
+  notes any leftover CI workflow.
