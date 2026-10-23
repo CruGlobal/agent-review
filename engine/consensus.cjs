@@ -217,6 +217,13 @@ function toEntry(m) {
   };
 }
 
+// A combined entry's agent and severity come from an earlier merge, so only its
+// tracked `_codeReviewBlocker` counts; raw and singleton members are tested directly.
+function codeReviewBlockerOf(m) {
+  if (m._codeReviewBlocker !== undefined) return m._codeReviewBlocker;
+  return m.agent === CODE_REVIEW_LANE && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+}
+
 // Combines >=2 members (raw findings on first grouping, or already-combined
 // entries on a decisions merge) into one output entry per the group rules:
 // agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
@@ -224,6 +231,8 @@ function toEntry(m) {
 // per field), line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
+// Exception: a code-review member at 7+ that passes the blocker bar keeps its
+// severity when the mean would be lower, and is then the primary.
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
@@ -278,27 +287,38 @@ function combineMembers(members) {
   // Weighted by each member's own corroboration count (default 1 for a raw/singleton
   // member) — otherwise re-merging an already-corroborated group with a singleton via
   // `decisions` silently discounts the group's weight down to a single vote.
+  // A group raised by its code-review member is weighted at its own mean, so the
+  // raise is never counted twice.
   const weightedSum = ordered.reduce(
-    (sum, m) => sum + m.severity * (m.corroboration || 1),
+    (sum, m) =>
+      sum + (m._meanSeverity !== undefined ? m._meanSeverity : m.severity) * (m.corroboration || 1),
     0,
   );
-  const meanSeverity = weightedSum / corroboration;
+  const meanSeverity = Math.round(weightedSum / corroboration);
+  const crBlocker = ordered.reduce((best, m) => {
+    const candidate = codeReviewBlockerOf(m);
+    return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
+  }, null);
+  const raised = crBlocker !== null && crBlocker.severity > meanSeverity;
+  const lead = raised ? crBlocker : primary;
   return {
-    agent: primary.agent,
+    agent: lead.agent,
     agents: agents.join(','),
-    category: primary.category,
-    severity: Math.round(meanSeverity),
-    file: primary.file,
-    line: primary.line,
-    message: primary.message,
+    category: lead.category,
+    severity: raised ? crBlocker.severity : meanSeverity,
+    file: lead.file,
+    line: lead.line,
+    message: lead.message,
     confidence: bestConfidence.confidence,
     evidence: longestField('evidence'),
     recommendation: longestField('recommendation'),
-    fix: primary.fix,
+    fix: lead.fix,
     corroboration,
     needsHumanReview: maxSeverity - minSeverity >= 4,
     _minSeverity: minSeverity,
     _maxSeverity: maxSeverity,
+    _meanSeverity: meanSeverity,
+    _codeReviewBlocker: crBlocker,
   };
 }
 
@@ -405,7 +425,7 @@ function applyDecisions(entries, decisions) {
 }
 
 function stripInternal(entry) {
-  const { _minSeverity, _maxSeverity, ...rest } = entry;
+  const { _minSeverity, _maxSeverity, _meanSeverity, _codeReviewBlocker, ...rest } = entry;
   return rest;
 }
 

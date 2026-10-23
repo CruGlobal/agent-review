@@ -19309,6 +19309,10 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
+    function codeReviewBlockerOf(m) {
+      if (m._codeReviewBlocker !== void 0) return m._codeReviewBlocker;
+      return m.agent === CODE_REVIEW_LANE && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+    }
     function combineMembers(members) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
@@ -19341,26 +19345,34 @@ var require_consensus = __commonJS({
         ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
       const weightedSum = ordered.reduce(
-        (sum, m) => sum + m.severity * (m.corroboration || 1),
+        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
         0
       );
-      const meanSeverity = weightedSum / corroboration;
+      const meanSeverity = Math.round(weightedSum / corroboration);
+      const crBlocker = ordered.reduce((best, m) => {
+        const candidate = codeReviewBlockerOf(m);
+        return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
+      }, null);
+      const raised = crBlocker !== null && crBlocker.severity > meanSeverity;
+      const lead = raised ? crBlocker : primary;
       return {
-        agent: primary.agent,
+        agent: lead.agent,
         agents: agents.join(","),
-        category: primary.category,
-        severity: Math.round(meanSeverity),
-        file: primary.file,
-        line: primary.line,
-        message: primary.message,
+        category: lead.category,
+        severity: raised ? crBlocker.severity : meanSeverity,
+        file: lead.file,
+        line: lead.line,
+        message: lead.message,
         confidence: bestConfidence.confidence,
         evidence: longestField("evidence"),
         recommendation: longestField("recommendation"),
-        fix: primary.fix,
+        fix: lead.fix,
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity
+        _maxSeverity: maxSeverity,
+        _meanSeverity: meanSeverity,
+        _codeReviewBlocker: crBlocker
       };
     }
     function unionFind(n) {
@@ -19438,7 +19450,7 @@ var require_consensus = __commonJS({
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, _meanSeverity, _codeReviewBlocker, ...rest } = entry;
       return rest;
     }
     function consensusFrom({
