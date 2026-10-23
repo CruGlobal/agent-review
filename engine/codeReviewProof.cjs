@@ -110,11 +110,12 @@ function checkCodeReviewProof({ rawText }) {
   // A quoted `[]`, such as one in a suggested fix, must never replace a real list.
   const nonEmpty = lists.filter((list) => list.length > 0);
   if (nonEmpty.length > 0) return { ok: true, reason: 'ok', findings: nonEmpty[nonEmpty.length - 1] };
-  if (lists.length > 0) return { ok: true, reason: 'ok', findings: [] };
   const resultAt = outside.findIndex((line) => /^Result:/.test(line));
-  if (listBlocks.length > 0 || resultAt < 0) return noList;
-  const afterResult = outside.slice(resultAt + 1);
+  const afterResult = resultAt < 0 ? [] : outside.slice(resultAt + 1);
   const lines = textFindings(afterResult);
+  // An empty list must never erase finding lines.
+  if (lists.length > 0) return { ok: true, reason: 'ok', findings: lines };
+  if (listBlocks.length > 0 || resultAt < 0) return noList;
   if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
   if (afterResult.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: 'ok', findings: [] };
   return noList;

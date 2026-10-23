@@ -640,6 +640,10 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
     flat.includes('A later `[]`, such as one quoted in a fix, never replaces a real list.'),
     'an empty list counts only when no list block holds a finding',
   );
+  assert.ok(
+    flat.includes('the raw findings are the finding lines item 2 describes, or zero when there are none. An empty list never cancels a finding line.'),
+    'an empty list never erases finding lines',
+  );
   const json = flat.indexOf('The last list block that parses as an array of objects');
   const lines = flat.indexOf('One-line findings in the text after `Result:`');
   const none = flat.indexOf('A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found no finding lines');
@@ -655,7 +659,7 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
     'fences follow CommonMark',
   );
   assert.ok(
-    flat.includes('Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list block.'),
+    flat.includes("Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list block, except that item 1 uses item 2's finding lines when every list block it can use is empty."),
     'a broken JSON list fails closed instead of falling back to text',
   );
   assert.ok(

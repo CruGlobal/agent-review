@@ -410,6 +410,30 @@ test('an unlabeled code snippet neither qualifies nor stops the text parse', () 
   assert.equal(unclosed.reason, NEW_REASON);
 });
 
+test('an empty list never erases finding lines after Result:', () => {
+  const textFinding = [{
+    file: 'app.js',
+    line: 13,
+    summary: 'No fallback to user.name.',
+    failure_scenario: 'displayName({ name: "Ann" }) throws.',
+  }];
+  for (const empty of [block('json', '[]'), block('', '[]'), block('json', '{"findings":[]}')]) {
+    const r = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\nSuggested fix:\n${empty}` });
+    assert.equal(r.ok, true, empty);
+    assert.deepEqual(r.findings, textFinding, empty);
+  }
+
+  const lone = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nAll good.\n\n${block('json', '[]')}` });
+  assert.equal(lone.ok, true, 'a lone [] with no finding lines still passes');
+  assert.deepEqual(lone.findings, []);
+
+  const real = checkCodeReviewProof({
+    rawText: `${HEADER}\n\n${SECTIONED}\n\n${block('json', '[]')}\n${block('json', JSON.stringify(FINDINGS))}`,
+  });
+  assert.equal(real.ok, true);
+  assert.deepEqual(real.findings, FINDINGS, 'a non-empty JSON list still wins over finding lines');
+});
+
 test('a later [] never replaces a real findings list', () => {
   const real = block('json', JSON.stringify(FINDINGS));
   for (const empty of [block('json', '[]'), block('', '[]'), block('json', '{"findings":[]}')]) {
