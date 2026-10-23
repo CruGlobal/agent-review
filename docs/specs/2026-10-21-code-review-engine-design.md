@@ -203,11 +203,12 @@ settings could weaken both the recipe and the scoring. Its prompt is a new templ
 
 1. **Run `/code-review`** with the Skill tool, `skill: "code-review"` (the built-in, not the
    `code-review:code-review` plugin command), and `args: "<effort> <target>"`. Always pass the
-   effort level explicitly; goals 1 and 5 depend on it. Pass `--max-findings <n>` only when
-   `engine.code_review.max_findings` is set. The target is the PR number for a full review, or
-   `<last-reviewed sha>..<PR head sha>` for an incremental one. Never pass `--fix` or
-   `--comment`. Tell it not to hand off to any run or verify check, not to post anything, and not
-   to publish an artifact.
+   effort level explicitly; goals 1 and 5 depend on it. Pass `--max-findings <n>` when
+   `engine.code_review.max_findings` is set, and `--max-findings default` when it is not, so a
+   limit the developer set earlier in the session never caps the lane. The target is the PR
+   number for a full review, or `<last-reviewed sha>..<PR head sha>` for an incremental one.
+   Never pass `--fix` or `--comment`. Tell it not to hand off to any run or verify check, not to
+   post anything, and not to publish an artifact.
 2. **Save the raw output** (the `ReportFindings` call arguments or the JSON block) to
    `/tmp/code_review_raw.json` exactly as returned, plus the recipe's first line (its tag, for
    example `` `xhigh effort → 10 inline angles → dedup (no verify) → sweep → ≤15 findings` ``) so
@@ -461,7 +462,10 @@ else stands.
   findings advice, because a developer's local review merges the bot's ledger, so those findings
   carry into the local report.
 - On 2026-10-22, after the hands-on check, Justin decided two more. The ledger skips a reworded
-  suggestion (below 7) within 5 lines of an older entry in the same file and category, because
-  rewordings pushed the test PR's comment to 65,373 of GitHub's 65,536 bytes. A code-review 7+ that
-  passes the blocker bar keeps its severity and leads a merged group, because averaging let a
-  `financial` 4 pull a proven 7 down to 6.
+  suggestion (below 7) within 5 lines of an older open or dismissed entry from the same lane, in
+  the same file and category, because rewordings pushed the test PR's comment to 65,373 of
+  GitHub's 65,536 bytes. A code-review 7+ that passes the blocker bar keeps its severity and leads
+  a merged group, because averaging let a `financial` 4 pull a proven 7 down to 6.
+- Two details above changed after the PR's /code-review run on 2026-10-23: the lane always passes
+  `--max-findings` (`default` when it is not set), and the ledger's location match counts only
+  open or dismissed entries from the same lane.

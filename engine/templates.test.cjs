@@ -1775,6 +1775,30 @@ test('README names the self-written proof file as a known limitation', () => {
   assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
 });
 
+test('README says an unset max_findings resets a limit set earlier in the session', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const section = readme
+    .slice(readme.indexOf('## Use /code-review as the engine'), readme.indexOf('## Questions people ask'))
+    .replace(/\s+/g, ' ');
+  assert.ok(
+    section.includes('When `max_findings` is not set, the lane passes `--max-findings default`, which resets any limit you set earlier in the same Claude Code session.'),
+    'the README states the reset in one plain sentence',
+  );
+});
+
+test('the spec records the fixes made after the PR\'s /code-review run', () => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-21-code-review-engine-design.md'), 'utf8');
+  const flat = spec.replace(/\s+/g, ' ');
+  const section5 = spec.slice(spec.indexOf('### 5. The `code-review` lane'), spec.indexOf('### 6.')).replace(/\s+/g, ' ');
+  assert.ok(section5.includes('and `--max-findings default` when it is not'), 'section 5 always passes the flag');
+  assert.ok(!section5.includes('only when `engine.code_review.max_findings` is set'), 'section 5 drops the old rule');
+  const amendments = flat.slice(flat.indexOf('## Amendments after the spike'));
+  assert.ok(amendments.includes('within 5 lines of an older open or dismissed entry from the same lane, in the same file and category'));
+  assert.ok(amendments.includes("after the PR's /code-review run on 2026-10-23"), 'the amendments date the change');
+  const added = spec.split('\n').filter((line) => line.includes('2026-10-23') || line.includes('--max-findings default'));
+  assert.ok(added.every((line) => !line.includes('—')), 'new prose uses no em dashes');
+});
+
 test('the review skill matches ledger suggestions by location only under the code-review engine', () => {
   const usage = execFileSync(process.execPath, [join(ROOT, 'bin/agent-review'), 'help'], { encoding: 'utf8' });
   const ledgerUsage = usage.split('\n').find((line) => line.trim().startsWith('ledger '));

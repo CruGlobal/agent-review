@@ -146,6 +146,9 @@ engine:
 reviews_run: local               # local | local-and-ci (default: local-and-ci)
 ```
 
+When `max_findings` is not set, the lane passes `--max-findings default`, which resets any limit
+you set earlier in the same Claude Code session.
+
 Or turn it on for one run, with `review`, `re-review`, or `yolo-review`:
 
 ```
