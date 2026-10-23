@@ -161,8 +161,11 @@ function codeReviewCap(f) {
 // Applies only to the code-review lane, before validateFinding: cleanups,
 // out-of-range and doubted findings never block, and a 7+ that misses the
 // blocker bar is kept as a suggestion at the cap instead of being dropped by
-// validateFinding.
-function capCodeReviewFinding(f) {
+// validateFinding. Rounding must come first: the cap and the bar judge the
+// rounded severity.
+function capCodeReviewFinding(input) {
+  const fractional = Number.isFinite(input.severity) && !Number.isInteger(input.severity);
+  const f = fractional ? { ...input, severity: Math.round(input.severity) } : input;
   const cap = codeReviewCap(f);
   return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
 }

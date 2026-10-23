@@ -19344,7 +19344,9 @@ var require_consensus = __commonJS({
       if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
       return null;
     }
-    function capCodeReviewFinding(f) {
+    function capCodeReviewFinding(input) {
+      const fractional = Number.isFinite(input.severity) && !Number.isInteger(input.severity);
+      const f = fractional ? { ...input, severity: Math.round(input.severity) } : input;
       const cap = codeReviewCap(f);
       return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
     }

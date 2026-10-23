@@ -651,6 +651,24 @@ test('other lanes are unchanged', () => {
   assert.equal(dropped.stats.droppedInvalid.length, 1);
 });
 
+test('a fractional code-review severity is rounded before the cap and the bar', () => {
+  const { findings, stats } = runCr([
+    crFinding({ file: 'bar.rb', severity: 7.5 }),
+    crFinding({ file: 'nobar.rb', severity: 7.5, confidence: 'Medium', message: 'medium confidence here' }),
+    crFinding({ file: 'low.rb', severity: 5.4, message: 'a small gap in error handling' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'bar.rb': 8, 'nobar.rb': 6, 'low.rb': 5 });
+  assert.deepEqual(stats.droppedInvalid, []);
+});
+
+test('a fractional severity from another lane is still dropped', () => {
+  const { findings, stats } = runCr([crFinding({ severity: 7.5 })], 'correctness');
+  assert.equal(findings.length, 0);
+  assert.equal(stats.droppedInvalid.length, 1);
+  assert.match(stats.droppedInvalid[0].reason, /invalid severity: 7\.5/);
+});
+
 test('the code-review engine fails closed when the code-review lane was not launched', () => {
   const findingsByAgent = { security: [], 'code-review': [] };
   const plan = (ids) => ({ engine: { name: 'code-review' }, agents: ids.map((id) => ({ id })) });
