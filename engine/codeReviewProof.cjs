@@ -157,7 +157,8 @@ const CATEGORIES = [
   'altitude',
   'conventions',
 ];
-const EXCLUDED_PREFIX = 'excluded path: ';
+// Any spelling of the prefix is checked, so a variant cannot pass as an ordinary proof.
+const EXCLUDED_PROOF = /^\s*excluded path:(.*)$/is;
 
 function spot(file, line) {
   return line == null ? `${file}, no line` : `${file}:${line}`;
@@ -181,8 +182,9 @@ function scoredEntryProblem(entry, index) {
 
 // Globs match as selectAgents matches excluded_paths.
 function excludedDropProblem(entry, excludedPaths) {
-  if (!entry.proof.startsWith(EXCLUDED_PREFIX)) return null;
-  const glob = entry.proof.slice(EXCLUDED_PREFIX.length).trim();
+  const m = EXCLUDED_PROOF.exec(entry.proof);
+  if (!m) return null;
+  const glob = m[1].trim();
   if (!excludedPaths.includes(glob)) {
     return `cites excluded path ${JSON.stringify(glob)}, which is not in the config's excluded_paths`;
   }

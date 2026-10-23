@@ -18972,7 +18972,7 @@ var require_codeReviewProof = __commonJS({
       "altitude",
       "conventions"
     ];
-    var EXCLUDED_PREFIX = "excluded path: ";
+    var EXCLUDED_PROOF = /^\s*excluded path:(.*)$/is;
     function spot(file, line) {
       return line == null ? `${file}, no line` : `${file}:${line}`;
     }
@@ -18991,8 +18991,9 @@ var require_codeReviewProof = __commonJS({
       return null;
     }
     function excludedDropProblem(entry, excludedPaths) {
-      if (!entry.proof.startsWith(EXCLUDED_PREFIX)) return null;
-      const glob = entry.proof.slice(EXCLUDED_PREFIX.length).trim();
+      const m = EXCLUDED_PROOF.exec(entry.proof);
+      if (!m) return null;
+      const glob = m[1].trim();
       if (!excludedPaths.includes(glob)) {
         return `cites excluded path ${JSON.stringify(glob)}, which is not in the config's excluded_paths`;
       }

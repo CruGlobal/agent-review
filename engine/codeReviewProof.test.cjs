@@ -295,6 +295,12 @@ test('accounting: an excluded-path drop needs a configured glob that matches the
   assert.equal(mismatch.ok, false);
   assert.equal(mismatch.reason, 'the code-review dropped entry 1 (src/a.js:2) cites excluded path "dist/**", which src/a.js does not match');
 
+  for (const proof of ['Excluded path: dist/*', '  excluded path:dist/*', 'EXCLUDED PATH: dist/*']) {
+    const variant = dropCheck(raw, [drop('dist/app.js', 4, { proof })], [scoredAt('src/a.js', { line: 2 })], config);
+    assert.equal(variant.ok, false, `${proof} is still checked`);
+    assert.match(variant.reason, /cites excluded path "dist\/\*", which is not in the config's excluded_paths/);
+  }
+
   const elsewhere = dropCheck(raw, [excluded('dist/app.js', 9, 'dist/**')], [scoredAt('src/a.js', { line: 2 })], config);
   assert.equal(elsewhere.ok, false, 'an excluded-path drop still matches its own raw finding');
   assert.match(elsewhere.reason, /\(dist\/app\.js:9\) matches no raw/);
