@@ -1101,8 +1101,8 @@ check it against the findings file the agent actually wrote:
 - The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
   (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
   or `findings.length` does not equal the reported `<N>`.
-- **The `code-review` lane** must also prove `/code-review` ran, and that it scored or dropped
-  every raw finding. Each scored finding needs a numeric severity from 1 to 10 and one of the nine
+- **Under the `code-review` engine, the `code-review` lane** must also prove `/code-review` ran,
+  and that it scored or dropped every raw finding. Each scored finding needs a numeric severity from 1 to 10 and one of the nine
   category names, and an `excluded path: <glob>` drop needs a glob from `excluded_paths` that
   matches its file. Run
   `agent-review code-review-proof --raw /tmp/code_review_raw.txt --findings /tmp/agent_findings/code-review.json --dropped /tmp/code_review_dropped.json > /tmp/code_review_proof.json`.

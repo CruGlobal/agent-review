@@ -163,15 +163,16 @@ function isNumericSeverity(value) {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value));
 }
 
-// Applies only to the code-review lane, before validateFinding: cleanups,
-// out-of-range and doubted findings never block, and a 7+ that misses the
-// blocker bar is kept as a suggestion at the cap instead of being dropped by
-// validateFinding. Flooring and clamping must come first: the cap and the bar
-// judge the whole 1 to 10 severity, and a half point never makes a blocker.
-// The raw severity decides whether to clamp, since normalizeFinding turns a
-// missing or non-numeric one into 0, which validateFinding must still drop.
+// Applies only to the code-review lane under the code-review engine, before
+// validateFinding: cleanups, out-of-range and doubted findings never block, and
+// a 7+ that misses the blocker bar is kept as a suggestion at the cap instead of
+// being dropped by validateFinding. Flooring and clamping must come first: the
+// cap and the bar judge the whole 1 to 10 severity, and a half point never makes
+// a blocker.
+// The raw severity decides whether to clamp: one that is not a number or a
+// numeric string becomes 0, which validateFinding must drop.
 function capCodeReviewFinding(input, rawSeverity) {
-  if (!isNumericSeverity(rawSeverity)) return input;
+  if (!isNumericSeverity(rawSeverity)) return { ...input, severity: 0 };
   const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
   const f = severity === input.severity ? input : { ...input, severity };
   const cap = codeReviewCap(f);
@@ -232,11 +233,10 @@ function toEntry(m) {
 
 // A combined entry's agent and severity come from an earlier merge, so only its
 // tracked `_provenBlocker` counts; raw and singleton members are tested directly.
-// `anyLane` is true only under the code-review engine.
-function provenBlockerOf(m, anyLane) {
+function provenBlockerOf(m, codeReviewEngine) {
+  if (!codeReviewEngine) return null;
   if (m._provenBlocker !== undefined) return m._provenBlocker;
-  const counts = anyLane || m.agent === CODE_REVIEW_LANE;
-  return counts && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+  return m.severity >= 7 && !blockerBarFailure(m) ? m : null;
 }
 
 // Combines >=2 members (raw findings on first grouping, or already-combined
@@ -246,9 +246,9 @@ function provenBlockerOf(m, anyLane) {
 // per field), line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
-// Exception: a member at 7+ that passes the blocker bar keeps its severity when
-// the mean would be lower, and is then the primary. Under the code-review engine
-// a member of any lane qualifies; otherwise only a code-review member does.
+// Exception, under the code-review engine only: a member of any lane at 7+ that
+// passes the blocker bar keeps its severity when the mean would be lower, and is
+// then the primary.
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
@@ -256,7 +256,7 @@ function provenBlockerOf(m, anyLane) {
 // wins. reduce() with a strict `>` comparison always keeps the first member it
 // saw on a tie, so sorting a local copy of `members` by agent id ascending
 // first is sufficient to make every tie-break deterministic.
-function combineMembers(members, anyLane) {
+function combineMembers(members, codeReviewEngine) {
   const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
   const primary = ordered.reduce(
     (best, m) => (m.severity > best.severity ? m : best),
@@ -311,7 +311,7 @@ function combineMembers(members, anyLane) {
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
   const blocker = ordered.reduce((best, m) => {
-    const candidate = provenBlockerOf(m, anyLane);
+    const candidate = provenBlockerOf(m, codeReviewEngine);
     return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
   }, null);
   const raised = blocker !== null && blocker.severity > meanSeverity;
@@ -402,7 +402,7 @@ function buildCandidates(entries) {
 // they stay union-find: a `merge` decision is a deliberate instruction to
 // combine those two entries (and, transitively, anything else a decision also
 // merges them with), unlike the clique-restricted automatic pass above.
-function applyDecisions(entries, decisions, anyLane) {
+function applyDecisions(entries, decisions, codeReviewEngine) {
   if (!Array.isArray(decisions)) {
     throw new Error('consensus: decisions must be an array');
   }
@@ -435,7 +435,7 @@ function applyDecisions(entries, decisions, anyLane) {
     groupsByRoot.get(root).push(entries[i]);
   }
   return [...groupsByRoot.values()].map((members) =>
-    members.length === 1 ? members[0] : combineMembers(members, anyLane),
+    members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine),
   );
 }
 
@@ -480,7 +480,9 @@ function consensusFrom({
     for (const raw of perLane[laneId]) {
       const normalized = normalizeFinding(raw, laneId);
       const finding =
-        laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
+        codeReviewEngine && laneId === CODE_REVIEW_LANE
+          ? capCodeReviewFinding(normalized, raw.severity)
+          : normalized;
       const reason = validateFinding(finding);
       if (reason) {
         const messageSlice = String(finding.message || '').slice(0, 200);

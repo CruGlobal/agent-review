@@ -18379,7 +18379,7 @@ var require_consensus = __commonJS({
       return typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value));
     }
     function capCodeReviewFinding(input, rawSeverity) {
-      if (!isNumericSeverity(rawSeverity)) return input;
+      if (!isNumericSeverity(rawSeverity)) return { ...input, severity: 0 };
       const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
       const f = severity === input.severity ? input : { ...input, severity };
       const cap = codeReviewCap(f);
@@ -18416,12 +18416,12 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
-    function provenBlockerOf(m, anyLane) {
+    function provenBlockerOf(m, codeReviewEngine) {
+      if (!codeReviewEngine) return null;
       if (m._provenBlocker !== void 0) return m._provenBlocker;
-      const counts = anyLane || m.agent === CODE_REVIEW_LANE;
-      return counts && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+      return m.severity >= 7 && !blockerBarFailure(m) ? m : null;
     }
-    function combineMembers(members, anyLane) {
+    function combineMembers(members, codeReviewEngine) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
         (best, m) => m.severity > best.severity ? m : best,
@@ -18458,7 +18458,7 @@ var require_consensus = __commonJS({
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
       const blocker = ordered.reduce((best, m) => {
-        const candidate = provenBlockerOf(m, anyLane);
+        const candidate = provenBlockerOf(m, codeReviewEngine);
         return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
       }, null);
       const raised = blocker !== null && blocker.severity > meanSeverity;
@@ -18528,7 +18528,7 @@ var require_consensus = __commonJS({
       }
       return candidates;
     }
-    function applyDecisions(entries, decisions, anyLane) {
+    function applyDecisions(entries, decisions, codeReviewEngine) {
       if (!Array.isArray(decisions)) {
         throw new Error("consensus: decisions must be an array");
       }
@@ -18554,7 +18554,7 @@ var require_consensus = __commonJS({
         groupsByRoot.get(root).push(entries[i]);
       }
       return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members, anyLane)
+        (members) => members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine)
       );
     }
     function stripInternal(entry) {
@@ -18591,7 +18591,7 @@ var require_consensus = __commonJS({
       for (const laneId of laneIds) {
         for (const raw of perLane[laneId]) {
           const normalized = normalizeFinding(raw, laneId);
-          const finding = laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
+          const finding = codeReviewEngine && laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
           const reason = validateFinding(finding);
           if (reason) {
             const messageSlice = String(finding.message || "").slice(0, 200);

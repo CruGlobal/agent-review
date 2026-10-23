@@ -1670,6 +1670,10 @@ test('review skill wires the code-review engine', () => {
     'Stage 2 proves /code-review ran and that every raw finding was scored or dropped',
   );
   assert.ok(stage2.includes('`reason`'), 'a second proof failure prints the proof reason');
+  assert.ok(
+    stage2.replace(/\s+/g, ' ').includes('**Under the `code-review` engine, the `code-review` lane** must also prove `/code-review` ran'),
+    'a default-engine repo\'s own code-review lane is an ordinary lane',
+  );
 
   const stage3 = stageSlice(skill, '## Stage 3 — Cross-Examination Debate', '### Debate Prompt Template');
   assert.match(stage3, /ENGINE[^\n]*code-review/, 'debate is skipped under the code-review engine');

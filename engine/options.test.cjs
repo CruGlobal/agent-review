@@ -215,7 +215,7 @@ test('resolve: the code-review id is reserved only when the engine resolves to c
     assert.equal(resolveOptions({ args, config: cfg }).engine.value, 'agent-review', `${args} ${JSON.stringify(cfg.engine)}`);
   }
   const ci = resolveOptions({ args: '', config: { ...config, engine: { name: 'code-review' } }, ci: true });
-  assert.equal(ci.engine.value, 'agent-review', 'CI runs the default engine, where the id is an ordinary lane');
+  assert.equal(ci.engine.value, 'agent-review', 'CI falls back to the default engine, so the reserved id does not stop the run');
 });
 
 test('codeReviewEngineProblems lists every engine-only problem in config validate wording', () => {
