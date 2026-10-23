@@ -18241,18 +18241,32 @@ var require_learningsStore = __commonJS({
   }
 });
 
+// engine/unwrapFindings.cjs
+var require_unwrapFindings = __commonJS({
+  "engine/unwrapFindings.cjs"(exports2, module2) {
+    "use strict";
+    function unwrapFindings(value) {
+      if (Array.isArray(value)) return value;
+      if (value !== null && typeof value === "object" && Array.isArray(value.findings)) return value.findings;
+      return null;
+    }
+    module2.exports = { unwrapFindings };
+  }
+});
+
 // engine/reportState.cjs
 var require_reportState = __commonJS({
   "engine/reportState.cjs"(exports2, module2) {
     "use strict";
     var { signature } = require_findingSignature();
+    var { unwrapFindings } = require_unwrapFindings();
     var STATUSES = /* @__PURE__ */ new Set(["open", "fixed", "dismissed"]);
     var RISKS = /* @__PURE__ */ new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
     function findingList(input) {
-      if (Array.isArray(input)) return input;
-      if (input && Array.isArray(input.kept)) return input.kept;
-      if (input && Array.isArray(input.findings)) return input.findings;
-      throw new Error("findings must be an array or an object with kept/findings");
+      if (input && !Array.isArray(input) && Array.isArray(input.kept)) return input.kept;
+      const list = unwrapFindings(input);
+      if (!list) throw new Error("findings must be an array or an object with kept/findings");
+      return list;
     }
     function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
       const severity = Number(raw.severity);
@@ -18448,6 +18462,7 @@ var require_approval = __commonJS({
 var require_codeReviewProof = __commonJS({
   "engine/codeReviewProof.cjs"(exports2, module2) {
     "use strict";
+    var { unwrapFindings } = require_unwrapFindings();
     var FIX = "update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes";
     function fail(reason) {
       return { ok: false, reason, findings: [] };
@@ -18463,9 +18478,7 @@ var require_codeReviewProof = __commonJS({
       return value !== null && typeof value === "object" && !Array.isArray(value);
     }
     function asFindings(value) {
-      let list = null;
-      if (Array.isArray(value)) list = value;
-      else if (isPlainObject(value) && Array.isArray(value.findings)) list = value.findings;
+      const list = unwrapFindings(value);
       return list && list.every(isPlainObject) ? list : null;
     }
     var MARKER = String.raw`^\s*(?:[-*]|\d+\.)?\s*`;
@@ -18530,10 +18543,7 @@ var require_codeReviewProof = __commonJS({
     }
     function checkFindingAccounting({ count, findingsText, droppedText }) {
       const lane = findingsText == null ? null : parseJson(findingsText);
-      const value = lane && lane.value;
-      let scored = null;
-      if (Array.isArray(value)) scored = value;
-      else if (isPlainObject(value) && Array.isArray(value.findings)) scored = value.findings;
+      const scored = lane && unwrapFindings(lane.value);
       if (!scored) {
         return { ok: false, reason: "the code-review lane findings file is missing or has no findings list" };
       }
@@ -19180,6 +19190,7 @@ var require_evidence = __commonJS({
 var require_consensus = __commonJS({
   "engine/consensus.cjs"(exports2, module2) {
     "use strict";
+    var { unwrapFindings } = require_unwrapFindings();
     var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
     function confidenceRank(c) {
       return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
@@ -19216,8 +19227,8 @@ var require_consensus = __commonJS({
           );
         }
       }
-      if (Array.isArray(parsed)) return parsed;
-      if (parsed && Array.isArray(parsed.findings)) return parsed.findings;
+      const list = unwrapFindings(parsed);
+      if (list) return list;
       throw new Error(
         `findings for lane "${laneId}" must be an array or {findings:[...]}`
       );

@@ -1,5 +1,7 @@
 'use strict';
 
+const { unwrapFindings } = require('./unwrapFindings.cjs');
+
 const FIX =
   'update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes';
 
@@ -21,9 +23,7 @@ function isPlainObject(value) {
 }
 
 function asFindings(value) {
-  let list = null;
-  if (Array.isArray(value)) list = value;
-  else if (isPlainObject(value) && Array.isArray(value.findings)) list = value.findings;
+  const list = unwrapFindings(value);
   return list && list.every(isPlainObject) ? list : null;
 }
 
@@ -94,10 +94,7 @@ function parseJson(text) {
 // A null droppedText is a missing dropped file, which counts as zero drops.
 function checkFindingAccounting({ count, findingsText, droppedText }) {
   const lane = findingsText == null ? null : parseJson(findingsText);
-  const value = lane && lane.value;
-  let scored = null;
-  if (Array.isArray(value)) scored = value;
-  else if (isPlainObject(value) && Array.isArray(value.findings)) scored = value.findings;
+  const scored = lane && unwrapFindings(lane.value);
   if (!scored) {
     return { ok: false, reason: 'the code-review lane findings file is missing or has no findings list' };
   }

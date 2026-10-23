@@ -25,6 +25,8 @@
 // `buildCliques`) so the same input always groups the same way regardless of
 // input ordering (e.g. which agent's lane file was read first).
 
+const { unwrapFindings } = require('./unwrapFindings.cjs');
+
 const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
 
 function confidenceRank(c) {
@@ -79,8 +81,8 @@ function parseLane(value, laneId) {
       );
     }
   }
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed && Array.isArray(parsed.findings)) return parsed.findings;
+  const list = unwrapFindings(parsed);
+  if (list) return list;
   throw new Error(
     `findings for lane "${laneId}" must be an array or {findings:[...]}`,
   );

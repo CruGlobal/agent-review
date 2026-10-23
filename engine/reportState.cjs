@@ -1,15 +1,16 @@
 'use strict';
 
 const { signature } = require('./findingSignature.cjs');
+const { unwrapFindings } = require('./unwrapFindings.cjs');
 
 const STATUSES = new Set(['open', 'fixed', 'dismissed']);
 const RISKS = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
 
 function findingList(input) {
-  if (Array.isArray(input)) return input;
-  if (input && Array.isArray(input.kept)) return input.kept;
-  if (input && Array.isArray(input.findings)) return input.findings;
-  throw new Error('findings must be an array or an object with kept/findings');
+  if (input && !Array.isArray(input) && Array.isArray(input.kept)) return input.kept;
+  const list = unwrapFindings(input);
+  if (!list) throw new Error('findings must be an array or an object with kept/findings');
+  return list;
 }
 
 function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
