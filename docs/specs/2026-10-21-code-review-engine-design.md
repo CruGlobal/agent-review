@@ -469,3 +469,9 @@ else stands.
 - Two details above changed after the PR's /code-review run on 2026-10-23: the lane always passes
   `--max-findings` (`default` when it is not set), and the ledger's location match counts only
   open or dismissed entries from the same lane.
+- A second /code-review run on the PR on 2026-10-23 changed four more. The `engine.code_review`
+  lanes are validated only under the `code-review` engine. The `code-review` lane's scoring rules
+  come from the matching `path_rules` and the replaced lanes that exist and are enabled. CI
+  approves only when it reads exactly `agent-review` from a base commit it can find, so a missing
+  base commit means no approval. Under the `code-review` engine, a proven 7+ from any lane keeps
+  its score through a merge.
