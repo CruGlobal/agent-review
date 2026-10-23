@@ -460,3 +460,8 @@ else stands.
   agent-review's own reviewers, and only the local review can approve." It no longer calls CI's
   findings advice, because a developer's local review merges the bot's ledger, so those findings
   carry into the local report.
+- On 2026-10-22, after the hands-on check, Justin decided two more. The ledger skips a reworded
+  suggestion (below 7) within 5 lines of an older entry in the same file and category, because
+  rewordings pushed the test PR's comment to 65,373 of GitHub's 65,536 bytes. A code-review 7+ that
+  passes the blocker bar keeps its severity and leads a merged group, because averaging let a
+  `financial` 4 pull a proven 7 down to 6.

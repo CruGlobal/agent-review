@@ -179,6 +179,10 @@ same thing whichever engine found it. The rules:
 - Deleted findings are listed in the report, with the quote, so you can check the work.
 - On a re-review, a finding outside the new commits scores 6 at most. It shows up as a
   suggestion and cannot block you.
+- On a re-review, a reworded suggestion within 5 lines of an older finding in the same file and
+  category is not added again, so the PR comment stops growing.
+- If another reviewer flags the same spot with a lower score, a proven `/code-review` blocker
+  keeps its 7 or more instead of being averaged down.
 
 **It stops if `/code-review` did not really run.** If the saved output is missing or does not
 look like a `/code-review` result, the review stops and posts nothing. It never quietly falls
