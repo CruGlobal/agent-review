@@ -1,5 +1,5 @@
 'use strict';
-const { join, relative, dirname } = require('node:path');
+const { join, relative, dirname, resolve, isAbsolute } = require('node:path');
 const { execFileSync } = require('node:child_process');
 const {
   readFileSync,
@@ -621,7 +621,13 @@ function main(rawArgv) {
         return 1;
       }
       const readIfPresent = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
-      const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath) });
+      const fileExists = (p) => {
+        const target = resolve(C.ROOT, p);
+        const rel = relative(C.ROOT, target);
+        if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return false;
+        return existsSync(target) && statSync(target).isFile();
+      };
+      const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath), fileExists });
       let { ok, reason } = r;
       if (ok && findingsPath) {
         let excludedPaths;

@@ -66,19 +66,25 @@ function qualifyingList(block) {
   return list && list.every(hasFile) ? list : null;
 }
 
-const MARKER = String.raw`^\s*(?:[-*]|\d+\.)?\s*`;
+const MARKER = String.raw`^\s*(?:[-*]|\d+\.(?=\s))?\s*`;
 const TEXT = String.raw`\s*(\S.*?)\s*$`;
 const DASH = String.raw`(?:[\u2014\u2013]|\s-\s)`;
 const BACKTICKED_LINE = new RegExp(`${MARKER}\`([^\\s\`:]+):(\\d+)[^\`]*\`\\s*(?:${DASH}|:)${TEXT}`);
-// A bare location names a path (it holds a / or a .), and a range such as 12-15 right after the
-// line number belongs to the location.
+// A range such as 12-15 right after the line number belongs to the location.
 const BARE_LINE = new RegExp(
-  `${MARKER}((?=[^\\s\`:]*[./])[^\\s\`:]+):(\\d+)(?:[-\u2013\u2014]\\d+)?(?![-\u2013\u2014]?\\d)\\S*?\\s*${DASH}${TEXT}`,
+  `${MARKER}([^\\s\`:]+):(\\d+)(?:[-\u2013\u2014]\\d+)?(?![-\u2013\u2014]?\\d)\\S*?\\s*${DASH}${TEXT}`,
 );
 const SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
 const NO_FINDINGS_LINE = /^\s*(?:No findings\.|\(none\))\s*$/;
 
-function textFindings(lines) {
+// A bare location must name a path (a letter, and a / or a .), or a file that exists, so
+// "localhost:3000" and "127.0.0.1:3000" are not findings.
+function namesFile(file, fileExists) {
+  if (/[./]/.test(file) && /\p{L}/u.test(file)) return true;
+  return Boolean(fileExists && fileExists(file));
+}
+
+function textFindings(lines, fileExists) {
   const findings = [];
   for (const line of lines) {
     const scenario = SCENARIO_LINE.exec(line);
@@ -86,13 +92,14 @@ function textFindings(lines) {
       findings[findings.length - 1].failure_scenario = scenario[1];
       continue;
     }
-    const m = BACKTICKED_LINE.exec(line) || BARE_LINE.exec(line);
+    const bare = BARE_LINE.exec(line);
+    const m = BACKTICKED_LINE.exec(line) || (bare && namesFile(bare[1], fileExists) ? bare : null);
     if (m) findings.push({ file: m[1], line: Number(m[2]), summary: m[3] });
   }
   return findings;
 }
 
-function checkCodeReviewProof({ rawText }) {
+function checkCodeReviewProof({ rawText, fileExists }) {
   if (rawText === null || rawText === undefined || String(rawText).trim() === '') {
     return fail(`/code-review did not run: its raw output is missing. Fix: ${FIX}.`);
   }
@@ -117,7 +124,7 @@ function checkCodeReviewProof({ rawText }) {
   if (nonEmpty.length > 0) return { ok: true, reason: 'ok', findings: nonEmpty[nonEmpty.length - 1] };
   const resultAt = outside.findIndex((line) => /^Result:/.test(line));
   const afterResult = resultAt < 0 ? [] : outside.slice(resultAt + 1);
-  const lines = textFindings(afterResult);
+  const lines = textFindings(afterResult, fileExists);
   // An empty list must never erase finding lines.
   if (lists.length > 0) return { ok: true, reason: 'ok', findings: lines };
   if (resultAt < 0) return noList;

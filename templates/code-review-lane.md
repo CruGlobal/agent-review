@@ -69,10 +69,12 @@ list block is usable. Otherwise, try these in order and use the first that appli
    finding line.
 2. One-line findings in the text after `Result:`. A line is a finding when it reads `file:line`,
    then an em dash, an en dash, or ` - `, then the summary. `file:line` may be wrapped in
-   backticks, and the line may start with `-`, `*`, or `N.`. Without backticks, `file` must hold a
-   `/` or a `.`, so `localhost:3000 - ...` is not a finding. A range written right after the line
-   number with `-`, an en dash, or an em dash and no spaces, as in `src/a.js:12-15`, is part of
-   `file:line`, not the summary. A colon in place of the dash counts only when `file:line` is in
+   backticks, and the line may start with `-`, `*`, or `N.` followed by a space. Without
+   backticks, `file` must hold a letter and a `/` or a `.`, or name a file that exists in the
+   repository, so `localhost:3000 - ...` and `127.0.0.1:3000 - ...` are not findings, but
+   `Makefile:12 - ...` is when the repository has a `Makefile`. A range written right after the
+   line number with `-`, an en dash, or an em dash and no spaces, as in `src/a.js:12-15`, is part
+   of `file:line`, not the summary. A colon in place of the dash counts only when `file:line` is in
    backticks, as in ``N. `file:line`: summary``. An indented `Failure scenario: ...` line right
    after a finding is that finding's `failure_scenario`. Each raw finding is `file`, `line` (the
    first number), `summary`, and `failure_scenario` when given. Ignore lines that do not match.

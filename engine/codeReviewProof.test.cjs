@@ -711,3 +711,40 @@ test('a line range right after the line number is part of the location', () => {
   const dashed = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nsrc/a.js:12\u2013fix the branch\n` });
   assert.deepEqual(dashed.findings, [{ file: 'src/a.js', line: 12, summary: 'fix the branch' }], 'a dash before words is still the separator');
 });
+
+test('a numbered-list marker needs a space after its dot', () => {
+  const ip = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n127.0.0.1:3000 - is where the dev server listens\n` });
+  assert.equal(ip.ok, false, 'an address is not a numbered finding on file 0.0.1');
+  assert.equal(ip.reason, NEW_REASON);
+
+  const dated = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n2024.10/notes.md:3 - stale date\n` });
+  assert.deepEqual(dated.findings, [{ file: '2024.10/notes.md', line: 3, summary: 'stale date' }]);
+
+  const numbered = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n1. a.js:3 - off by one\n12.  src/b.js:4 - another\n` });
+  assert.deepEqual(numbered.findings, [
+    { file: 'a.js', line: 3, summary: 'off by one' },
+    { file: 'src/b.js', line: 4, summary: 'another' },
+  ]);
+});
+
+test('a bare location may name an existing file with no / or .', () => {
+  const exists = (names) => (path) => names.includes(path);
+  const make = checkCodeReviewProof({
+    rawText: `${HEADER}\n\nResult:\nMakefile:12 - the test target skips lint\nsrc/a.js:4 - a real one\n`,
+    fileExists: exists(['Makefile']),
+  });
+  assert.equal(make.ok, true);
+  assert.deepEqual(make.findings, [
+    { file: 'Makefile', line: 12, summary: 'the test target skips lint' },
+    { file: 'src/a.js', line: 4, summary: 'a real one' },
+  ]);
+
+  for (const line of ['localhost:3000 - is where the dev server listens', '127.0.0.1:3000 - the dev server']) {
+    const r = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n${line}\n`, fileExists: exists([]) });
+    assert.equal(r.ok, false, line);
+    assert.equal(r.reason, NEW_REASON, line);
+  }
+
+  const noCallback = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nMakefile:12 - x\nsrc/a.js:4 - y\n` });
+  assert.deepEqual(noCallback.findings.map((f) => f.file), ['src/a.js'], 'without the callback the path rule alone applies');
+});

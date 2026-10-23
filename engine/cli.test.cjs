@@ -704,6 +704,24 @@ test('startup notes leftover CI files when any of the three CI workflows remains
   }
 });
 
+test('code-review-proof reads a bare finding on an existing extensionless file under --root', () => {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-crproof-root-'));
+  try {
+    const raw = join(root, 'raw.txt');
+    writeFileSync(raw, 'Skill "code-review" completed (forked execution).\n\nResult:\nMakefile:12 - the test target skips lint\nsrc/a.js:4 - a real one\n');
+    const missing = run(['code-review-proof', '--raw', raw, '--root', root]);
+    assert.deepEqual(JSON.parse(missing.s), { ok: true, reason: 'ok', count: 1 }, 'no Makefile, so only the path-like line counts');
+    writeFileSync(join(root, 'Makefile'), 'all:\n');
+    const present = run(['code-review-proof', '--raw', raw, '--root', root]);
+    assert.deepEqual(JSON.parse(present.s), { ok: true, reason: 'ok', count: 2 });
+    mkdirSync(join(root, 'Dir'));
+    writeFileSync(raw, 'Skill "code-review" completed (forked execution).\n\nResult:\nDir:3 - a directory\n');
+    assert.equal(run(['code-review-proof', '--raw', raw, '--root', root]).code, 1, 'a directory is not a file');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('code-review-proof exit codes', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
   try {

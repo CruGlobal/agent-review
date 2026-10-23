@@ -672,9 +672,10 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
     'code examples and quoted config neither qualify nor stop the text parse',
   );
   assert.ok(
-    flat.includes('Without backticks, `file` must hold a `/` or a `.`, so `localhost:3000 - ...` is not a finding.'),
-    'a bare location must look like a path',
+    flat.includes('Without backticks, `file` must hold a letter and a `/` or a `.`, or name a file that exists in the repository, so `localhost:3000 - ...` and `127.0.0.1:3000 - ...` are not findings, but `Makefile:12 - ...` is when the repository has a `Makefile`.'),
+    'a bare location must look like a path or name an existing file',
   );
+  assert.ok(flat.includes('the line may start with `-`, `*`, or `N.` followed by a space.'), 'a numbered marker needs a space');
   assert.ok(
     flat.includes('A range written right after the line number with `-`, an en dash, or an em dash and no spaces, as in `src/a.js:12-15`, is part of `file:line`, not the summary.'),
     'a line range is part of the location',

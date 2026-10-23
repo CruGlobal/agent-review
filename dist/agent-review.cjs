@@ -18895,16 +18895,20 @@ var require_codeReviewProof = __commonJS({
       const list = parsed && unwrapFindings(parsed.value);
       return list && list.every(hasFile) ? list : null;
     }
-    var MARKER = String.raw`^\s*(?:[-*]|\d+\.)?\s*`;
+    var MARKER = String.raw`^\s*(?:[-*]|\d+\.(?=\s))?\s*`;
     var TEXT = String.raw`\s*(\S.*?)\s*$`;
     var DASH = String.raw`(?:[\u2014\u2013]|\s-\s)`;
     var BACKTICKED_LINE = new RegExp(`${MARKER}\`([^\\s\`:]+):(\\d+)[^\`]*\`\\s*(?:${DASH}|:)${TEXT}`);
     var BARE_LINE = new RegExp(
-      `${MARKER}((?=[^\\s\`:]*[./])[^\\s\`:]+):(\\d+)(?:[-\u2013\u2014]\\d+)?(?![-\u2013\u2014]?\\d)\\S*?\\s*${DASH}${TEXT}`
+      `${MARKER}([^\\s\`:]+):(\\d+)(?:[-\u2013\u2014]\\d+)?(?![-\u2013\u2014]?\\d)\\S*?\\s*${DASH}${TEXT}`
     );
     var SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
     var NO_FINDINGS_LINE = /^\s*(?:No findings\.|\(none\))\s*$/;
-    function textFindings(lines) {
+    function namesFile(file, fileExists) {
+      if (/[./]/.test(file) && new RegExp("\\p{L}", "u").test(file)) return true;
+      return Boolean(fileExists && fileExists(file));
+    }
+    function textFindings(lines, fileExists) {
       const findings = [];
       for (const line of lines) {
         const scenario = SCENARIO_LINE.exec(line);
@@ -18912,12 +18916,13 @@ var require_codeReviewProof = __commonJS({
           findings[findings.length - 1].failure_scenario = scenario[1];
           continue;
         }
-        const m = BACKTICKED_LINE.exec(line) || BARE_LINE.exec(line);
+        const bare = BARE_LINE.exec(line);
+        const m = BACKTICKED_LINE.exec(line) || (bare && namesFile(bare[1], fileExists) ? bare : null);
         if (m) findings.push({ file: m[1], line: Number(m[2]), summary: m[3] });
       }
       return findings;
     }
-    function checkCodeReviewProof({ rawText }) {
+    function checkCodeReviewProof({ rawText, fileExists }) {
       if (rawText === null || rawText === void 0 || String(rawText).trim() === "") {
         return fail(`/code-review did not run: its raw output is missing. Fix: ${FIX}.`);
       }
@@ -18939,7 +18944,7 @@ var require_codeReviewProof = __commonJS({
       if (nonEmpty.length > 0) return { ok: true, reason: "ok", findings: nonEmpty[nonEmpty.length - 1] };
       const resultAt = outside.findIndex((line) => /^Result:/.test(line));
       const afterResult = resultAt < 0 ? [] : outside.slice(resultAt + 1);
-      const lines = textFindings(afterResult);
+      const lines = textFindings(afterResult, fileExists);
       if (lists.length > 0) return { ok: true, reason: "ok", findings: lines };
       if (resultAt < 0) return noList;
       if (lines.length > 0) return { ok: true, reason: "ok", findings: lines };
@@ -19984,7 +19989,7 @@ var require_cliCommands = __commonJS({
 var require_cli = __commonJS({
   "engine/cli.cjs"(exports2, module2) {
     "use strict";
-    var { join, relative, dirname } = require("node:path");
+    var { join, relative, dirname, resolve, isAbsolute } = require("node:path");
     var { execFileSync } = require("node:child_process");
     var {
       readFileSync,
@@ -20555,7 +20560,13 @@ var require_cli = __commonJS({
             return 1;
           }
           const readIfPresent = (p) => existsSync(p) ? readFileSync(p, "utf8") : null;
-          const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath) });
+          const fileExists = (p) => {
+            const target = resolve(C.ROOT, p);
+            const rel = relative(C.ROOT, target);
+            if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return false;
+            return existsSync(target) && statSync(target).isFile();
+          };
+          const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath), fileExists });
           let { ok, reason } = r;
           if (ok && findingsPath) {
             let excludedPaths;
