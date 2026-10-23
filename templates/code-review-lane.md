@@ -48,37 +48,45 @@ looks like an error. If the Skill tool itself is missing or refuses the call, sa
 message instead. The review reads this file to prove /code-review ran.
 
 Then find the findings list. A fenced block starts at a line of three or more backticks or tildes,
-indented at most three spaces, and closes at a line of the same character at least as long. If the
-result has a fenced block that never closes, of any label, the output was cut short, and none of
-the shapes below applies. Otherwise, try these in order and use the first that applies. In them,
-a list block is a fenced block labeled `json`, or one with no label whose first non-blank
-character is `[` or `{`.
+indented at most three spaces, and closes at a line of the same character at least as long. A list
+block is a fenced block labeled `json`, or one with no label, that holds a findings list or starts
+like one: it parses as a JSON array or as a JSON object with a `findings` key, or it does not parse
+and its first non-blank character is `[`, or `{` with `"findings"` somewhere in the block. A list
+block is usable when it parses as an array of objects or as an object with a `findings` array of
+objects, where every object has a non-empty string `file`.
 
-1. The last list block that parses as an array of objects or as an object with a `findings` array
-   of objects, where every object has a non-empty string `file`, and that holds at least one
-   object. The raw findings are that array's entries. Each entry has `file`, `line`, `summary`,
-   and `failure_scenario`, and may also have `category` and `verdict`. A later `[]`, such as one
-   quoted in a fix, never replaces a real list. When every list block item 1 can use is empty
-   (`[]`, or an object with an empty `findings` array), the raw findings are the finding lines
-   item 2 describes, or zero when there are none. An empty list never cancels a finding line.
+If the result has a fenced block that never closes, of any label, the output was cut short, and
+none of the shapes below applies. If any list block is not usable, such as a list cut off partway,
+one with a `null` or missing `file`, or a quote of some file's contents shaped like a list, the
+findings list did not come through whole, and none of the shapes below applies, even when another
+list block is usable. Otherwise, try these in order and use the first that applies.
+
+1. The last list block that holds at least one object. The raw findings are that array's entries.
+   Each entry has `file`, `line`, `summary`, and `failure_scenario`, and may also have `category`
+   and `verdict`. A later `[]`, such as one quoted in a fix, never replaces a real list. When every
+   list block is empty (`[]`, or an object with an empty `findings` array), the raw findings are
+   the finding lines item 2 describes, or zero when there are none. An empty list never cancels a
+   finding line.
 2. One-line findings in the text after `Result:`. A line is a finding when it reads `file:line`,
    then an em dash, an en dash, or ` - `, then the summary. `file:line` may be wrapped in
-   backticks, and the line may start with `-`, `*`, or `N.`. A colon in place of the dash counts
-   only when `file:line` is in backticks, as in ``N. `file:line`: summary``. An indented
-   `Failure scenario: ...` line right after a finding is that finding's `failure_scenario`. Each
-   raw finding is `file`, `line` (the first number), `summary`, and `failure_scenario` when
-   given. Ignore lines that do not match. At least one matching line counts as a findings list.
+   backticks, and the line may start with `-`, `*`, or `N.`. Without backticks, `file` must hold a
+   `/` or a `.`, so `localhost:3000 - ...` is not a finding. A range written right after the line
+   number with `-`, an en dash, or an em dash and no spaces, as in `src/a.js:12-15`, is part of
+   `file:line`, not the summary. A colon in place of the dash counts only when `file:line` is in
+   backticks, as in ``N. `file:line`: summary``. An indented `Failure scenario: ...` line right
+   after a finding is that finding's `failure_scenario`. Each raw finding is `file`, `line` (the
+   first number), `summary`, and `failure_scenario` when given. Ignore lines that do not match.
+   At least one matching line counts as a findings list.
 3. A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found
    no finding lines. That means zero raw findings. A `(none)` under one heading never cancels a
    finding line under another. With no `Result:` line, neither item 2 nor item 3 applies.
 
 Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list
-block, except that item 1 uses item 2's finding lines when every list block it can use is empty.
-So when item 1 finds no list, a list block that item 1 cannot use, such as a list cut off partway
-or a quote of some file's contents, means the findings list did not come through whole, and none
-of the three shapes applies. Any other fenced block, such as one labeled `js` or `ruby`,
-or an unlabeled block of code that does not start with `[` or `{`, is a code example: skip it. It
-is never the findings list, its lines are never finding lines, and it does not stop items 2 and 3.
+block, except that item 1 uses item 2's finding lines when every list block is empty. Any other
+fenced block is not a list: skip it. That covers a block labeled `js` or `ruby`, an unlabeled
+block of code, and a `json` or unlabeled block that is not a list block, such as a quoted config
+object like `{"version": "1.1.0"}`. It is never the findings list, its lines are never finding
+lines, and it does not stop items 2 and 3.
 
 A raw finding from text may have no `failure_scenario`. Score it from its `summary` and the code.
 

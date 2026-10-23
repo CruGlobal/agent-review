@@ -18509,31 +18509,32 @@ var require_codeReviewProof = __commonJS({
       if (open) blocks.push({ info: open.info, body: open.body.join("\n"), closed: false });
       return { blocks, outside };
     }
-    function isListBlock(block) {
-      if (block.info === "json") return true;
-      return block.info === "" && /^[[{]/.test(block.body.trim());
-    }
     function isPlainObject(value) {
       return value !== null && typeof value === "object" && !Array.isArray(value);
     }
     function hasFile(value) {
       return isPlainObject(value) && typeof value.file === "string" && value.file.trim() !== "";
     }
+    function isListLike(block) {
+      if (block.info !== "json" && block.info !== "") return false;
+      const body = block.body.trim();
+      const parsed = parseJson(body);
+      if (!parsed) return body.startsWith("[") || body.startsWith("{") && body.includes('"findings"');
+      const { value } = parsed;
+      return Array.isArray(value) || isPlainObject(value) && Object.hasOwn(value, "findings");
+    }
     function qualifyingList(block) {
-      let parsed;
-      try {
-        parsed = JSON.parse(block.body);
-      } catch {
-        return null;
-      }
-      const list = unwrapFindings(parsed);
+      const parsed = parseJson(block.body);
+      const list = parsed && unwrapFindings(parsed.value);
       return list && list.every(hasFile) ? list : null;
     }
     var MARKER = String.raw`^\s*(?:[-*]|\d+\.)?\s*`;
     var TEXT = String.raw`\s*(\S.*?)\s*$`;
     var DASH = String.raw`(?:[\u2014\u2013]|\s-\s)`;
     var BACKTICKED_LINE = new RegExp(`${MARKER}\`([^\\s\`:]+):(\\d+)[^\`]*\`\\s*(?:${DASH}|:)${TEXT}`);
-    var BARE_LINE = new RegExp(`${MARKER}([^\\s\`:]+):(\\d+)\\S*?\\s*${DASH}${TEXT}`);
+    var BARE_LINE = new RegExp(
+      `${MARKER}((?=[^\\s\`:]*[./])[^\\s\`:]+):(\\d+)(?:[-\u2013\u2014]\\d+)?(?![-\u2013\u2014]?\\d)\\S*?\\s*${DASH}${TEXT}`
+    );
     var SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
     var NO_FINDINGS_LINE = /^\s*(?:No findings\.|\(none\))\s*$/;
     function textFindings(lines) {
@@ -18565,15 +18566,15 @@ var require_codeReviewProof = __commonJS({
       );
       const { blocks, outside } = scanFences(text);
       if (blocks.some((b) => !b.closed)) return noList;
-      const listBlocks = blocks.filter(isListBlock);
-      const lists = listBlocks.map(qualifyingList).filter(Boolean);
+      const lists = blocks.filter(isListLike).map(qualifyingList);
+      if (lists.includes(null)) return noList;
       const nonEmpty = lists.filter((list) => list.length > 0);
       if (nonEmpty.length > 0) return { ok: true, reason: "ok", findings: nonEmpty[nonEmpty.length - 1] };
       const resultAt = outside.findIndex((line) => /^Result:/.test(line));
       const afterResult = resultAt < 0 ? [] : outside.slice(resultAt + 1);
       const lines = textFindings(afterResult);
       if (lists.length > 0) return { ok: true, reason: "ok", findings: lines };
-      if (listBlocks.length > 0 || resultAt < 0) return noList;
+      if (resultAt < 0) return noList;
       if (lines.length > 0) return { ok: true, reason: "ok", findings: lines };
       if (afterResult.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: "ok", findings: [] };
       return noList;

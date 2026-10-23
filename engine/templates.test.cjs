@@ -633,8 +633,12 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
   assert.ok(flat.includes('array of objects'), 'a findings array holds only objects');
   assert.ok(flat.includes('every object has a non-empty string `file`'), 'a qualifying list names a file in every entry');
   assert.ok(
-    flat.includes('a list block is a fenced block labeled `json`, or one with no label whose first non-blank character is `[` or `{`.'),
-    'an unlabeled block is a list candidate only when it opens like JSON',
+    flat.includes('A list block is a fenced block labeled `json`, or one with no label, that holds a findings list or starts like one: it parses as a JSON array or as a JSON object with a `findings` key, or it does not parse and its first non-blank character is `[`, or `{` with `"findings"` somewhere in the block.'),
+    'a json or unlabeled block is a list block only when it is list-like',
+  );
+  assert.ok(
+    flat.includes('If any list block is not usable, such as a list cut off partway, one with a `null` or missing `file`, or a quote of some file\'s contents shaped like a list, the findings list did not come through whole, and none of the shapes below applies, even when another list block is usable.'),
+    'one unusable list block fails closed beside a usable one',
   );
   assert.ok(
     flat.includes('A later `[]`, such as one quoted in a fix, never replaces a real list.'),
@@ -644,7 +648,7 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
     flat.includes('the raw findings are the finding lines item 2 describes, or zero when there are none. An empty list never cancels a finding line.'),
     'an empty list never erases finding lines',
   );
-  const json = flat.indexOf('The last list block that parses as an array of objects');
+  const json = flat.indexOf('The last list block that holds at least one object.');
   const lines = flat.indexOf('One-line findings in the text after `Result:`');
   const none = flat.indexOf('A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found no finding lines');
   assert.ok(json >= 0 && lines >= 0 && none >= 0, 'all three shapes are listed');
@@ -659,16 +663,20 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
     'fences follow CommonMark',
   );
   assert.ok(
-    flat.includes("Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list block, except that item 1 uses item 2's finding lines when every list block it can use is empty."),
+    flat.includes("Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list block, except that item 1 uses item 2's finding lines when every list block is empty."),
     'a broken JSON list fails closed instead of falling back to text',
   );
   assert.ok(
-    flat.includes('when item 1 finds no list, a list block that item 1 cannot use'),
-    'an unusable JSON block stops the lane only when no real list was found',
+    flat.includes('Any other fenced block is not a list: skip it. That covers a block labeled `js` or `ruby`, an unlabeled block of code, and a `json` or unlabeled block that is not a list block, such as a quoted config object like `{"version": "1.1.0"}`.'),
+    'code examples and quoted config neither qualify nor stop the text parse',
   );
   assert.ok(
-    flat.includes('Any other fenced block, such as one labeled `js` or `ruby`, or an unlabeled block of code that does not start with `[` or `{`, is a code example'),
-    'code examples neither qualify nor stop the text parse',
+    flat.includes('Without backticks, `file` must hold a `/` or a `.`, so `localhost:3000 - ...` is not a finding.'),
+    'a bare location must look like a path',
+  );
+  assert.ok(
+    flat.includes('A range written right after the line number with `-`, an en dash, or an em dash and no spaces, as in `src/a.js:12-15`, is part of `file:line`, not the summary.'),
+    'a line range is part of the location',
   );
   assert.ok(!/\b[Ss]teps? [1-3]\b/.test(flat), 'list items are "item N", never "step N", beside the STEP headings');
   assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));

@@ -66,10 +66,11 @@ test('passing results', () => {
 });
 
 test('the last fenced JSON array wins', () => {
-  const raw = `${HEADER}\n\nResult:\n\`\`\`json\n[{"a":1}]\n\`\`\`\nlater\n\`\`\`js\nconst x = 1;\n\`\`\`\n\`\`\`json\n${JSON.stringify(FINDINGS)}\n\`\`\`\n`;
+  const first = [{ file: 'lib.js', line: 2, summary: 'an earlier list' }];
+  const raw = `${HEADER}\n\nResult:\n\`\`\`json\n${JSON.stringify(first)}\n\`\`\`\nlater\n\`\`\`js\nconst x = 1;\n\`\`\`\n\`\`\`json\n${JSON.stringify(FINDINGS)}\n\`\`\`\n`;
   const r = checkCodeReviewProof({ rawText: raw });
   assert.equal(r.ok, true);
-  assert.equal(r.findings.length, 2);
+  assert.deepEqual(r.findings, FINDINGS);
 });
 
 test('"No findings." never passes over a broken JSON block', () => {
@@ -355,19 +356,76 @@ test('lines inside a skipped code block are not finding lines', () => {
   assert.deepEqual(r.findings, []);
 });
 
-test('a JSON block that quotes file contents is not the findings list', () => {
+test('a list-like block that does not qualify fails closed, even next to a real list', () => {
   const quoted = block('json', '[{"name":"a"}]');
   const alone = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\npackage list:\n${quoted}` });
-  assert.equal(alone.ok, false, 'a JSON block that does not qualify still fails closed');
+  assert.equal(alone.ok, false, 'a list-like block that does not qualify still fails closed');
   assert.equal(alone.reason, NEW_REASON);
   assert.deepEqual(alone.findings, []);
 
   const real = block('json', JSON.stringify(FINDINGS));
   for (const rawText of [`${HEADER}\n\nResult:\n${quoted}\n${real}`, `${HEADER}\n\nResult:\n${real}\n${quoted}`]) {
     const r = checkCodeReviewProof({ rawText });
-    assert.equal(r.ok, true);
-    assert.deepEqual(r.findings, FINDINGS);
+    assert.equal(r.ok, false, rawText);
+    assert.equal(r.reason, NEW_REASON);
+    assert.deepEqual(r.findings, []);
   }
+});
+
+test('a readable [] never covers for an unreadable real list', () => {
+  const broken = [
+    block('json', '[{"file": null, "line": 3, "summary": "s"}]'),
+    block('json', '[{"file": "a.js", "line": 3, "summary": "s"},]'),
+    block('', '[{"file": "a.js", "line": 3, "summary": "s"},]'),
+    block('json', '{"findings": [{"file": "a.js"},], "level": "high"}'),
+    block('json', '{"findings": "none"}'),
+  ];
+  for (const bad of broken) {
+    for (const empty of [block('json', '[]'), block('', '{"findings":[]}')]) {
+      for (const rawText of [
+        `${HEADER}\n\nResult:\n${bad}\nSuggested fix:\n${empty}`,
+        `${HEADER}\n\nResult:\n${empty}\n${bad}`,
+        `${HEADER}\n\n${SECTIONED}\n\n${bad}\n${empty}`,
+      ]) {
+        const r = checkCodeReviewProof({ rawText });
+        assert.equal(r.ok, false, rawText);
+        assert.equal(r.reason, NEW_REASON, rawText);
+        assert.deepEqual(r.findings, [], rawText);
+      }
+    }
+  }
+});
+
+test('a JSON block that is not list-like is ignored', () => {
+  const textFinding = [{
+    file: 'app.js',
+    line: 13,
+    summary: 'No fallback to user.name.',
+    failure_scenario: 'displayName({ name: "Ann" }) throws.',
+  }];
+  for (const quoted of [
+    block('json', '{"version":"1.1.0"}'),
+    block('json', '{\n  "name": "agent-review",\n  "private": true\n}'),
+    block('json', '"just a string"'),
+    block('json', '42'),
+    block('json', 'not json at all'),
+    block('', '{"name":"a"}'),
+    block('', '{ name: "a" }'),
+  ]) {
+    const r = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\nThe config reads:\n${quoted}` });
+    assert.equal(r.ok, true, quoted);
+    assert.deepEqual(r.findings, textFinding, quoted);
+
+    const withList = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n${quoted}\n${block('json', JSON.stringify(FINDINGS))}` });
+    assert.equal(withList.ok, true, quoted);
+    assert.deepEqual(withList.findings, FINDINGS, quoted);
+  }
+
+  const inside = checkCodeReviewProof({
+    rawText: `${HEADER}\n\nResult:\n(none)\n\n${block('json', '{"note": "x"}\napp.js:3 - not a finding')}`,
+  });
+  assert.equal(inside.ok, true, 'an unparseable json block that starts with { but has no "findings" is ignored');
+  assert.deepEqual(inside.findings, [], 'its lines are never finding lines');
 });
 
 test('an unlabeled block that starts with [ or { follows the json rules', () => {
@@ -379,7 +437,7 @@ test('an unlabeled block that starts with [ or { follows the json rules', () => 
   assert.equal(indented.ok, true, 'the content is trimmed before the check');
   assert.equal(indented.findings.length, 2);
 
-  for (const quoted of ['[{"name":"a"}]', '{"name":"a"}', '{ name: "a" }', '[1,2']) {
+  for (const quoted of ['[{"name":"a"}]', '[1,2', '{"findings": [1]}', '{ "findings": [', '{"x": 1, "findings": null}']) {
     const r = checkCodeReviewProof({ rawText: `${HEADER}\n\n${SECTIONED}\n\n${block('', quoted)}` });
     assert.equal(r.ok, false, `${quoted} must fail closed`);
     assert.equal(r.reason, NEW_REASON);
@@ -520,4 +578,32 @@ test('CommonMark fences: up to 3 leading spaces, backticks or tildes, closed by 
   }
   const tildeCode = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n(none)\n~~~ruby\nx = 1\n~~~\n` });
   assert.equal(tildeCode.ok, true, 'a closed tilde code example is skipped like a backtick one');
+});
+
+test('a bare text location must look like a path', () => {
+  const host = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nlocalhost:3000 - is where the dev server listens\n` });
+  assert.equal(host.ok, false, 'localhost is not a file');
+  assert.equal(host.reason, NEW_REASON);
+
+  const mixed = checkCodeReviewProof({
+    rawText: `${HEADER}\n\nResult:\nlocalhost:3000 - is where the dev server listens\nsrc/a.js:4 - a real one\nMakefile.am:2 \u2014 dotted\n`,
+  });
+  assert.equal(mixed.ok, true);
+  assert.deepEqual(mixed.findings.map((f) => f.file), ['src/a.js', 'Makefile.am']);
+
+  const backticked = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n\`Makefile:3\` \u2014 wrong target\n` });
+  assert.equal(backticked.ok, true, 'a backticked location needs no / or .');
+  assert.deepEqual(backticked.findings, [{ file: 'Makefile', line: 3, summary: 'wrong target' }]);
+});
+
+test('a line range right after the line number is part of the location', () => {
+  for (const dash of ['-', '\u2013', '\u2014']) {
+    const r = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nsrc/a.js:12${dash}15 \u2014 wrong branch\n` });
+    assert.equal(r.ok, true, dash);
+    assert.deepEqual(r.findings, [{ file: 'src/a.js', line: 12, summary: 'wrong branch' }], dash);
+  }
+  const plain = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nsrc/a.js:12-15 - wrong branch\n` });
+  assert.deepEqual(plain.findings, [{ file: 'src/a.js', line: 12, summary: 'wrong branch' }]);
+  const dashed = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nsrc/a.js:12\u2013fix the branch\n` });
+  assert.deepEqual(dashed.findings, [{ file: 'src/a.js', line: 12, summary: 'fix the branch' }], 'a dash before words is still the separator');
 });
