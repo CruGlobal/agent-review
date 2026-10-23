@@ -459,6 +459,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `.github/workflows/test.yml` | This repo's own CI — `npm ci && npm test && npm run check-dist` |
 | `.github/workflows/review.yml`, `interact.yml`, `approve.yml`, `readiness.yml` | Reusable workflows the consumer callers invoke |
 | `.github/actions/approve/` | Composite action shared by every approval path |
+| `.github/actions/read-engine/` | Composite action that reads the review engine from the base commit's config, so the CI approval steps run only on an exact `agent-review` |
 
 ## Development
 

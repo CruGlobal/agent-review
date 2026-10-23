@@ -268,26 +268,11 @@ jobs:
       - name: Read the trusted review engine
         id: engine
         if: inputs.auto_approve
-        env:
-          BASE_SHA: ${{ needs.model.outputs.base_sha }}
-          RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
-          TRUSTED_DIR: ${{ runner.temp }}/agent-review-engine-trusted
-        run: |
-          set -euo pipefail
-          # The approve step runs only on an exact agent-review, so an unreadable base stays unknown.
-          ENGINE=unknown
-          mkdir -p "$TRUSTED_DIR"
-          if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
-            ENGINE=agent-review
-            if git cat-file -e "$BASE_SHA:.claude/review/config.yml" 2>/dev/null; then
-              git archive "$BASE_SHA" .claude/review | tar -x -C "$TRUSTED_DIR"
-              CONFIGURED=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
-                --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_DIR/.claude/review" \
-                config get engine.name)
-              if [ "$CONFIGURED" != "undefined" ]; then ENGINE=$CONFIGURED; fi
-            fi
-          fi
-          echo "name=$ENGINE" >> "$GITHUB_OUTPUT"
+        uses: CruGlobal/agent-review/.github/actions/read-engine@main
+        with:
+          base_sha: ${{ needs.model.outputs.base_sha }}
+          runtime_dir: ${{ runner.temp }}/agent-review-runtime
+          trusted_dir: ${{ runner.temp }}/agent-review-engine-trusted
       - name: Download the model handoff
         uses: actions/download-artifact@v4
         with:

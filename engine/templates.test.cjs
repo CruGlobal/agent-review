@@ -1811,33 +1811,129 @@ test('report skeleton covers the code-review engine', () => {
 
 // Both engine steps must report `unknown` when the base commit cannot be read, so
 // the exact-match approve gates never approve on a config they did not see.
-function assertBaseCommitGuard(run, label) {
-  const guard = 'if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then';
-  const unknown = run.indexOf('ENGINE=unknown');
-  const guardAt = run.indexOf(guard);
-  const fallback = run.indexOf('ENGINE=agent-review');
-  assert.ok(unknown >= 0, `${label}: the engine starts as unknown`);
-  assert.ok(guardAt > unknown, `${label}: the base commit is checked before anything else`);
-  assert.ok(fallback > guardAt, `${label}: agent-review is set only once the base commit exists`);
-  assert.ok(run.indexOf('config get engine.name') > guardAt, `${label}: the config is read only from an existing base commit`);
-  assert.ok(run.includes('"$CONFIGURED" != "undefined"'), `${label}: an unset engine keeps agent-review`);
-  assert.ok(run.trimEnd().endsWith('echo "name=$ENGINE" >> "$GITHUB_OUTPUT"'), `${label}: the output is written last`);
+const READ_ENGINE_ACTION = join(ROOT, '.github/actions/read-engine/action.yml');
+const READ_ENGINE_USES = 'CruGlobal/agent-review/.github/actions/read-engine@main';
+
+function readEngineRun() {
+  const { parse } = require('yaml');
+  const action = parse(readFileSync(READ_ENGINE_ACTION, 'utf8'));
+  return { action, step: action.runs.steps[0] };
 }
 
-test('review.yml approves only on an exact agent-review engine', () => {
+test('the engine read is one composite action', () => {
+  const { action, step } = readEngineRun();
+  assert.equal(action.runs.using, 'composite');
+  assert.deepEqual(Object.keys(action.inputs).sort(), ['base_sha', 'runtime_dir', 'trusted_dir']);
+  for (const input of Object.values(action.inputs)) assert.equal(input.required, true);
+  assert.deepEqual(Object.keys(action.outputs), ['name']);
+  assert.equal(action.outputs.name.value, '${{ steps.read.outputs.name }}');
+  assert.equal(action.runs.steps.length, 1);
+  assert.equal(step.id, 'read');
+  assert.equal(step.shell, 'bash');
+  assert.deepEqual(step.env, {
+    BASE_SHA: '${{ inputs.base_sha }}',
+    RUNTIME_DIR: '${{ inputs.runtime_dir }}',
+    TRUSTED_DIR: '${{ inputs.trusted_dir }}',
+  });
+  assert.ok(!step.run.includes('${{'), 'the run block must not contain expressions');
+  const run = step.run;
+  const unknown = run.indexOf('ENGINE=unknown');
+  const guard = run.indexOf('if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then');
+  assert.ok(unknown >= 0 && guard > unknown, 'the engine starts as unknown, then the base commit is checked');
+  assert.ok(run.indexOf('ENGINE=agent-review') > guard, 'agent-review is set only once the base commit exists');
+  assert.ok(run.includes('config get engine.name) || CONFIGURED=unknown'), 'a failed read is unknown and never fails the job');
+  assert.ok(run.includes('if [ "$CONFIGURED" = "undefined" ]; then ENGINE=agent-review; else ENGINE=$CONFIGURED; fi'));
+  assert.ok(run.trimEnd().endsWith('echo "name=$ENGINE" >> "$GITHUB_OUTPUT"'), 'the output is written last');
+});
+
+test('the engine read action outputs agent-review, the configured engine, or unknown, and never fails', () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs');
+  const os = require('node:os');
+  const { step } = readEngineRun();
+  const repo = mkdtempSync(join(os.tmpdir(), 'ar-read-engine-'));
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  const commit = (message) => {
+    git('add', '-A');
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '--allow-empty', '-m', message);
+    return git('rev-parse', 'HEAD');
+  };
+  const config = (extra = '') => [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', extra,
+  ].join('\n');
+  try {
+    git('init', '-q');
+    const bare = commit('no config');
+    mkdirSync(join(repo, '.claude/review'), { recursive: true });
+    writeFileSync(join(repo, '.claude/review/config.yml'), config());
+    const unset = commit('config without engine');
+    writeFileSync(join(repo, '.claude/review/config.yml'), config('engine:\n  name: code-review\n'));
+    const codeReview = commit('code-review engine with missing always lanes');
+    writeFileSync(join(repo, '.claude/review/config.yml'), config('engine:\n  name: agent-review\n'));
+    const named = commit('explicit agent-review');
+    writeFileSync(join(repo, '.claude/review/config.yml'), 'version: [');
+    const broken = commit('broken config');
+
+    const read = (baseSha) => {
+      const trusted = mkdtempSync(join(os.tmpdir(), 'ar-read-engine-trusted-'));
+      const output = join(trusted, 'output.txt');
+      writeFileSync(output, '');
+      try {
+        execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+          cwd: repo,
+          env: {
+            ...process.env,
+            BASE_SHA: baseSha,
+            RUNTIME_DIR: ROOT,
+            TRUSTED_DIR: join(trusted, 'base'),
+            GITHUB_WORKSPACE: repo,
+            GITHUB_OUTPUT: output,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        return readFileSync(output, 'utf8');
+      } finally {
+        rmSync(trusted, { recursive: true, force: true });
+      }
+    };
+    assert.equal(read(bare), 'name=agent-review\n', 'no config at the base');
+    assert.equal(read(unset), 'name=agent-review\n', 'a config with no engine');
+    assert.equal(read(named), 'name=agent-review\n');
+    assert.equal(read(codeReview), 'name=code-review\n', 'a code-review config that config validate would reject still reads');
+    assert.equal(read(broken), 'name=unknown\n', 'an unreadable config is unknown, and the step still succeeds');
+    assert.equal(read(''), 'name=unknown\n', 'no base SHA');
+    assert.equal(read('0123456789abcdef0123456789abcdef01234567'), 'name=unknown\n', 'a base commit the checkout lacks');
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('review.yml reads the engine through the shared action and approves only on an exact agent-review', () => {
   const { parse } = require('yaml');
   const wf = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
-  assert.ok(wf.jobs.review.outputs && wf.jobs.review.outputs.engine, 'review job must expose an engine output');
+  assert.equal(wf.jobs.review.outputs.engine, '${{ steps.engine.outputs.name }}');
   assert.equal(wf.jobs.approve.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
   const step = wf.jobs.review.steps.find((s) => s.id === 'engine');
   assert.ok(step, 'review job needs a step with id engine');
-  assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
-  assert.ok(step.env.TRUSTED_REVIEW_DIR && step.env.RUNTIME_DIR, 'engine step reads its paths from env');
-  assert.equal(step.env.BASE_SHA, '${{ github.event.pull_request.base.sha }}', 'engine step reads the base SHA from env');
-  assertBaseCommitGuard(step.run, 'review.yml');
+  assert.equal(step.uses, READ_ENGINE_USES);
+  assert.equal(step.run, undefined, 'the engine shell lives in the action');
+  assert.deepEqual(step.with, {
+    base_sha: '${{ github.event.pull_request.base.sha }}',
+    runtime_dir: '${{ runner.temp }}/agent-review-runtime',
+    trusted_dir: '${{ runner.temp }}/agent-review-engine-trusted',
+  });
+  const steps = wf.jobs.review.steps;
+  const isolate = steps.findIndex((s) => s.name === 'Isolate trusted base configuration and runtime');
+  assert.ok(isolate >= 0 && isolate < steps.indexOf(step), 'the runtime is in place before the engine read');
 });
 
-test('interact.yml approves only on an exact agent-review engine', () => {
+test('interact.yml reads the engine through the shared action and approves only on an exact agent-review', () => {
   const { parse } = require('yaml');
   const wf = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
   const steps = wf.jobs.publish.steps;
@@ -1846,12 +1942,25 @@ test('interact.yml approves only on an exact agent-review engine', () => {
   assert.ok(engineIndex >= 0, 'publish job needs its own step with id engine');
   assert.ok(engineIndex < approveIndex, 'the engine is read before the approve step');
   const step = steps[engineIndex];
+  assert.equal(step.uses, READ_ENGINE_USES);
+  assert.equal(step.run, undefined, 'the engine shell lives in the action');
+  assert.equal(step.if, 'inputs.auto_approve');
   assert.ok(!String(step.if || '').includes('is_fork'), 'the engine read must run for forks too');
-  assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
-  assert.ok(step.env.BASE_SHA && step.env.RUNTIME_DIR && step.env.TRUSTED_DIR, 'engine step reads its inputs from env');
-  assert.ok(step.run.includes('git archive "$BASE_SHA" .claude/review'), 'engine comes from the trusted base-SHA config');
-  assertBaseCommitGuard(step.run, 'interact.yml');
+  assert.deepEqual(step.with, {
+    base_sha: '${{ needs.model.outputs.base_sha }}',
+    runtime_dir: '${{ runner.temp }}/agent-review-runtime',
+    trusted_dir: '${{ runner.temp }}/agent-review-engine-trusted',
+  });
+  const checkout = steps.findIndex((s) => s.name === 'Check out a credential-free PR validation tree');
+  assert.ok(checkout >= 0 && checkout < engineIndex, 'the base commit is fetched before the engine read');
   assert.equal(steps[approveIndex].if, "inputs.auto_approve && steps.engine.outputs.name == 'agent-review'");
+});
+
+test('no workflow carries its own engine-read shell', () => {
+  for (const path of [REVIEW_WORKFLOW, INTERACT_WORKFLOW]) {
+    const body = readFileSync(path, 'utf8');
+    assert.ok(!body.includes('config get engine.name'), `${path} must read the engine through the action`);
+  }
 });
 
 test('init asks engine, where reviews run, and approval', () => {
