@@ -47,7 +47,10 @@ fenced JSON in between. Do not trim, reformat, shorten, or fix anything in it. S
 looks like an error. If the Skill tool itself is missing or refuses the call, save that error
 message instead. The review reads this file to prove /code-review ran.
 
-Then find the findings list. Try these in order and use the first that applies:
+Then find the findings list. A fenced block starts at a line of three or more backticks or tildes,
+indented at most three spaces, and closes at a line of the same character at least as long. If the
+result has a fenced block that never closes, of any label, the output was cut short, and none of
+the shapes below applies. Otherwise, try these in order and use the first that applies:
 
 1. The last fenced block labeled `json`, or with no label, that parses as an array of objects
    (possibly `[]`) or as an object with a `findings` array of objects, where every object has a
@@ -60,15 +63,16 @@ Then find the findings list. Try these in order and use the first that applies:
    `Failure scenario: ...` line right after a finding is that finding's `failure_scenario`. Each
    raw finding is `file`, `line` (the first number), `summary`, and `failure_scenario` when
    given. Ignore lines that do not match. At least one matching line counts as a findings list.
-3. A line that reads exactly `No findings.` or `(none)`, but only when step 2 found no finding
-   lines. That means zero raw findings. A `(none)` under one heading never cancels a finding line
-   under another.
+3. A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found
+   no finding lines. That means zero raw findings. A `(none)` under one heading never cancels a
+   finding line under another. With no `Result:` line, neither item 2 nor item 3 applies.
 
-Steps 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled
-`json` or has no label. A `json` or unlabeled block that step 1 cannot use, such as a list cut off
-partway or a quote of some file's contents, means the findings list did not come through whole, so
-none of the three shapes applies. A block with any other label, such as `js` or `ruby`, is a code
-example: skip it. It is never the findings list, and it does not stop steps 2 and 3.
+Items 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled
+`json` or has no label. So when item 1 finds no list, a `json` or unlabeled block that item 1
+cannot use, such as a list cut off partway or a quote of some file's contents, means the findings
+list did not come through whole, and none of the three shapes applies. A block with any other
+label, such as `js` or `ruby`, is a code example: skip it. It is never the findings list, and it
+does not stop items 2 and 3.
 
 A raw finding from text may have no `failure_scenario`. Score it from its `summary` and the code.
 

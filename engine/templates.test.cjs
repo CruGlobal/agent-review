@@ -620,17 +620,31 @@ test('code-review-lane.md finds the findings list the way the proof does', () =>
   assert.ok(flat.includes('every object has a non-empty string `file`'), 'a qualifying list names a file in every entry');
   const json = flat.indexOf('The last fenced block labeled `json`, or with no label');
   const lines = flat.indexOf('One-line findings in the text after `Result:`');
-  const none = flat.indexOf('`No findings.` or `(none)`, but only when step 2 found no finding lines');
+  const none = flat.indexOf('A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found no finding lines');
   assert.ok(json >= 0 && lines >= 0 && none >= 0, 'all three shapes are listed');
   assert.ok(json < lines && lines < none, 'JSON list first, then finding lines, then the no-findings line');
+  assert.ok(flat.includes('With no `Result:` line, neither item 2 nor item 3 applies.'), 'no Result: line, no text list');
   assert.ok(
-    flat.includes('Steps 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled `json` or has no label.'),
+    flat.includes('If the result has a fenced block that never closes, of any label, the output was cut short'),
+    'an unclosed fence fails closed',
+  );
+  assert.ok(
+    flat.includes('three or more backticks or tildes, indented at most three spaces'),
+    'fences follow CommonMark',
+  );
+  assert.ok(
+    flat.includes('Items 2 and 3 read only the text outside fenced blocks, and only when no fenced block is labeled `json` or has no label.'),
     'a broken JSON list fails closed instead of falling back to text',
+  );
+  assert.ok(
+    flat.includes('when item 1 finds no list, a `json` or unlabeled block that item 1 cannot use'),
+    'an unusable JSON block stops the lane only when no real list was found',
   );
   assert.ok(
     flat.includes('A block with any other label, such as `js` or `ruby`, is a code example'),
     'code examples neither qualify nor stop the text parse',
   );
+  assert.ok(!/\b[Ss]teps? [1-3]\b/.test(flat), 'list items are "item N", never "step N", beside the STEP headings');
   assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));
 });
 

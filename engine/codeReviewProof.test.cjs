@@ -382,3 +382,60 @@ test('a truncated JSON list fails closed over prose, finding lines, and "(none)"
     }
   }
 });
+
+test('"(none)" counts only after Result:, so with no Result: line nothing passes', () => {
+  const cases = [
+    `${HEADER}\n\nCorrectness:\napp.js:13 - real bug\nCleanup:\n(none)\n`,
+    `${HEADER}\n\nNo findings.\n`,
+    `${HEADER}\n\n(none)\n\nResult:\nAll good.\n`,
+  ];
+  for (const rawText of cases) {
+    const r = checkCodeReviewProof({ rawText });
+    assert.equal(r.ok, false, rawText);
+    assert.equal(r.reason, NEW_REASON);
+    assert.deepEqual(r.findings, []);
+  }
+});
+
+test('an unclosed fence of any label fails closed', () => {
+  const cases = {
+    'unclosed js block swallowing a finding line': `${HEADER}\n\nResult:\n(none)\n\`\`\`js\nconst x = 1;\napp.js:3 - real bug\n`,
+    'unclosed ruby block after finding lines': `${HEADER}\n\n${SECTIONED}\n\`\`\`ruby\nx = 1\n`,
+    'unclosed json block after a qualifying list': `${HEADER}\n\nResult:\n${block('json', JSON.stringify(FINDINGS))}\`\`\`json\n[{"file":"a.js",\n`,
+    'unclosed unlabeled block after a qualifying list': `${HEADER}\n\nResult:\n${block('json', JSON.stringify(FINDINGS))}\`\`\`\n[{"file":"a.js"}]\n`,
+  };
+  for (const [label, rawText] of Object.entries(cases)) {
+    const r = checkCodeReviewProof({ rawText });
+    assert.equal(r.ok, false, label);
+    assert.equal(r.reason, NEW_REASON, label);
+    assert.deepEqual(r.findings, [], label);
+  }
+});
+
+test('CommonMark fences: up to 3 leading spaces, backticks or tildes, closed by the same character', () => {
+  const truncated = '[{"file":"a.js",';
+  const failing = {
+    'indented json block': `${HEADER}\n\nResult:\n(none)\n   \`\`\`json\n${truncated}\n   \`\`\`\n`,
+    'tilde json block': `${HEADER}\n\nResult:\n(none)\n~~~json\n${truncated}\n~~~\n`,
+    'tilde block closed by backticks': `${HEADER}\n\nResult:\n~~~json\n${JSON.stringify(FINDINGS)}\n\`\`\`\n`,
+    'backtick block closed by tildes': `${HEADER}\n\nResult:\n\`\`\`json\n${JSON.stringify(FINDINGS)}\n~~~\n`,
+    'four-backtick block closed by three': `${HEADER}\n\nResult:\n\`\`\`\`json\n${JSON.stringify(FINDINGS)}\n\`\`\`\n`,
+  };
+  for (const [label, rawText] of Object.entries(failing)) {
+    const r = checkCodeReviewProof({ rawText });
+    assert.equal(r.ok, false, label);
+    assert.equal(r.reason, NEW_REASON, label);
+  }
+  const passing = {
+    'tilde json list': `${HEADER}\n\nResult:\n~~~json\n${JSON.stringify(FINDINGS)}\n~~~\n`,
+    'indented json list': `${HEADER}\n\nResult:\n  \`\`\`json\n${JSON.stringify(FINDINGS)}\n  \`\`\`\n`,
+    'longer closer': `${HEADER}\n\nResult:\n\`\`\`json\n${JSON.stringify(FINDINGS)}\n\`\`\`\`\`\n`,
+  };
+  for (const [label, rawText] of Object.entries(passing)) {
+    const r = checkCodeReviewProof({ rawText });
+    assert.equal(r.ok, true, label);
+    assert.deepEqual(r.findings, FINDINGS, label);
+  }
+  const tildeCode = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\n(none)\n~~~ruby\nx = 1\n~~~\n` });
+  assert.equal(tildeCode.ok, true, 'a closed tilde code example is skipped like a backtick one');
+});

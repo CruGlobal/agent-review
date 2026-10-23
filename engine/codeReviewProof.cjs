@@ -9,16 +9,19 @@ function fail(reason) {
   return { ok: false, reason, findings: [] };
 }
 
-// A fence closes only at a bare fence line at least as long as its opener; one left open runs
-// to the end of the text and never qualifies as the findings list.
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+// CommonMark fences: a block closes only at a bare fence of the same character, at least as long
+// as its opener, and a backtick opener's info string holds no backtick.
 function scanFences(text) {
   const blocks = [];
   const outside = [];
   let open = null;
   for (const line of text.split('\n').map((l) => l.replace(/\r$/, ''))) {
     if (open) {
-      const close = /^(`{3,})[ \t]*$/.exec(line);
-      if (close && close[1].length >= open.fence.length) {
+      const close = FENCE_CLOSE.exec(line);
+      if (close && close[1][0] === open.fence[0] && close[1].length >= open.fence.length) {
         blocks.push({ info: open.info, body: open.body.join('\n'), closed: true });
         open = null;
       } else {
@@ -26,9 +29,12 @@ function scanFences(text) {
       }
       continue;
     }
-    const start = /^(`{3,})[ \t]*([^`]*)$/.exec(line);
-    if (start) open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [] };
-    else outside.push(line);
+    const start = FENCE_OPEN.exec(line);
+    if (start && !(start[1][0] === '`' && start[2].includes('`'))) {
+      open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [] };
+    } else {
+      outside.push(line);
+    }
   }
   if (open) blocks.push({ info: open.info, body: open.body.join('\n'), closed: false });
   return { blocks, outside };
@@ -45,7 +51,6 @@ function hasFile(value) {
 }
 
 function qualifyingList(block) {
-  if (!block.closed) return null;
   let parsed;
   try {
     parsed = JSON.parse(block.body);
@@ -65,10 +70,8 @@ const SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
 const NO_FINDINGS_LINE = /^\s*(?:No findings\.|\(none\))\s*$/;
 
 function textFindings(lines) {
-  const resultAt = lines.findIndex((line) => /^Result:/.test(line));
-  if (resultAt < 0) return [];
   const findings = [];
-  for (const line of lines.slice(resultAt + 1)) {
+  for (const line of lines) {
     const scenario = SCENARIO_LINE.exec(line);
     if (scenario && findings.length > 0) {
       findings[findings.length - 1].failure_scenario = scenario[1];
@@ -91,20 +94,24 @@ function checkCodeReviewProof({ rawText }) {
       `/code-review did not run: the output lacks the Skill "code-review" completed header. Fix: ${FIX}.`,
     );
   }
+  const noList = fail(
+    '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review',
+  );
   const { blocks, outside } = scanFences(text);
+  // An unclosed fence of any label means the output was cut short.
+  if (blocks.some((b) => !b.closed)) return noList;
   const listBlocks = blocks.filter((b) => LIST_INFO.has(b.info));
   for (let i = listBlocks.length - 1; i >= 0; i--) {
     const findings = qualifyingList(listBlocks[i]);
     if (findings) return { ok: true, reason: 'ok', findings };
   }
-  if (listBlocks.length === 0) {
-    const lines = textFindings(outside);
-    if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
-    if (outside.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: 'ok', findings: [] };
-  }
-  return fail(
-    '/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review',
-  );
+  const resultAt = outside.findIndex((line) => /^Result:/.test(line));
+  if (listBlocks.length > 0 || resultAt < 0) return noList;
+  const afterResult = outside.slice(resultAt + 1);
+  const lines = textFindings(afterResult);
+  if (lines.length > 0) return { ok: true, reason: 'ok', findings: lines };
+  if (afterResult.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: 'ok', findings: [] };
+  return noList;
 }
 
 function parseJson(text) {
