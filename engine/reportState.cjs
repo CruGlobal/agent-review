@@ -107,12 +107,16 @@ function isStaticFinding(finding) {
 
 // Blockers are excluded so a real or regressed blocker never hides behind an older entry.
 // Static findings are excluded because every static signature must reach the ledger.
+// Fixed entries and other lanes' entries never match, so a regression or a second lane's
+// finding at the same spot still reaches the ledger.
 function matchesEarlierSpot(finding, previous) {
   return (
     finding.severity < 7 &&
     !isStaticFinding(finding) &&
     previous.some(
       (entry) =>
+        entry.status !== 'fixed' &&
+        entry.agent === finding.agent &&
         entry.file === finding.file &&
         sameCategory(entry.category, finding.category) &&
         nearLine(entry.line, finding.line),

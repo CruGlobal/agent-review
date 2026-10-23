@@ -1760,3 +1760,17 @@ test('the review skill matches ledger suggestions by location only under the cod
     'no other ledger call passes the flag',
   );
 });
+
+test('docs say location matching uses only the same lane\'s open or dismissed entries', () => {
+  const usage = execFileSync(process.execPath, [join(ROOT, 'bin/agent-review'), 'help'], { encoding: 'utf8' });
+  const ledgerUsage = usage.split('\n').find((line) => line.trim().startsWith('ledger '));
+  assert.ok(
+    ledgerUsage.includes("older open or dismissed entries from the same lane"),
+    `the CLI usage names which entries match: ${ledgerUsage}`,
+  );
+  const flatSkill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(flatSkill.includes('within 5 lines of an older open or dismissed entry from the same lane, in the same file and category'));
+  assert.ok(!flatSkill.includes('older entry (any status)'));
+  const flatReadme = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(flatReadme.includes('within 5 lines of an older open or dismissed finding from the same reviewer, in the same file and category'));
+});

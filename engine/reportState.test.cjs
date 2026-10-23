@@ -159,8 +159,8 @@ function reworded(over = {}) {
   });
 }
 
-test('location mode skips a reworded suggestion near an old entry of any status; default mode appends it', () => {
-  for (const status of ['open', 'fixed', 'dismissed']) {
+test('location mode skips a reworded suggestion near an open or dismissed entry; default mode appends it', () => {
+  for (const status of ['open', 'dismissed']) {
     const previous = [oldEntry({ status })];
     const byLocation = mergeLedger(previous, [reworded()], BY_LOCATION);
     assert.deepEqual(byLocation.map((entry) => entry.n), [3], `status ${status}`);
@@ -170,6 +170,25 @@ test('location mode skips a reworded suggestion near an old entry of any status;
   }
   const unanchored = mergeLedger([oldEntry({ line: null })], [reworded({ line: null })], BY_LOCATION);
   assert.equal(unanchored.length, 1, 'two unanchored entries in the same file and category match');
+});
+
+test('location mode appends a new suggestion near a fixed entry', () => {
+  const previous = [oldEntry({ status: 'fixed', sha: 'abc1234' })];
+  const ledger = mergeLedger(previous, [reworded()], BY_LOCATION);
+  assert.deepEqual(ledger.map((entry) => [entry.n, entry.signature, entry.status]), [
+    [3, 'old-sig', 'fixed'],
+    [4, 'new-sig', 'open'],
+  ]);
+});
+
+test('location mode appends a new suggestion near another agent entry', () => {
+  for (const status of ['open', 'dismissed']) {
+    const other = mergeLedger([oldEntry({ status, agent: 'testing' })], [reworded()], BY_LOCATION);
+    assert.deepEqual(other.map((entry) => entry.n), [3, 4], `another lane's ${status} entry`);
+  }
+  const corroborated = oldEntry({ agent: 'security', agents: 'security,code-review' });
+  const byPrimary = mergeLedger([corroborated], [reworded()], BY_LOCATION);
+  assert.deepEqual(byPrimary.map((entry) => entry.n), [3, 4], 'only the primary agent field counts');
 });
 
 test('location mode never folds a reworded blocker into an old entry', () => {

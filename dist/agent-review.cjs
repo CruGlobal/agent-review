@@ -18341,7 +18341,7 @@ var require_reportState = __commonJS({
     }
     function matchesEarlierSpot(finding, previous) {
       return finding.severity < 7 && !isStaticFinding(finding) && previous.some(
-        (entry) => entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line)
+        (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line)
       );
     }
     function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
@@ -20070,7 +20070,7 @@ var require_cli = __commonJS({
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older entries by file, category, and nearby line)
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, and nearby line)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
