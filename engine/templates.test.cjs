@@ -1249,6 +1249,19 @@ test('Task 4 consolidation preserves every fail-closed exit message verbatim', (
   }
 });
 
+test('the review gates load the config without the code-review engine checks', () => {
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(
+    bashBlocks(review).includes('agent-review config show >/dev/null || {\n  echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."'),
+    'engine=agent-review and CI must still run when the code-review engine settings are wrong; agent-review options reports them',
+  );
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  assert.ok(yolo.includes('agent-review config show >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }'));
+  for (const text of [review, yolo]) {
+    assert.ok(!bashBlocks(text).includes('agent-review config validate'), 'config validate fails on code-review engine problems');
+  }
+});
+
 test('Task-4-merged blocks never append to a scratch file other than review_env.sh', () => {
   // A bwrap bind-race rerun replays a whole merged block from the top — a `>>` onto any file
   // besides review_env.sh (whose duplicate export lines are harmless) would duplicate data on

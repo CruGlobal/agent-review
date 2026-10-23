@@ -5,7 +5,6 @@ const { parse } = require('yaml');
 const Ajv = require('ajv/dist/2020');
 const { upgradeConfig } = require('./upgradeConfig.cjs');
 const { validateContextManifest } = require('./contextPack.cjs');
-const { alwaysLaneProblems, laneOverlapMessage } = require('./options.cjs');
 
 function parseConfig(yamlText) {
   return parse(yamlText);
@@ -29,23 +28,6 @@ function validateConfigReferences(configObj, configPath) {
   for (const agent of configObj.agents || []) {
     if (ids.has(agent.id)) errors.push(`duplicate agent id: ${agent.id}`);
     ids.add(agent.id);
-    if (agent.id === 'code-review') {
-      errors.push('agent id "code-review" is reserved for the code-review engine');
-    }
-  }
-
-  // Under any other engine the code_review block is checked only by the schema, so
-  // the template's explicit always list never stops a default-engine repo loading.
-  const engine = configObj.engine || {};
-  if (engine.name === 'code-review') {
-    const codeReview = engine.code_review || {};
-    for (const { id, kind } of alwaysLaneProblems(codeReview, configObj.agents)) {
-      errors.push(
-        kind === 'overlap'
-          ? laneOverlapMessage(id, codeReview)
-          : `engine.code_review.always references ${kind} agent: ${id}`,
-      );
-    }
   }
 
   const base = dirname(resolve(configPath));

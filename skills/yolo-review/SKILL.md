@@ -28,7 +28,7 @@ re-reviews cheap.
    if [ "$(git rev-parse HEAD)" != "$HEAD_REF" ]; then
      git push || { echo "❌ Could not push local commits — the review must record the PR head."; exit 1; }
    fi
-   agent-review config validate >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }
+   agent-review config show >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }
    START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > /tmp/yolo_env.sh
    ```

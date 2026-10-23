@@ -1,7 +1,14 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { ENGINE_DEFAULTS, CI_NOTE, alwaysLaneProblems, parseReviewArgs, resolveOptions } = require('./options.cjs');
+const {
+  ENGINE_DEFAULTS,
+  CI_NOTE,
+  alwaysLaneProblems,
+  codeReviewEngineProblems,
+  parseReviewArgs,
+  resolveOptions,
+} = require('./options.cjs');
 
 const lanes = (ids) => ids.map((id) => ({ id, enabled: true }));
 const FULL = lanes(['security', 'testing', 'standards', 'architecture', 'simplification']);
@@ -188,4 +195,54 @@ test('resolve: a replaces id the repo lacks is a note under the code-review engi
 
   assert.deepEqual(unknownNotes(resolveOptions({ args: 'engine=agent-review', config: typo })), []);
   assert.deepEqual(unknownNotes(resolveOptions({ args: 'engine=code-review', config: typo, ci: true })), []);
+});
+
+const RESERVED = 'agent id "code-review" is reserved for the code-review engine';
+
+test('resolve: the code-review id is reserved only when the engine resolves to code-review', () => {
+  const config = { agents: [...FULL, { id: 'code-review' }] };
+  assert.throws(() => resolveOptions({ args: 'engine=code-review', config }), { message: RESERVED });
+  assert.throws(
+    () => resolveOptions({ args: '', config: { ...config, engine: { name: 'code-review' } } }),
+    { message: RESERVED },
+  );
+  for (const [args, cfg] of [
+    ['', config],
+    ['engine=agent-review', config],
+    ['', { ...config, engine: { name: 'agent-review' } }],
+    ['engine=agent-review', { ...config, engine: { name: 'code-review' } }],
+  ]) {
+    assert.equal(resolveOptions({ args, config: cfg }).engine.value, 'agent-review', `${args} ${JSON.stringify(cfg.engine)}`);
+  }
+  const ci = resolveOptions({ args: '', config: { ...config, engine: { name: 'code-review' } }, ci: true });
+  assert.equal(ci.engine.value, 'agent-review', 'CI runs the default engine, where the id is an ordinary lane');
+});
+
+test('codeReviewEngineProblems lists every engine-only problem in config validate wording', () => {
+  assert.deepEqual(codeReviewEngineProblems({ agents: FULL }), []);
+  assert.deepEqual(codeReviewEngineProblems({ agents: FULL, engine: { name: 'code-review', code_review: { effort: 'high' } } }), []);
+  assert.deepEqual(
+    codeReviewEngineProblems({
+      agents: [{ id: 'security' }, { id: 'standards', enabled: false }, { id: 'code-review' }],
+      engine: { name: 'code-review', code_review: { always: ['security', 'testing', 'standards'] } },
+    }),
+    [
+      RESERVED,
+      'engine.code_review.always references unknown agent: testing',
+      'engine.code_review.always references disabled agent: standards',
+    ],
+  );
+  assert.deepEqual(
+    codeReviewEngineProblems({ agents: [{ id: 'security' }], engine: { code_review: { always: ['security'], replaces: ['security'] } } }),
+    ['engine.code_review lists security in both always and replaces'],
+  );
+  assert.deepEqual(
+    codeReviewEngineProblems({ agents: FULL, engine: { code_review: { replaces: ['architecture', 'simplification', 'security'] } } }),
+    ['engine.code_review lists security in both always (default) and replaces'],
+  );
+  assert.deepEqual(
+    codeReviewEngineProblems({ agents: FULL, engine: { code_review: { always: ['security', 'testing', 'standards', 'architecture'] } } }),
+    ['engine.code_review lists architecture in both always and replaces (default)'],
+  );
+  assert.deepEqual(codeReviewEngineProblems({ agents: FULL, engine: { code_review: { replaces: ['nope'] } } }), []);
 });

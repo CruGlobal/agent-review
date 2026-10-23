@@ -12,7 +12,7 @@ const {
 const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { loadConfig } = require('./loadConfig.cjs');
-const { resolveOptions } = require('./options.cjs');
+const { resolveOptions, codeReviewEngineProblems } = require('./options.cjs');
 const { buildPlan, linesChangedFromStat } = require('./plan.cjs');
 const {
   loadOrBuildIndex,
@@ -252,6 +252,12 @@ function main(rawArgv) {
     case 'config': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       if (rest[0] === 'validate') {
+        const engineName = cfg.engine && cfg.engine.name;
+        const problems = engineName === 'code-review' ? codeReviewEngineProblems(cfg) : [];
+        if (problems.length) {
+          out(`Invalid review config (${C.CONFIG}):\n- ${problems.join('\n- ')}`);
+          return 1;
+        }
         out('config OK');
         return 0;
       }

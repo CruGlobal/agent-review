@@ -37,6 +37,28 @@ function alwaysLaneProblems(crCfg, agents) {
   return problems;
 }
 
+const RESERVED_ID = 'code-review';
+const RESERVED_ID_MESSAGE = `agent id "${RESERVED_ID}" is reserved for the code-review engine`;
+
+function hasReservedId(agents) {
+  return (agents || []).some((a) => a.id === RESERVED_ID);
+}
+
+// Only under the code-review engine: a repo on the default engine, or a CI run that falls back to
+// it, must load and run with these.
+function codeReviewEngineProblems(config) {
+  const crCfg = (config.engine && config.engine.code_review) || {};
+  const problems = hasReservedId(config.agents) ? [RESERVED_ID_MESSAGE] : [];
+  for (const { id, kind } of alwaysLaneProblems(crCfg, config.agents)) {
+    problems.push(
+      kind === 'overlap'
+        ? laneOverlapMessage(id, crCfg)
+        : `engine.code_review.always references ${kind} agent: ${id}`,
+    );
+  }
+  return problems;
+}
+
 const CI_NOTE =
   "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
 
@@ -115,6 +137,7 @@ function resolveOptions({ args, config, ci }) {
     const lanes = codeReviewLanes(crCfg);
     replaces = lanes.replaces.slice();
     always = lanes.always.slice();
+    if (hasReservedId(cfg.agents)) throw new Error(RESERVED_ID_MESSAGE);
     const [problem] = alwaysLaneProblems(crCfg, cfg.agents);
     if (problem && problem.kind === 'overlap') {
       throw new Error(`${laneOverlapMessage(problem.id, crCfg)}; a lane cannot both run and be replaced`);
@@ -156,7 +179,7 @@ module.exports = {
   ENGINE_DEFAULTS,
   CI_NOTE,
   alwaysLaneProblems,
-  laneOverlapMessage,
+  codeReviewEngineProblems,
   parseReviewArgs,
   resolveOptions,
 };

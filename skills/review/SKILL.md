@@ -102,7 +102,7 @@ CI_MODE=""
 [ -n "${AGENT_REVIEW_CI:-}" ] && CI_MODE="true"
 
 # --- Verify the repo is set up ---
-agent-review config validate || {
+agent-review config show >/dev/null || {
   echo "❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first."
   exit 1
 }

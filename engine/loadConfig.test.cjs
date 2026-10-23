@@ -226,50 +226,6 @@ test('escalates fallback warns exactly once; named-lane path never warns', () =>
   }
 });
 
-function engineRefs(agents, codeReview) {
-  const cfg = parseConfig(MINIMAL);
-  cfg.agents = agents;
-  cfg.engine = { name: 'code-review', code_review: codeReview };
-  return validateConfigReferences(cfg, join(tmpdir(), 'config.yml'));
-}
-
-test('references: always id must exist and be enabled', () => {
-  const errors = engineRefs(
-    [{ id: 'security' }, { id: 'standards', enabled: false }],
-    { always: ['security', 'testing', 'standards'] },
-  );
-  assert.ok(errors.includes('engine.code_review.always references unknown agent: testing'));
-  assert.ok(errors.includes('engine.code_review.always references disabled agent: standards'));
-  assert.equal(errors.length, 2);
-});
-
-test('references: an id in both lists', () => {
-  const errors = engineRefs([{ id: 'security' }], { always: ['security'], replaces: ['security'] });
-  assert.deepEqual(errors, ['engine.code_review lists security in both always and replaces']);
-});
-
-test('references: replaces overlapping the default always list', () => {
-  const agents = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }, { id: 'architecture' }];
-  const errors = engineRefs(agents, { replaces: ['architecture', 'simplification', 'security'] });
-  assert.deepEqual(errors, ['engine.code_review lists security in both always (default) and replaces']);
-});
-
-test('references: always overlapping the default replaces list', () => {
-  const agents = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }, { id: 'architecture' }];
-  const errors = engineRefs(agents, { always: ['security', 'testing', 'standards', 'architecture'] });
-  assert.deepEqual(errors, ['engine.code_review lists architecture in both always and replaces (default)']);
-});
-
-const DEFAULT_ALWAYS = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }];
-
-test('references: the default lists alone do not overlap', () => {
-  assert.deepEqual(engineRefs(DEFAULT_ALWAYS, { effort: 'high' }), []);
-});
-
-test('references: unknown replaces id is ignored', () => {
-  assert.deepEqual(engineRefs(DEFAULT_ALWAYS, { replaces: ['nope'] }), []);
-});
-
 const refsWith = (agents, engine) => {
   const cfg = parseConfig(MINIMAL);
   cfg.agents = agents;
@@ -277,69 +233,38 @@ const refsWith = (agents, engine) => {
   return validateConfigReferences(cfg, join(tmpdir(), 'config.yml'));
 };
 
-test('references: "code-review" is a reserved agent id under any engine', () => {
-  for (const engine of [undefined, { name: 'agent-review' }, { name: 'code-review' }]) {
-    assert.deepEqual(
-      refsWith([...DEFAULT_ALWAYS, { id: 'code-review' }], engine),
-      ['agent id "code-review" is reserved for the code-review engine'],
-      JSON.stringify(engine),
-    );
-  }
-});
-
-test('references: under the code-review engine the default always lanes must exist and be enabled', () => {
-  const agents = [{ id: 'security', enabled: false }, { id: 'standards' }];
-  const expected = [
-    'engine.code_review.always references disabled agent: security',
-    'engine.code_review.always references unknown agent: testing',
-  ];
-  assert.deepEqual(refsWith(agents, { name: 'code-review' }), expected, 'no code_review block');
-  assert.deepEqual(refsWith(agents, { name: 'code-review', code_review: { effort: 'high' } }), expected, 'no always key');
-});
-
-test('references: under any other engine the code_review lanes are not checked', () => {
-  const agents = [{ id: 'standards' }, { id: 'testing', enabled: false }];
+test('references: the engine-only checks are left to config validate and resolveOptions', () => {
+  const misconfigured = [{ id: 'security', enabled: false }, { id: 'standards' }, { id: 'code-review' }];
   for (const engine of [
     undefined,
     { name: 'agent-review' },
-    { name: 'agent-review', code_review: { effort: 'high' } },
-    { code_review: { replaces: ['architecture'] } },
-    { name: 'agent-review', code_review: { always: ['security', 'testing', 'standards'] } },
-    { code_review: { always: ['security'] } },
-    { name: 'agent-review', code_review: { always: ['standards'], replaces: ['standards'] } },
+    { name: 'code-review' },
+    { name: 'code-review', code_review: { always: ['security', 'testing'], replaces: ['security'] } },
     { code_review: { replaces: ['architecture', 'simplification', 'security'] } },
   ]) {
-    assert.deepEqual(refsWith(agents, engine), [], JSON.stringify(engine));
+    assert.deepEqual(refsWith(misconfigured, engine), [], JSON.stringify(engine));
   }
 });
 
-test('the template config loads under the agent-review engine with testing disabled', () => {
+test('the template config loads under either engine with testing disabled', () => {
   const root = mkdtempSync(join(tmpdir(), 'agent-review-template-'));
   cpSync(join(__dirname, '..', 'templates', 'rules'), join(root, 'rules'), { recursive: true });
   const cfg = parseConfig(readFileSync(join(__dirname, '..', 'templates', 'config.yml'), 'utf8'));
-  assert.equal(cfg.engine.name, 'agent-review');
-  assert.deepEqual(cfg.engine.code_review.always, ['security', 'testing', 'standards']);
   cfg.agents.find((a) => a.id === 'testing').enabled = false;
   const configPath = join(root, 'config.yml');
-  writeFileSync(configPath, stringify(cfg));
-  assert.doesNotThrow(() => loadConfig({ configPath, schemaPath }));
-
-  cfg.engine.name = 'code-review';
-  writeFileSync(configPath, stringify(cfg));
-  assert.throws(
-    () => loadConfig({ configPath, schemaPath }),
-    /engine\.code_review\.always references disabled agent: testing/,
-    'the code-review engine still checks the list',
-  );
+  for (const engine of [undefined, { name: 'agent-review' }, { name: 'code-review' }]) {
+    if (engine) cfg.engine = engine;
+    writeFileSync(configPath, stringify(cfg));
+    assert.doesNotThrow(() => loadConfig({ configPath, schemaPath }), JSON.stringify(engine));
+  }
 });
 
-test('loadConfig rejects a code-review config whose default security lane is disabled', () => {
+test('loadConfig loads a code-review config whose default security lane is disabled', () => {
   const agents = [{ id: 'security', enabled: false }, { id: 'testing' }, { id: 'standards' }];
-  assert.throws(
-    () => loadFixtureWith({ agents, engine: { name: 'code-review' } }),
-    /engine\.code_review\.always references disabled agent: security/,
-  );
-  assert.doesNotThrow(() => loadFixtureWith({ agents, engine: { name: 'agent-review' } }));
+  for (const name of ['code-review', 'agent-review']) {
+    assert.doesNotThrow(() => loadFixtureWith({ agents, engine: { name } }), name);
+  }
+  assert.doesNotThrow(() => loadFixtureWith({ agents: [...agents, { id: 'code-review' }] }), 'the reserved id loads');
 });
 
 test('template config still validates', () => {

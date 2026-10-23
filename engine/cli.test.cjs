@@ -573,6 +573,73 @@ test('options reports errors', () => {
   assert.match(s, /^error: /);
 });
 
+test('a code-review config with a disabled default lane fails only config validate and the code-review engine', () => {
+  const root = optionsRoot();
+  const configPath = join(root, 'rd', 'config.yml');
+  writeFileSync(
+    configPath,
+    readFileSync(configPath, 'utf8')
+      .replace('agents:\n  - id: standards\n    always: true\n', 'agents:\n  - id: standards\n    always: true\n  - id: security\n    enabled: false\n')
+      .concat('rollout:\n  mode: advisory\nengine:\n  name: code-review\n'),
+  );
+  const at = ['--root', root, '--review-dir', 'rd'];
+  try {
+    const mode = run(['config', 'get', 'rollout.mode', ...at]);
+    assert.equal(mode.code, 0, mode.s);
+    assert.equal(mode.s, 'advisory\n');
+
+    const fallback = run(['options', '--args', 'engine=agent-review', ...at]);
+    assert.equal(fallback.code, 0, fallback.s);
+    assert.equal(JSON.parse(fallback.s).engine.value, 'agent-review');
+
+    const ci = run(['options', '--args', '', '--ci', ...at]);
+    assert.equal(ci.code, 0, ci.s);
+
+    const validate = run(['config', 'validate', ...at]);
+    assert.equal(validate.code, 1);
+    assert.equal(
+      validate.s,
+      `Invalid review config (${configPath}):\n` +
+        '- engine.code_review.always references disabled agent: security\n' +
+        '- engine.code_review.always references unknown agent: testing\n',
+    );
+
+    const engine = run(['options', '--args', '', ...at]);
+    assert.equal(engine.code, 1);
+    assert.match(engine.s, /^error: engine\.code_review\.always lists "security"/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the reserved code-review id fails config validate only under the code-review engine', () => {
+  const root = optionsRoot();
+  const configPath = join(root, 'rd', 'config.yml');
+  const base = readFileSync(configPath, 'utf8').replace(
+    'agents:\n  - id: standards\n    always: true\n',
+    'agents:\n  - id: standards\n    always: true\n  - id: security\n  - id: testing\n  - id: code-review\n',
+  );
+  const at = ['--root', root, '--review-dir', 'rd'];
+  try {
+    writeFileSync(configPath, base);
+    const plain = run(['config', 'validate', ...at]);
+    assert.equal(plain.code, 0, plain.s);
+    assert.equal(plain.s, 'config OK\n');
+    assert.equal(run(['options', '--args', '', ...at]).code, 0, 'the default engine runs the lane as before');
+
+    writeFileSync(configPath, `${base}engine:\n  name: code-review\n`);
+    const validate = run(['config', 'validate', ...at]);
+    assert.equal(validate.code, 1);
+    assert.equal(validate.s, `Invalid review config (${configPath}):\n- agent id "code-review" is reserved for the code-review engine\n`);
+    assert.equal(run(['config', 'get', 'profile', ...at]).code, 0, 'other commands still load it');
+    const engine = run(['options', '--args', '', ...at]);
+    assert.equal(engine.code, 1);
+    assert.equal(engine.s, 'error: agent id "code-review" is reserved for the code-review engine\n');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('code-review-proof exit codes', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
   try {
