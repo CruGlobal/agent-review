@@ -140,7 +140,7 @@ function oldEntry(over = {}) {
       category: 'Correctness',
       severity: 5,
       line: 40,
-      message: 'cache is never invalidated',
+      message: 'the cache is never invalidated after a write',
     }),
     status: 'open',
     ...over,
@@ -154,7 +154,7 @@ function reworded(over = {}) {
     category: ' correctness ',
     severity: 4,
     line: 44,
-    message: 'stale cache entries survive updates',
+    message: 'a write never clears the cache, so the next read returns stale data',
     ...over,
   });
 }
@@ -215,6 +215,32 @@ test('location mode appends a suggestion in another category, file, or more than
   }
   assert.equal(mergeLedger(previous, [reworded({ line: 45 })], BY_LOCATION).length, 1, 'exactly 5 lines away matches');
   assert.equal(mergeLedger(previous, [reworded({ line: 35 })], BY_LOCATION).length, 1, 'exactly 5 lines before matches');
+});
+
+test('location mode appends an unrelated suggestion near an entry of the same lane, file, and category', () => {
+  const previous = [oldEntry({
+    category: 'security',
+    file: 'app/controllers/sessions_controller.rb',
+    line: 20,
+    message: 'The session cookie sets SameSite=Lax, so a cross-site POST still sends it.',
+  })];
+  const redirect = reworded({
+    category: 'security',
+    file: 'app/controllers/sessions_controller.rb',
+    line: 23,
+    severity: 5,
+    message: 'The redirect target comes from params[:return_to] unchecked, so the login page is an open redirect.',
+  });
+  const ledger = mergeLedger(previous, [redirect], BY_LOCATION);
+  assert.deepEqual(ledger.map((entry) => [entry.n, entry.signature]), [[3, 'old-sig'], [4, 'new-sig']]);
+});
+
+test('location mode needs a token Jaccard of at least 0.3 between the messages', () => {
+  const previous = [oldEntry({ message: 'alpha bravo charlie delta echo foxtrot golf' })];
+  const atBar = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie hotel india juliet' })], BY_LOCATION);
+  assert.equal(atBar.length, 1, '3 shared of 10 tokens is exactly 0.3, a match');
+  const below = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie hotel india juliet kilo' })], BY_LOCATION);
+  assert.equal(below.length, 2, '3 shared of 11 tokens is below 0.3');
 });
 
 test('the default ledger merge ignores location, with or without an options object', () => {

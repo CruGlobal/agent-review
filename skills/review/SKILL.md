@@ -1651,7 +1651,8 @@ the feedback store):
 - Under the `code-review` engine the call adds `--match-suggestions-by-location`, because
   `/code-review` rewords the same suggestion on every run. A new finding below 7 that sits within
   5 lines of an older open or dismissed entry from the same lane, in the same file and category,
-  is treated as that entry and gets no new number. Blockers are never matched this way, and
+  and says much the same thing (a token Jaccard of 0.3 or more between the two messages), is
+  treated as that entry and gets no new number. Blockers are never matched this way, and
   neither are fixed entries or other lanes' entries.
 - The ledger also carries bounded `evidence` and `recommendation` fields. This preserves enough
   context to address an older open finding after the visible report is updated by a later run.

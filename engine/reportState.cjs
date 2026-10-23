@@ -2,6 +2,7 @@
 
 const { signature } = require('./findingSignature.cjs');
 const { unwrapFindings } = require('./unwrapFindings.cjs');
+const { tokenize, jaccard } = require('./consensus.cjs');
 
 const STATUSES = new Set(['open', 'fixed', 'dismissed']);
 const RISKS = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
@@ -91,6 +92,7 @@ function cleanPrevious(raw) {
 }
 
 const LOCATION_WINDOW = 5;
+const LOCATION_WORDING = 0.3;
 
 function sameCategory(a, b) {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -99,6 +101,10 @@ function sameCategory(a, b) {
 function nearLine(a, b) {
   if (a === null && b === null) return true;
   return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+}
+
+function similarWording(a, b) {
+  return jaccard(tokenize(a), tokenize(b)) >= LOCATION_WORDING;
 }
 
 function isStaticFinding(finding) {
@@ -119,7 +125,8 @@ function matchesEarlierSpot(finding, previous) {
         entry.agent === finding.agent &&
         entry.file === finding.file &&
         sameCategory(entry.category, finding.category) &&
-        nearLine(entry.line, finding.line),
+        nearLine(entry.line, finding.line) &&
+        similarWording(entry.message, finding.message),
     )
   );
 }

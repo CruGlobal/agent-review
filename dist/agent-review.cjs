@@ -18269,12 +18269,371 @@ var require_unwrapFindings = __commonJS({
   }
 });
 
+// engine/consensus.cjs
+var require_consensus = __commonJS({
+  "engine/consensus.cjs"(exports2, module2) {
+    "use strict";
+    var { unwrapFindings } = require_unwrapFindings();
+    var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
+    function confidenceRank(c) {
+      return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
+    }
+    function tokenize(message) {
+      return String(message || "").toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\d+/g, " ").split(/\s+/).filter(Boolean);
+    }
+    function jaccard(tokensA, tokensB) {
+      const a = new Set(tokensA);
+      const b = new Set(tokensB);
+      let inter = 0;
+      for (const t of a) if (b.has(t)) inter++;
+      const union = (/* @__PURE__ */ new Set([...a, ...b])).size;
+      return union === 0 ? 0 : inter / union;
+    }
+    function sameGroup(a, b) {
+      if (!a.file || a.file !== b.file) return false;
+      const bothNull = a.line == null && b.line == null;
+      const withinRange = a.line != null && b.line != null && Math.abs(a.line - b.line) <= 3;
+      if (!bothNull && !withinRange) return false;
+      return jaccard(tokenize(a.message), tokenize(b.message)) >= 0.5;
+    }
+    function parseLane(value, laneId) {
+      if (value === void 0) {
+        throw new Error(`missing findings for lane "${laneId}"`);
+      }
+      let parsed = value;
+      if (typeof value === "string") {
+        try {
+          parsed = JSON.parse(value);
+        } catch (e) {
+          throw new Error(
+            `unparseable findings JSON for lane "${laneId}": ${e.message}`
+          );
+        }
+      }
+      const list = unwrapFindings(parsed);
+      if (list) return list;
+      throw new Error(
+        `findings for lane "${laneId}" must be an array or {findings:[...]}`
+      );
+    }
+    function normalizeFinding(raw, laneId) {
+      const line = raw.line == null || raw.line === "" ? null : Number(raw.line);
+      const severity = Number(raw.severity);
+      return {
+        agent: laneId,
+        category: raw.category != null ? String(raw.category) : "",
+        severity: Number.isFinite(severity) ? severity : 0,
+        file: String(raw.file || ""),
+        line: Number.isFinite(line) ? line : null,
+        message: raw.message != null ? String(raw.message) : "",
+        confidence: raw.confidence != null ? String(raw.confidence) : "",
+        evidence: raw.evidence != null ? String(raw.evidence) : "",
+        recommendation: raw.recommendation != null ? String(raw.recommendation) : "",
+        fix: raw.fix != null ? String(raw.fix) : ""
+      };
+    }
+    function blockerBarFailure(f) {
+      if (f.line === null) return "severity >= 7 requires a line anchor";
+      if (String(f.confidence || "").toLowerCase() !== "high") {
+        return "severity >= 7 requires High confidence";
+      }
+      if (!String(f.evidence || "").trim()) {
+        return "severity >= 7 requires concrete evidence";
+      }
+      return null;
+    }
+    function validateFinding(f) {
+      if (!f.file) return "missing file";
+      if (!f.message) return "missing message";
+      if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
+        return `invalid severity: ${f.severity}`;
+      }
+      if (f.severity >= 7) return blockerBarFailure(f);
+      return null;
+    }
+    var CODE_REVIEW_LANE = "code-review";
+    var CLEANUP_CATEGORIES = /* @__PURE__ */ new Set([
+      "simplification",
+      "efficiency",
+      "reuse",
+      "altitude",
+      "conventions"
+    ]);
+    var CODE_REVIEW_CAP = 6;
+    var DOUBTED_CAP = 4;
+    var OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
+    var DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
+    function codeReviewCap(f) {
+      const evidence = String(f.evidence || "").trimStart();
+      if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
+      const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
+      if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
+      if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
+      return null;
+    }
+    function isNumericSeverity(value) {
+      if (typeof value === "number") return Number.isFinite(value);
+      return typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value));
+    }
+    function capCodeReviewFinding(input, rawSeverity) {
+      if (!isNumericSeverity(rawSeverity)) return input;
+      const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
+      const f = severity === input.severity ? input : { ...input, severity };
+      const cap = codeReviewCap(f);
+      return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
+    }
+    function canonicalOrder(a, b) {
+      return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
+    }
+    function buildCliques(findings) {
+      const ordered = [...findings].sort(canonicalOrder);
+      const cliques = [];
+      for (const finding of ordered) {
+        const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
+        if (clique) clique.push(finding);
+        else cliques.push([finding]);
+      }
+      return cliques;
+    }
+    function toEntry(m) {
+      return {
+        agent: m.agent,
+        category: m.category,
+        severity: m.severity,
+        file: m.file,
+        line: m.line,
+        message: m.message,
+        confidence: m.confidence,
+        evidence: m.evidence,
+        recommendation: m.recommendation,
+        fix: m.fix,
+        corroboration: 1,
+        needsHumanReview: false,
+        _minSeverity: m.severity,
+        _maxSeverity: m.severity
+      };
+    }
+    function provenBlockerOf(m, anyLane) {
+      if (m._provenBlocker !== void 0) return m._provenBlocker;
+      const counts = anyLane || m.agent === CODE_REVIEW_LANE;
+      return counts && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
+    }
+    function combineMembers(members, anyLane) {
+      const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
+      const primary = ordered.reduce(
+        (best, m) => m.severity > best.severity ? m : best,
+        ordered[0]
+      );
+      const agents = [
+        ...new Set(
+          ordered.flatMap(
+            (m) => String(m.agents || m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
+          )
+        )
+      ].sort();
+      const bestConfidence = ordered.reduce(
+        (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
+        ordered[0]
+      );
+      const longestField = (field) => ordered.reduce(
+        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
+        ordered[0]
+      )[field];
+      const corroboration = ordered.reduce(
+        (sum, m) => sum + (m.corroboration || 1),
+        0
+      );
+      const minSeverity = Math.min(
+        ...ordered.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
+      );
+      const maxSeverity = Math.max(
+        ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
+      );
+      const weightedSum = ordered.reduce(
+        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+        0
+      );
+      const meanSeverity = Math.round(weightedSum / corroboration);
+      const blocker = ordered.reduce((best, m) => {
+        const candidate = provenBlockerOf(m, anyLane);
+        return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
+      }, null);
+      const raised = blocker !== null && blocker.severity > meanSeverity;
+      const lead = raised ? blocker : primary;
+      return {
+        agent: lead.agent,
+        agents: agents.join(","),
+        category: lead.category,
+        severity: raised ? blocker.severity : meanSeverity,
+        file: lead.file,
+        line: lead.line,
+        message: lead.message,
+        confidence: bestConfidence.confidence,
+        evidence: longestField("evidence"),
+        recommendation: longestField("recommendation"),
+        fix: lead.fix,
+        corroboration,
+        needsHumanReview: maxSeverity - minSeverity >= 4,
+        _minSeverity: minSeverity,
+        _maxSeverity: maxSeverity,
+        _meanSeverity: meanSeverity,
+        _provenBlocker: blocker
+      };
+    }
+    function unionFind(n) {
+      const parent = Array.from({ length: n }, (_, i) => i);
+      function find(x) {
+        while (parent[x] !== x) {
+          parent[x] = parent[parent[x]];
+          x = parent[x];
+        }
+        return x;
+      }
+      function union(x, y) {
+        const rx = find(x);
+        const ry = find(y);
+        if (rx !== ry) parent[rx] = ry;
+      }
+      return { find, union };
+    }
+    function applyProfileCutoff(entries, profile) {
+      if (profile !== "chill") return entries;
+      return entries.filter((e) => e.severity >= 4 || e.corroboration >= 2);
+    }
+    function sortEntries(entries) {
+      return [...entries].sort(
+        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
+      );
+    }
+    function lineDistance(a, b) {
+      if (a == null && b == null) return 0;
+      if (a == null || b == null) return null;
+      return Math.abs(a - b);
+    }
+    function buildCandidates(entries) {
+      const candidates = [];
+      for (let i = 0; i < entries.length; i++) {
+        for (let j = i + 1; j < entries.length; j++) {
+          const a = entries[i];
+          const b = entries[j];
+          if (a.file !== b.file || !a.file) continue;
+          const dist = lineDistance(a.line, b.line);
+          if (dist == null || dist > 10) continue;
+          const reason = a.line == null && b.line == null ? `both findings in ${a.file} have no line anchor` : `both findings in ${a.file} within ${dist} line(s) (L${a.line} vs L${b.line})`;
+          candidates.push({ a: i, b: j, reason });
+        }
+      }
+      return candidates;
+    }
+    function applyDecisions(entries, decisions, anyLane) {
+      if (!Array.isArray(decisions)) {
+        throw new Error("consensus: decisions must be an array");
+      }
+      const n = entries.length;
+      const { find, union } = unionFind(n);
+      for (const d of decisions) {
+        const pair = d && (d.merge || d.keep);
+        if (!Array.isArray(pair) || pair.length !== 2) {
+          throw new Error(`consensus: invalid decision entry ${JSON.stringify(d)}`);
+        }
+        const [i, j] = pair;
+        if (!Number.isInteger(i) || !Number.isInteger(j) || i < 0 || j < 0 || i >= n || j >= n) {
+          throw new Error(
+            `consensus: unknown finding index in decision ${JSON.stringify(d)}`
+          );
+        }
+        if (d.merge) union(i, j);
+      }
+      const groupsByRoot = /* @__PURE__ */ new Map();
+      for (let i = 0; i < n; i++) {
+        const root = find(i);
+        if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
+        groupsByRoot.get(root).push(entries[i]);
+      }
+      return [...groupsByRoot.values()].map(
+        (members) => members.length === 1 ? members[0] : combineMembers(members, anyLane)
+      );
+    }
+    function stripInternal(entry) {
+      const { _minSeverity, _maxSeverity, _meanSeverity, _provenBlocker, ...rest } = entry;
+      return rest;
+    }
+    function consensusFrom({
+      plan,
+      findingsByAgent = {},
+      profile = "standard",
+      decisions
+    } = {}) {
+      const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
+      const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE);
+      if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
+        throw new Error(
+          "consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review"
+        );
+      }
+      const errors = [];
+      const perLane = {};
+      for (const laneId of laneIds) {
+        try {
+          perLane[laneId] = parseLane(findingsByAgent[laneId], laneId);
+        } catch (e) {
+          errors.push(e.message);
+        }
+      }
+      if (errors.length) {
+        throw new Error(`consensus: ${errors.join("; ")}`);
+      }
+      const all = [];
+      const droppedInvalid = [];
+      for (const laneId of laneIds) {
+        for (const raw of perLane[laneId]) {
+          const normalized = normalizeFinding(raw, laneId);
+          const finding = laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
+          const reason = validateFinding(finding);
+          if (reason) {
+            const messageSlice = String(finding.message || "").slice(0, 200);
+            droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
+            console.warn(
+              `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`
+            );
+            continue;
+          }
+          all.push(finding);
+        }
+      }
+      let entries = buildCliques(all).map(
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
+      );
+      const beforeCutoff = entries.length;
+      entries = applyProfileCutoff(entries, profile);
+      const droppedByProfile = beforeCutoff - entries.length;
+      entries = sortEntries(entries);
+      if (decisions !== void 0) {
+        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
+      }
+      const candidates = buildCandidates(entries);
+      const findings = entries.map(stripInternal);
+      const stats = {
+        raw: all.length,
+        groups: findings.filter((e) => e.corroboration > 1).length,
+        singletons: findings.filter((e) => e.corroboration === 1).length,
+        droppedByProfile,
+        droppedInvalid,
+        needsHumanReview: findings.filter((e) => e.needsHumanReview).length
+      };
+      return { findings, candidates, stats };
+    }
+    module2.exports = { consensusFrom, capCodeReviewFinding, tokenize, jaccard, parseLane };
+  }
+});
+
 // engine/reportState.cjs
 var require_reportState = __commonJS({
   "engine/reportState.cjs"(exports2, module2) {
     "use strict";
     var { signature } = require_findingSignature();
     var { unwrapFindings } = require_unwrapFindings();
+    var { tokenize, jaccard } = require_consensus();
     var STATUSES = /* @__PURE__ */ new Set(["open", "fixed", "dismissed"]);
     var RISKS = /* @__PURE__ */ new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
     function findingList(input) {
@@ -18344,6 +18703,7 @@ var require_reportState = __commonJS({
       });
     }
     var LOCATION_WINDOW = 5;
+    var LOCATION_WORDING = 0.3;
     function sameCategory(a, b) {
       return a.trim().toLowerCase() === b.trim().toLowerCase();
     }
@@ -18351,12 +18711,15 @@ var require_reportState = __commonJS({
       if (a === null && b === null) return true;
       return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
     }
+    function similarWording(a, b) {
+      return jaccard(tokenize(a), tokenize(b)) >= LOCATION_WORDING;
+    }
     function isStaticFinding(finding) {
       return finding.agent === "static-analysis" || finding.category.startsWith("static-analysis/");
     }
     function matchesEarlierSpot(finding, previous) {
       return finding.severity < 7 && !isStaticFinding(finding) && previous.some(
-        (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line)
+        (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line) && similarWording(entry.message, finding.message)
       );
     }
     function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
@@ -19313,364 +19676,6 @@ var require_evidence = __commonJS({
   }
 });
 
-// engine/consensus.cjs
-var require_consensus = __commonJS({
-  "engine/consensus.cjs"(exports2, module2) {
-    "use strict";
-    var { unwrapFindings } = require_unwrapFindings();
-    var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
-    function confidenceRank(c) {
-      return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
-    }
-    function tokenize(message) {
-      return String(message || "").toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\d+/g, " ").split(/\s+/).filter(Boolean);
-    }
-    function jaccard(tokensA, tokensB) {
-      const a = new Set(tokensA);
-      const b = new Set(tokensB);
-      let inter = 0;
-      for (const t of a) if (b.has(t)) inter++;
-      const union = (/* @__PURE__ */ new Set([...a, ...b])).size;
-      return union === 0 ? 0 : inter / union;
-    }
-    function sameGroup(a, b) {
-      if (!a.file || a.file !== b.file) return false;
-      const bothNull = a.line == null && b.line == null;
-      const withinRange = a.line != null && b.line != null && Math.abs(a.line - b.line) <= 3;
-      if (!bothNull && !withinRange) return false;
-      return jaccard(tokenize(a.message), tokenize(b.message)) >= 0.5;
-    }
-    function parseLane(value, laneId) {
-      if (value === void 0) {
-        throw new Error(`missing findings for lane "${laneId}"`);
-      }
-      let parsed = value;
-      if (typeof value === "string") {
-        try {
-          parsed = JSON.parse(value);
-        } catch (e) {
-          throw new Error(
-            `unparseable findings JSON for lane "${laneId}": ${e.message}`
-          );
-        }
-      }
-      const list = unwrapFindings(parsed);
-      if (list) return list;
-      throw new Error(
-        `findings for lane "${laneId}" must be an array or {findings:[...]}`
-      );
-    }
-    function normalizeFinding(raw, laneId) {
-      const line = raw.line == null || raw.line === "" ? null : Number(raw.line);
-      const severity = Number(raw.severity);
-      return {
-        agent: laneId,
-        category: raw.category != null ? String(raw.category) : "",
-        severity: Number.isFinite(severity) ? severity : 0,
-        file: String(raw.file || ""),
-        line: Number.isFinite(line) ? line : null,
-        message: raw.message != null ? String(raw.message) : "",
-        confidence: raw.confidence != null ? String(raw.confidence) : "",
-        evidence: raw.evidence != null ? String(raw.evidence) : "",
-        recommendation: raw.recommendation != null ? String(raw.recommendation) : "",
-        fix: raw.fix != null ? String(raw.fix) : ""
-      };
-    }
-    function blockerBarFailure(f) {
-      if (f.line === null) return "severity >= 7 requires a line anchor";
-      if (String(f.confidence || "").toLowerCase() !== "high") {
-        return "severity >= 7 requires High confidence";
-      }
-      if (!String(f.evidence || "").trim()) {
-        return "severity >= 7 requires concrete evidence";
-      }
-      return null;
-    }
-    function validateFinding(f) {
-      if (!f.file) return "missing file";
-      if (!f.message) return "missing message";
-      if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
-        return `invalid severity: ${f.severity}`;
-      }
-      if (f.severity >= 7) return blockerBarFailure(f);
-      return null;
-    }
-    var CODE_REVIEW_LANE = "code-review";
-    var CLEANUP_CATEGORIES = /* @__PURE__ */ new Set([
-      "simplification",
-      "efficiency",
-      "reuse",
-      "altitude",
-      "conventions"
-    ]);
-    var CODE_REVIEW_CAP = 6;
-    var DOUBTED_CAP = 4;
-    var OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
-    var DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
-    function codeReviewCap(f) {
-      const evidence = String(f.evidence || "").trimStart();
-      if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
-      const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
-      if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
-      if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
-      return null;
-    }
-    function isNumericSeverity(value) {
-      if (typeof value === "number") return Number.isFinite(value);
-      return typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value));
-    }
-    function capCodeReviewFinding(input, rawSeverity) {
-      if (!isNumericSeverity(rawSeverity)) return input;
-      const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
-      const f = severity === input.severity ? input : { ...input, severity };
-      const cap = codeReviewCap(f);
-      return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
-    }
-    function canonicalOrder(a, b) {
-      return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
-    }
-    function buildCliques(findings) {
-      const ordered = [...findings].sort(canonicalOrder);
-      const cliques = [];
-      for (const finding of ordered) {
-        const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
-        if (clique) clique.push(finding);
-        else cliques.push([finding]);
-      }
-      return cliques;
-    }
-    function toEntry(m) {
-      return {
-        agent: m.agent,
-        category: m.category,
-        severity: m.severity,
-        file: m.file,
-        line: m.line,
-        message: m.message,
-        confidence: m.confidence,
-        evidence: m.evidence,
-        recommendation: m.recommendation,
-        fix: m.fix,
-        corroboration: 1,
-        needsHumanReview: false,
-        _minSeverity: m.severity,
-        _maxSeverity: m.severity
-      };
-    }
-    function provenBlockerOf(m, anyLane) {
-      if (m._provenBlocker !== void 0) return m._provenBlocker;
-      const counts = anyLane || m.agent === CODE_REVIEW_LANE;
-      return counts && m.severity >= 7 && !blockerBarFailure(m) ? m : null;
-    }
-    function combineMembers(members, anyLane) {
-      const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
-      const primary = ordered.reduce(
-        (best, m) => m.severity > best.severity ? m : best,
-        ordered[0]
-      );
-      const agents = [
-        ...new Set(
-          ordered.flatMap(
-            (m) => String(m.agents || m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
-          )
-        )
-      ].sort();
-      const bestConfidence = ordered.reduce(
-        (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
-        ordered[0]
-      );
-      const longestField = (field) => ordered.reduce(
-        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
-        ordered[0]
-      )[field];
-      const corroboration = ordered.reduce(
-        (sum, m) => sum + (m.corroboration || 1),
-        0
-      );
-      const minSeverity = Math.min(
-        ...ordered.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
-      );
-      const maxSeverity = Math.max(
-        ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
-      );
-      const weightedSum = ordered.reduce(
-        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
-        0
-      );
-      const meanSeverity = Math.round(weightedSum / corroboration);
-      const blocker = ordered.reduce((best, m) => {
-        const candidate = provenBlockerOf(m, anyLane);
-        return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
-      }, null);
-      const raised = blocker !== null && blocker.severity > meanSeverity;
-      const lead = raised ? blocker : primary;
-      return {
-        agent: lead.agent,
-        agents: agents.join(","),
-        category: lead.category,
-        severity: raised ? blocker.severity : meanSeverity,
-        file: lead.file,
-        line: lead.line,
-        message: lead.message,
-        confidence: bestConfidence.confidence,
-        evidence: longestField("evidence"),
-        recommendation: longestField("recommendation"),
-        fix: lead.fix,
-        corroboration,
-        needsHumanReview: maxSeverity - minSeverity >= 4,
-        _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity,
-        _meanSeverity: meanSeverity,
-        _provenBlocker: blocker
-      };
-    }
-    function unionFind(n) {
-      const parent = Array.from({ length: n }, (_, i) => i);
-      function find(x) {
-        while (parent[x] !== x) {
-          parent[x] = parent[parent[x]];
-          x = parent[x];
-        }
-        return x;
-      }
-      function union(x, y) {
-        const rx = find(x);
-        const ry = find(y);
-        if (rx !== ry) parent[rx] = ry;
-      }
-      return { find, union };
-    }
-    function applyProfileCutoff(entries, profile) {
-      if (profile !== "chill") return entries;
-      return entries.filter((e) => e.severity >= 4 || e.corroboration >= 2);
-    }
-    function sortEntries(entries) {
-      return [...entries].sort(
-        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
-      );
-    }
-    function lineDistance(a, b) {
-      if (a == null && b == null) return 0;
-      if (a == null || b == null) return null;
-      return Math.abs(a - b);
-    }
-    function buildCandidates(entries) {
-      const candidates = [];
-      for (let i = 0; i < entries.length; i++) {
-        for (let j = i + 1; j < entries.length; j++) {
-          const a = entries[i];
-          const b = entries[j];
-          if (a.file !== b.file || !a.file) continue;
-          const dist = lineDistance(a.line, b.line);
-          if (dist == null || dist > 10) continue;
-          const reason = a.line == null && b.line == null ? `both findings in ${a.file} have no line anchor` : `both findings in ${a.file} within ${dist} line(s) (L${a.line} vs L${b.line})`;
-          candidates.push({ a: i, b: j, reason });
-        }
-      }
-      return candidates;
-    }
-    function applyDecisions(entries, decisions, anyLane) {
-      if (!Array.isArray(decisions)) {
-        throw new Error("consensus: decisions must be an array");
-      }
-      const n = entries.length;
-      const { find, union } = unionFind(n);
-      for (const d of decisions) {
-        const pair = d && (d.merge || d.keep);
-        if (!Array.isArray(pair) || pair.length !== 2) {
-          throw new Error(`consensus: invalid decision entry ${JSON.stringify(d)}`);
-        }
-        const [i, j] = pair;
-        if (!Number.isInteger(i) || !Number.isInteger(j) || i < 0 || j < 0 || i >= n || j >= n) {
-          throw new Error(
-            `consensus: unknown finding index in decision ${JSON.stringify(d)}`
-          );
-        }
-        if (d.merge) union(i, j);
-      }
-      const groupsByRoot = /* @__PURE__ */ new Map();
-      for (let i = 0; i < n; i++) {
-        const root = find(i);
-        if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
-        groupsByRoot.get(root).push(entries[i]);
-      }
-      return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members, anyLane)
-      );
-    }
-    function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, _provenBlocker, ...rest } = entry;
-      return rest;
-    }
-    function consensusFrom({
-      plan,
-      findingsByAgent = {},
-      profile = "standard",
-      decisions
-    } = {}) {
-      const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
-      const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE);
-      if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
-        throw new Error(
-          "consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review"
-        );
-      }
-      const errors = [];
-      const perLane = {};
-      for (const laneId of laneIds) {
-        try {
-          perLane[laneId] = parseLane(findingsByAgent[laneId], laneId);
-        } catch (e) {
-          errors.push(e.message);
-        }
-      }
-      if (errors.length) {
-        throw new Error(`consensus: ${errors.join("; ")}`);
-      }
-      const all = [];
-      const droppedInvalid = [];
-      for (const laneId of laneIds) {
-        for (const raw of perLane[laneId]) {
-          const normalized = normalizeFinding(raw, laneId);
-          const finding = laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
-          const reason = validateFinding(finding);
-          if (reason) {
-            const messageSlice = String(finding.message || "").slice(0, 200);
-            droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
-            console.warn(
-              `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`
-            );
-            continue;
-          }
-          all.push(finding);
-        }
-      }
-      let entries = buildCliques(all).map(
-        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
-      );
-      const beforeCutoff = entries.length;
-      entries = applyProfileCutoff(entries, profile);
-      const droppedByProfile = beforeCutoff - entries.length;
-      entries = sortEntries(entries);
-      if (decisions !== void 0) {
-        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
-      }
-      const candidates = buildCandidates(entries);
-      const findings = entries.map(stripInternal);
-      const stats = {
-        raw: all.length,
-        groups: findings.filter((e) => e.corroboration > 1).length,
-        singletons: findings.filter((e) => e.corroboration === 1).length,
-        droppedByProfile,
-        droppedInvalid,
-        needsHumanReview: findings.filter((e) => e.needsHumanReview).length
-      };
-      return { findings, candidates, stats };
-    }
-    module2.exports = { consensusFrom, capCodeReviewFinding, tokenize, jaccard, parseLane };
-  }
-});
-
 // engine/slice.cjs
 var require_slice = __commonJS({
   "engine/slice.cjs"(exports2, module2) {
@@ -20150,7 +20155,7 @@ var require_cli = __commonJS({
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, and nearby line)
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
