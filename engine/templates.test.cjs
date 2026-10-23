@@ -688,6 +688,18 @@ test('code-review-lane.md limits category to the names the engine knows', () => 
     'an invented cleanup name would dodge the engine cap',
   );
   assert.ok(flat.includes('every `category` is one of the nine names'), 'the self-check repeats the rule');
+  assert.ok(
+    categories.includes('When that category is not one of the nine names, map it to the closest one. This mapping is normal scoring and needs no note in `evidence`.'),
+    'mapping a raw category is ordinary scoring',
+  );
+  assert.ok(
+    categories.includes('`Recategorized from <original>: <why>`, where `<original>` is the cleanup name you moved it out of'),
+    'the prefix names the cleanup category the finding left',
+  );
+  assert.ok(
+    categories.includes('Use this prefix only for that move, never for mapping a raw category to one of the nine names.'),
+    'the prefix is not for mapping',
+  );
 });
 
 test('code-review-lane.md says how the proof matches each drop to its raw finding', () => {

@@ -123,8 +123,7 @@ CATEGORY:
 other name. The cleanup categories are `simplification`, `efficiency`, `reuse`, `altitude`, and
 `conventions`: a cleanup finding must use one of these five names, and it scores 6 at most.
 
-Start from the raw finding's original category, mapped to the closest of the nine names when the
-raw finding uses a more specific one:
+Start from the raw finding's category:
 
 1. its `category` field, when it has one;
 2. otherwise the label its `summary` starts with, such as `Simplification:` for `simplification`;
@@ -133,12 +132,18 @@ raw finding uses a more specific one:
    wrong result, lost or corrupted data), or the closest cleanup category when it describes only
    cost, duplication, readability, or style.
 
+When that category is not one of the nine names, map it to the closest one. This mapping is
+normal scoring and needs no note in `evidence`. The name you end with is the finding's original
+category.
+
 Move a finding out of a cleanup category only when its failure scenario is a real correctness or
 security defect, for example a `conventions` finding that is really a leaked secret. Set the new
 category to `correctness` or `security`, and start `evidence` with
-`Recategorized from <original>: <why>`, for example
-`Recategorized from conventions: line 14 commits a live API key to the repo.` In every other case,
-and for every finding outside the reviewed range (see SEVERITY), keep the original category.
+`Recategorized from <original>: <why>`, where `<original>` is the cleanup name you moved it out
+of, for example `Recategorized from conventions: line 14 commits a live API key to the repo.`
+Use this prefix only for that move, never for mapping a raw category to one of the nine names. In
+every other case, and for every finding outside the reviewed range (see SEVERITY), keep the
+original category.
 
 CONFIDENCE:
 
