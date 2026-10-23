@@ -157,8 +157,8 @@ const CATEGORIES = [
   'altitude',
   'conventions',
 ];
-// Any spelling of the prefix is checked, so a variant cannot pass as an ordinary proof.
-const EXCLUDED_PROOF = /^\s*excluded path:(.*)$/is;
+// Spelling variants of the prefix are checked too, so none can pass as an ordinary proof.
+const EXCLUDED_PROOF = /^\s*excluded[\s_-]*paths?\s*[:-](.*)$/is;
 
 function spot(file, line) {
   return line == null ? `${file}, no line` : `${file}:${line}`;
@@ -169,7 +169,8 @@ function shown(value) {
 }
 
 function scoredEntryProblem(entry, index) {
-  const { file, line, severity, category } = isPlainObject(entry) ? entry : {};
+  if (!isPlainObject(entry)) return `the code-review scored finding ${index + 1} is not an object`;
+  const { file, line, severity, category } = entry;
   const label = `the code-review scored finding ${index + 1} (${spot(file, line)})`;
   if (typeof severity !== 'number' || !Number.isFinite(severity) || severity < 1 || severity > 10) {
     return `${label} needs a numeric severity from 1 to 10, not ${shown(severity)}`;

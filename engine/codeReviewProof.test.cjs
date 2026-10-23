@@ -246,6 +246,11 @@ test('accounting: every scored finding needs a numeric severity from 1 to 10', (
       String(severity),
     );
   }
+  for (const entry of [5, null, 'a.js:2', [{ file: 'b.js' }]]) {
+    const r = checkFindingAccounting({ rawFindings: raw, findingsText: J([scoredAt('a.js'), entry]), droppedText: '[]' });
+    assert.equal(r.ok, false, JSON.stringify(entry));
+    assert.equal(r.reason, 'the code-review scored finding 2 is not an object', JSON.stringify(entry));
+  }
   const unanchored = checkFindingAccounting({
     rawFindings: RAW(['a.js', null]),
     findingsText: J([scoredAt('a.js', { line: null, severity: 'high' })]),
@@ -295,11 +300,29 @@ test('accounting: an excluded-path drop needs a configured glob that matches the
   assert.equal(mismatch.ok, false);
   assert.equal(mismatch.reason, 'the code-review dropped entry 1 (src/a.js:2) cites excluded path "dist/**", which src/a.js does not match');
 
-  for (const proof of ['Excluded path: dist/*', '  excluded path:dist/*', 'EXCLUDED PATH: dist/*']) {
-    const variant = dropCheck(raw, [drop('dist/app.js', 4, { proof })], [scoredAt('src/a.js', { line: 2 })], config);
-    assert.equal(variant.ok, false, `${proof} is still checked`);
-    assert.match(variant.reason, /cites excluded path "dist\/\*", which is not in the config's excluded_paths/);
+  const prefixes = [
+    'Excluded path: ',
+    '  excluded path:',
+    'EXCLUDED PATH: ',
+    'Excluded paths: ',
+    'excluded path - ',
+    'excluded path : ',
+    'excluded  path: ',
+    'excluded_path: ',
+    'excluded-paths - ',
+  ];
+  for (const prefix of prefixes) {
+    const unlisted = dropCheck(raw, [drop('dist/app.js', 4, { proof: `${prefix}dist/*` })], [scoredAt('src/a.js', { line: 2 })], config);
+    assert.equal(unlisted.ok, false, `${prefix} is still checked`);
+    assert.match(unlisted.reason, /cites excluded path "dist\/\*", which is not in the config's excluded_paths/, prefix);
+    const listed = dropCheck(raw, [drop('dist/app.js', 4, { proof: `${prefix}dist/**` })], [scoredAt('src/a.js', { line: 2 })], config);
+    assert.deepEqual(listed, { ok: true, reason: 'ok' }, prefix);
   }
+  assert.deepEqual(
+    dropCheck(raw, [drop('dist/app.js', 4, { proof: 'Excluded paths do not apply: already handled: dist/app.js:3 return;' })], [scoredAt('src/a.js', { line: 2 })], config),
+    { ok: true, reason: 'ok' },
+    'an ordinary proof that only mentions excluded paths is not an excluded-path drop',
+  );
 
   const elsewhere = dropCheck(raw, [excluded('dist/app.js', 9, 'dist/**')], [scoredAt('src/a.js', { line: 2 })], config);
   assert.equal(elsewhere.ok, false, 'an excluded-path drop still matches its own raw finding');
