@@ -651,15 +651,44 @@ test('other lanes are unchanged', () => {
   assert.equal(dropped.stats.droppedInvalid.length, 1);
 });
 
-test('a fractional code-review severity is rounded before the cap and the bar', () => {
+test('a fractional code-review severity is floored before the cap and the bar', () => {
   const { findings, stats } = runCr([
     crFinding({ file: 'bar.rb', severity: 7.5 }),
     crFinding({ file: 'nobar.rb', severity: 7.5, confidence: 'Medium', message: 'medium confidence here' }),
     crFinding({ file: 'low.rb', severity: 5.4, message: 'a small gap in error handling' }),
+    crFinding({ file: 'half.rb', severity: 6.5, message: 'a half point never makes a blocker' }),
   ]);
   const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'bar.rb': 8, 'nobar.rb': 6, 'low.rb': 5 });
+  assert.deepEqual(by, { 'bar.rb': 7, 'nobar.rb': 6, 'low.rb': 5, 'half.rb': 6 });
   assert.deepEqual(stats.droppedInvalid, []);
+});
+
+test('a code-review severity outside 1 to 10 is clamped, not dropped', () => {
+  const { findings, stats } = runCr([
+    crFinding({ file: 'high.rb', severity: 11 }),
+    crFinding({ file: 'zero.rb', severity: 0, message: 'scored zero by mistake' }),
+    crFinding({ file: 'neg.rb', severity: -2, message: 'scored below zero by mistake' }),
+    crFinding({ file: 'capped.rb', severity: 11, category: 'conventions', message: 'naming drift' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'high.rb': 10, 'zero.rb': 1, 'neg.rb': 1, 'capped.rb': 6 });
+  assert.deepEqual(stats.droppedInvalid, []);
+});
+
+test('severities outside 1 to 10 from another lane are still dropped', () => {
+  const { findings, stats } = runCr(
+    [
+      crFinding({ file: 'half.rb', severity: 6.5 }),
+      crFinding({ file: 'high.rb', severity: 11 }),
+      crFinding({ file: 'zero.rb', severity: 0 }),
+    ],
+    'correctness',
+  );
+  assert.equal(findings.length, 0);
+  assert.deepEqual(
+    stats.droppedInvalid.map((d) => d.reason),
+    ['invalid severity: 6.5', 'invalid severity: 11', 'invalid severity: 0'],
+  );
 });
 
 test('a fractional severity from another lane is still dropped', () => {
@@ -709,6 +738,18 @@ test('doubted code-review findings cap at 4 at any prefix boundary', () => {
   ]);
   const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
   assert.deepEqual(by, { 'a.rb': 4, 'b.rb': 4, 'c.rb': 4, 'd.rb': 4, 'e.rb': 4, 'f.rb': 3, 'g.rb': 8 });
+});
+
+test('outside and doubted prefixes match in any case', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'o.rb', evidence: 'outside the reviewed range: old_helper drops the last row.' }),
+    crFinding({ file: 'u.rb', evidence: 'OUTSIDE THE REVIEWED RANGE: old_helper drops the last row.' }),
+    crFinding({ file: 'd.rb', evidence: 'doubted: depends on a caller I could not see.' }),
+    crFinding({ file: 'r.rb', evidence: 'Recategorized from reuse: drops writes. DOUBTED: the queue may retry.' }),
+    crFinding({ file: 'm.rb', evidence: 'new code calls outside the reviewed range: as a phrase mid-text' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'o.rb': 6, 'u.rb': 6, 'd.rb': 4, 'r.rb': 4, 'm.rb': 8 });
 });
 
 test('outside and doubted prefixes leave other lanes alone', () => {

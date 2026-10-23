@@ -19347,19 +19347,19 @@ var require_consensus = __commonJS({
     ]);
     var CODE_REVIEW_CAP = 6;
     var DOUBTED_CAP = 4;
-    var OUTSIDE_PREFIX = "Outside the reviewed range: ";
-    var DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /;
+    var OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
+    var DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
     function codeReviewCap(f) {
       const evidence = String(f.evidence || "").trimStart();
       if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
       const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
-      if (cleanup || evidence.startsWith(OUTSIDE_PREFIX)) return CODE_REVIEW_CAP;
+      if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
       if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
       return null;
     }
     function capCodeReviewFinding(input) {
-      const fractional = Number.isFinite(input.severity) && !Number.isInteger(input.severity);
-      const f = fractional ? { ...input, severity: Math.round(input.severity) } : input;
+      const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
+      const f = severity === input.severity ? input : { ...input, severity };
       const cap = codeReviewCap(f);
       return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
     }

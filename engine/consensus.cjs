@@ -144,16 +144,16 @@ const CLEANUP_CATEGORIES = new Set([
 const CODE_REVIEW_CAP = 6;
 const DOUBTED_CAP = 4;
 // The lane template's evidence prefixes, in order: Outside, Recategorized, Doubted.
-const OUTSIDE_PREFIX = 'Outside the reviewed range: ';
+const OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
 // Recategorized's free-text reason ends at no fixed marker, so Doubted counts at
 // the start, at a line start, or right after a prior prefix or sentence ends.
-const DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /;
+const DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
 
 function codeReviewCap(f) {
   const evidence = String(f.evidence || '').trimStart();
   if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
   const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
-  if (cleanup || evidence.startsWith(OUTSIDE_PREFIX)) return CODE_REVIEW_CAP;
+  if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
   if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
   return null;
 }
@@ -161,11 +161,11 @@ function codeReviewCap(f) {
 // Applies only to the code-review lane, before validateFinding: cleanups,
 // out-of-range and doubted findings never block, and a 7+ that misses the
 // blocker bar is kept as a suggestion at the cap instead of being dropped by
-// validateFinding. Rounding must come first: the cap and the bar judge the
-// rounded severity.
+// validateFinding. Flooring and clamping must come first: the cap and the bar
+// judge the whole 1 to 10 severity, and a half point never makes a blocker.
 function capCodeReviewFinding(input) {
-  const fractional = Number.isFinite(input.severity) && !Number.isInteger(input.severity);
-  const f = fractional ? { ...input, severity: Math.round(input.severity) } : input;
+  const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
+  const f = severity === input.severity ? input : { ...input, severity };
   const cap = codeReviewCap(f);
   return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
 }
