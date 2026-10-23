@@ -84,15 +84,20 @@ jobs:
       - name: Read the trusted review engine
         id: engine
         env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
           TRUSTED_REVIEW_DIR: ${{ runner.temp }}/agent-review-trusted/.claude/review
         run: |
-          ENGINE=agent-review
-          if [ -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
-            CONFIGURED=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
-              --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR" \
-              config get engine.name)
-            if [ "$CONFIGURED" != "undefined" ]; then ENGINE=$CONFIGURED; fi
+          # The approve job runs only on an exact agent-review, so an unreadable base stays unknown.
+          ENGINE=unknown
+          if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            ENGINE=agent-review
+            if [ -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
+              CONFIGURED=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
+                --root "$GITHUB_WORKSPACE" --review-dir "$TRUSTED_REVIEW_DIR" \
+                config get engine.name)
+              if [ "$CONFIGURED" != "undefined" ]; then ENGINE=$CONFIGURED; fi
+            fi
           fi
           echo "name=$ENGINE" >> "$GITHUB_OUTPUT"
       - name: Load the previous trusted report
@@ -441,7 +446,7 @@ jobs:
   # a plain `if:` means a failed or skipped review never reaches this job.
   approve:
     needs: review
-    if: inputs.auto_approve && needs.review.outputs.engine != 'code-review'
+    if: inputs.auto_approve && needs.review.outputs.engine == 'agent-review'
     runs-on: ubuntu-latest
     permissions:
       contents: read

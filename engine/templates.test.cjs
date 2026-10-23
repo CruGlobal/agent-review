@@ -1312,7 +1312,7 @@ test('interact.yml approves through the shared action, gated by auto_approve', (
   const doc = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
   const step = doc.jobs.publish.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.ok(step, 'publish job must call the shared approve action');
-  assert.equal(step.if, "inputs.auto_approve && steps.engine.outputs.name != 'code-review'");
+  assert.equal(step.if, "inputs.auto_approve && steps.engine.outputs.name == 'agent-review'");
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.match(step.with.approval_body, /fixed or dismissed/);
   const body = readFileSync(INTERACT_WORKFLOW, 'utf8');
@@ -1328,7 +1328,7 @@ test('review.yml approves only when the caller opts in and the review job succee
   const job = doc.jobs.approve;
   assert.ok(job, 'review.yml must define an approve job');
   assert.equal(job.needs, 'review', 'a failed or skipped review must never reach the approver');
-  assert.equal(job.if, "inputs.auto_approve && needs.review.outputs.engine != 'code-review'");
+  assert.equal(job.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
   assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' }, 'the runtime checkout needs contents: read');
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
@@ -1680,20 +1680,35 @@ test('report skeleton covers the code-review engine', () => {
   assert.ok(/follows the\s+`notes` field alone, under any engine/.test(skill), 'notes block follows `notes` alone');
 });
 
-test('review.yml skips approval under the code-review engine', () => {
+// Both engine steps must report `unknown` when the base commit cannot be read, so
+// the exact-match approve gates never approve on a config they did not see.
+function assertBaseCommitGuard(run, label) {
+  const guard = 'if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then';
+  const unknown = run.indexOf('ENGINE=unknown');
+  const guardAt = run.indexOf(guard);
+  const fallback = run.indexOf('ENGINE=agent-review');
+  assert.ok(unknown >= 0, `${label}: the engine starts as unknown`);
+  assert.ok(guardAt > unknown, `${label}: the base commit is checked before anything else`);
+  assert.ok(fallback > guardAt, `${label}: agent-review is set only once the base commit exists`);
+  assert.ok(run.indexOf('config get engine.name') > guardAt, `${label}: the config is read only from an existing base commit`);
+  assert.ok(run.includes('"$CONFIGURED" != "undefined"'), `${label}: an unset engine keeps agent-review`);
+  assert.ok(run.trimEnd().endsWith('echo "name=$ENGINE" >> "$GITHUB_OUTPUT"'), `${label}: the output is written last`);
+}
+
+test('review.yml approves only on an exact agent-review engine', () => {
   const { parse } = require('yaml');
   const wf = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
   assert.ok(wf.jobs.review.outputs && wf.jobs.review.outputs.engine, 'review job must expose an engine output');
-  const cond = String(wf.jobs.approve.if);
-  assert.ok(cond.includes('inputs.auto_approve'), 'approve must still honor auto_approve');
-  assert.ok(cond.includes("needs.review.outputs.engine != 'code-review'"), 'approve must skip under the code-review engine');
+  assert.equal(wf.jobs.approve.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
   const step = wf.jobs.review.steps.find((s) => s.id === 'engine');
   assert.ok(step, 'review job needs a step with id engine');
   assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
   assert.ok(step.env.TRUSTED_REVIEW_DIR && step.env.RUNTIME_DIR, 'engine step reads its paths from env');
+  assert.equal(step.env.BASE_SHA, '${{ github.event.pull_request.base.sha }}', 'engine step reads the base SHA from env');
+  assertBaseCommitGuard(step.run, 'review.yml');
 });
 
-test('interact.yml skips approval under the code-review engine', () => {
+test('interact.yml approves only on an exact agent-review engine', () => {
   const { parse } = require('yaml');
   const wf = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
   const steps = wf.jobs.publish.steps;
@@ -1706,10 +1721,8 @@ test('interact.yml skips approval under the code-review engine', () => {
   assert.ok(!step.run.includes('${{'), 'engine step run block must not contain expressions');
   assert.ok(step.env.BASE_SHA && step.env.RUNTIME_DIR && step.env.TRUSTED_DIR, 'engine step reads its inputs from env');
   assert.ok(step.run.includes('git archive "$BASE_SHA" .claude/review'), 'engine comes from the trusted base-SHA config');
-  assert.ok(step.run.includes('config get engine.name'), 'engine step reads engine.name');
-  assert.ok(step.run.includes('ENGINE=agent-review'), 'engine defaults to agent-review');
-  assert.ok(step.run.includes('"$CONFIGURED" != "undefined"'), 'an unset engine keeps the default');
-  assert.equal(steps[approveIndex].if, "inputs.auto_approve && steps.engine.outputs.name != 'code-review'");
+  assertBaseCommitGuard(step.run, 'interact.yml');
+  assert.equal(steps[approveIndex].if, "inputs.auto_approve && steps.engine.outputs.name == 'agent-review'");
 });
 
 test('init asks engine, where reviews run, and approval', () => {
