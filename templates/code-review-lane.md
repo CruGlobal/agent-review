@@ -306,7 +306,8 @@ Drop a raw finding in only two cases:
    - the text right after `path:line` holds that whole line, quoted exactly. It may run on into
      the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.
 
-   So write the quoted code right after `path:line`, and nothing after it.
+   So write the quoted code right after `path:line`, and nothing after it. The review reads each
+   file as committed, never from your working copy, so quote committed code.
 
 EXCLUDED PATHS (one glob per line, or `none`):
 

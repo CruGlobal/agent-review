@@ -492,8 +492,31 @@ function trackedFiles(root) {
   }
 }
 
+function commitIn(root, ref) {
+  if (!validRef(ref)) return null;
+  try {
+    return gitIn(root, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// A disproof must quote the code /code-review reviewed, so files are read from the commit, never
+// from the working tree.
+function blobLines(root, commit, path) {
+  const rel = relative(root, resolve(root, path));
+  if (!commit || rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+  const spec = `${commit}:./${rel}`;
+  try {
+    if (gitIn(root, ['cat-file', '-t', spec]).trim() !== 'blob') return null;
+    return gitIn(root, ['show', spec]).replace(/\r?\n$/, '').split(/\r?\n/);
+  } catch {
+    return null;
+  }
+}
+
 const CODE_REVIEW_PROOF_USAGE =
-  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]';
+  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]';
 const DIFF_FOR_USAGE = 'usage: agent-review diff-for --diff <f> --raw <f>';
 
 function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -556,7 +579,7 @@ const USAGE = `usage: agent-review <command>
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -972,13 +995,15 @@ function main(rawArgv) {
       const droppedPath = flag(rest, '--dropped');
       const runId = flag(rest, '--run');
       const promotePath = flag(rest, '--promote');
+      const headArg = flag(rest, '--head');
       if (
         !rawPath ||
         !findingsPath ||
         !droppedPath ||
         !runId ||
         rest.includes('--capture') ||
-        (rest.includes('--promote') && !promotePath)
+        (rest.includes('--promote') && !promotePath) ||
+        (rest.includes('--head') && headArg === undefined)
       ) {
         out(CODE_REVIEW_PROOF_USAGE);
         return 1;
@@ -1021,26 +1046,24 @@ function main(rawArgv) {
       } catch (e) {
         return refuse('config', `could not read excluded_paths from the review config: ${e.message}`);
       }
+      let commit;
+      if (headArg !== undefined) {
+        commit = commitIn(C.ROOT, headArg);
+        if (!commit) return refuse('config', `--head ${JSON.stringify(headArg)} is not a commit in ${C.ROOT}`);
+      }
       const dir = captureDir();
       const dirError = captureDirError(dir);
       if (dirError) return refuse('capture', dirError);
       const capturePath = join(dir, CAPTURE_FILES.capture);
-      const fileUnderRoot = (p) => {
-        const target = resolve(C.ROOT, p);
-        const rel = relative(C.ROOT, target);
-        if (rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
-        return existsSync(target) && statSync(target).isFile() ? target : null;
-      };
-      const fileExists = (p) => fileUnderRoot(p) !== null;
+      const blobs = new Map();
       const readLines = (p) => {
-        const target = fileUnderRoot(p);
-        if (!target) return null;
-        try {
-          return readFileSync(target, 'utf8').replace(/\r?\n$/, '').split(/\r?\n/);
-        } catch {
-          return null;
+        if (!blobs.has(p)) {
+          if (commit === undefined) commit = commitIn(C.ROOT, 'HEAD');
+          blobs.set(p, blobLines(C.ROOT, commit, p));
         }
+        return blobs.get(p);
       };
+      const fileExists = (p) => readLines(p) !== null;
       let lookup = null;
       const tracked = (name) => {
         lookup ??= trackedLookup(trackedFiles(C.ROOT));

@@ -137,13 +137,15 @@ judge its next final line. If none arrives by then, judge the lane on what it ha
 
 The proof checks the lane's three files against the saved /code-review result. When they pass, it
 also saves the findings file it checked, byte for byte, as `/tmp/agent_findings/code-review.json`,
-the file consensus reads. When they fail, it removes that file. Run it as written; the attempt id
-comes from `/tmp/review_env.sh`:
+the file consensus reads. When they fail, it removes that file. The proof reads each disproof's
+file as committed at the reviewed head: `HEAD_REF`, the PR head, or the local `HEAD` when there is
+no PR. Run it as written; the attempt id comes from `/tmp/review_env.sh`:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 ATTEMPT="$CODE_REVIEW_ATTEMPT"
-agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --promote /tmp/agent_findings/code-review.json > /tmp/code_review_proof.json
+REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"
+agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --promote /tmp/agent_findings/code-review.json > /tmp/code_review_proof.json
 cat /tmp/code_review_proof.json
 ```
 
@@ -151,8 +153,8 @@ It prints one JSON line, `{ ok, stage, reason, count, mode, dropped }`, and exit
 `false`. Act on it:
 
 - `ok` is `true` and the cross-check passed: the lane passed (step 4).
-- `stage` is `"config"`: the review's config cannot be read, or the proved findings cannot be
-  saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).
+- `stage` is `"config"`: the review's config cannot be read, the reviewed head is not a commit
+  here, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).
 - `stage` is `"capture"`: relaunch with a new capture (step 3).
 - `stage` is `"lane"`: relaunch with the same capture (step 3), with the proof's `reason`.
 - `ok` is `true` but the cross-check failed: relaunch with the same capture (step 3), with one

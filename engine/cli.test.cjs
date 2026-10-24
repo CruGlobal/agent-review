@@ -927,7 +927,7 @@ test('startup notes leftover CI files when any of the three CI workflows remains
   }
 });
 
-const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--promote <f>\]\n$/;
+const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--promote <f>\]\n$/;
 
 // Writes the lane files into dir and the capture into a private dir under it, which the
 // command reads through AGENT_REVIEW_CAPTURE_DIR.
@@ -988,7 +988,7 @@ test('code-review-proof exits 1 with a usage line when a flag is missing, and re
       assert.equal(withFlag.code, 1);
       assert.match(withFlag.s, PROOF_USAGE, 'the capture path is never accepted from the command line');
     });
-    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--promote <f>\] {3}/m);
+    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--promote <f>\] {3}/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1174,7 +1174,7 @@ test('code-review-proof lists --promote in its usage and needs a value for it', 
     assert.match(r.s, PROOF_USAGE);
     assert.match(
       run(['help']).s,
-      /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--promote <f>\] {3}.*--promote/m,
+      /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--promote <f>\] {3}.*--promote/m,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1230,14 +1230,14 @@ test('code-review-proof reads root-level file names from git ls-files under --ro
   }
 });
 
-test('code-review-proof checks a disproof against the files under --root', () => {
-  const parent = mkdtempSync(join(os.tmpdir(), 'ar-crproof-disproof-'));
-  const root = join(parent, 'repo');
+test('code-review-proof checks a disproof against the files committed under --root', () => {
+  const cart = Array.from({ length: 20 }, (_, i) => (i === 17 ? '  if (!items) return [];' : `# line ${i + 1}`));
+  const { parent, root } = proofRepo({
+    'lib/cart.rb': cart.join('\n') + '\n',
+    'lib/dir/a.rb': 'x = 1\n',
+    Makefile: Array.from({ length: 14 }, (_, i) => (i === 11 ? 'test: build lint' : `# ${i + 1}`)).join('\n'),
+  });
   try {
-    mkdirSync(join(root, 'lib'), { recursive: true });
-    const cart = Array.from({ length: 20 }, (_, i) => (i === 17 ? '  if (!items) return [];' : `# line ${i + 1}`));
-    writeFileSync(join(root, 'lib', 'cart.rb'), cart.join('\n') + '\n');
-    writeFileSync(join(root, 'Makefile'), Array.from({ length: 14 }, (_, i) => (i === 11 ? 'test: build lint' : `# ${i + 1}`)).join('\n'));
     writeFileSync(join(parent, 'outside.rb'), 'secret = 1\n');
     const result = 'Result:\n```json\n[{"file":"lib/cart.rb","line":18,"summary":"s"}]\n```\n';
     const f = proofFiles(parent, { raw: [{ n: 1, file: 'lib/cart.rb', line: 18, summary: 's' }], scored: [], dropped: [], result });
@@ -1254,12 +1254,67 @@ test('code-review-proof checks a disproof against the files under --root', () =>
       ['lib/cart.rb:5 if (!items) return [];', /quote after lib\/cart\.rb:5 does not hold that whole line of lib\/cart\.rb/],
       ['../outside.rb:1 secret = 1', /no file \.\.\/outside\.rb exists/],
       [`${parent}/outside.rb:1 secret = 1`, /no file .*outside\.rb exists/],
+      ['lib/dir:1 a.rb a.rb', /no file lib\/dir exists/],
     ]) {
       const r = proofWith(proof);
       assert.equal(r.ok, false, proof);
       assert.equal(r.stage, 'lane', proof);
       assert.match(r.reason, pattern, proof);
     }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof reads a disproof at --head, or else at HEAD, never from the working tree', () => {
+  const lines = (third) => ['def pay(amount)', '  log(amount)', third, '  charge(amount)', 'end'].join('\n') + '\n';
+  const { parent, root, git } = proofRepo({ 'lib/pay.rb': lines('  audit(amount)') });
+  try {
+    const first = git('rev-parse', 'HEAD');
+    const result = 'Result:\n```json\n[{"file":"lib/pay.rb","line":3,"summary":"charges a nil amount"}]\n```\n';
+    const proof = 'already handled: lib/pay.rb:3 return if amount.nil?';
+    const f = proofFiles(parent, {
+      raw: [{ n: 1, file: 'lib/pay.rb', line: 3, summary: 'charges a nil amount' }],
+      scored: [],
+      dropped: [{ raw: 1, reason: 'disproved', proof }],
+      result,
+    });
+    const proofAt = (extra) => withCaptureDir(f.capDir, () => run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere', ...extra])));
+    const judged = (extra) => JSON.parse(proofAt(extra).s);
+
+    writeFileSync(join(root, 'lib', 'pay.rb'), lines('  return if amount.nil?'));
+    for (const extra of [[], ['--head', first]]) {
+      const r = judged(extra);
+      assert.equal(r.ok, false, `an uncommitted guard proves nothing (${extra.join(' ') || 'no --head'})`);
+      assert.equal(r.stage, 'lane');
+      assert.match(r.reason, /quote after lib\/pay\.rb:3 does not hold that whole line of lib\/pay\.rb/);
+    }
+
+    git('commit', '-q', '-am', 'guard');
+    const second = git('rev-parse', 'HEAD');
+    assert.equal(judged(['--head', second]).ok, true, 'the committed guard, at that commit, disproves the finding');
+    assert.equal(judged([]).ok, true, 'with no --head the proof reads HEAD');
+    assert.equal(judged(['--head', first]).ok, false, 'an older --head still lacks the guard');
+    assert.equal(judged(['--head', second.slice(0, 12)]).ok, true, 'a short sha names the same commit');
+
+    writeFileSync(join(root, 'lib', 'new.rb'), 'return if amount.nil?\n');
+    writeFileSync(f.dropped, JSON.stringify([{ raw: 1, reason: 'disproved', proof: 'lib/new.rb:1 return if amount.nil?' }]));
+    const untracked = judged(['--head', second]);
+    assert.equal(untracked.ok, false);
+    assert.match(untracked.reason, /no file lib\/new\.rb exists in the repository/, 'a working-tree-only file does not exist at the commit');
+    writeFileSync(f.dropped, JSON.stringify([{ raw: 1, reason: 'disproved', proof }]));
+
+    for (const bad of ['not-a-commit', '-x', '', 'HEAD:lib/pay.rb', `${second}^{tree}`]) {
+      const r = proofAt(['--head', bad]);
+      assert.equal(r.code, 1, bad);
+      const parsed = JSON.parse(r.s);
+      assert.equal(parsed.ok, false, bad);
+      assert.equal(parsed.stage, 'config', bad);
+      assert.match(parsed.reason, /--head .* is not a commit in /, bad);
+    }
+    const missing = proofAt(['--head']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.s, PROOF_USAGE);
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

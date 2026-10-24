@@ -553,7 +553,8 @@ const LANE_PROOF_COMMAND =
   'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}';
 const PROMOTED_FINDINGS = '/tmp/agent_findings/code-review.json';
 const STAGE2_PROOF_COMMAND =
-  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
+  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
+const REVIEWED_HEAD_LINE = 'REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"';
 const QUIET_DISARM = 'agent-review capture disarm >/dev/null 2>&1 || true';
 
 function laneText() {
@@ -999,6 +1000,7 @@ test('lane template has no REFUTED drop and names both drop reasons', () => {
     '- that line has at least 6 characters besides spaces, so a short line such as `end`, `}`, or `nil` can never be the proof: cite a longer line near it;',
     '- the text right after `path:line` holds that whole line, quoted exactly. It may run on into the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.',
     'So write the quoted code right after `path:line`, and nothing after it.',
+    'The review reads each file as committed, never from your working copy, so quote committed code.',
   ]) {
     assert.ok(dropping.includes(needle), `DROPPING A FINDING must say ${JSON.stringify(needle)}`);
   }
@@ -2534,6 +2536,10 @@ const SECTION4_FRESH_NEEDLES = [
   'A `path:0` mention names its file with no line, and a raw entry with `line: null` claims it.',
   'A `disproved` proof must quote the whole cited line: the cited line, with whitespace removed, has at least 6 characters and appears in the quote with whitespace removed.',
   'This replaces "at least 3 non-space characters, that appears within 2 lines of it" above.',
+  '`code-review-proof` takes an optional `--head <sha>`. The disproof checks read the file at that commit',
+  'without `--head` they read the commit `HEAD` names in `--root`. They never read the working tree.',
+  'Stage 2 passes the reviewed head, `HEAD_REF`, or the local `HEAD` when `HEAD_REF` is empty.',
+  'A `--head` that is not a commit fails with `stage: config`.',
 ];
 
 test('the capture spec records the fresh-review changes to the check in section 4', () => {
@@ -2559,7 +2565,7 @@ test('README states how the capture, the wait, and the proof behave, and what th
     "That text mode has a cost, and it is usual at `low`, `medium`, and `high`: a line that cites a location only as context still counts as a finding. The lane must list it and score or drop it, and a line it leaves out fails the run.",
     "The check also holds every scored finding to the field rules: its raw finding's file, a whole-number severity from 1 to 10, one of the nine category names, a confidence of High, Medium, or Low, and the `outside_range`, `doubted`, and `recategorized_from` fields.",
     'this was built and tested on 2.1.309',
-    "- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a glob in your `excluded_paths` and its line in the result cites no other file, or it is `disproved` by quoting the whole cited line right after its `path:line` in a file that exists. That line must have at least 6 characters besides spaces, so `end` or `}` never proves anything. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped findings are listed in the report, so you can check the work.",
+    "- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a glob in your `excluded_paths` and its line in the result cites no other file, or it is `disproved` by quoting the whole cited line right after its `path:line`, from the file as committed at the reviewed head, never your working copy. That line must have at least 6 characters besides spaces, so `end` or `}` never proves anything. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped findings are listed in the report, so you can check the work.",
   ]) {
     assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
   }
@@ -3120,7 +3126,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
   const stage2 = engineSection('Stage 2: checking the code-review lane');
   const flat = flatText(stage2);
   assert.strictEqual(
-    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}'),
+    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}').replace(' --head "$REVIEWED_HEAD"', ''),
     `${LANE_PROOF_COMMAND} --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`,
     "Stage 2 runs the lane's own check on the same attempt's files",
   );
@@ -3132,7 +3138,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     '`stage` is `"capture"`: relaunch with a new capture (step 3).',
     'A reply that starts with `/code-review did not finish` is that failure, whatever follows it.',
     '`/code-review did not finish: <reason>`, or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
-    '`stage` is `"config"`: the review\'s config cannot be read, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
+    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head is not a commit here, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
     '**With the same capture.** Do not re-arm',
     '**With a new capture.** Re-arm with this block first, which clears the old result',
   ]) {
@@ -3195,8 +3201,13 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
   const proofBlocks = bashBlockList(stage2).filter((b) => b.includes('agent-review code-review-proof'));
   assert.deepStrictEqual(
     proofBlocks,
-    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
-    'the proof reads the attempt Stage 1 or the relaunch saved',
+    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${REVIEWED_HEAD_LINE}\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
+    'the proof reads the attempt Stage 1 or the relaunch saved, at the reviewed head',
+  );
+  assert.ok(!/:\+\s*--head/.test(doc), 'the head is passed plainly: zsh drops a ${X:+--head ...} expansion');
+  assert.ok(
+    flatText(stage2).includes("The proof reads each disproof's file as committed at the reviewed head: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR."),
+    'Stage 2 says which commit the proof reads',
   );
   assert.ok(!/^ATTEMPT="\$REVIEW_ID-/m.test(doc) && !doc.includes('# ←'), 'no block asks for a hand-edited attempt id');
   assert.ok(!/\bcp\b[^\n]*agent_findings/.test(doc), 'consensus reads the file the proof promoted, never a copy');
@@ -3212,7 +3223,8 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       mkdirSync(join(dir, 'bin'));
       mkdirSync(join(dir, 'agent_findings'));
       writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\necho '{"ok":true}'\n`, { mode: 0o755 });
-      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1"\n');
+      writeFileSync(join(dir, 'bin', 'git'), '#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && echo localhead1234\n', { mode: 0o755 });
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="prhead5678"\n');
       writeFileSync(join(dir, 'agent_findings', 'code-review.json'), '{"findings":[]}');
       const sh = (script) =>
         require('node:child_process').spawnSync(shell, ['-c', at(script)], {
@@ -3225,6 +3237,7 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       let args = argsOf();
       assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-1.json`, `${shell}: attempt 1`);
       assert.strictEqual(args[args.indexOf('--promote') + 1], `${dir}/agent_findings/code-review.json`, `${shell}: promotes for consensus`);
+      assert.strictEqual(args[args.indexOf('--head') + 1], 'prhead5678', `${shell}: the PR head`);
 
       const relaunched = sh(RELAUNCH_ATTEMPT_BLOCK);
       assert.strictEqual(relaunched.status, 0, shell);
@@ -3233,6 +3246,11 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       assert.strictEqual(sh(proofBlocks[0]).status, 0, shell);
       args = argsOf();
       assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-2.json`, `${shell}: attempt 2`);
+
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF=""\n');
+      assert.strictEqual(sh(proofBlocks[0]).status, 0, shell);
+      args = argsOf();
+      assert.strictEqual(args[args.indexOf('--head') + 1], 'localhead1234', `${shell}: with no PR head, the local HEAD`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
