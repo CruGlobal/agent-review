@@ -104,6 +104,13 @@ Both writes are atomic: write a temp file, then rename it.
 - The payload's `agent_id` is the caller's id. The fork is identified only by `tool_response.agentId`.
 - The Bash sandbox shares `/tmp` with the hooks.
 
+**Amendment, 2026-10-23 (security review, plan Task 3).** The capture files live in a private per-user directory, `/tmp/agent-review-<uid>`, where `<uid>` is the user's numeric id. The root stays `/tmp`, so the hooks and the sandboxed Bash tool agree on the path. The file names inside the directory are the ones this spec gives. Read each `/tmp/<capture file>` above as `/tmp/agent-review-<uid>/<capture file>`.
+- Only `agent-review capture arm` creates the directory, with mode 0700.
+- Every reader and writer first checks the directory with `lstat`. It must be a real directory, not a symlink, owned by the current user, with no group or other permission bits. If the check fails or the directory is missing, the hooks do nothing (they still exit 0 and print nothing), and the CLI commands exit 1 with the reason.
+- Writes go through a temp file created with exclusive create (`wx`), then a rename. The stop buffer is appended with `O_APPEND | O_CREAT | O_NOFOLLOW`, and its trim also goes through an exclusive temp file and a rename.
+- The hooks read a subagent transcript only from an absolute path that ends in `.jsonl`.
+- The lane reads the result with `agent-review capture show --run <id>`. It prints the captured `result` exactly, with no added newline, or exits 1 when no capture for that run exists. No template names a capture path.
+
 **Wiring and tests.** The hook logic lives in a pure, unit-tested engine module (`engine/captureHook.cjs`). It takes the payload and the arming and pending state, and returns the file writes to make. The CLI wrapper does the I/O. Engine tests cover:
 - not armed;
 - args mismatch;

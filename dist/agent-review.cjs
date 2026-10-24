@@ -20065,7 +20065,17 @@ var require_captureHook = __commonJS({
       return typeof v === "string" && v.trim() !== "";
     }
     function captureDir(env = process.env) {
-      return env.AGENT_REVIEW_CAPTURE_DIR || "/tmp";
+      return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
+    }
+    function captureDirProblem(stat, uid) {
+      if (!stat) return "does not exist";
+      if (stat.isSymbolicLink()) return "is a symlink";
+      if (!stat.isDirectory()) return "is not a directory";
+      if (stat.uid !== uid) return `is owned by uid ${stat.uid}, not ${uid}`;
+      if (stat.mode & 63) {
+        return `has group or other permission bits (mode ${(stat.mode & 511).toString(8)}; it must be 700)`;
+      }
+      return null;
     }
     function armedState(arm, nowSeconds) {
       if (!isObject(arm) || arm.armed !== true) return null;
@@ -20197,6 +20207,7 @@ var require_captureHook = __commonJS({
       STOP_BUFFER_LINES,
       CAPTURE_SOURCE,
       captureDir,
+      captureDirProblem,
       armedState,
       stripSkillHeader,
       lastAssistantText,
@@ -20221,10 +20232,14 @@ var require_cli = __commonJS({
       mkdirSync,
       statSync,
       renameSync,
-      appendFileSync
+      lstatSync,
+      openSync,
+      closeSync,
+      writeSync,
+      constants: fsConstants
     } = require("node:fs");
     var os = require("node:os");
-    var { createHash } = require("node:crypto");
+    var { createHash, randomBytes } = require("node:crypto");
     var { loadConfig } = require_loadConfig();
     var { resolveOptions, codeReviewEngineProblems } = require_options();
     var { buildPlan, linesChangedFromStat } = require_plan();
@@ -20279,7 +20294,9 @@ var require_cli = __commonJS({
     var {
       CAPTURE_FILES,
       STOP_BUFFER_LINES,
+      CAPTURE_SOURCE,
       captureDir,
+      captureDirProblem,
       armedState,
       lastAssistantText,
       postSkillWrites,
@@ -20396,13 +20413,40 @@ var require_cli = __commonJS({
     function nowSeconds() {
       return Math.floor(Date.now() / 1e3);
     }
-    function writeFileAtomic(path, text) {
-      const tmp = `${path}.${process.pid}.tmp`;
+    function captureDirError(dir) {
+      let stat = null;
       try {
-        writeFileSync(tmp, text, { mode: 384 });
+        stat = lstatSync(dir);
+      } catch (e) {
+        if (e.code !== "ENOENT") return `capture dir ${dir} cannot be checked: ${e.message}`;
+      }
+      const problem = captureDirProblem(stat, process.getuid());
+      return problem ? `capture dir ${dir} ${problem}` : null;
+    }
+    function writeFileAtomic(path, text) {
+      const tmp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+      const fd = openSync(tmp, "wx", 384);
+      try {
+        try {
+          writeFileSync(fd, text);
+        } finally {
+          closeSync(fd);
+        }
         renameSync(tmp, path);
-      } finally {
+      } catch (e) {
         rmSync(tmp, { force: true });
+        throw e;
+      }
+    }
+    function writeStdoutSync(text) {
+      const buf = Buffer.from(text, "utf8");
+      let offset = 0;
+      while (offset < buf.length) {
+        try {
+          offset += writeSync(1, buf, offset);
+        } catch (e) {
+          if (e.code !== "EAGAIN") throw e;
+        }
       }
     }
     function parseJsonOrNull(text) {
@@ -20429,6 +20473,7 @@ var require_cli = __commonJS({
       return text.split("\n").filter((line) => line.trim()).map(parseJsonOrNull).filter(Boolean);
     }
     function readTranscript(path) {
+      if (typeof path !== "string" || !isAbsolute(path) || !path.endsWith(".jsonl")) return null;
       try {
         return lastAssistantText(readFileSync(path, "utf8"));
       } catch {
@@ -20436,7 +20481,13 @@ var require_cli = __commonJS({
       }
     }
     function appendStop(path, stop) {
-      appendFileSync(path, JSON.stringify(stop) + "\n", { mode: 384 });
+      const { O_WRONLY, O_APPEND, O_CREAT, O_NOFOLLOW } = fsConstants;
+      const fd = openSync(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 384);
+      try {
+        writeFileSync(fd, JSON.stringify(stop) + "\n");
+      } finally {
+        closeSync(fd);
+      }
       const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
       if (lines.length > STOP_BUFFER_LINES) {
         writeFileAtomic(path, lines.slice(-STOP_BUFFER_LINES).join("\n") + "\n");
@@ -20445,6 +20496,7 @@ var require_cli = __commonJS({
     function runHook(name) {
       try {
         const dir = captureDir();
+        if (captureDirError(dir)) return 0;
         const file = (key) => join(dir, CAPTURE_FILES[key]);
         const arm = readJsonOrNull(file("arm"));
         const now = nowSeconds();
@@ -20493,6 +20545,7 @@ var require_cli = __commonJS({
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
+  capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -20904,17 +20957,31 @@ var require_cli = __commonJS({
           return ok ? 0 : 1;
         }
         case "capture": {
+          const sub = rest[0];
+          const runId = flag(rest, "--run");
+          const argsAt = rest.indexOf("--args");
+          const args = argsAt < 0 ? void 0 : rest[argsAt + 1];
+          if (!["arm", "disarm", "show"].includes(sub) || sub !== "disarm" && !runId || sub === "arm" && !args) {
+            out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm | capture show --run <id>');
+            return 1;
+          }
+          const fail = (reason) => {
+            process.stderr.write(`error: ${reason}
+`);
+            return 1;
+          };
           const dir = captureDir();
           const file = (key) => join(dir, CAPTURE_FILES[key]);
-          if (rest[0] === "arm") {
-            const runId = flag(rest, "--run");
-            const argsAt = rest.indexOf("--args");
-            const args = argsAt < 0 ? void 0 : rest[argsAt + 1];
-            if (!runId || !args) {
-              out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm');
-              return 1;
+          if (sub === "arm") {
+            try {
+              mkdirSync(dir, { mode: 448 });
+            } catch (e) {
+              if (e.code !== "EEXIST") return fail(`could not create capture dir ${dir}: ${e.message}`);
             }
-            mkdirSync(dir, { recursive: true });
+          }
+          const dirError = captureDirError(dir);
+          if (dirError) return fail(dirError);
+          if (sub === "arm") {
             for (const key of ["capture", "pending", "stops", "mismatch"]) {
               rmSync(file(key), { force: true });
             }
@@ -20925,13 +20992,20 @@ var require_cli = __commonJS({
             out(`armed ${runId}: ${args}`);
             return 0;
           }
-          if (rest[0] === "disarm") {
+          if (sub === "disarm") {
             rmSync(file("arm"), { force: true });
             out("disarmed");
             return 0;
           }
-          out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm');
-          return 1;
+          const capture = readJsonOrNull(file("capture"));
+          if (!capture || capture.source !== CAPTURE_SOURCE || typeof capture.result !== "string") {
+            return fail(`no capture for run ${runId}`);
+          }
+          if (capture.run_id !== runId) {
+            return fail(`the capture is for run ${capture.run_id}, not run ${runId}`);
+          }
+          writeStdoutSync(capture.result);
+          return 0;
         }
         case "hook":
           return runHook(rest[0]);
@@ -21209,7 +21283,8 @@ ${USAGE}`);
       ctx,
       changedFiles,
       resolveMinSupport,
-      planTmpPath
+      planTmpPath,
+      readTranscript
     };
   }
 });

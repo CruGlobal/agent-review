@@ -27,8 +27,21 @@ function nonEmpty(v) {
   return typeof v === 'string' && v.trim() !== '';
 }
 
+// The root stays /tmp so the hooks and the sandboxed Bash tool agree on the path.
 function captureDir(env = process.env) {
-  return env.AGENT_REVIEW_CAPTURE_DIR || '/tmp';
+  return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
+}
+
+// Capture files decide approvals, so the dir must be one no other local user can plant files in.
+function captureDirProblem(stat, uid) {
+  if (!stat) return 'does not exist';
+  if (stat.isSymbolicLink()) return 'is a symlink';
+  if (!stat.isDirectory()) return 'is not a directory';
+  if (stat.uid !== uid) return `is owned by uid ${stat.uid}, not ${uid}`;
+  if (stat.mode & 0o077) {
+    return `has group or other permission bits (mode ${(stat.mode & 0o777).toString(8)}; it must be 700)`;
+  }
+  return null;
 }
 
 function armedState(arm, nowSeconds) {
@@ -185,6 +198,7 @@ module.exports = {
   STOP_BUFFER_LINES,
   CAPTURE_SOURCE,
   captureDir,
+  captureDirProblem,
   armedState,
   stripSkillHeader,
   lastAssistantText,

@@ -7,6 +7,7 @@ const {
   STOP_BUFFER_LINES,
   CAPTURE_SOURCE,
   captureDir,
+  captureDirProblem,
   armedState,
   stripSkillHeader,
   lastAssistantText,
@@ -76,8 +77,33 @@ test('capture constants match the documented names', () => {
   assert.equal(ARM_MAX_AGE_SECONDS, 10800);
   assert.equal(STOP_BUFFER_LINES, 50);
   assert.equal(CAPTURE_SOURCE, 'agent-review-capture-hook');
-  assert.equal(captureDir({}), '/tmp');
+  assert.equal(captureDir({}), `/tmp/agent-review-${process.getuid()}`);
   assert.equal(captureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }), '/x/y');
+});
+
+function fakeStat({ symlink = false, directory = true, uid = process.getuid(), mode = 0o40700 } = {}) {
+  return { isSymbolicLink: () => symlink, isDirectory: () => directory, uid, mode };
+}
+
+test('captureDirProblem accepts only a private real directory', () => {
+  assert.equal(captureDirProblem(fakeStat(), process.getuid()), null);
+  assert.match(captureDirProblem(null, process.getuid()), /does not exist/);
+  assert.match(captureDirProblem(fakeStat({ symlink: true, directory: false }), process.getuid()), /symlink/);
+  assert.match(captureDirProblem(fakeStat({ directory: false, mode: 0o100600 }), process.getuid()), /not a directory/);
+  for (const mode of [0o40770, 0o40702, 0o40750, 0o40701, 0o40710]) {
+    assert.match(
+      captureDirProblem(fakeStat({ mode }), process.getuid()),
+      /group or other permission bits/,
+      mode.toString(8),
+    );
+  }
+});
+
+// The CLI cannot hand a real directory to another owner without root, so ownership is checked here.
+test('capture dir owned by another uid is refused', () => {
+  const me = process.getuid();
+  assert.match(captureDirProblem(fakeStat({ uid: me + 1 }), me), new RegExp(`owned by uid ${me + 1}, not ${me}`));
+  assert.match(captureDirProblem(fakeStat({ uid: 0 }), 501), /owned by uid 0, not 501/);
 });
 
 test('armedState accepts a fresh arm and rejects missing, malformed, disarmed, or stale ones', () => {

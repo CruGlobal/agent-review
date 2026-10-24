@@ -2,8 +2,19 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
-const { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync, existsSync, readdirSync } = require('node:fs');
-const { join } = require('node:path');
+const {
+  mkdtempSync,
+  writeFileSync,
+  rmSync,
+  mkdirSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  chmodSync,
+  symlinkSync,
+  lstatSync,
+} = require('node:fs');
+const { join, relative } = require('node:path');
 const os = require('node:os');
 const {
   main,
@@ -11,6 +22,7 @@ const {
   changedFiles,
   resolveMinSupport,
   planTmpPath,
+  readTranscript,
 } = require('./cli.cjs');
 const { buildPlan } = require('./plan.cjs');
 
@@ -1061,6 +1073,172 @@ test('subagent-stop keeps the last 50 stop lines', () => {
     assert.equal(lines.length, 50);
     assert.equal(JSON.parse(lines[0]).agent_id, 'old6');
     assert.equal(JSON.parse(lines[49]).agent_id, 'newest');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const QUIET = { code: 0, stdout: '', stderr: '' };
+const FORK_STOP = { hook_event_name: 'SubagentStop', agent_id: 'f1', agent_type: 'general-purpose', last_assistant_message: '- a.rb:1: bug', agent_transcript_path: '/t/f1.jsonl' };
+const HEADLESS_SKILL = {
+  hook_event_name: 'PostToolUse',
+  tool_name: 'Skill',
+  agent_id: 'lane1',
+  tool_input: { skill: 'code-review', args: 'xhigh 12' },
+  tool_response: { success: true, commandName: 'code-review', status: 'forked', agentId: 'f1', result: '- a.rb:1: bug' },
+};
+
+// Every reader and writer must refuse `dir`: the hooks silently, the commands with exit 1 and a reason.
+function assertCaptureDirRefused(dir, reason) {
+  const before = readdirSync(dir).sort();
+  assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(FORK_STOP) }), QUIET);
+  assert.deepEqual(spawnCli(['hook', 'post-skill'], { dir, input: JSON.stringify(HEADLESS_SKILL) }), QUIET);
+  assert.deepEqual(readdirSync(dir).sort(), before, 'the hooks wrote nothing');
+  for (const args of [
+    ['capture', 'arm', '--run', 'r1', '--args', 'xhigh 12'],
+    ['capture', 'disarm'],
+    ['capture', 'show', '--run', 'r1'],
+  ]) {
+    const r = spawnCli(args, { dir });
+    assert.equal(r.code, 1, args.join(' '));
+    assert.equal(r.stdout, '', args.join(' '));
+    assert.match(r.stderr, reason, args.join(' '));
+  }
+  assert.deepEqual(readdirSync(dir).sort(), before, 'the commands changed nothing');
+}
+
+test('capture dir that is group- or world-writable is refused', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    armCapture(dir);
+    for (const mode of [0o770, 0o702, 0o750, 0o701]) {
+      chmodSync(dir, mode);
+      assertCaptureDirRefused(dir, /group or other permission bits/);
+    }
+    chmodSync(dir, 0o700);
+    assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(FORK_STOP) }), QUIET);
+    assert.ok(existsSync(join(dir, 'code_review_capture.stops.jsonl')), 'the same dir at 0700 is used');
+  } finally {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture dir that is a symlink is refused', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const real = join(parent, 'real');
+    mkdirSync(real, { mode: 0o700 });
+    armCapture(real);
+    const link = join(parent, 'link');
+    symlinkSync(real, link);
+    assertCaptureDirRefused(link, /symlink/);
+    assert.deepEqual(readdirSync(real), ['agent_review_capture.json'], 'nothing reached the real dir');
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('hooks do nothing when the capture dir is missing', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const dir = join(parent, 'missing');
+    assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(FORK_STOP) }), QUIET);
+    assert.deepEqual(spawnCli(['hook', 'post-skill'], { dir, input: JSON.stringify(HEADLESS_SKILL) }), QUIET);
+    assert.equal(existsSync(dir), false, 'the hooks never create the dir');
+    for (const args of [['capture', 'disarm'], ['capture', 'show', '--run', 'r1']]) {
+      const r = spawnCli(args, { dir });
+      assert.equal(r.code, 1, args.join(' '));
+      assert.match(r.stderr, /does not exist/, args.join(' '));
+    }
+    assert.equal(existsSync(dir), false, 'only capture arm creates the dir');
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('capture arm creates the dir with mode 0700', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const dir = join(parent, 'capture');
+    const r = spawnCli(['capture', 'arm', '--run', 'r1', '--args', 'xhigh 12'], { dir });
+    assert.equal(r.code, 0, r.stderr);
+    const stat = lstatSync(dir);
+    assert.ok(stat.isDirectory() && !stat.isSymbolicLink());
+    assert.equal(stat.mode & 0o777, 0o700);
+    assert.equal(stat.uid, process.getuid());
+    assert.equal(readCaptureJson(dir, 'agent_review_capture.json').run_id, 'r1');
+    assert.equal(spawnCli(['capture', 'arm', '--run', 'r2', '--args', 'xhigh 12'], { dir }).code, 0, 'arming again reuses the dir');
+    assert.equal(lstatSync(dir).mode & 0o777, 0o700);
+
+    const fileInTheWay = join(parent, 'file');
+    writeFileSync(fileInTheWay, '');
+    const blocked = spawnCli(['capture', 'arm', '--run', 'r1', '--args', 'xhigh 12'], { dir: fileInTheWay });
+    assert.equal(blocked.code, 1);
+    assert.match(blocked.stderr, /not a directory/);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('readTranscript ignores a non-jsonl path', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const body = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'from the transcript' }] } }) + '\n';
+    for (const name of ['t.jsonl', 't.txt', 't.jsonl.bak', 't.json']) writeFileSync(join(dir, name), body);
+    assert.equal(readTranscript(join(dir, 't.jsonl')), 'from the transcript');
+    assert.equal(readTranscript(join(dir, 't.txt')), null);
+    assert.equal(readTranscript(join(dir, 't.jsonl.bak')), null);
+    assert.equal(readTranscript(join(dir, 't.json')), null);
+    assert.equal(readTranscript(relative(process.cwd(), join(dir, 't.jsonl'))), null, 'a relative path is ignored');
+    assert.equal(readTranscript(join(dir, 'missing.jsonl')), null);
+    assert.equal(readTranscript(undefined), null);
+
+    armCapture(dir);
+    const skill = { ...HEADLESS_SKILL, tool_response: { ...HEADLESS_SKILL.tool_response, background: true, result: 'launched' } };
+    assert.deepEqual(spawnCli(['hook', 'post-skill'], { dir, input: JSON.stringify(skill) }), QUIET);
+    const stop = { ...FORK_STOP, last_assistant_message: '', agent_transcript_path: join(dir, 't.txt') };
+    assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(stop) }), QUIET);
+    assert.equal(readCaptureJson(dir, 'code_review_capture.json').result, '', 'the hook does not read a non-jsonl transcript');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture show prints the result for the matching run and fails for another run', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    assert.equal(spawnCli(['capture', 'arm', '--run', 'r1', '--args', 'xhigh 12'], { dir }).code, 0);
+    const none = spawnCli(['capture', 'show', '--run', 'r1'], { dir });
+    assert.equal(none.code, 1);
+    assert.equal(none.stdout, '');
+    assert.match(none.stderr, /no capture/);
+
+    const result = 'I reviewed it.\n\n```json\n[{"file": "café.rb", "line": 3}]\n```\n\n';
+    const capture = { source: 'agent-review-capture-hook', mode: 'forked', run_id: 'r1', args: 'xhigh 12', fork_id: 'f1', result, transcript: null, stop_count: 1, ts: 1 };
+    writeFileSync(join(dir, 'code_review_capture.json'), JSON.stringify(capture));
+    assert.deepEqual(spawnCli(['capture', 'show', '--run', 'r1'], { dir }), { code: 0, stdout: result, stderr: '' });
+
+    const other = spawnCli(['capture', 'show', '--run', 'r2'], { dir });
+    assert.equal(other.code, 1);
+    assert.equal(other.stdout, '');
+    assert.match(other.stderr, /r1/);
+    assert.match(other.stderr, /r2/);
+
+    const big = 'x'.repeat(300 * 1024) + '\nend';
+    writeFileSync(join(dir, 'code_review_capture.json'), JSON.stringify({ ...capture, result: big }));
+    const shown = spawnCli(['capture', 'show', '--run', 'r1'], { dir });
+    assert.equal(shown.code, 0);
+    assert.equal(shown.stdout.length, big.length, 'a large result is not cut short through a pipe');
+    assert.equal(shown.stdout, big);
+
+    writeFileSync(join(dir, 'code_review_capture.json'), JSON.stringify({ ...capture, source: 'something-else' }));
+    assert.equal(spawnCli(['capture', 'show', '--run', 'r1'], { dir }).code, 1, 'a file the hook did not write is not a capture');
+
+    const usage = spawnCli(['capture', 'show'], { dir });
+    assert.equal(usage.code, 1);
+    assert.match(usage.stdout, /usage: agent-review capture/);
+    assert.match(run(['help']).s, /^ {2}capture show --run <id> {2,}/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
