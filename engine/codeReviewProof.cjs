@@ -166,11 +166,13 @@ function repoRelative(file, root) {
 }
 
 // Only max starts helpers, so only there can a stop arrive before the findings do. A foreground
-// capture is the Skill's own reply, which comes only once /code-review is done.
+// capture is the Skill's own reply, which comes only once /code-review is done. At max an early
+// stop can quote a fenced [], so an empty list alone is not proof of a finished fork.
 function looksFinished(result, effort, mode) {
   if (typeof result !== 'string') return false;
   if (effort !== 'max' || mode === 'foreground') return true;
-  return jsonFindings(result).list !== null || explicitEmpty(result);
+  const { list } = jsonFindings(result);
+  return (Array.isArray(list) && list.length > 0) || explicitEmpty(result);
 }
 
 const PATH_CHAR = /[\p{L}\p{N}_./-]/u;

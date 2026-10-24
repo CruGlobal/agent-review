@@ -19190,7 +19190,8 @@ var require_codeReviewProof = __commonJS({
     function looksFinished(result, effort, mode) {
       if (typeof result !== "string") return false;
       if (effort !== "max" || mode === "foreground") return true;
-      return jsonFindings(result).list !== null || explicitEmpty(result);
+      const { list } = jsonFindings(result);
+      return Array.isArray(list) && list.length > 0 || explicitEmpty(result);
     }
     var PATH_CHAR = /[\p{L}\p{N}_./-]/u;
     function pathStartsAt(text, at, root) {

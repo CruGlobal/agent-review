@@ -127,7 +127,7 @@ The lane template (`templates/code-review-lane.md`) STEP 1 becomes:
 1. Call the Skill tool exactly as the template says, with the same args the skill armed.
 2. Do not read findings from the Skill tool's reply. The reply may say "launched" or may contain the result. Either way, wait with the engine's command: `agent-review capture-wait --run <run_id> --effort <effort> --timeout <seconds>`.
    - It polls every 5 seconds. It exits 0 once the capture for that `run_id` *looks finished*:
-     - At `max`, the only effort whose recipe starts helpers, the capture must hold a qualifying JSON findings list (section 4) or an explicit empty marker. Any other text means the fork stopped while its helpers still run, so polling continues.
+     - At `max`, the only effort whose recipe starts helpers, the capture must hold a non-empty qualifying JSON findings list (section 4) or an explicit empty marker (`(none)` or `No findings.`). A fenced `[]` alone does not count at `max`, and any other text means the fork stopped while its helpers still run, so polling continues.
      - At every other effort, the first capture counts as finished. Unusable text then fails the check in section 4 right away, instead of waiting out the limit.
    - Each call stays under the Bash tool's 10-minute limit. The lane re-runs it until the overall time limit for the effort level runs out:
 
@@ -335,7 +335,7 @@ If any of these differs from section 1, adjust section 1 before building.
 
 1. **JSON comes back for `xhigh` and `max`.** Their recipes ask for a JSON array, so the check reads that array and ignores the prose around it. The text rules apply only to `low`, `medium`, and `high`.
 2. **The hooks don't depend on firing order.** Headless runs fire the fork's stop before `PostToolUse`. A small stop buffer covers both orders.
-3. **The last stop wins.** `capture-wait` decides when a capture is finished: at `max`, a JSON list or an explicit empty marker; at other efforts, the first capture.
+3. **The last stop wins.** `capture-wait` decides when a capture is finished: at `max`, a non-empty JSON list or an explicit empty marker; at other efforts, the first capture.
 4. **Strict text mode.** One raw finding per finding line, and no context exception. The cost: a `low`, `medium`, or `high` result that cites a line only as context fails the run, and the review must be rerun. `xhigh`, the default, is not affected, because its prose is ignored.
 5. **One set of files per lane attempt.** A resumed earlier lane can't overwrite a relaunch's files.
 
@@ -344,3 +344,5 @@ If any of these differs from section 1, adjust section 1 before building.
 - Exact file names for new modules, beyond those named here.
 - Poll interval details, and the exact `capture-wait` output text.
 - Test fixture wording.
+
+**Amendment, 2026-10-24 (probe P5).** At `max`, a non-foreground capture looks finished only when it holds a non-empty qualifying JSON list or an explicit empty marker (`(none)` or `No findings.`). A fenced `[]` alone no longer counts, because an early stop that quotes `[]` would otherwise let the review approve before `/code-review` finishes. Foreground captures and the other efforts are unchanged.

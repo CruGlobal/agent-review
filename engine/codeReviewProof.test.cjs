@@ -528,7 +528,12 @@ test('looksFinished waits at max until a findings list or an explicit empty mark
   const list = fenced('json', J([{ file: 'a.rb', line: 3 }]));
   assert.equal(looksFinished('I launched three helpers and will merge their findings.', 'max'), false);
   assert.equal(looksFinished(`Here is the list:\n${list}`, 'max'), true);
-  assert.equal(looksFinished(`All good.\n${fenced('json', '[]')}`, 'max'), true);
+  assert.equal(looksFinished(`All good.\n${fenced('json', '[]')}`, 'max', 'foreground'), true);
+  assert.equal(looksFinished(`Waiting on helpers; so far the list is\n${fenced('json', '[]')}`, 'max', 'forked'), false, 'P5: a quoted [] is not a finished fork');
+  assert.equal(looksFinished(`Waiting on helpers; so far the list is\n${fenced('json', '[]')}`, 'max'), false);
+  assert.equal(looksFinished(`Here is the list:\n${list}`, 'max', 'forked'), true);
+  assert.equal(looksFinished('(none)', 'max', 'forked'), true);
+  assert.equal(looksFinished(fenced('json', '[]'), 'xhigh'), true);
   assert.equal(looksFinished('(none)', 'max'), true);
   assert.equal(looksFinished('No findings.', 'max'), true);
   assert.equal(looksFinished('', 'max'), false);
