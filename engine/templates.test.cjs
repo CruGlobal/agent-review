@@ -759,6 +759,25 @@ test('lane template has no node -e write recipe and uses a quoted node heredoc',
     ),
     'the lane is told how to escape quoted code inside a JS string',
   );
+  assert.ok(
+    flatText(text).includes('Use double quotes for every JS string, never backticks: a backtick string runs any `${...}` in the code you quote.'),
+    'a template-literal string would run quoted code',
+  );
+  for (const script of scripts) assert.ok(!script.includes('`'), 'the heredoc examples use no backtick strings');
+});
+
+test('lane template pages long output by bytes through a pipe, never through a file', () => {
+  const long = flatText(laneStep(laneText(), 'LONG OUTPUT:', 'STEP 1.'));
+  for (const needle of [
+    "If the Bash tool cuts a command's output short, run the command again piped through `head -c 20000` to read the first part,",
+    'then through `tail -c +20001 | head -c 20000` for the second, `tail -c +40001 | head -c 20000` for the third, and so on, until a part prints nothing.',
+    'If a part still comes back cut short, halve the page size and read that part again in two halves.',
+    'This applies to `agent-review capture show` and `agent-review diff-for` output alike.',
+    'Never save the output to a file to page through it.',
+  ]) {
+    assert.ok(long.includes(needle), `LONG OUTPUT must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!long.includes('sed -n'), 'a page of 300 lines can still pass the Bash cap');
 });
 
 test('the lane heredoc examples run, and their files pass the lane check', () => {
@@ -833,9 +852,12 @@ test('lane template lists raw findings the way the check grounds them', () => {
     'It prints the saved result exactly, and that text is the only source of raw findings.',
     '`n` counts 1, 2, 3, ... in list order;',
     '`file` is the path the result gives, made repo-relative: drop any leading path to the repository root and any leading `./`;',
-    'the last such list is the only source: copy it one to one, in the same order, with the same `file` and the same `line`, and ignore every other line of the result.',
+    'that list is the only source: copy it one to one, in the same order, with the same `file` and the same `line`, and ignore every other line of the result.',
+    'When it has two such lists that differ, the result cannot be used.',
     'A `line` written as a string uses the number it starts with (`"42-45"` gives 42).',
     'Otherwise, every line of the result that cites a location is one raw finding.',
+    'For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.',
+    'When none of these fits, or the result cannot be used, write `[]` as the raw list anyway,',
     'A web address such as `https://example.com:443` is not a location.',
     'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
     'List each such line once, using the first location on it, even when two lines cite the same location and even when a line seems to give only context.',
@@ -847,6 +869,7 @@ test('lane template lists raw findings the way the check grounds them', () => {
   for (const label of ['text', 'txt', 'md', 'markdown', 'plain']) {
     assert.ok(step2.includes(`\`${label}\``), `a fence labeled ${label} holds prose the check reads`);
   }
+  assert.ok(!step2.includes('the last such list'), 'two different lists fail the check, so the last one never wins');
   const json = step2.indexOf('1. JSON list.');
   const lines = step2.indexOf('2. Finding lines.');
   const none = step2.indexOf('3. Nothing.');
@@ -866,6 +889,39 @@ test('lane template scores from the diff-for blocks, not the whole diff', () => 
   assert.ok(flat.includes('Read that output, not the whole diff.'), flat);
   assert.ok(flat.indexOf('skip to STEP 4') < flat.indexOf('agent-review diff-for'), 'an empty raw list never reads the diff');
   assert.ok(flat.includes("either way its entry's `raw` is the raw finding's `n`."), flat);
+  for (const needle of [
+    'It skips files on an excluded path, and for any other file it has no block for, it prints a line `no diff block for <file>`.',
+    'A missing block never proves that a file is unchanged: the diff can spell a path another way, such as a quoted name or a rename.',
+    'Before you set `outside_range` to `true` for a finding on such a file, run `grep -n "^diff --git" {{DIFF_PATH}}`, look for the file under any spelling, and read its block if it is there.',
+  ]) {
+    assert.ok(flat.includes(needle), `STEP 3 must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!flat.includes('has no change in this pass'), 'a missing block is not proof of no change');
+});
+
+test('lane template anchors a no-line finding to the changed line, and consensus caps a null line at 6', () => {
+  const flat = flatText(laneText());
+  for (const needle of [
+    "- `line`: its raw entry's `line`. When that is `null`, use the line in {{DIFF_PATH}} that this change adds or changes and that the failure runs through. Leave it `null` only when no such line applies. A finding with a `null` line never scores above 6.",
+    '- every finding with a `null` `line` scores 6 or less;',
+  ]) {
+    assert.ok(flat.includes(needle), `the lane must say ${JSON.stringify(needle)}`);
+  }
+  const { consensusFrom } = require('./consensus.cjs');
+  const blocker = {
+    raw: 1, agent: 'code-review', category: 'correctness', severity: 8, file: 'app/user.js', line: null,
+    message: 'displayName throws for a user with no profile', confidence: 'High',
+    evidence: 'displayName({}) reaches the nickname read with no profile and throws.',
+    outside_range: false, doubted: false, recategorized_from: null,
+  };
+  const run = (finding) =>
+    consensusFrom({
+      plan: { engine: { name: 'code-review' }, agents: [{ id: 'code-review' }] },
+      findingsByAgent: { 'code-review': { findings: [finding] } },
+      profile: 'standard',
+    }).findings.map((f) => f.severity);
+  assert.deepStrictEqual(run(blocker), [6], 'a High-confidence 8 with no line comes out as 6');
+  assert.deepStrictEqual(run({ ...blocker, line: 13 }), [8], 'anchored to a line, the same finding keeps its 8');
 });
 
 test('lane template sets the structured fields instead of evidence prefixes', () => {
@@ -931,9 +987,16 @@ test('lane template has no REFUTED drop and names both drop reasons', () => {
     '2. Disproved.',
     'Drop it with `reason: "disproved"` and a `proof` that names which of those it is and quotes the exact line or lines that show it, with `path:line`',
     'EXCLUDED PATHS (one glob per line, or `none`): {{EXCLUDED_PATHS}}',
+    "When the finding's line in /code-review's result also cites a location that no excluded glob matches, the finding is not only on an excluded path: score it instead.",
+    'The review checks the proof three ways:',
+    '- the path names a file that exists in the repository, such as `lib/cart.rb` or `Makefile`;',
+    '- the line is a line of that file, from 1 to its last line;',
+    '- the text right after `path:line` is the quoted code: at least 3 characters besides spaces, found in that file within 2 lines of that line. Spaces, line breaks, backticks, and `*` do not count when comparing.',
+    'So write the quoted code right after `path:line`, and nothing after it.',
   ]) {
     assert.ok(dropping.includes(needle), `DROPPING A FINDING must say ${JSON.stringify(needle)}`);
   }
+  assert.ok(!dropping.includes('The review checks that the proof cites a `path:line`.'), 'the old, looser rule is gone');
   const flat = flatText(text);
   for (const needle of [
     'Each dropped finding becomes one entry: `{ raw, reason: "excluded", glob }` or `{ raw, reason: "disproved", proof }`.',

@@ -485,7 +485,7 @@ function droppedEntryProblem(entry, i, rawByN, excludedPaths, root, repo, claime
     const kept = claimed ? claimed.mentions.find((m) => !isExcludedMention(m, excludedPaths, root)) : null;
     if (kept) {
       return {
-        problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${kept.file}:${kept.line}, which no excluded glob matches; list that line under its first location and score it`,
+        problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${kept.file}:${kept.line}, which no excluded glob matches; score it instead`,
       };
     }
     return { why: `excluded path: ${entry.glob}` };

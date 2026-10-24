@@ -33,9 +33,19 @@ only that call: still run `capture-wait` in STEP 1, and do every later step.
 
 LONG OUTPUT:
 
+The Bash tool cuts a command's output off after about 30,000 characters.
 If the Bash tool cuts a command's output short, run the command again piped through
-`sed -n '1,300p'`, then `sed -n '301,600p'`, and so on, until a part prints nothing. Read every
-part.
+`head -c 20000` to read the first part, then through `tail -c +20001 | head -c 20000` for the
+second, `tail -c +40001 | head -c 20000` for the third, and so on, until a part prints nothing.
+For example, the second part of the saved result is:
+
+```bash
+agent-review capture show --run {{RUN_ID}} | tail -c +20001 | head -c 20000
+```
+
+If a part still comes back cut short, halve the page size and read that part again in two halves.
+Read every part. This applies to `agent-review capture show` and `agent-review diff-for` output
+alike. Never save the output to a file to page through it.
 
 STEP 1. RUN /code-review AND WAIT FOR ITS RESULT
 
@@ -100,13 +110,15 @@ Find the entries this way:
 1. JSON list. A fenced block labeled `json`, or one with no label, that holds a JSON array of
    objects (or an object whose `findings` key holds one), where every object has a non-empty
    string `file`, is a findings list. `xhigh` and `max` return one. When the result has a list
-   with at least one object, the last such list is the only source: copy it one to one, in the
-   same order, with the same `file` and the same `line`, and ignore every other line of the
-   result. A `line` written as a string uses the number it starts with (`"42-45"` gives 42).
-   Any other `line` that is not a whole number above 0 gives `null`.
+   with at least one object, that list is the only source: copy it one to one, in the same
+   order, with the same `file` and the same `line`, and ignore every other line of the result.
+   When it has two such lists that differ, the result cannot be used. A `line` written as a
+   string uses the number it starts with (`"42-45"` gives 42). Any other `line` that is not a
+   whole number above 0 gives `null`.
 2. Finding lines. Otherwise, every line of the result that cites a location is one raw finding.
    A location is `path:line` or `path:start-end`, where the path holds a letter and a `/` or a
-   `.`, or names a file in the repository, as in `lib/cart.rb:51` or `Makefile:12`. A web
+   `.`, or names a file in the repository, as in `lib/cart.rb:51` or `Makefile:12`. For
+   `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49. A web
    address such as `https://example.com:443` is not a location. Backticks and `*` around a
    location do not matter. This covers bullets, nested bullets, and lines inside a fenced block
    with no label or labeled `text`, `txt`, `md`, `markdown`, or `plain`, but not lines inside a
@@ -116,8 +128,8 @@ Find the entries this way:
 3. Nothing. The raw list is `[]` when no line cites a location and the result either has
    findings lists that are all `[]` or has a line that reads exactly `(none)` or `No findings.`.
 
-When none of these fits, the result cannot be used. Write `[]` as the raw list anyway, then skip
-to STEP 4, write empty files there, and let STEP 5's check decide.
+When none of these fits, or the result cannot be used, write `[]` as the raw list anyway, then
+skip to STEP 4, write empty files there, and let STEP 5's check decide.
 
 Write the raw list with this command, putting your entries in place of the examples (write
 `const raw = [];` when the list is empty):
@@ -134,10 +146,11 @@ fs.writeFileSync("/tmp/code_review_raw.{{ATTEMPT}}.json", JSON.stringify(raw, nu
 EOF
 ```
 
-The quoted `'EOF'` keeps the shell from changing anything, but the script is still JavaScript:
-inside a JS string, write a backslash as `\\` and a double quote as `\"`, and a line break as
-`\n`. So quoted code such as `/^\d+$/` goes in as `"/^\\d+$/"`. Never hand-write JSON;
-`JSON.stringify` writes it.
+The quoted `'EOF'` keeps the shell from changing anything, but the script is still JavaScript.
+Use double quotes for every JS string, never backticks: a backtick string runs any `${...}` in
+the code you quote. And inside a JS string, write a backslash as `\\` and a double quote as `\"`,
+and a line break as `\n`. So quoted code such as `/^\d+$/` goes in as `"/^\\d+$/"`. Never
+hand-write JSON; `JSON.stringify` writes it.
 
 STEP 3. SCORE EACH RAW FINDING
 
@@ -148,8 +161,14 @@ your raw findings name:
 agent-review diff-for --diff {{DIFF_PATH}} --raw /tmp/code_review_raw.{{ATTEMPT}}.json
 ```
 
-Read that output, not the whole diff. A file with no block in it has no change in this pass. In a
-block, a line this change adds or changes starts with `+` (not `+++`), and each hunk header
+Read that output, not the whole diff. It skips files on an excluded path, and for any other file
+it has no block for, it prints a line `no diff block for <file>`. A missing block never proves
+that a file is unchanged: the diff can spell a path another way, such as a quoted name or a
+rename. Before you set `outside_range` to `true` for a finding on such a file, run
+`grep -n "^diff --git" {{DIFF_PATH}}`, look for the file under any spelling, and read its block if
+it is there.
+
+In a block, a line this change adds or changes starts with `+` (not `+++`), and each hunk header
 `@@ -a,b +c,d @@` gives the new file's line numbers, starting at c. Then take the raw findings
 one at a time. Read the lines each one names, plus enough of the code around them to follow its
 failure scenario. Open other files only when the scenario runs through them. To see whether this
@@ -266,15 +285,22 @@ Drop a raw finding in only two cases:
    `reason: "excluded"` and `glob` set to that glob, copied exactly as listed, for example
    `dist/**`. This repository keeps these paths out of review, so drop every raw finding on one,
    even a real bug. The review checks that the glob is in the repository's `excluded_paths` and
-   that `file` matches it.
+   that `file` matches it. When the finding's line in /code-review's result also cites a location
+   that no excluded glob matches, the finding is not only on an excluded path: score it instead.
 2. Disproved. You can prove it wrong, by the same bar /code-review's own verifier uses to reject
    a finding: the finding misreads the code, the failure cannot happen because a type, constant,
    or invariant rules it out, or this diff already handles it. Drop it with
    `reason: "disproved"` and a `proof` that names which of those it is and quotes the exact line
    or lines that show it, with `path:line`, for example
    `already handled: lib/cart.rb:18 if (!items) return [];`. "Speculative" or "depends on runtime
-   state" is not proof when that state is realistic. The review checks that the proof cites a
-   `path:line`.
+   state" is not proof when that state is realistic. The review checks the proof three ways:
+   - the path names a file that exists in the repository, such as `lib/cart.rb` or `Makefile`;
+   - the line is a line of that file, from 1 to its last line;
+   - the text right after `path:line` is the quoted code: at least 3 characters besides spaces,
+     found in that file within 2 lines of that line. Spaces, line breaks, backticks, and `*` do
+     not count when comparing.
+
+   So write the quoted code right after `path:line`, and nothing after it.
 
 EXCLUDED PATHS (one glob per line, or `none`):
 
@@ -295,7 +321,9 @@ Each scored finding becomes one entry:
 - `category`: from CATEGORY
 - `severity`: the whole number from SEVERITY, after the caps
 - `file`: its raw entry's `file`, repo-relative
-- `line`: its raw entry's `line`
+- `line`: its raw entry's `line`. When that is `null`, use the line in {{DIFF_PATH}} that this
+  change adds or changes and that the failure runs through. Leave it `null` only when no such
+  line applies. A finding with a `null` line never scores above 6.
 - `message`: ≤ 2 sentences naming the defect and its consequence
 - `confidence`: `High`, `Medium`, or `Low`, from CONFIDENCE
 - `evidence`: the execution path, or the reason for the score
@@ -322,6 +350,7 @@ Before you write, check your work:
 - every `category` is one of the nine names in CATEGORY;
 - no finding in a cleanup category scores above 6;
 - every finding scored 7 or higher clears the 7+ bar;
+- every finding with a `null` `line` scores 6 or less;
 - every finding with `outside_range` set to `true` scores 6 or less;
 - every finding with `doubted` set to `true` has `confidence` `Low` and scores 4 or less;
 - every finding with a `recategorized_from` name has category `correctness` or `security`.
