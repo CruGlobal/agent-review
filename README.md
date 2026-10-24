@@ -78,6 +78,10 @@ approval has to come from an account the branch rules trust. So:
 - the repo setting "Allow GitHub Actions to create and approve pull requests" is off
 - the `agent-review-approve.yml` workflow is not on the default branch yet
 
+When reviewers flag the same spot, their scores are averaged, with one exception: a 7 or more
+from any reviewer keeps its score, on every engine. Every 7 or more has already shown concrete
+evidence, so a lower score from another reviewer cannot pull it below the blocker line.
+
 The same rules apply when the review ran in CI instead of your terminal, and when you fix or
 dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]: reason`).
 
