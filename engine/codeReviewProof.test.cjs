@@ -748,3 +748,422 @@ test('a bare location may name an existing file with no / or .', () => {
   const noCallback = checkCodeReviewProof({ rawText: `${HEADER}\n\nResult:\nMakefile:12 - x\nsrc/a.js:4 - y\n` });
   assert.deepEqual(noCallback.findings.map((f) => f.file), ['src/a.js'], 'without the callback the path rule alone applies');
 });
+
+// Grounding: the lane's raw list against the captured /code-review text.
+
+const {
+  CAPTURE_LIMIT_MINUTES,
+  jsonFindings,
+  explicitEmpty,
+  findingLines,
+  jsonLine,
+  repoRelative,
+  looksFinished,
+  checkGrounding,
+} = require('./codeReviewProof.cjs');
+const { EFFORTS } = require('./vocabulary.cjs');
+const { CAPTURE_SOURCE } = require('./captureHook.cjs');
+const { readFileSync } = require('node:fs');
+const { join } = require('node:path');
+
+const XHIGH_RESULT = readFileSync(join(__dirname, '../fixtures/code-review/xhigh-result.txt'), 'utf8');
+const fenced = (info, content) => `\`\`\`${info}\n${content}\n\`\`\`\n`;
+const captureOf = (result, over = {}) => ({
+  source: CAPTURE_SOURCE,
+  mode: 'forked',
+  run_id: 'r1',
+  args: 'xhigh 12',
+  fork_id: 'f1',
+  result,
+  transcript: null,
+  stop_count: 1,
+  ts: 1,
+  ...over,
+});
+const raws = (...spots) => spots.map(([file, line], i) => ({ n: i + 1, file, line, summary: `${file} finding ${i + 1}` }));
+const ground = (result, rawEntries, over = {}) =>
+  checkGrounding({ capture: captureOf(result), runId: 'r1', rawEntries, fileExists: () => false, root: '/repo', ...over });
+const assertGrounded = (r, mode, label) => {
+  assert.deepEqual(r, { ok: true, stage: null, reason: 'ok', mode }, label);
+};
+const assertFails = (r, stage, label) => {
+  assert.equal(r.ok, false, label);
+  assert.equal(r.stage, stage, `${label}: ${r.reason}`);
+  assert.equal(typeof r.reason, 'string', label);
+  assert.notEqual(r.reason, '', label);
+};
+const XHIGH_SPOTS = [
+  ['app.js', 13],
+  ['app.js', 13],
+  ['app.js', 13],
+  ['app.js', 13],
+  ['app.js', 4],
+  ['app.js', 5],
+  ['app.js', 13],
+  ['app.js', 12],
+];
+
+test('the capture limits per effort cover every effort', () => {
+  assert.deepEqual({ ...CAPTURE_LIMIT_MINUTES }, { low: 10, medium: 15, high: 20, xhigh: 40, max: 120 });
+  assert.deepEqual(Object.keys(CAPTURE_LIMIT_MINUTES), EFFORTS);
+});
+
+test('xhigh spike result grounds a matching raw list', () => {
+  const { list, problem } = jsonFindings(XHIGH_RESULT);
+  assert.equal(problem, null);
+  assert.deepEqual(list.map((f) => [f.file, f.line]), XHIGH_SPOTS);
+  assertGrounded(ground(XHIGH_RESULT, raws(...XHIGH_SPOTS)), 'json');
+  assertGrounded(
+    ground(XHIGH_RESULT, raws(...XHIGH_SPOTS.map(([file, line], i) => [i % 2 ? `/repo/${file}` : `./${file}`, line]))),
+    'json',
+    'paths compare repo-relative',
+  );
+});
+
+test('json raw list must match count, file, and line one to one', () => {
+  const cases = {
+    'one short': XHIGH_SPOTS.slice(0, -1),
+    'one extra': [...XHIGH_SPOTS, ['app.js', 13]],
+    'two swapped': [...XHIGH_SPOTS.slice(0, 4), XHIGH_SPOTS[5], XHIGH_SPOTS[4], ...XHIGH_SPOTS.slice(6)],
+    'a wrong line': [...XHIGH_SPOTS.slice(0, -1), ['app.js', 11]],
+    'a wrong file': [...XHIGH_SPOTS.slice(0, -1), ['lib/app.js', 12]],
+    'a null line for a lined finding': [...XHIGH_SPOTS.slice(0, -1), ['app.js', null]],
+    'an empty list': [],
+  };
+  for (const [label, spots] of Object.entries(cases)) {
+    const r = ground(XHIGH_RESULT, raws(...spots));
+    assertFails(r, 'lane', label);
+    assert.equal(r.mode, 'json', label);
+  }
+  assert.match(ground(XHIGH_RESULT, raws(...cases['one short'])).reason, /8\b.*\b7|7\b.*\b8/);
+  assert.match(ground(XHIGH_RESULT, raws(...cases['two swapped'])).reason, /raw entry 5\b/);
+});
+
+test('json line "42-45" grounds raw line 42, and "L42" grounds null', () => {
+  const result = fenced('json', J([
+    { file: 'a.rb', line: '42-45', summary: 'x' },
+    { file: 'b.rb', line: 'L42', summary: 'y' },
+    { file: 'c.rb', summary: 'z' },
+    { file: 'd.rb', line: 'n/a', summary: 'w' },
+  ]));
+  assertGrounded(ground(result, raws(['a.rb', 42], ['b.rb', null], ['c.rb', null], ['d.rb', null])), 'json');
+  assertFails(ground(result, raws(['a.rb', 42], ['b.rb', 42], ['c.rb', null], ['d.rb', null])), 'lane', 'L42 is no line');
+  assertFails(ground(result, raws(['a.rb', 45], ['b.rb', null], ['c.rb', null], ['d.rb', null])), 'lane', 'a range is its start');
+
+  assert.equal(jsonLine(7), 7);
+  assert.equal(jsonLine('42-45'), 42);
+  assert.equal(jsonLine('42'), 42);
+  assert.equal(jsonLine('L42'), null);
+  assert.equal(jsonLine('n/a'), null);
+  assert.equal(jsonLine(4.5), null);
+  assert.equal(jsonLine(null), null);
+  assert.equal(jsonLine(undefined), null);
+  assert.equal(jsonLine([42]), null);
+});
+
+test('a quoted [] after a real list never replaces it', () => {
+  const real = fenced('json', J([{ file: 'a.rb', line: 3, summary: 's' }]));
+  for (const empty of [fenced('json', '[]'), fenced('', '[]'), fenced('json', '{"findings":[]}')]) {
+    for (const result of [`Findings:\n${real}\nSuggested fix:\n${empty}`, `${empty}\n${real}`]) {
+      assert.deepEqual(jsonFindings(result), { list: [{ file: 'a.rb', line: 3, summary: 's' }], problem: null });
+      assertGrounded(ground(result, raws(['a.rb', 3])), 'json');
+      assertFails(ground(result, []), 'lane', 'the [] does not make an empty raw list pass');
+    }
+  }
+  const later = fenced('json', J([{ file: 'b.rb', line: 9 }]));
+  assert.deepEqual(jsonFindings(`${real}${fenced('json', '[]')}${later}`).list, [{ file: 'b.rb', line: 9 }], 'the last non-empty list wins');
+  assert.deepEqual(jsonFindings(`All good.\n${fenced('json', '[]')}`), { list: [], problem: null });
+  assert.deepEqual(jsonFindings('All good.'), { list: null, problem: null });
+});
+
+test('an unusable list-like block fails with stage capture even beside a usable one', () => {
+  const real = fenced('json', J([{ file: 'a.rb', line: 3, summary: 's' }]));
+  for (const bad of [
+    '[{"line": 3}]',
+    '[{"file": "a.rb", "line": 3},]',
+    '{"findings": "none"}',
+    '{"findings": [{"file": ""}]}',
+    '[1, 2]',
+  ]) {
+    for (const info of ['json', '']) {
+      for (const result of [`${real}\n${fenced(info, bad)}`, `${fenced(info, bad)}\n${real}`]) {
+        assert.equal(typeof jsonFindings(result).problem, 'string', result);
+        const r = ground(result, raws(['a.rb', 3]));
+        assertFails(r, 'capture', result);
+        assert.equal(r.mode, null, result);
+      }
+    }
+  }
+});
+
+test('a list padded with a no-break space or BOM is usable (final review #42)', () => {
+  for (const pad of ['\u00a0', '\ufeff', '  ']) {
+    const result = fenced('json', `${pad}${J([{ file: 'a.rb', line: 3 }])}${pad}`);
+    assert.deepEqual(jsonFindings(result), { list: [{ file: 'a.rb', line: 3 }], problem: null }, J(pad));
+  }
+});
+
+test('a quoted JSON config object is ignored', () => {
+  const config = fenced('json', '{"engine": {"name": "x"}, "excluded_paths": ["dist/**"]}');
+  for (const quoted of [config, fenced('json', '"just a string"'), fenced('', '{ name: "a" }'), fenced('ruby', '[1, 2')]) {
+    assert.deepEqual(jsonFindings(`The config reads:\n${quoted}`), { list: null, problem: null }, quoted);
+    assertGrounded(ground(`(none)\n\nThe config reads:\n${quoted}`, []), 'empty', quoted);
+    assertGrounded(ground(`${quoted}\n${fenced('json', J([{ file: 'a.rb', line: 3 }]))}`, raws(['a.rb', 3])), 'json', quoted);
+  }
+});
+
+test('an unclosed fence fails with stage capture', () => {
+  const real = fenced('json', J([{ file: 'a.rb', line: 3 }]));
+  for (const result of [
+    '```json\n[{"file": "a.rb", "line": 3',
+    '(none)\n```ruby\nx = 1\n',
+    '- a.rb:3: bug\n```\n',
+    `${real}\`\`\`json\n[{"file": "b.rb"`,
+  ]) {
+    assert.equal(typeof jsonFindings(result).problem, 'string', result);
+    assertFails(ground(result, raws(['a.rb', 3])), 'capture', result);
+    assertFails(ground(result, []), 'capture', result);
+  }
+});
+
+test('an all-empty JSON list never erases text finding lines', () => {
+  for (const empty of [fenced('json', '[]'), fenced('', '{"findings": []}')]) {
+    const result = `- a.rb:3: total skips the guard\n\nSuggested fix:\n${empty}`;
+    assert.deepEqual(jsonFindings(result).list, []);
+    const r = ground(result, []);
+    assertFails(r, 'lane', 'the finding line is unclaimed');
+    assert.equal(r.mode, 'text');
+    assertGrounded(ground(result, raws(['a.rb', 3])), 'text');
+  }
+});
+
+test('text shapes from final review #3 each ground a matching entry', () => {
+  for (const [line, file, at] of [
+    ['**app/a.rb:12**: x', 'app/a.rb', 12],
+    ['1. `a.js:3`: x', 'a.js', 3],
+    ['a.rb:12 (pre-existing) - x', 'a.rb', 12],
+    ['a.rb:12: x', 'a.rb', 12],
+    ['see lib/b.rb:40 where the guard is skipped', 'lib/b.rb', 40],
+    ['1. **`src/cart.js:12`** - total() reads items before the empty-cart guard', 'src/cart.js', 12],
+    ['- lib/cart.rb:50: `total` multiplies before it rounds', 'lib/cart.rb', 50],
+    ['- /repo/lib/cart.rb:50 - an absolute path', 'lib/cart.rb', 50],
+    ['| lib/cart.rb:50 | total is wrong |', 'lib/cart.rb', 50],
+    ['- [lib/cart.rb:50](https://example.com/lib/cart.rb#L50) total is wrong', 'lib/cart.rb', 50],
+    ['- app/(shop)/[id]/page.tsx:8 reads params before the guard', 'app/(shop)/[id]/page.tsx', 8],
+  ]) {
+    const result = `Correctness:\n${line}\nCleanups:\n(none)\n`;
+    assert.deepEqual(
+      findingLines(result).map((l) => [l.index, l.mentions.map((m) => [repoRelative(m.file, '/repo'), m.line])]),
+      [[1, [[file, at]]]],
+      line,
+    );
+    assertGrounded(ground(result, raws([file, at])), 'text', line);
+    assertFails(ground(result, raws([file, at + 1])), 'lane', `${line} at the wrong line`);
+    assertFails(ground(result, []), 'lane', `${line} unclaimed`);
+  }
+});
+
+test('src/a.js:49-59 grounds raw line 49, but not raw line 51', () => {
+  for (const dash of ['-', '\u2013', '\u2014']) {
+    const result = `src/a.js:49${dash}59 \u2014 x`;
+    assert.deepEqual(findingLines(result)[0].mentions, [{ file: 'src/a.js', line: 49 }], J(dash));
+    assertGrounded(ground(result, raws(['src/a.js', 49])), 'text', J(dash));
+    assertFails(ground(result, raws(['src/a.js', 51])), 'lane', J(dash));
+    assertFails(ground(result, raws(['src/a.js', 59])), 'lane', J(dash));
+  }
+});
+
+test('a nested bullet with a mention fails when no raw entry claims it', () => {
+  const result = '- a.rb:3: total skips the guard\n  - b.rb:9 calls total() with an empty cart\n';
+  const r = ground(result, raws(['a.rb', 3]));
+  assertFails(r, 'lane', 'the nested bullet is a finding line');
+  assert.match(r.reason, /line 2\b/);
+  assert.match(r.reason, /b\.rb:9/);
+  assertGrounded(ground(result, raws(['a.rb', 3], ['b.rb', 9])), 'text');
+});
+
+test('two findings at one location need two raw entries', () => {
+  const result = '- a.rb:3: total skips the guard\n- a.rb:3: total also rounds too early\n';
+  assertFails(ground(result, raws(['a.rb', 3])), 'lane', 'one entry for two lines');
+  assertGrounded(ground(result, raws(['a.rb', 3], ['a.rb', 3])), 'text');
+  const extra = ground(result, raws(['a.rb', 3], ['a.rb', 3], ['a.rb', 3]));
+  assertFails(extra, 'lane', 'three entries for two lines');
+  assert.match(extra.reason, /raw entry 3\b/);
+});
+
+test('localhost:3000 and https://example.com:443/x are not mentions', () => {
+  const prose = 'Start the server at localhost:3000, then open https://example.com:443/x, 127.0.0.1:8080, or file://host/a.rb:3.';
+  assert.deepEqual(findingLines(prose, () => false), []);
+  assertGrounded(ground(`(none)\n\n${prose}`, []), 'empty');
+  assertFails(ground(prose, []), 'capture', 'prose with no marker');
+
+  const exists = (path) => path === 'Gemfile';
+  assert.deepEqual(findingLines('Gemfile:12 pins an old rack', exists)[0].mentions, [{ file: 'Gemfile', line: 12 }]);
+  assert.deepEqual(findingLines('Gemfile:12 pins an old rack', () => false), [], 'a bare name needs the file to exist');
+  assert.deepEqual(findingLines('Gemfile:12 pins an old rack'), [], 'no callback means no bare names');
+  assert.deepEqual(findingLines('2026:10 and a.rb:x are not mentions', () => true), []);
+});
+
+test('snake_case paths survive normalization', () => {
+  const result = '- *app/user_account.rb:7*: _the_ balance is __never__ checked in `user_account.rb`\n';
+  assert.deepEqual(findingLines(result)[0].mentions, [{ file: 'app/user_account.rb', line: 7 }]);
+  assertGrounded(ground(result, raws(['app/user_account.rb', 7])), 'text');
+  assertFails(ground(result, raws(['app/useraccount.rb', 7])), 'lane', 'the underscore is kept, not dropped');
+});
+
+test('matching is not greedy', () => {
+  const result = 'A: x.rb:1 and y.rb:2 disagree about the total\nB: x.rb:1 rounds the total\n';
+  assertGrounded(ground(result, raws(['x.rb', 1], ['y.rb', 2])), 'text');
+  assertGrounded(ground(result, raws(['y.rb', 2], ['x.rb', 1])), 'text');
+});
+
+test('an entry with no line takes a line that names its path and has no mention', () => {
+  const result = '- lib/cart.rb never freezes its constants\n- a.rb:3: total skips the guard\n';
+  assertGrounded(ground(result, raws(['lib/cart.rb', null], ['a.rb', 3])), 'text');
+  assertGrounded(ground(result, raws(['/repo/lib/cart.rb', null], ['a.rb', 3])), 'text');
+  assertFails(ground(result, raws(['cart.rb', null], ['a.rb', 3])), 'lane', 'a path inside a longer path is not its path');
+  assertFails(ground(result, raws(['a.rb', null], ['a.rb', 3])), 'lane', 'a line with a mention is not a no-line line');
+  assertFails(ground(result, raws(['lib/cart.rb', null], ['lib/cart.rb', null], ['a.rb', 3])), 'lane', 'one line per entry');
+  const fencedOnly = `${fenced('', 'lib/cart.rb')}- a.rb:3: total skips the guard\n`;
+  assertFails(ground(fencedOnly, raws(['lib/cart.rb', null], ['a.rb', 3])), 'lane', 'a fenced line is not text');
+  for (const longer of ['lib/cart.rbs', 'lib/cart.rb.bak', 'lib/cart.rb/x', 'lib/cart.rb-old']) {
+    const r = ground(`- ${longer} declares the cart types\n- a.rb:3: bug\n`, raws(['lib/cart.rb', null], ['a.rb', 3]));
+    assertFails(r, 'lane', `${longer} is not lib/cart.rb`);
+  }
+  assertGrounded(ground('- The constants live in lib/cart.rb.\n- a.rb:3: bug\n', raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'a full stop ends the path');
+});
+
+test('finding lines skip fenced lines and index every line of the result', () => {
+  const result = `intro\n${fenced('ruby', 'a.rb:1 inside a fence')}- b.rb:2: x\n`;
+  assert.deepEqual(findingLines(result).map((l) => [l.index, l.mentions]), [[4, [{ file: 'b.rb', line: 2 }]]]);
+  assert.equal(explicitEmpty(`${fenced('', '(none)')}`), false, 'a fenced marker does not count');
+  assert.equal(explicitEmpty('  (none)  \r'), true);
+  assert.equal(explicitEmpty('No findings.'), true);
+  assert.equal(explicitEmpty('- (none)'), false);
+  assert.equal(explicitEmpty('No findings. None at all.'), false);
+});
+
+test('a 50,000-character whitespace line is read in under 100 ms', () => {
+  const lines = [
+    ' '.repeat(50000) + 'x',
+    '\t'.repeat(50000) + 'a.rb:1',
+    ' '.repeat(25000) + 'a.rb:1' + ' '.repeat(25000) + '\r',
+    'a'.repeat(50000),
+    'a:'.repeat(25000),
+    '_'.repeat(50000),
+    '*'.repeat(50000) + ':1',
+    `${'1-'.repeat(25000)}`,
+  ];
+  for (const line of lines) {
+    const result = `- a.rb:1: bug\n${line}\n`;
+    const start = process.hrtime.bigint();
+    findingLines(result, () => false);
+    explicitEmpty(result);
+    jsonFindings(result);
+    ground(result, raws(['a.rb', 1], ['a.rb', 1]));
+    looksFinished(result, 'max');
+    const ms = Number(process.hrtime.bigint() - start) / 1e6;
+    assert.ok(ms < 100, `${J(line.slice(0, 12))}... took ${ms.toFixed(1)} ms`);
+  }
+});
+
+test('(none) plus an explanation with no mentions grounds an empty raw list', () => {
+  for (const result of [
+    '(none)\n\nThe diff only renames a local variable in app/a.rb, and nothing else changed.',
+    'No findings.\n',
+    `All good.\n${fenced('json', '[]')}`,
+    `I reviewed it.\n${fenced('json', '{"findings": []}')}`,
+  ]) {
+    assertGrounded(ground(result, []), 'empty', result);
+  }
+});
+
+test('text with no finding lines and no marker fails with stage capture', () => {
+  for (const result of ['I looked at the diff and it seems fine.', '- lib/cart.rb never freezes its constants', '**(none)**']) {
+    const r = ground(result, []);
+    assertFails(r, 'capture', result);
+    assert.match(r.reason, /no findings list and no explicit \(none\)/);
+    assert.equal(r.mode, null);
+  }
+});
+
+test('a non-empty raw list against (none) fails with stage lane', () => {
+  const r = ground('(none)\n', raws(['a.rb', 3]));
+  assertFails(r, 'lane', '(none)');
+  assert.equal(r.mode, 'empty');
+  assertFails(ground(`All good.\n${fenced('json', '[]')}`, raws(['a.rb', 3])), 'lane', 'a lone []');
+});
+
+test('the capture must exist, come from the hook, match the run, and hold text', () => {
+  const good = captureOf('(none)');
+  const cases = [
+    ['missing capture', null, /no .*capture/i],
+    ['not an object', 'text', /no .*capture/i],
+    ['wrong source', { ...good, source: 'something-else' }, /source/],
+    ['run_id from another run', { ...good, run_id: 'r2' }, /r2.*r1|r1.*r2/],
+    ['no run_id', { ...good, run_id: undefined }, /run/],
+    ['result not a string', { ...good, result: null }, /result/],
+    ['empty result', { ...good, result: '' }, /empty/],
+    ['blank result', { ...good, result: ' \n\t' }, /empty/],
+  ];
+  for (const [label, capture, reason] of cases) {
+    const r = checkGrounding({ capture, runId: 'r1', rawEntries: [], fileExists: () => false, root: '/repo' });
+    assertFails(r, 'capture', label);
+    assert.match(r.reason, reason, label);
+    assert.equal(r.mode, null, label);
+  }
+  assertGrounded(checkGrounding({ capture: good, runId: 'r1', rawEntries: [], root: '/repo' }), 'empty');
+});
+
+test('the raw list must be numbered 1..N with a file, a line, and a summary', () => {
+  const result = '- a.rb:3: bug one\n- b.rb:4: bug two\n';
+  const good = raws(['a.rb', 3], ['b.rb', 4]);
+  assertGrounded(ground(result, good), 'text');
+  const skipped = ground(result, [good[0], { ...good[1], n: 3 }]);
+  assertFails(skipped, 'lane', 'n that skips a number');
+  assert.match(skipped.reason, /\bn\b/);
+  assert.equal(skipped.mode, 'text');
+  for (const [label, rawEntries] of [
+    ['not an array', null],
+    ['an object', { findings: good }],
+    ['n from 0', good.map((e, i) => ({ ...e, n: i }))],
+    ['n as a string', [{ ...good[0], n: '1' }, good[1]]],
+    ['an entry that is not an object', [good[0], 'b.rb:4']],
+    ['an empty file', [good[0], { ...good[1], file: ' ' }]],
+    ['a file that is not a string', [good[0], { ...good[1], file: 4 }]],
+    ['a zero line', [good[0], { ...good[1], line: 0 }]],
+    ['a string line', [good[0], { ...good[1], line: '4' }]],
+    ['a missing line', [good[0], { ...good[1], line: undefined }]],
+    ['a fractional line', [good[0], { ...good[1], line: 4.5 }]],
+    ['an empty summary', [good[0], { ...good[1], summary: '' }]],
+    ['a missing summary', [good[0], { ...good[1], summary: undefined }]],
+  ]) {
+    assertFails(ground(result, rawEntries), 'lane', label);
+  }
+});
+
+test('looksFinished waits at max until a findings list or an explicit empty marker appears', () => {
+  const list = fenced('json', J([{ file: 'a.rb', line: 3 }]));
+  assert.equal(looksFinished('I launched three helpers and will merge their findings.', 'max'), false);
+  assert.equal(looksFinished(`Here is the list:\n${list}`, 'max'), true);
+  assert.equal(looksFinished(`All good.\n${fenced('json', '[]')}`, 'max'), true);
+  assert.equal(looksFinished('(none)', 'max'), true);
+  assert.equal(looksFinished('No findings.', 'max'), true);
+  assert.equal(looksFinished('', 'max'), false);
+  assert.equal(looksFinished('I launched three helpers and will merge their findings.', 'xhigh'), true);
+  for (const effort of ['low', 'medium', 'high', 'xhigh']) {
+    assert.equal(looksFinished('', effort), true, `${effort}: an empty result fails in the check, not by waiting`);
+    assert.equal(looksFinished(null, effort), false, effort);
+  }
+  assert.equal(looksFinished(undefined, 'max'), false);
+});
+
+test('repoRelative strips the root and a leading ./', () => {
+  assert.equal(repoRelative('/repo/app/a.rb', '/repo'), 'app/a.rb');
+  assert.equal(repoRelative('/repo/app/a.rb', '/repo/'), 'app/a.rb');
+  assert.equal(repoRelative('./app/a.rb', '/repo'), 'app/a.rb');
+  assert.equal(repoRelative('app/a.rb', '/repo'), 'app/a.rb');
+  assert.equal(repoRelative('/repository/app/a.rb', '/repo'), '/repository/app/a.rb');
+  assert.equal(repoRelative('/other/app/a.rb', '/repo'), '/other/app/a.rb');
+  assert.equal(repoRelative('/repo/app/a.rb', undefined), '/repo/app/a.rb');
+});

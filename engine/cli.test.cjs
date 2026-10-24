@@ -877,11 +877,11 @@ test('ledger --match-suggestions-by-location skips reworded suggestions; without
 
 const CLI = join(__dirname, 'cli.cjs');
 
-function spawnCli(args, { dir, input = '' }) {
+function spawnCli(args, { dir, input = '', env = {} }) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     input,
     encoding: 'utf8',
-    env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir },
+    env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir, ...env },
   });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
@@ -1310,5 +1310,185 @@ test('a command printing through out() delivers more than 64 KiB through a pipe 
     assert.equal(run(['ledger', '--findings', findingsPath]).s, expected, 'in-process output is the same bytes');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const FAST_POLL = { AGENT_REVIEW_CAPTURE_POLL_MS: '10' };
+
+function captureWait(dir, args) {
+  const started = Date.now();
+  const r = spawnCli(['capture-wait', ...args], { dir, env: FAST_POLL });
+  assert.equal(r.stderr, '', 'capture-wait reports through its JSON line');
+  assert.match(r.stdout, /^[^\n]+\n$/, `one JSON line: ${JSON.stringify(r.stdout)}`);
+  const json = JSON.parse(r.stdout);
+  assert.deepEqual(Object.keys(json), ['status', 'reason', 'stop_count', 'mode']);
+  assert.equal(typeof json.reason, 'string');
+  return { code: r.code, json, ms: Date.now() - started };
+}
+
+function armRun(dir, { run = 'r1', args = 'xhigh 12', created = Math.floor(Date.now() / 1000) } = {}) {
+  writeFileSync(join(dir, 'agent_review_capture.json'), JSON.stringify({ armed: true, run_id: run, args, created }));
+}
+
+function writeCapture(dir, over = {}) {
+  writeFileSync(
+    join(dir, 'code_review_capture.json'),
+    JSON.stringify({
+      source: 'agent-review-capture-hook',
+      mode: 'forked',
+      run_id: 'r1',
+      args: 'xhigh 12',
+      fork_id: 'f1',
+      result: '(none)',
+      transcript: null,
+      stop_count: 1,
+      ts: 1,
+      ...over,
+    }),
+  );
+}
+
+const JSON_LIST_RESULT = 'Summary.\n\n```json\n[{"file": "a.rb", "line": 3, "summary": "s"}]\n```\n';
+
+test('capture-wait finishes on a matching capture', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    armRun(dir);
+    writeCapture(dir, { result: JSON_LIST_RESULT });
+    const done = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(done.code, 0);
+    assert.equal(done.json.status, 'finished');
+    assert.equal(done.json.stop_count, 1);
+    assert.equal(done.json.mode, 'forked');
+    assert.ok(done.ms < 5000, `took ${done.ms} ms`);
+
+    writeCapture(dir, { mode: 'foreground', stop_count: 0, result: '- a.rb:1: bug' });
+    const foreground = captureWait(dir, ['--run', 'r1', '--effort', 'low', '--timeout', '30']);
+    assert.equal(foreground.code, 0, 'a foreground capture with no stops counts');
+    assert.deepEqual([foreground.json.stop_count, foreground.json.mode], [0, 'foreground']);
+
+    writeCapture(dir, { result: '' });
+    assert.equal(captureWait(dir, ['--run', 'r1', '--effort', 'high', '--timeout', '30']).code, 0, 'an empty result fails in the proof, not by waiting');
+
+    writeCapture(dir, { result: 'I launched three helpers and will merge their findings.', stop_count: 2 });
+    const prose = captureWait(dir, ['--run', 'r1', '--effort', 'max', '--timeout', '0.05']);
+    assert.equal(prose.code, 3, 'prose at max keeps waiting');
+    assert.deepEqual([prose.json.status, prose.json.stop_count, prose.json.mode], ['waiting', 2, 'forked']);
+    assert.equal(captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0.05']).code, 0, 'prose below max is finished');
+
+    writeCapture(dir, { result: JSON_LIST_RESULT, stop_count: 3 });
+    const max = captureWait(dir, ['--run', 'r1', '--effort', 'max', '--timeout', '0.05']);
+    assert.equal(max.code, 0, 'a findings list at max is finished');
+    assert.equal(max.json.stop_count, 3);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("capture-wait keeps waiting on another run's capture and exits 3", () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    armRun(dir);
+    const none = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0']);
+    assert.equal(none.code, 3, 'no capture yet');
+    assert.deepEqual(none.json, { status: 'waiting', reason: none.json.reason, stop_count: null, mode: null });
+
+    writeCapture(dir, { run_id: 'r2', result: JSON_LIST_RESULT });
+    const other = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0.2']);
+    assert.equal(other.code, 3);
+    assert.deepEqual([other.json.status, other.json.stop_count, other.json.mode], ['waiting', null, null]);
+    assert.ok(other.ms >= 200, `waited the timeout out (${other.ms} ms)`);
+    assert.match(other.json.reason, /capture-wait/, 'the reason says to run it again');
+
+    writeCapture(dir, { source: 'something-else', result: JSON_LIST_RESULT });
+    assert.equal(captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0']).code, 3, 'a file the hook did not write is not a capture');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture-wait fails at once on a mismatch record and prints both args', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    armRun(dir, { args: 'xhigh 12' });
+    const got = 'xhigh  12 --max-findings all';
+    writeFileSync(join(dir, 'code_review_capture.mismatch.json'), JSON.stringify({ run_id: 'r1', expected: 'xhigh 12', got, ts: 1 }));
+    const r = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(r.code, 1);
+    assert.equal(r.json.status, 'failed');
+    assert.ok(r.ms < 5000, `failed within one poll (${r.ms} ms)`);
+    assert.ok(r.json.reason.includes(JSON.stringify('xhigh 12')), r.json.reason);
+    assert.ok(r.json.reason.includes(JSON.stringify(got)), r.json.reason);
+
+    writeFileSync(join(dir, 'code_review_capture.mismatch.json'), JSON.stringify({ run_id: 'r0', expected: 'xhigh 12', got, ts: 1 }));
+    assert.equal(captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0']).code, 3, "another run's mismatch is ignored");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture-wait fails after the overall limit', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const created = Math.floor(Date.now() / 1000) - 41 * 60;
+    armRun(dir, { created });
+    const late = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(late.code, 1);
+    assert.equal(late.json.status, 'failed');
+    assert.match(late.json.reason, /40-minute/);
+    assert.ok(late.ms < 5000, `failed at once (${late.ms} ms)`);
+
+    assert.equal(captureWait(dir, ['--run', 'r1', '--effort', 'max', '--timeout', '0']).code, 3, 'the max limit is 120 minutes');
+
+    writeCapture(dir, { result: JSON_LIST_RESULT });
+    assert.equal(captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']).code, 0, 'a finished capture still counts');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture-wait fails with no arm for the run or a refused dir, and checks its arguments', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  const dir = join(parent, 'capture');
+  try {
+    const missing = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.json.reason, /does not exist/);
+
+    mkdirSync(dir, { mode: 0o700 });
+    writeCapture(dir, { result: JSON_LIST_RESULT });
+    const unarmed = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(unarmed.code, 1);
+    assert.equal(unarmed.json.status, 'failed');
+    assert.match(unarmed.json.reason, /not armed/);
+
+    armRun(dir, { run: 'r2' });
+    const otherRun = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(otherRun.code, 1);
+    assert.match(otherRun.json.reason, /r2/);
+    assert.match(otherRun.json.reason, /r1/);
+
+    armRun(dir);
+    chmodSync(dir, 0o770);
+    const open = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(open.code, 1);
+    assert.match(open.json.reason, /group or other permission bits/);
+    chmodSync(dir, 0o700);
+
+    for (const args of [
+      ['--effort', 'xhigh'],
+      ['--run', 'r1'],
+      ['--run', 'r1', '--effort', 'huge'],
+      ['--run', 'r1', '--effort', 'xhigh', '--timeout', 'soon'],
+      ['--run', 'r1', '--effort', 'xhigh', '--timeout', '-1'],
+    ]) {
+      const r = spawnCli(['capture-wait', ...args], { dir, env: FAST_POLL });
+      assert.equal(r.code, 1, args.join(' '));
+      assert.match(r.stdout, /^usage: agent-review capture-wait/, args.join(' '));
+    }
+    assert.match(run(['help']).s, /^ {2}capture-wait --run <id> --effort <low\|medium\|high\|xhigh\|max> \[--timeout <seconds>\] {2,}/m);
+  } finally {
+    chmodSync(parent, 0o700);
+    rmSync(parent, { recursive: true, force: true });
   }
 });

@@ -1,7 +1,7 @@
 'use strict';
 const { join, relative, dirname, resolve, isAbsolute } = require('node:path');
 const { execFileSync } = require('node:child_process');
-const { MODES, FINAL_MODES, ENGINE_CODE_REVIEW } = require('./vocabulary.cjs');
+const { MODES, FINAL_MODES, ENGINE_CODE_REVIEW, EFFORTS } = require('./vocabulary.cjs');
 const {
   readFileSync,
   writeFileSync,
@@ -41,7 +41,12 @@ const {
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
 const { evaluateApproval } = require('./approval.cjs');
-const { checkCodeReviewProof, checkFindingAccounting } = require('./codeReviewProof.cjs');
+const {
+  CAPTURE_LIMIT_MINUTES,
+  checkCodeReviewProof,
+  checkFindingAccounting,
+  looksFinished,
+} = require('./codeReviewProof.cjs');
 const {
   MAX_RESULT_BYTES,
   prepareAddressRequest,
@@ -350,6 +355,73 @@ function runHook(name) {
   return 0;
 }
 
+const CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]`;
+const CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
+
+function capturePollMs(env = process.env) {
+  const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
+  return Number.isInteger(ms) && ms > 0 ? ms : 5000;
+}
+
+// main() is synchronous, so the wait blocks the thread with Atomics.wait instead of a timer.
+function captureWait({ runId, effort, timeoutSeconds }) {
+  const dir = captureDir();
+  const file = (key) => join(dir, CAPTURE_FILES[key]);
+  const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
+  const pollMs = capturePollMs();
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  const report = (status, reason, capture = null) => {
+    out(JSON.stringify({
+      status,
+      reason,
+      stop_count: capture ? (capture.stop_count ?? null) : null,
+      mode: capture ? (capture.mode ?? null) : null,
+    }));
+    return CAPTURE_WAIT_EXIT[status];
+  };
+  for (;;) {
+    const dirError = captureDirError(dir);
+    if (dirError) return report('failed', dirError);
+    const arm = readJsonOrNull(file('arm'));
+    const armed = armedState(arm, nowSeconds());
+    if (!armed) return report('failed', `/code-review capture is not armed for run ${runId}`);
+    if (armed.run_id !== runId) {
+      return report('failed', `/code-review capture is armed for run ${armed.run_id}, not run ${runId}`);
+    }
+    const mismatch = readJsonOrNull(file('mismatch'));
+    if (mismatch?.run_id === runId) {
+      return report(
+        'failed',
+        `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ` +
+          `${JSON.stringify(mismatch.expected)}; call the Skill tool with exactly the armed args`,
+      );
+    }
+    const found = readJsonOrNull(file('capture'));
+    const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
+    if (capture && looksFinished(capture.result, effort)) {
+      return report('finished', `the /code-review capture for run ${runId} looks finished`, capture);
+    }
+    const now = Date.now();
+    const limitAt = (armed.created + limitMinutes * 60) * 1000;
+    if (now >= limitAt) {
+      return report(
+        'failed',
+        `/code-review did not finish within the ${limitMinutes}-minute limit for effort ${effort}`,
+        capture,
+      );
+    }
+    if (now >= deadline) {
+      const left = Math.ceil((limitAt - now) / 60000);
+      return report(
+        'waiting',
+        `no finished /code-review capture for run ${runId} yet; about ${left} of the ${limitMinutes} minutes are left, so run capture-wait again`,
+        capture,
+      );
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
+  }
+}
+
 const USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -369,6 +441,7 @@ const USAGE = `usage: agent-review <command>
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
+  capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540) for that run's capture to look finished; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, or the effort's time limit passed)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -860,6 +933,16 @@ function main(rawArgv) {
       }
       writeStdoutSync(capture.result);
       return 0;
+    }
+    case 'capture-wait': {
+      const runId = flag(rest, '--run');
+      const effort = flag(rest, '--effort');
+      const timeout = flag(rest, '--timeout') ?? '540';
+      if (!runId || !EFFORTS.includes(effort) || !/^\d+(?:\.\d+)?$/.test(timeout)) {
+        out(CAPTURE_WAIT_USAGE);
+        return 1;
+      }
+      return captureWait({ runId, effort, timeoutSeconds: Number(timeout) });
     }
     case 'hook':
       return runHook(rest[0]);

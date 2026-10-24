@@ -18869,6 +18869,184 @@ var require_approval = __commonJS({
   }
 });
 
+// engine/captureHook.cjs
+var require_captureHook = __commonJS({
+  "engine/captureHook.cjs"(exports2, module2) {
+    "use strict";
+    var { ENGINE_CODE_REVIEW } = require_vocabulary();
+    var CODE_REVIEW_SKILL = ENGINE_CODE_REVIEW;
+    var CAPTURE_FILES = {
+      arm: "agent_review_capture.json",
+      pending: "code_review_capture.pending.json",
+      capture: "code_review_capture.json",
+      stops: "code_review_capture.stops.jsonl",
+      mismatch: "code_review_capture.mismatch.json"
+    };
+    var ARM_MAX_AGE_SECONDS = 10800;
+    var STOP_BUFFER_LINES = 50;
+    var CAPTURE_SOURCE = "agent-review-capture-hook";
+    var SKILL_HEADER = new RegExp(
+      `^\\s*Skill "${CODE_REVIEW_SKILL}" completed[^\\n]*\\n(?:[^\\n]*\\n)*?[ \\t]*Result:[ \\t]*\\r?\\n?`
+    );
+    function isObject(v) {
+      return v !== null && typeof v === "object" && !Array.isArray(v);
+    }
+    function nonEmpty(v) {
+      return typeof v === "string" && v.trim() !== "";
+    }
+    function captureDir(env = process.env) {
+      return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
+    }
+    function captureDirProblem(stat, uid) {
+      if (!stat) return "does not exist";
+      if (stat.isSymbolicLink()) return "is a symlink";
+      if (!stat.isDirectory()) return "is not a directory";
+      if (stat.uid !== uid) return `is owned by uid ${stat.uid}, not ${uid}`;
+      if (stat.mode & 63) {
+        return `has group or other permission bits (mode ${(stat.mode & 511).toString(8)}; it must be 700)`;
+      }
+      return null;
+    }
+    function armedState(arm, nowSeconds) {
+      if (!isObject(arm) || arm.armed !== true) return null;
+      if (!nonEmpty(arm.run_id) || typeof arm.args !== "string") return null;
+      if (!Number.isFinite(arm.created) || nowSeconds - arm.created > ARM_MAX_AGE_SECONDS) return null;
+      return arm;
+    }
+    function stripSkillHeader(text) {
+      return text.replace(SKILL_HEADER, "");
+    }
+    function lastAssistantText(jsonl) {
+      const lines = String(jsonl).split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].trim()) continue;
+        let entry;
+        try {
+          entry = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (!isObject(entry) || entry.type !== "assistant" || !isObject(entry.message)) continue;
+        const { content } = entry.message;
+        if (nonEmpty(content)) return content;
+        if (!Array.isArray(content)) continue;
+        for (let j = content.length - 1; j >= 0; j--) {
+          const block = content[j];
+          if (isObject(block) && block.type === "text" && nonEmpty(block.text)) return block.text;
+        }
+      }
+      return null;
+    }
+    function stopResult(stop, readTranscript) {
+      if (nonEmpty(stop.last_assistant_message)) return stop.last_assistant_message;
+      if (!nonEmpty(stop.agent_transcript_path) || typeof readTranscript !== "function") return "";
+      try {
+        const text = readTranscript(stop.agent_transcript_path);
+        return typeof text === "string" ? text : "";
+      } catch {
+        return "";
+      }
+    }
+    function captureRecord({ mode, armed, args, forkId, result, transcript, stopCount, now }) {
+      return {
+        source: CAPTURE_SOURCE,
+        mode,
+        run_id: armed.run_id,
+        args,
+        fork_id: forkId,
+        result,
+        transcript: nonEmpty(transcript) ? transcript : null,
+        stop_count: stopCount,
+        ts: now
+      };
+    }
+    function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
+      const armed = armedState(arm, now);
+      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
+      const input = isObject(payload.tool_input) ? payload.tool_input : {};
+      if (input.skill !== CODE_REVIEW_SKILL) return {};
+      const args = typeof input.args === "string" ? input.args : "";
+      if (args !== armed.args) {
+        return { mismatch: { run_id: armed.run_id, expected: armed.args, got: args, ts: now } };
+      }
+      const response = payload.tool_response;
+      const tr = isObject(response) ? response : {};
+      const forkId = nonEmpty(tr.agentId) ? tr.agentId : null;
+      const forkStops = forkId && Array.isArray(stops) ? stops.filter((s) => isObject(s) && s.agent_id === forkId) : [];
+      const latest = forkStops.at(-1);
+      const record = (mode, result2) => captureRecord({
+        mode,
+        armed,
+        args,
+        forkId,
+        result: result2,
+        transcript: latest && latest.agent_transcript_path,
+        stopCount: forkStops.length,
+        now
+      });
+      if (tr.background === true) {
+        const written = {
+          pending: {
+            fork_id: forkId,
+            args,
+            caller: payload.agent_id,
+            tool_use_id: payload.tool_use_id ?? null,
+            session_id: payload.session_id ?? null,
+            ts: now
+          }
+        };
+        if (latest) written.capture = record("forked", stopResult(latest, readTranscript));
+        return written;
+      }
+      const fromResponse = [tr.result, response].filter((v) => typeof v === "string").map(stripSkillHeader).find(nonEmpty);
+      let result = "";
+      if (fromResponse !== void 0) result = fromResponse;
+      else if (latest) result = stopResult(latest, readTranscript);
+      return { capture: record("foreground", result) };
+    }
+    function subagentStopWrites({ payload, arm, pending, capture, now, readTranscript } = {}) {
+      const armed = armedState(arm, now);
+      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return { stop: null };
+      const stop = {
+        agent_id: payload.agent_id,
+        last_assistant_message: typeof payload.last_assistant_message === "string" ? payload.last_assistant_message : null,
+        agent_transcript_path: typeof payload.agent_transcript_path === "string" ? payload.agent_transcript_path : null,
+        ts: now
+      };
+      if (!isObject(pending) || !nonEmpty(pending.fork_id) || pending.fork_id !== stop.agent_id) {
+        return { stop };
+      }
+      const previous = isObject(capture) && capture.run_id === armed.run_id && capture.fork_id === pending.fork_id && Number.isInteger(capture.stop_count) ? capture.stop_count : 0;
+      return {
+        stop,
+        capture: captureRecord({
+          mode: "forked",
+          armed,
+          args: typeof pending.args === "string" ? pending.args : armed.args,
+          forkId: pending.fork_id,
+          result: stopResult(stop, readTranscript),
+          transcript: stop.agent_transcript_path,
+          stopCount: previous + 1,
+          now
+        })
+      };
+    }
+    module2.exports = {
+      CAPTURE_FILES,
+      ARM_MAX_AGE_SECONDS,
+      STOP_BUFFER_LINES,
+      CAPTURE_SOURCE,
+      captureDir,
+      captureDirProblem,
+      armedState,
+      stripSkillHeader,
+      lastAssistantText,
+      postSkillWrites,
+      subagentStopWrites
+    };
+  }
+});
+
 // engine/codeReviewProof.cjs
 var require_codeReviewProof = __commonJS({
   "engine/codeReviewProof.cjs"(exports2, module2) {
@@ -18876,8 +19054,10 @@ var require_codeReviewProof = __commonJS({
     var { minimatch } = require_commonjs3();
     var { unwrapFindings } = require_unwrapFindings();
     var { ENGINE_CODE_REVIEW, CATEGORIES } = require_vocabulary();
+    var { CAPTURE_SOURCE } = require_captureHook();
     var SKILL_NAME = ENGINE_CODE_REVIEW;
     var FIX = "update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes";
+    var CAPTURE_LIMIT_MINUTES = Object.freeze({ low: 10, medium: 15, high: 20, xhigh: 40, max: 120 });
     function fail(reason) {
       return { ok: false, reason, findings: [] };
     }
@@ -18886,8 +19066,9 @@ var require_codeReviewProof = __commonJS({
     function scanFences(text) {
       const blocks = [];
       const outside = [];
+      const outsideAt = [];
       let open = null;
-      for (const line of text.split("\n").map((l) => l.replace(/\r$/, ""))) {
+      for (const [index, line] of text.split("\n").map((l) => l.replace(/\r$/, "")).entries()) {
         if (open) {
           const close = FENCE_CLOSE.exec(line);
           if (close && close[1][0] === open.fence[0] && close[1].length >= open.fence.length) {
@@ -18903,10 +19084,11 @@ var require_codeReviewProof = __commonJS({
           open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [] };
         } else {
           outside.push(line);
+          outsideAt.push(index);
         }
       }
       if (open) blocks.push({ info: open.info, body: open.body.join("\n"), closed: false });
-      return { blocks, outside };
+      return { blocks, outside, outsideAt };
     }
     function isPlainObject(value) {
       return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -18914,18 +19096,34 @@ var require_codeReviewProof = __commonJS({
     function hasFile(value) {
       return isPlainObject(value) && typeof value.file === "string" && value.file.trim() !== "";
     }
-    function isListLike(block) {
-      if (block.info !== "json" && block.info !== "") return false;
+    function listOf(block) {
+      if (block.info !== "json" && block.info !== "") return null;
       const body = block.body.trim();
       const parsed = parseJson(body);
-      if (!parsed) return body.startsWith("[") || body.startsWith("{") && body.includes('"findings"');
+      if (!parsed) {
+        return body.startsWith("[") || body.startsWith("{") && body.includes('"findings"') ? { list: null } : null;
+      }
       const { value } = parsed;
-      return Array.isArray(value) || isPlainObject(value) && Object.hasOwn(value, "findings");
+      if (!Array.isArray(value) && !(isPlainObject(value) && Object.hasOwn(value, "findings"))) return null;
+      const list = unwrapFindings(value);
+      return { list: list && list.every(hasFile) ? list : null };
     }
-    function qualifyingList(block) {
-      const parsed = parseJson(block.body);
-      const list = parsed && unwrapFindings(parsed.value);
-      return list && list.every(hasFile) ? list : null;
+    function jsonFindings(text) {
+      const lists = [];
+      let problem = null;
+      for (const [i, block] of scanFences(String(text)).blocks.entries()) {
+        if (!block.closed) {
+          problem ??= `fenced block ${i + 1} is never closed, so the result was cut short`;
+          continue;
+        }
+        const found = listOf(block);
+        if (!found) continue;
+        if (found.list) lists.push(found.list);
+        else problem ??= `fenced block ${i + 1} looks like a findings list, but not every item is an object with a non-empty string file`;
+      }
+      const nonEmpty = lists.filter((list2) => list2.length > 0);
+      const list = nonEmpty.length > 0 ? nonEmpty[nonEmpty.length - 1] : lists.length > 0 ? [] : null;
+      return { list, problem };
     }
     var MARKER = String.raw`^\s*(?:[-*]|\d+\.(?=\s))?\s*`;
     var TEXT = String.raw`\s*(\S.*?)\s*$`;
@@ -18968,20 +19166,198 @@ var require_codeReviewProof = __commonJS({
       const noList = fail(
         "/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review"
       );
-      const { blocks, outside } = scanFences(text);
-      if (blocks.some((b) => !b.closed)) return noList;
-      const lists = blocks.filter(isListLike).map(qualifyingList);
-      if (lists.includes(null)) return noList;
-      const nonEmpty = lists.filter((list) => list.length > 0);
-      if (nonEmpty.length > 0) return { ok: true, reason: "ok", findings: nonEmpty[nonEmpty.length - 1] };
+      const { list, problem } = jsonFindings(text);
+      if (problem) return noList;
+      if (list && list.length > 0) return { ok: true, reason: "ok", findings: list };
+      const { outside } = scanFences(text);
       const resultAt = outside.findIndex((line) => /^Result:/.test(line));
       const afterResult = resultAt < 0 ? [] : outside.slice(resultAt + 1);
       const lines = textFindings(afterResult, fileExists);
-      if (lists.length > 0) return { ok: true, reason: "ok", findings: lines };
+      if (list) return { ok: true, reason: "ok", findings: lines };
       if (resultAt < 0) return noList;
       if (lines.length > 0) return { ok: true, reason: "ok", findings: lines };
       if (afterResult.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: "ok", findings: [] };
       return noList;
+    }
+    function explicitEmpty(text) {
+      return scanFences(String(text)).outside.some((line) => {
+        const trimmed = line.trim();
+        return trimmed === "(none)" || trimmed === "No findings.";
+      });
+    }
+    function normalizeLine(line) {
+      return line.replace(/[`*]/g, "").replace(/(?<![\p{L}\p{N}_])_|_(?![\p{L}\p{N}_])/gu, "");
+    }
+    var PATH_LEAD = /^[(\[{<"'\u201c\u2018|]+/;
+    var LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}_])/u;
+    function mentionPath(path, fileExists) {
+      if (!new RegExp("\\p{L}", "u").test(path) || path.startsWith("//")) return false;
+      if (path.includes("/") || path.includes(".")) return true;
+      return Boolean(fileExists && fileExists(path));
+    }
+    function mentionsIn(line, fileExists) {
+      const mentions = [];
+      for (const token of line.split(/\s+/)) {
+        if (!token.includes(":")) continue;
+        const parts = token.split(":");
+        for (let i = 0; i + 1 < parts.length; i++) {
+          const at = LINE_PART.exec(parts[i + 1]);
+          if (!at) continue;
+          const file = parts[i].replace(PATH_LEAD, "");
+          if (mentionPath(file, fileExists)) mentions.push({ file, line: Number(at[1]) });
+        }
+      }
+      return mentions;
+    }
+    function textLines(text, fileExists) {
+      const { outside, outsideAt } = scanFences(String(text));
+      return outside.map((raw, k) => {
+        const line = normalizeLine(raw);
+        return { index: outsideAt[k], text: line, mentions: mentionsIn(line, fileExists) };
+      });
+    }
+    function findingLines(text, fileExists) {
+      return textLines(text, fileExists).filter((line) => line.mentions.length > 0);
+    }
+    function jsonLine(value) {
+      if (Number.isInteger(value)) return value;
+      const m = /^\s*(\d+)/.exec(typeof value === "string" ? value : "");
+      return m ? Number(m[1]) : null;
+    }
+    function repoRelative(file, root) {
+      let path = String(file);
+      if (typeof root === "string" && root !== "") {
+        const prefix = root.endsWith("/") ? root : `${root}/`;
+        if (path.startsWith(prefix)) path = path.slice(prefix.length);
+      }
+      while (path.startsWith("./")) path = path.slice(2);
+      return path;
+    }
+    function looksFinished(result, effort) {
+      if (typeof result !== "string") return false;
+      if (effort !== "max") return true;
+      return jsonFindings(result).list !== null || explicitEmpty(result);
+    }
+    function namesPathIn(text, path) {
+      if (path === "") return false;
+      for (let at = text.indexOf(path); at >= 0; at = text.indexOf(path, at + 1)) {
+        const before = at > 0 ? text[at - 1] : "";
+        const after = text.slice(at + path.length, at + path.length + 2);
+        if (/[\p{L}\p{N}_./-]/u.test(before)) continue;
+        if (/^(?:[\p{L}\p{N}_/-]|\.[\p{L}\p{N}_])/u.test(after)) continue;
+        return true;
+      }
+      return false;
+    }
+    function captureProblem(capture, runId) {
+      if (!isPlainObject(capture)) return "no /code-review capture was found for this run";
+      if (capture.source !== CAPTURE_SOURCE) {
+        return `the capture's source is ${shown(capture.source)}, not ${JSON.stringify(CAPTURE_SOURCE)}, so the capture hook did not write it`;
+      }
+      if (!isText(capture.run_id)) return "the capture names no run";
+      if (capture.run_id !== runId) return `the capture is for run ${capture.run_id}, not run ${runId}`;
+      if (typeof capture.result !== "string") return "the capture holds no result text";
+      if (capture.result.trim() === "") return "/code-review's captured result is empty";
+      return null;
+    }
+    function rawShapeProblem(rawEntries) {
+      if (!Array.isArray(rawEntries)) return "the raw findings list is missing or is not a JSON array";
+      for (const [i, entry] of rawEntries.entries()) {
+        const label = `raw entry ${i + 1}`;
+        if (!isPlainObject(entry)) return `${label} is not an object`;
+        if (entry.n !== i + 1) return `${label} has n ${shown(entry.n)}; n must count 1, 2, 3, ... in order`;
+        if (!isText(entry.file)) return `${label} needs a non-empty string file`;
+        if (entry.line !== null && !(Number.isInteger(entry.line) && entry.line > 0)) {
+          return `${label} (${entry.file}) needs a positive integer line, or null when the result gives no line, not ${shown(entry.line)}`;
+        }
+        if (!isText(entry.summary)) return `${label} (${spot(entry.file, entry.line)}) needs a non-empty summary`;
+      }
+      return null;
+    }
+    function jsonMismatch(rawEntries, list, root) {
+      if (rawEntries.length !== list.length) {
+        return `/code-review's JSON list has ${list.length} findings, but the raw list has ${rawEntries.length}; copy the list one to one`;
+      }
+      for (const [i, item] of list.entries()) {
+        const raw = rawEntries[i];
+        const want = { file: repoRelative(item.file, root), line: jsonLine(item.line) };
+        if (repoRelative(raw.file, root) !== want.file || raw.line !== want.line) {
+          return `raw entry ${i + 1} is ${spot(raw.file, raw.line)}, but JSON finding ${i + 1} is ${spot(want.file, want.line)}; copy the list in order`;
+        }
+      }
+      return null;
+    }
+    function matchLines(candidates) {
+      const owner = /* @__PURE__ */ new Map();
+      const claim = (entry, seen) => {
+        const free = candidates[entry].find((line) => !owner.has(line));
+        if (free !== void 0) {
+          owner.set(free, entry);
+          return true;
+        }
+        for (const line of candidates[entry]) {
+          if (seen.has(line)) continue;
+          seen.add(line);
+          if (claim(owner.get(line), seen)) {
+            owner.set(line, entry);
+            return true;
+          }
+        }
+        return false;
+      };
+      for (let entry = 0; entry < candidates.length; entry++) claim(entry, /* @__PURE__ */ new Set());
+      return owner;
+    }
+    function textMismatch(rawEntries, lines, root) {
+      const candidates = rawEntries.map((entry) => {
+        const path = repoRelative(entry.file, root);
+        const fits = entry.line === null ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path) : (l) => l.mentions.some((m) => m.line === entry.line && repoRelative(m.file, root) === path);
+        return lines.filter(fits).map((l) => l.index);
+      });
+      const owner = matchLines(candidates);
+      const claimed = new Set(owner.values());
+      const problems = [];
+      const lost = rawEntries.findIndex((_, i) => !claimed.has(i));
+      if (lost >= 0) {
+        const entry = rawEntries[lost];
+        const wanted = entry.line === null ? "names that file with no line number and no other location" : "mentions that file and line";
+        problems.push(`raw entry ${lost + 1} (${spot(entry.file, entry.line)}) has no line of its own in /code-review's result that ${wanted}`);
+      }
+      const unclaimed = lines.find((l) => l.mentions.length > 0 && !owner.has(l.index));
+      if (unclaimed) {
+        const where = unclaimed.mentions.map((m) => `${m.file}:${m.line}`).join(", ");
+        const quoted = JSON.stringify(unclaimed.text.trim().slice(0, 200));
+        problems.push(`line ${unclaimed.index + 1} of /code-review's result (${where}) is a finding line that no raw entry claims: ${quoted}`);
+      }
+      return problems.length > 0 ? problems.join("; ") : null;
+    }
+    function checkGrounding({ capture, runId, rawEntries, fileExists, root }) {
+      const failAt = (stage, reason, mode2 = null) => ({ ok: false, stage, reason, mode: mode2 });
+      const unusable = captureProblem(capture, runId);
+      if (unusable) return failAt("capture", unusable);
+      const { result } = capture;
+      const { list, problem } = jsonFindings(result);
+      if (problem) return failAt("capture", `/code-review's result cannot be read: ${problem}`);
+      let mode;
+      let lines = [];
+      if (list && list.length > 0) {
+        mode = "json";
+      } else {
+        lines = textLines(result, fileExists);
+        if (lines.some((l) => l.mentions.length > 0)) mode = "text";
+        else if (list || explicitEmpty(result)) mode = "empty";
+        else return failAt("capture", "/code-review's result has no findings list and no explicit (none)");
+      }
+      const shape = rawShapeProblem(rawEntries);
+      if (shape) return failAt("lane", shape, mode);
+      let mismatch = null;
+      if (mode === "json") mismatch = jsonMismatch(rawEntries, list, root);
+      else if (mode === "text") mismatch = textMismatch(rawEntries, lines, root);
+      else if (rawEntries.length > 0) {
+        mismatch = `/code-review reported no findings, but the raw list has ${rawEntries.length}`;
+      }
+      if (mismatch) return failAt("lane", mismatch, mode);
+      return { ok: true, stage: null, reason: "ok", mode };
     }
     function parseJson(text) {
       try {
@@ -18989,11 +19365,6 @@ var require_codeReviewProof = __commonJS({
       } catch {
         return null;
       }
-    }
-    function rawLine(finding) {
-      if (Number.isInteger(finding.line)) return finding.line;
-      const m = /^\s*(\d+)/.exec(typeof finding.line === "string" ? finding.line : "");
-      return m ? Number(m[1]) : null;
     }
     function isText(value) {
       return typeof value === "string" && value.trim() !== "";
@@ -19047,7 +19418,7 @@ var require_codeReviewProof = __commonJS({
         const where = spot(entry.file, entry.line);
         const excluded = excludedDropProblem(entry, excludedPaths);
         if (excluded) return `${label} (${where}) ${excluded}`;
-        const spots = rawFindings.map((raw, index) => ({ raw, index })).filter(({ raw }) => raw.file === entry.file && rawLine(raw) === entry.line);
+        const spots = rawFindings.map((raw, index) => ({ raw, index })).filter(({ raw }) => raw.file === entry.file && jsonLine(raw.line) === entry.line);
         if (spots.length === 0) return `${label} (${where}) matches no raw /code-review finding at that file and line`;
         const free = spots.find(({ index }) => !claimed.has(index));
         if (!free) return `${label} (${where}) matches a raw finding that another dropped entry already accounts for`;
@@ -19084,7 +19455,18 @@ var require_codeReviewProof = __commonJS({
       if (problem) return { ok: false, reason: problem };
       return { ok: true, reason: "ok" };
     }
-    module2.exports = { checkCodeReviewProof, checkFindingAccounting };
+    module2.exports = {
+      CAPTURE_LIMIT_MINUTES,
+      checkCodeReviewProof,
+      checkFindingAccounting,
+      jsonFindings,
+      explicitEmpty,
+      findingLines,
+      jsonLine,
+      repoRelative,
+      looksFinished,
+      checkGrounding
+    };
   }
 });
 
@@ -20039,191 +20421,13 @@ var require_cliCommands = __commonJS({
   }
 });
 
-// engine/captureHook.cjs
-var require_captureHook = __commonJS({
-  "engine/captureHook.cjs"(exports2, module2) {
-    "use strict";
-    var { ENGINE_CODE_REVIEW } = require_vocabulary();
-    var CODE_REVIEW_SKILL = ENGINE_CODE_REVIEW;
-    var CAPTURE_FILES = {
-      arm: "agent_review_capture.json",
-      pending: "code_review_capture.pending.json",
-      capture: "code_review_capture.json",
-      stops: "code_review_capture.stops.jsonl",
-      mismatch: "code_review_capture.mismatch.json"
-    };
-    var ARM_MAX_AGE_SECONDS = 10800;
-    var STOP_BUFFER_LINES = 50;
-    var CAPTURE_SOURCE = "agent-review-capture-hook";
-    var SKILL_HEADER = new RegExp(
-      `^\\s*Skill "${CODE_REVIEW_SKILL}" completed[^\\n]*\\n(?:[^\\n]*\\n)*?[ \\t]*Result:[ \\t]*\\r?\\n?`
-    );
-    function isObject(v) {
-      return v !== null && typeof v === "object" && !Array.isArray(v);
-    }
-    function nonEmpty(v) {
-      return typeof v === "string" && v.trim() !== "";
-    }
-    function captureDir(env = process.env) {
-      return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
-    }
-    function captureDirProblem(stat, uid) {
-      if (!stat) return "does not exist";
-      if (stat.isSymbolicLink()) return "is a symlink";
-      if (!stat.isDirectory()) return "is not a directory";
-      if (stat.uid !== uid) return `is owned by uid ${stat.uid}, not ${uid}`;
-      if (stat.mode & 63) {
-        return `has group or other permission bits (mode ${(stat.mode & 511).toString(8)}; it must be 700)`;
-      }
-      return null;
-    }
-    function armedState(arm, nowSeconds) {
-      if (!isObject(arm) || arm.armed !== true) return null;
-      if (!nonEmpty(arm.run_id) || typeof arm.args !== "string") return null;
-      if (!Number.isFinite(arm.created) || nowSeconds - arm.created > ARM_MAX_AGE_SECONDS) return null;
-      return arm;
-    }
-    function stripSkillHeader(text) {
-      return text.replace(SKILL_HEADER, "");
-    }
-    function lastAssistantText(jsonl) {
-      const lines = String(jsonl).split("\n");
-      for (let i = lines.length - 1; i >= 0; i--) {
-        if (!lines[i].trim()) continue;
-        let entry;
-        try {
-          entry = JSON.parse(lines[i]);
-        } catch {
-          continue;
-        }
-        if (!isObject(entry) || entry.type !== "assistant" || !isObject(entry.message)) continue;
-        const { content } = entry.message;
-        if (nonEmpty(content)) return content;
-        if (!Array.isArray(content)) continue;
-        for (let j = content.length - 1; j >= 0; j--) {
-          const block = content[j];
-          if (isObject(block) && block.type === "text" && nonEmpty(block.text)) return block.text;
-        }
-      }
-      return null;
-    }
-    function stopResult(stop, readTranscript) {
-      if (nonEmpty(stop.last_assistant_message)) return stop.last_assistant_message;
-      if (!nonEmpty(stop.agent_transcript_path) || typeof readTranscript !== "function") return "";
-      try {
-        const text = readTranscript(stop.agent_transcript_path);
-        return typeof text === "string" ? text : "";
-      } catch {
-        return "";
-      }
-    }
-    function captureRecord({ mode, armed, args, forkId, result, transcript, stopCount, now }) {
-      return {
-        source: CAPTURE_SOURCE,
-        mode,
-        run_id: armed.run_id,
-        args,
-        fork_id: forkId,
-        result,
-        transcript: nonEmpty(transcript) ? transcript : null,
-        stop_count: stopCount,
-        ts: now
-      };
-    }
-    function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
-      const armed = armedState(arm, now);
-      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
-      const input = isObject(payload.tool_input) ? payload.tool_input : {};
-      if (input.skill !== CODE_REVIEW_SKILL) return {};
-      const args = typeof input.args === "string" ? input.args : "";
-      if (args !== armed.args) {
-        return { mismatch: { run_id: armed.run_id, expected: armed.args, got: args, ts: now } };
-      }
-      const response = payload.tool_response;
-      const tr = isObject(response) ? response : {};
-      const forkId = nonEmpty(tr.agentId) ? tr.agentId : null;
-      const forkStops = forkId && Array.isArray(stops) ? stops.filter((s) => isObject(s) && s.agent_id === forkId) : [];
-      const latest = forkStops.at(-1);
-      const record = (mode, result2) => captureRecord({
-        mode,
-        armed,
-        args,
-        forkId,
-        result: result2,
-        transcript: latest && latest.agent_transcript_path,
-        stopCount: forkStops.length,
-        now
-      });
-      if (tr.background === true) {
-        const written = {
-          pending: {
-            fork_id: forkId,
-            args,
-            caller: payload.agent_id,
-            tool_use_id: payload.tool_use_id ?? null,
-            session_id: payload.session_id ?? null,
-            ts: now
-          }
-        };
-        if (latest) written.capture = record("forked", stopResult(latest, readTranscript));
-        return written;
-      }
-      const fromResponse = [tr.result, response].filter((v) => typeof v === "string").map(stripSkillHeader).find(nonEmpty);
-      let result = "";
-      if (fromResponse !== void 0) result = fromResponse;
-      else if (latest) result = stopResult(latest, readTranscript);
-      return { capture: record("foreground", result) };
-    }
-    function subagentStopWrites({ payload, arm, pending, capture, now, readTranscript } = {}) {
-      const armed = armedState(arm, now);
-      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return { stop: null };
-      const stop = {
-        agent_id: payload.agent_id,
-        last_assistant_message: typeof payload.last_assistant_message === "string" ? payload.last_assistant_message : null,
-        agent_transcript_path: typeof payload.agent_transcript_path === "string" ? payload.agent_transcript_path : null,
-        ts: now
-      };
-      if (!isObject(pending) || !nonEmpty(pending.fork_id) || pending.fork_id !== stop.agent_id) {
-        return { stop };
-      }
-      const previous = isObject(capture) && capture.run_id === armed.run_id && capture.fork_id === pending.fork_id && Number.isInteger(capture.stop_count) ? capture.stop_count : 0;
-      return {
-        stop,
-        capture: captureRecord({
-          mode: "forked",
-          armed,
-          args: typeof pending.args === "string" ? pending.args : armed.args,
-          forkId: pending.fork_id,
-          result: stopResult(stop, readTranscript),
-          transcript: stop.agent_transcript_path,
-          stopCount: previous + 1,
-          now
-        })
-      };
-    }
-    module2.exports = {
-      CAPTURE_FILES,
-      ARM_MAX_AGE_SECONDS,
-      STOP_BUFFER_LINES,
-      CAPTURE_SOURCE,
-      captureDir,
-      captureDirProblem,
-      armedState,
-      stripSkillHeader,
-      lastAssistantText,
-      postSkillWrites,
-      subagentStopWrites
-    };
-  }
-});
-
 // engine/cli.cjs
 var require_cli = __commonJS({
   "engine/cli.cjs"(exports2, module2) {
     "use strict";
     var { join, relative, dirname, resolve, isAbsolute } = require("node:path");
     var { execFileSync } = require("node:child_process");
-    var { MODES, FINAL_MODES, ENGINE_CODE_REVIEW } = require_vocabulary();
+    var { MODES, FINAL_MODES, ENGINE_CODE_REVIEW, EFFORTS } = require_vocabulary();
     var {
       readFileSync,
       writeFileSync,
@@ -20263,7 +20467,12 @@ var require_cli = __commonJS({
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
     var { evaluateApproval } = require_approval();
-    var { checkCodeReviewProof, checkFindingAccounting } = require_codeReviewProof();
+    var {
+      CAPTURE_LIMIT_MINUTES,
+      checkCodeReviewProof,
+      checkFindingAccounting,
+      looksFinished
+    } = require_codeReviewProof();
     var {
       MAX_RESULT_BYTES,
       prepareAddressRequest,
@@ -20529,6 +20738,68 @@ var require_cli = __commonJS({
       }
       return 0;
     }
+    var CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]`;
+    var CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
+    function capturePollMs(env = process.env) {
+      const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
+      return Number.isInteger(ms) && ms > 0 ? ms : 5e3;
+    }
+    function captureWait({ runId, effort, timeoutSeconds }) {
+      const dir = captureDir();
+      const file = (key) => join(dir, CAPTURE_FILES[key]);
+      const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
+      const pollMs = capturePollMs();
+      const deadline = Date.now() + timeoutSeconds * 1e3;
+      const report = (status, reason, capture = null) => {
+        out(JSON.stringify({
+          status,
+          reason,
+          stop_count: capture ? capture.stop_count ?? null : null,
+          mode: capture ? capture.mode ?? null : null
+        }));
+        return CAPTURE_WAIT_EXIT[status];
+      };
+      for (; ; ) {
+        const dirError = captureDirError(dir);
+        if (dirError) return report("failed", dirError);
+        const arm = readJsonOrNull(file("arm"));
+        const armed = armedState(arm, nowSeconds());
+        if (!armed) return report("failed", `/code-review capture is not armed for run ${runId}`);
+        if (armed.run_id !== runId) {
+          return report("failed", `/code-review capture is armed for run ${armed.run_id}, not run ${runId}`);
+        }
+        const mismatch = readJsonOrNull(file("mismatch"));
+        if (mismatch?.run_id === runId) {
+          return report(
+            "failed",
+            `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; call the Skill tool with exactly the armed args`
+          );
+        }
+        const found = readJsonOrNull(file("capture"));
+        const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
+        if (capture && looksFinished(capture.result, effort)) {
+          return report("finished", `the /code-review capture for run ${runId} looks finished`, capture);
+        }
+        const now = Date.now();
+        const limitAt = (armed.created + limitMinutes * 60) * 1e3;
+        if (now >= limitAt) {
+          return report(
+            "failed",
+            `/code-review did not finish within the ${limitMinutes}-minute limit for effort ${effort}`,
+            capture
+          );
+        }
+        if (now >= deadline) {
+          const left = Math.ceil((limitAt - now) / 6e4);
+          return report(
+            "waiting",
+            `no finished /code-review capture for run ${runId} yet; about ${left} of the ${limitMinutes} minutes are left, so run capture-wait again`,
+            capture
+          );
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
+      }
+    }
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -20548,6 +20819,7 @@ var require_cli = __commonJS({
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
+  capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540) for that run's capture to look finished; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, or the effort's time limit passed)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -21009,6 +21281,16 @@ var require_cli = __commonJS({
           }
           writeStdoutSync(capture.result);
           return 0;
+        }
+        case "capture-wait": {
+          const runId = flag(rest, "--run");
+          const effort = flag(rest, "--effort");
+          const timeout = flag(rest, "--timeout") ?? "540";
+          if (!runId || !EFFORTS.includes(effort) || !/^\d+(?:\.\d+)?$/.test(timeout)) {
+            out(CAPTURE_WAIT_USAGE);
+            return 1;
+          }
+          return captureWait({ runId, effort, timeoutSeconds: Number(timeout) });
         }
         case "hook":
           return runHook(rest[0]);
