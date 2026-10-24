@@ -90,15 +90,16 @@ operate on empty strings.
 Mode parsing, CI detection, config validation, and working directories are read-only setup with no
 required decision in between — one shell handles all of it, so a bwrap bind-race rerun replays it
 as a single unit. Before running it, paste the full argument string this skill was invoked with,
-exactly as given, between the two `REVIEW_ARGS_END_7f3a` marker lines in place of the example line, and nothing else
-(leave it empty when there were none). The quoted heredoc keeps quotes, `$(...)`, and backticks in the
-arguments inert:
+exactly as given, as one line between the two `REVIEW_ARGS_END_7f3a` marker lines, and nothing
+else (leave nothing between them when there were none). For example, for
+`/agent-review:review auto incremental engine=code-review`, the one line between the markers is
+`auto incremental engine=code-review`. The quoted heredoc keeps quotes, `$(...)`, and backticks in
+the arguments inert:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 set -e
 cat > /tmp/review_args.txt <<'REVIEW_ARGS_END_7f3a'
-auto incremental engine=code-review
 REVIEW_ARGS_END_7f3a
 
 # --- Detect CI Mode (the workflow's signal; a `ci` argument is resolved with the options) ---

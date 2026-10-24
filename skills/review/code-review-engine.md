@@ -56,11 +56,13 @@ if [ -z "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ] && [ -n "$BASE_REF" ] && [ -n "$
 else
   CODE_REVIEW_DIFF=/tmp/pr_diff.txt
 fi
+CODE_REVIEW_ATTEMPT="$REVIEW_ID-1"
 agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"
 cat >> /tmp/review_env.sh <<EOF
-export CODE_REVIEW_ARGS="$CODE_REVIEW_ARGS" CODE_REVIEW_DIFF="$CODE_REVIEW_DIFF"
+export CODE_REVIEW_ARGS="$CODE_REVIEW_ARGS" CODE_REVIEW_DIFF="$CODE_REVIEW_DIFF" CODE_REVIEW_ATTEMPT="$CODE_REVIEW_ATTEMPT"
 EOF
 echo "code-review diff: $CODE_REVIEW_DIFF"
+echo "code-review attempt: $CODE_REVIEW_ATTEMPT"
 ```
 
 If this block fails, stop the review and show its error. Without an armed capture, the lane's
@@ -75,7 +77,7 @@ this file) and fill its twelve placeholders:
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{RUN_ID}}`              | `$REVIEW_ID`, the `<id>` in the `armed <id>: <args>` line |
-| `{{ATTEMPT}}`             | `$REVIEW_ID-1`, or `$REVIEW_ID-2` on a relaunch |
+| `{{ATTEMPT}}`             | `$CODE_REVIEW_ATTEMPT`, the value the block above prints as `code-review attempt:` (`$REVIEW_ID-1`); on a relaunch, the value Stage 2's relaunch block prints (`$REVIEW_ID-2`) |
 | `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `/tmp/review_env.sh`.                                                                                                                        |
 | `{{SKILL_ARGS}}`          | The args printed by `agent-review capture arm`, composed as `"$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"`. `MAX_FINDINGS_FLAG` is ` --max-findings <n>` when `plan.engine.maxFindings` is set, else ` --max-findings default`. Copy them exactly from the `armed <id>: <args>` line the block prints. |
 | `{{RETRY_NOTE}}`          | Empty on the first launch and on a relaunch with a new capture; the note from Stage 2 on a relaunch with the same capture |
@@ -104,7 +106,8 @@ Under the `code-review` engine, the `code-review` lane must also prove `/code-re
 and that it scored or dropped every raw finding. Judge it with the steps below, in place of the
 findings-file cross-check and the unchanged-prompt retry in `SKILL.md`'s Stage 2. The rest of that
 stage still holds: a lane that fails twice fails the run. Below, `<attempt>` is the attempt id the
-lane was launched with: `$REVIEW_ID-1`, or `$REVIEW_ID-2` after a relaunch.
+lane was launched with, saved as `CODE_REVIEW_ATTEMPT` in `/tmp/review_env.sh`: `$REVIEW_ID-1`, or
+`$REVIEW_ID-2` after a relaunch.
 
 **1. Wait for the final line.** The lane's final line is one of three:
 `done — <N> findings, max severity <X>` (the `done` line), `/code-review did not finish`, or
@@ -131,12 +134,15 @@ judge its next final line. If none arrives by then, judge the lane on what it ha
   the proof below. The cross-check passes when the reply is the `done` line, and
   `/tmp/code_review_findings.<attempt>.json` parses and its `findings.length` equals `<N>`.
 
-The proof checks the lane's three files against the saved /code-review result:
+The proof checks the lane's three files against the saved /code-review result. When they pass, it
+also saves the findings file it checked, byte for byte, as `/tmp/agent_findings/code-review.json`,
+the file consensus reads. When they fail, it removes that file. Run it as written; the attempt id
+comes from `/tmp/review_env.sh`:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
-ATTEMPT="$REVIEW_ID-1"   # ← "$REVIEW_ID-2" when judging the relaunch
-agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" > /tmp/code_review_proof.json
+ATTEMPT="$CODE_REVIEW_ATTEMPT"
+agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --promote /tmp/agent_findings/code-review.json > /tmp/code_review_proof.json
 cat /tmp/code_review_proof.json
 ```
 
@@ -144,8 +150,8 @@ It prints one JSON line, `{ ok, stage, reason, count, mode, dropped }`, and exit
 `false`. Act on it:
 
 - `ok` is `true` and the cross-check passed: the lane passed (step 4).
-- `stage` is `"config"`: the review's config cannot be read, and a relaunch cannot fix that. Fail
-  the run now, with no relaunch (step 5).
+- `stage` is `"config"`: the review's config cannot be read, or the proved findings cannot be
+  saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).
 - `stage` is `"capture"`: relaunch with a new capture (step 3).
 - `stage` is `"lane"`: relaunch with the same capture (step 3), with the proof's `reason`.
 - `ok` is `true` but the cross-check failed: relaunch with the same capture (step 3), with one
@@ -153,9 +159,19 @@ It prints one JSON line, `{ ok, stage, reason, count, mode, dropped }`, and exit
   the findings file has 2`.
 
 **3. Relaunch once.** Only attempt 1 is relaunched. When attempt 2 fails any check in step 2, the
-lane has failed twice (step 5). For the relaunch, `{{ATTEMPT}}` is `$REVIEW_ID-2`,
-`{{RETRY_NOTE}}` is set as below, and every other placeholder and Task input is the same as in
-Stage 1. Then judge it with steps 1 and 2.
+lane has failed twice (step 5). Before either kind of relaunch below, run this block. It saves the
+new attempt id and removes any findings file attempt 1's proof saved:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+rm -f /tmp/agent_findings/code-review.json
+echo "export CODE_REVIEW_ATTEMPT=\"$REVIEW_ID-2\"" >> /tmp/review_env.sh
+echo "code-review attempt: $REVIEW_ID-2"
+```
+
+For the relaunch, `{{ATTEMPT}}` is `$REVIEW_ID-2`, the value that block prints, `{{RETRY_NOTE}}`
+is set as below, and every other placeholder and Task input is the same as in Stage 1. Then judge
+it with steps 1 and 2.
 
 - **With the same capture.** Do not re-arm: /code-review's saved result stays in place, and the
   relaunch reuses it instead of running /code-review again. Set `{{RETRY_NOTE}}` to this, with the
@@ -175,21 +191,19 @@ agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS" || {
 }
 ```
 
-**4. Pass.** Copy the passing attempt's findings to the file consensus reads, then disarm the
-capture:
+**4. Pass.** The proof already saved the passing attempt's findings as
+`/tmp/agent_findings/code-review.json`, exactly as it checked them. Do not copy or edit that file.
+Disarm the capture:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
-ATTEMPT="$REVIEW_ID-1"   # ← "$REVIEW_ID-2" when the relaunch passed
-cp "/tmp/code_review_findings.$ATTEMPT.json" /tmp/agent_findings/code-review.json
-agent-review capture disarm
+agent-review capture disarm >/dev/null 2>&1 || true
 ```
 
 **5. Fail.** When the lane fails twice, fails once at `stage: "config"`, or cannot be re-armed,
 first disarm the capture:
 
 ```bash
-agent-review capture disarm
+agent-review capture disarm >/dev/null 2>&1 || true
 ```
 
 Then stop the way `SKILL.md`'s Stage 2 says to for a lane that fails twice. At `stage: "config"`,
@@ -218,6 +232,6 @@ from `/tmp/review_options.json`.
   `effort`, `model`). `[engine source]` is `engine.source`, and the effort and model sources are
   `effort.source` and `model.source`. `[N]` is `count` from `/tmp/code_review_proof.json`, `[M]` is
   `findings.length` in `/tmp/agent_findings/code-review.json` (the passing attempt's findings,
-  copied there in Stage 2), and `[K]` is the length of the proof's `dropped` list. List one line
+  which the proof saved there in Stage 2), and `[K]` is the length of the proof's `dropped` list. List one line
   per entry in that list, as `<file>:<line> <summary>: <why>` (just `<file>` before the summary
   when `line` is `null`), and omit the list when `K` is 0. Do not add a recipe tag.

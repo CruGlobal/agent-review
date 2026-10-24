@@ -551,8 +551,10 @@ const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
 const LANE_FILES = ['raw', 'findings', 'dropped'].map((kind) => `/tmp/code_review_${kind}.{{ATTEMPT}}.json`);
 const LANE_PROOF_COMMAND =
   'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}';
+const PROMOTED_FINDINGS = '/tmp/agent_findings/code-review.json';
 const STAGE2_PROOF_COMMAND =
-  'agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" > /tmp/code_review_proof.json';
+  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
+const QUIET_DISARM = 'agent-review capture disarm >/dev/null 2>&1 || true';
 
 function laneText() {
   return readFileSync(CODE_REVIEW_LANE, 'utf8');
@@ -633,7 +635,10 @@ test('lane template placeholders are exactly the twelve listed', () => {
 test('the skill says how to fill the capture, attempt, retry, diff, and profile placeholders', () => {
   const { rows } = lanePlaceholderRows();
   assert.strictEqual(rows.get('RUN_ID'), '`$REVIEW_ID`, the `<id>` in the `armed <id>: <args>` line');
-  assert.strictEqual(rows.get('ATTEMPT'), '`$REVIEW_ID-1`, or `$REVIEW_ID-2` on a relaunch');
+  assert.strictEqual(
+    rows.get('ATTEMPT'),
+    "`$CODE_REVIEW_ATTEMPT`, the value the block above prints as `code-review attempt:` (`$REVIEW_ID-1`); on a relaunch, the value Stage 2's relaunch block prints (`$REVIEW_ID-2`)",
+  );
   assert.strictEqual(
     rows.get('RETRY_NOTE'),
     'Empty on the first launch and on a relaunch with a new capture; the note from Stage 2 on a relaunch with the same capture',
@@ -2666,6 +2671,17 @@ test('REVIEW_ARGS is written with a quoted heredoc to /tmp/review_args.txt and r
   const bash = bashBlocks(init);
   assert.ok(bash.includes("cat > /tmp/review_args.txt <<'REVIEW_ARGS_END_7f3a'\n"), 'a quoted heredoc writes the file');
   assert.ok(bash.includes('\nREVIEW_ARGS_END_7f3a\n'), 'the heredoc is closed by its marker');
+  assert.ok(
+    bash.includes("cat > /tmp/review_args.txt <<'REVIEW_ARGS_END_7f3a'\nREVIEW_ARGS_END_7f3a\n"),
+    'the shipped heredoc body is empty, so a skipped paste runs with no arguments rather than an example',
+  );
+  const prose = flatText(init.slice(0, init.indexOf('```bash')));
+  assert.ok(
+    prose.includes(
+      'For example, for `/agent-review:review auto incremental engine=code-review`, the one line between the markers is `auto incremental engine=code-review`.',
+    ),
+    prose,
+  );
   assert.ok(bash.includes('agent-review options --args-file /tmp/review_args.txt ${CI_MODE:+--ci} > /tmp/review_options.json'));
   assert.ok(!/--args "\$REVIEW_ARGS"/.test(skill), 'the raw string never goes through a double-quoted assignment');
   assert.ok(!/^REVIEW_ARGS=/m.test(bash), 'no shell assignment of the raw arguments');
@@ -2850,6 +2866,8 @@ test('code-review-engine.md arms capture with the composed args and fills SKILL_
       assert.strictEqual(run.agentReview, `capture\narm\n--run\n${env.REVIEW_ID}\n--args\n${args}\n`, `${shell}: arm call`);
       assert.ok(run.stdout.includes(`armed ${env.REVIEW_ID}: ${args}\n`), `${shell}: the printed args are the armed args`);
       assert.ok(run.env.includes(`export CODE_REVIEW_ARGS="${args}"`), `${shell}: a relaunch re-arms with the same args`);
+      assert.ok(run.env.includes(`CODE_REVIEW_ATTEMPT="${env.REVIEW_ID}-1"`), `${shell}: the attempt id is saved for Stage 2`);
+      assert.ok(run.stdout.includes(`code-review attempt: ${env.REVIEW_ID}-1\n`), `${shell}: ${run.stdout}`);
     }
     const missing = runArmBlock(shell, { ...FULL_PR_ENV, CODE_REVIEW_TARGET: '' }, { engine: { maxFindings: null } });
     assert.notStrictEqual(missing.status, 0, `${shell}: no target, no arm`);
@@ -2915,7 +2933,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
   const flat = flatText(stage2);
   assert.strictEqual(
     STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}'),
-    `${LANE_PROOF_COMMAND} > /tmp/code_review_proof.json`,
+    `${LANE_PROOF_COMMAND} --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`,
     "Stage 2 runs the lane's own check on the same attempt's files",
   );
   assert.ok(bashBlocks(stage2).includes(STAGE2_PROOF_COMMAND));
@@ -2925,7 +2943,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     '`stage` is `"lane"`: relaunch with the same capture (step 3), with the proof\'s `reason`.',
     '`stage` is `"capture"`: relaunch with a new capture (step 3).',
     '`/code-review did not finish` or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
-    '`stage` is `"config"`: the review\'s config cannot be read, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
+    '`stage` is `"config"`: the review\'s config cannot be read, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
     '**With the same capture.** Do not re-arm',
     '**With a new capture.** Re-arm with this block first, which clears the old result',
   ]) {
@@ -2975,17 +2993,75 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
   assert.ok(!stage2.includes('code_review_raw.txt') && !stage2.includes('/code-review did not run'));
 });
 
+const RELAUNCH_ATTEMPT_BLOCK = [
+  '. /tmp/review_env.sh 2>/dev/null || true',
+  `rm -f ${PROMOTED_FINDINGS}`,
+  'echo "export CODE_REVIEW_ATTEMPT=\\"$REVIEW_ID-2\\"" >> /tmp/review_env.sh',
+  'echo "code-review attempt: $REVIEW_ID-2"',
+].join('\n');
+
+test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no hand-edited attempt id', (t) => {
+  const doc = engineDoc();
+  const stage2 = engineSection('Stage 2: checking the code-review lane');
+  const proofBlocks = bashBlockList(stage2).filter((b) => b.includes('agent-review code-review-proof'));
+  assert.deepStrictEqual(
+    proofBlocks,
+    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
+    'the proof reads the attempt Stage 1 or the relaunch saved',
+  );
+  assert.ok(!/^ATTEMPT="\$REVIEW_ID-/m.test(doc) && !doc.includes('# ←'), 'no block asks for a hand-edited attempt id');
+  assert.ok(!/\bcp\b[^\n]*agent_findings/.test(doc), 'consensus reads the file the proof promoted, never a copy');
+  const relaunch = stage2.slice(stage2.indexOf('**3. Relaunch once.**'), stage2.indexOf('**With the same capture.**'));
+  assert.deepStrictEqual(bashBlockList(relaunch), [RELAUNCH_ATTEMPT_BLOCK], 'both kinds of relaunch first record attempt 2');
+  assert.ok(stage2.indexOf(RELAUNCH_ATTEMPT_BLOCK) < stage2.indexOf('agent-review capture arm --run'), 'the attempt block comes before the re-arm');
+
+  const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-attempt-'));
+    try {
+      const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
+      mkdirSync(join(dir, 'bin'));
+      mkdirSync(join(dir, 'agent_findings'));
+      writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\necho '{"ok":true}'\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1"\n');
+      writeFileSync(join(dir, 'agent_findings', 'code-review.json'), '{"findings":[]}');
+      const sh = (script) =>
+        require('node:child_process').spawnSync(shell, ['-c', at(script)], {
+          encoding: 'utf8',
+          env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
+        });
+      const argsOf = () => readFileSync(join(dir, 'agent-review.args'), 'utf8').split('\n');
+
+      assert.strictEqual(sh(proofBlocks[0]).status, 0, shell);
+      let args = argsOf();
+      assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-1.json`, `${shell}: attempt 1`);
+      assert.strictEqual(args[args.indexOf('--promote') + 1], `${dir}/agent_findings/code-review.json`, `${shell}: promotes for consensus`);
+
+      const relaunched = sh(RELAUNCH_ATTEMPT_BLOCK);
+      assert.strictEqual(relaunched.status, 0, shell);
+      assert.strictEqual(relaunched.stdout, 'code-review attempt: r9-2\n', shell);
+      assert.ok(!existsSync(join(dir, 'agent_findings', 'code-review.json')), `${shell}: a relaunch never inherits attempt 1's promoted file`);
+      assert.strictEqual(sh(proofBlocks[0]).status, 0, shell);
+      args = argsOf();
+      assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-2.json`, `${shell}: attempt 2`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('Stage 2 disarms capture after judging the lane', () => {
   const stage2 = engineSection('Stage 2: checking the code-review lane');
   const pass = stage2.slice(stage2.indexOf('**4. Pass.**'), stage2.indexOf('**5. Fail.**'));
+  assert.deepStrictEqual(bashBlockList(pass), [QUIET_DISARM], 'a pass only disarms: the proof already promoted the findings');
   assert.ok(
-    bashBlocks(pass).includes(
-      'cp "/tmp/code_review_findings.$ATTEMPT.json" /tmp/agent_findings/code-review.json\nagent-review capture disarm',
+    flatText(pass).includes(
+      `The proof already saved the passing attempt's findings as \`${PROMOTED_FINDINGS}\`, exactly as it checked them. Do not copy or edit that file.`,
     ),
-    'a pass copies the attempt for consensus, then disarms',
+    pass,
   );
   const failText = stage2.slice(stage2.indexOf('**5. Fail.**'));
-  assert.ok(bashBlockList(failText).includes('agent-review capture disarm'), 'a failed lane disarms in a bash block');
+  assert.ok(bashBlockList(failText).includes(QUIET_DISARM), 'a failed lane disarms in a bash block');
   const fail = flatText(failText);
   assert.ok(
     fail.includes('When the lane fails twice, fails once at `stage: "config"`, or cannot be re-armed, first disarm the capture:'),
