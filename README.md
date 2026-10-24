@@ -210,8 +210,8 @@ same thing whichever engine found it. The rules:
 - On every review, not only re-reviews, a reworded suggestion within 5 lines of an older open or
   dismissed finding from the same reviewer, in the same file and category, that says much the
   same thing is not added again, so the PR comment stops growing.
-- If another reviewer flags the same spot with a lower score, a proven 7 or more from any
-  reviewer keeps its score through the merge instead of being averaged down.
+- As on every engine, if another reviewer flags the same spot with a lower score, a proven 7 or
+  more from any reviewer keeps its score through the merge instead of being averaged down.
 
 **It stops if `/code-review` did not really run.** The check `agent-review code-review-proof`
 compares the lane's list with the text the hook captured. When the result holds a JSON findings

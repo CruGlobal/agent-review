@@ -1215,13 +1215,13 @@ test('(default engine) a merged 7+ never carries whitespace-only evidence', () =
   const { findings } = consensusFrom({
     plan: { agents: [{ id: 'security' }, { id: 'standards' }] },
     findingsByAgent: {
-      security: [crFinding({ severity: 8, category: 'security', evidence: 'short but real', message: 'refund rounds before fees are subtracted' })],
-      standards: [crFinding({ severity: 2, line: 11, category: 'standards', evidence: ' '.repeat(200), message: 'refund rounds before fees are subtracted' })],
+      security: [crFinding({ severity: 9, category: 'security', evidence: 'short but real', message: 'refund rounds before fees are subtracted' })],
+      standards: [crFinding({ severity: 6, line: 11, category: 'standards', evidence: ' '.repeat(200), message: 'refund rounds before fees are subtracted' })],
     },
     profile: 'standard',
   });
   assert.equal(findings.length, 1);
-  assert.equal(findings[0].severity, 8);
+  assert.equal(findings[0].severity, 9, 'the mean is 8, the old code carried the blank evidence and threw');
   assert.equal(findings[0].evidence, 'short but real');
   assert.doesNotThrow(() => mergeLedger([], findings));
 });
@@ -1250,5 +1250,23 @@ test('a group with no 7+ member still averages, on either engine', () => {
     });
     assert.equal(findings.length, 1);
     assert.equal(findings[0].severity, 5);
+  }
+});
+
+test('(default engine) an 8 that fails the blocker bar is dropped, so it cannot raise a group', () => {
+  const standards = crFinding({ severity: 4, line: 11, category: 'standards', message: 'refund rounds before fees are subtracted' });
+  const noLine = { ...crFinding({ severity: 8, category: 'security', message: 'refund rounds before fees are subtracted' }), line: undefined };
+  const blank = crFinding({ severity: 8, category: 'security', evidence: '   ', message: 'refund rounds before fees are subtracted' });
+  for (const bad of [noLine, blank]) {
+    const { findings, stats } = quiet(() =>
+      consensusFrom({
+        plan: { agents: [{ id: 'security' }, { id: 'standards' }] },
+        findingsByAgent: { security: [bad], standards: [standards] },
+        profile: 'standard',
+      }),
+    );
+    assert.equal(stats.droppedInvalid.length, 1, 'validation drops the unproven 8');
+    assert.equal(findings.length, 1);
+    assert.ok(findings[0].severity < 7);
   }
 });

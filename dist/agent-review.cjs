@@ -18483,7 +18483,7 @@ var require_consensus = __commonJS({
         ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
       const weightedSum = ordered.reduce(
-        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+        (sum, m) => sum + m.severity * (m.corroboration || 1),
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
@@ -18503,8 +18503,7 @@ var require_consensus = __commonJS({
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity,
-        _meanSeverity: meanSeverity
+        _maxSeverity: maxSeverity
       };
     }
     function unionFind(n) {
@@ -18582,7 +18581,7 @@ var require_consensus = __commonJS({
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, ...rest } = entry;
       return rest;
     }
     function consensusFrom({

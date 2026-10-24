@@ -222,9 +222,11 @@ function toEntry(m) {
 
 // Combines >=2 members (raw findings on first grouping, or already-combined
 // entries on a decisions merge) into one output entry per the group rules:
-// agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
-// highest member's, recommendation = longest member's, evidence = the primary's trimmed when it is
-// non-blank, else the longest trimmed, line/category/message/fix = the highest-severity member's,
+// agent = the lead's (highest-severity member's) lane, agents = comma-joined
+// sorted lane ids, severity = rounded mean, confidence = highest member's,
+// recommendation = longest member's, evidence = the primary's trimmed when it
+// is non-blank, else the longest trimmed,
+// line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
 // Exception: when any member is 7+ (every surviving 7+ already passed the
@@ -287,11 +289,8 @@ function combineMembers(members) {
   // Weighted by each member's own corroboration count (default 1 for a raw/singleton
   // member) — otherwise re-merging an already-corroborated group with a singleton via
   // `decisions` silently discounts the group's weight down to a single vote.
-  // A group that kept its maximum is weighted at its own mean, so the maximum is
-  // never counted twice.
   const weightedSum = ordered.reduce(
-    (sum, m) =>
-      sum + (m._meanSeverity !== undefined ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+    (sum, m) => sum + m.severity * (m.corroboration || 1),
     0,
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
@@ -313,7 +312,6 @@ function combineMembers(members) {
     needsHumanReview: maxSeverity - minSeverity >= 4,
     _minSeverity: minSeverity,
     _maxSeverity: maxSeverity,
-    _meanSeverity: meanSeverity,
   };
 }
 
@@ -420,7 +418,7 @@ function applyDecisions(entries, decisions) {
 }
 
 function stripInternal(entry) {
-  const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+  const { _minSeverity, _maxSeverity, ...rest } = entry;
   return rest;
 }
 
