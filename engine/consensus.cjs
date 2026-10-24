@@ -26,7 +26,7 @@
 // input ordering (e.g. which agent's lane file was read first).
 
 const { unwrapFindings } = require('./unwrapFindings.cjs');
-const { CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require('./vocabulary.cjs');
+const { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require('./vocabulary.cjs');
 
 const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
 
@@ -448,7 +448,7 @@ function consensusFrom({
     plan && Array.isArray(plan.agents)
       ? plan.agents.map((a) => a.id)
       : Object.keys(findingsByAgent);
-  const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE);
+  const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === ENGINE_CODE_REVIEW);
   if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
     throw new Error(
       'consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review',

@@ -16905,6 +16905,10 @@ var require_options = __commonJS({
         unknown: parsed.unknown
       };
     }
+    function orList(items) {
+      if (items.length <= 2) return items.join(" or ");
+      return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
+    }
     function pick(argValue, configValue, defaultValue) {
       if (argValue != null) return { value: argValue, source: "argument" };
       if (configValue != null) return { value: configValue, source: "config" };
@@ -16917,10 +16921,10 @@ var require_options = __commonJS({
       const crCfg = engineCfg.code_review || {};
       const notes = [];
       if (parsed.engine != null && !ENGINES.includes(parsed.engine)) {
-        throw new Error(`unknown engine "${parsed.engine}" (use agent-review or code-review)`);
+        throw new Error(`unknown engine "${parsed.engine}" (use ${orList(ENGINES)})`);
       }
       if (parsed.effort != null && !EFFORTS.includes(parsed.effort)) {
-        throw new Error(`unknown effort "${parsed.effort}" (use low, medium, high, xhigh, or max)`);
+        throw new Error(`unknown effort "${parsed.effort}" (use ${orList(EFFORTS)})`);
       }
       const isCi = Boolean(ci) || parsed.ci;
       let engine = pick(parsed.engine, engineCfg.name, ENGINE_DEFAULT);
@@ -18321,7 +18325,7 @@ var require_consensus = __commonJS({
   "engine/consensus.cjs"(exports2, module2) {
     "use strict";
     var { unwrapFindings } = require_unwrapFindings();
-    var { CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require_vocabulary();
+    var { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require_vocabulary();
     var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
     function confidenceRank(c) {
       return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
@@ -18606,7 +18610,7 @@ var require_consensus = __commonJS({
       decisions
     } = {}) {
       const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
-      const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === CODE_REVIEW_LANE);
+      const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === ENGINE_CODE_REVIEW);
       if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
         throw new Error(
           "consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review"

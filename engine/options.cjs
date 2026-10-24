@@ -97,6 +97,11 @@ function parseReviewArgs(raw) {
   };
 }
 
+function orList(items) {
+  if (items.length <= 2) return items.join(' or ');
+  return `${items.slice(0, -1).join(', ')}, or ${items[items.length - 1]}`;
+}
+
 function pick(argValue, configValue, defaultValue) {
   if (argValue != null) return { value: argValue, source: 'argument' };
   if (configValue != null) return { value: configValue, source: 'config' };
@@ -111,10 +116,10 @@ function resolveOptions({ args, config, ci }) {
   const notes = [];
 
   if (parsed.engine != null && !ENGINES.includes(parsed.engine)) {
-    throw new Error(`unknown engine "${parsed.engine}" (use agent-review or code-review)`);
+    throw new Error(`unknown engine "${parsed.engine}" (use ${orList(ENGINES)})`);
   }
   if (parsed.effort != null && !EFFORTS.includes(parsed.effort)) {
-    throw new Error(`unknown effort "${parsed.effort}" (use low, medium, high, xhigh, or max)`);
+    throw new Error(`unknown effort "${parsed.effort}" (use ${orList(EFFORTS)})`);
   }
 
   const isCi = Boolean(ci) || parsed.ci;

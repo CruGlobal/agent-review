@@ -246,3 +246,18 @@ test('codeReviewEngineProblems lists every engine-only problem in config validat
   );
   assert.deepEqual(codeReviewEngineProblems({ agents: FULL, engine: { code_review: { replaces: ['nope'] } } }), []);
 });
+
+test('resolve: error messages name every vocabulary entry', () => {
+  const { ENGINES, EFFORTS } = require('./vocabulary.cjs');
+  const config = { agents: FULL };
+  const msg = (args) => {
+    try {
+      resolveOptions({ args, config });
+    } catch (e) {
+      return e.message;
+    }
+    return '';
+  };
+  for (const e of ENGINES) assert.ok(msg('engine=lanes').includes(e), e);
+  for (const e of EFFORTS) assert.ok(msg('effort=extreme').includes(e), e);
+});
