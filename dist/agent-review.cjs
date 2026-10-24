@@ -18493,7 +18493,7 @@ var require_consensus = __commonJS({
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const evidence = String(primary.evidence || "").trim() ? primary.evidence : longestTrimmed("evidence");
+      const evidence = codeReviewEngine ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestField("evidence");
       return {
         agent: primary.agent,
         agents: agents.join(","),

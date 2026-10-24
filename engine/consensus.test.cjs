@@ -794,15 +794,37 @@ test('a merged 7+ never carries whitespace-only evidence', () => {
   assert.doesNotThrow(() => mergeLedger([], findings));
 });
 
-test('a blank primary evidence falls back to the longest trimmed evidence', () => {
+test('under the engine a blank primary evidence falls back to the longest trimmed evidence', () => {
   const lead = crFinding({ severity: 5, evidence: '   ', message: 'refund rounds before fees are subtracted' });
   const other = crFinding({ severity: 4, line: 11, evidence: '  the real trace  ', message: 'refund rounds before fees are subtracted' });
   const { findings } = consensusFrom({
-    plan: { agents: [{ id: 'correctness' }, { id: 'financial' }] },
-    findingsByAgent: { correctness: [lead], financial: [other] },
+    plan: crEnginePlan(['code-review', 'financial']),
+    findingsByAgent: { 'code-review': [lead], financial: [other] },
     profile: 'standard',
   });
   assert.equal(findings[0].evidence, 'the real trace');
+});
+
+test('under the engine the primary evidence is returned trimmed', () => {
+  const eight = crFinding({ severity: 8, evidence: '  real trace  ', message: 'refund rounds before fees are subtracted' });
+  const { findings } = consensusFrom({
+    plan: crEnginePlan(['code-review']),
+    findingsByAgent: { 'code-review': [eight, { ...eight, line: 11, severity: 2, evidence: 'x' }] },
+    profile: 'standard',
+  });
+  assert.equal(findings[0].evidence, 'real trace');
+});
+
+test('on the default engine the longest evidence still wins', () => {
+  const eight = crFinding({ severity: 8, evidence: 'short', message: 'refund rounds before fees are subtracted' });
+  const six = crFinding({ severity: 6, line: 11, evidence: 'a much longer trace of the failure', message: 'refund rounds before fees are subtracted' });
+  const { findings } = consensusFrom({
+    plan: { agents: [{ id: 'correctness' }, { id: 'financial' }] },
+    findingsByAgent: { correctness: [eight], financial: [six] },
+    profile: 'standard',
+  });
+  assert.equal(findings[0].severity, 7);
+  assert.equal(findings[0].evidence, 'a much longer trace of the failure');
 });
 
 test('the code-review engine fails closed when the code-review lane was not launched', () => {

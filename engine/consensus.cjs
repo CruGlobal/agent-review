@@ -223,7 +223,7 @@ function toEntry(m) {
 // Combines >=2 members (raw findings on first grouping, or already-combined
 // entries on a decisions merge) into one output entry per the group rules:
 // agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
-// highest member's, recommendation = longest member's, evidence = the primary's when it is
+// highest member's, recommendation = longest member's, under the code-review engine evidence = the primary's when it is
 // non-blank, else the longest, line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
@@ -295,9 +295,9 @@ function combineMembers(members, codeReviewEngine) {
     0,
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
-  const evidence = String(primary.evidence || '').trim()
-    ? primary.evidence
-    : longestTrimmed('evidence');
+  const evidence = codeReviewEngine
+    ? String(primary.evidence || '').trim() || longestTrimmed('evidence')
+    : longestField('evidence');
   return {
     agent: primary.agent,
     agents: agents.join(','),
