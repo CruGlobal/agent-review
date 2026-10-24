@@ -420,8 +420,8 @@ function scoredEntryProblem(entry, i, rawByN, root) {
 }
 
 const QUOTE_LEAD = /^[\s:;,\-\u2013\u2014]+/;
-const MIN_QUOTE_CHARS = 3;
-const QUOTE_WINDOW = 2;
+// A shorter line, such as `end` or `}`, appears all over a file, so quoting it proves nothing.
+const MIN_LINE_CHARS = 6;
 
 // normalizeLine already dropped backticks and `*` from the proof, so the file's lines lose them too.
 function squeezed(text) {
@@ -436,9 +436,8 @@ function existingPath(file, root, fileExists) {
   return null;
 }
 
-// A disproof passes when one of its mentions cites a line of a real file and the text right after
-// that mention, as quoted code, appears within QUOTE_WINDOW lines of it. Otherwise the problem of
-// the mention that got furthest names the check that failed.
+// A disproof passes when the text right after one of its mentions holds the whole cited line.
+// Otherwise the problem of the mention that got furthest names the check that failed.
 function disproofProblem(proof, { fileExists, readLines, root }) {
   const exists = typeof fileExists === 'function' ? fileExists : () => false;
   const read = typeof readLines === 'function' ? readLines : () => null;
@@ -470,15 +469,19 @@ function disproofProblem(proof, { fileExists, readLines, root }) {
       miss(1, `has a proof that cites ${at}, but ${path} has ${lines.length} lines`);
       continue;
     }
-    const code = squeezed(quote);
-    if (code.length < MIN_QUOTE_CHARS) {
-      miss(2, `has a proof that quotes no code after ${at}; put the exact code there right after it`);
+    const cited = squeezed(lines[line - 1]);
+    if (cited.length < MIN_LINE_CHARS) {
+      miss(2, `has a proof that cites ${at}, a line with fewer than ${MIN_LINE_CHARS} characters besides spaces, which cannot prove anything; cite a longer line and quote all of it`);
       continue;
     }
-    const near = squeezed(lines.slice(Math.max(0, line - 1 - QUOTE_WINDOW), line + QUOTE_WINDOW).join('\n'));
-    if (!near.includes(code)) {
+    const code = squeezed(quote);
+    if (code === '') {
+      miss(3, `has a proof that quotes no code after ${at}; put that whole line right after it`);
+      continue;
+    }
+    if (!code.includes(cited)) {
       const shownQuote = JSON.stringify(oneLine(quote).slice(0, 120));
-      miss(3, `has a proof whose quoted code is not in ${path} within ${QUOTE_WINDOW} lines of line ${line}: ${shownQuote}`);
+      miss(3, `has a proof whose quote after ${at} does not hold that whole line of ${path}: ${shownQuote}; quote all of line ${line} right after it`);
       continue;
     }
     return null;

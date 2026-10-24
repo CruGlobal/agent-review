@@ -993,15 +993,17 @@ test('lane template has no REFUTED drop and names both drop reasons', () => {
     'Drop it with `reason: "disproved"` and a `proof` that names which of those it is and quotes the exact line or lines that show it, with `path:line`',
     'EXCLUDED PATHS (one glob per line, or `none`): {{EXCLUDED_PATHS}}',
     "When the finding's line in /code-review's result also cites a location that no excluded glob matches, the finding is not only on an excluded path: score it instead.",
-    'The review checks the proof three ways:',
+    'The review checks the proof four ways:',
     '- the path names a file that exists in the repository, such as `lib/cart.rb` or `Makefile`;',
     '- the line is a line of that file, from 1 to its last line;',
-    '- the text right after `path:line` is the quoted code: at least 3 characters besides spaces, found in that file within 2 lines of that line. Spaces, line breaks, backticks, and `*` do not count when comparing.',
+    '- that line has at least 6 characters besides spaces, so a short line such as `end`, `}`, or `nil` can never be the proof: cite a longer line near it;',
+    '- the text right after `path:line` holds that whole line, quoted exactly. It may run on into the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.',
     'So write the quoted code right after `path:line`, and nothing after it.',
   ]) {
     assert.ok(dropping.includes(needle), `DROPPING A FINDING must say ${JSON.stringify(needle)}`);
   }
   assert.ok(!dropping.includes('The review checks that the proof cites a `path:line`.'), 'the old, looser rule is gone');
+  assert.ok(!dropping.includes('within 2 lines'), 'a nearby fragment no longer proves anything');
   const flat = flatText(text);
   for (const needle of [
     'Each dropped finding becomes one entry: `{ raw, reason: "excluded", glob }` or `{ raw, reason: "disproved", proof }`.',
@@ -2530,6 +2532,8 @@ const SECTION4_FRESH_NEEDLES = [
   'parses to an object with a `findings` key, parses to an array that is empty or holds at least one plain object, or does not parse and contains `"file"`',
   'A mention path with no `/` counts only when the repository tracks a file with that exact path or with that file name (`git ls-files` under `--root`, read once per run)',
   'A `path:0` mention names its file with no line, and a raw entry with `line: null` claims it.',
+  'A `disproved` proof must quote the whole cited line: the cited line, with whitespace removed, has at least 6 characters and appears in the quote with whitespace removed.',
+  'This replaces "at least 3 non-space characters, that appears within 2 lines of it" above.',
 ];
 
 test('the capture spec records the fresh-review changes to the check in section 4', () => {
@@ -2555,7 +2559,7 @@ test('README states how the capture, the wait, and the proof behave, and what th
     "That text mode has a cost, and it is usual at `low`, `medium`, and `high`: a line that cites a location only as context still counts as a finding. The lane must list it and score or drop it, and a line it leaves out fails the run.",
     "The check also holds every scored finding to the field rules: its raw finding's file, a whole-number severity from 1 to 10, one of the nine category names, a confidence of High, Medium, or Low, and the `outside_range`, `doubted`, and `recategorized_from` fields.",
     'this was built and tested on 2.1.309',
-    "- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a glob in your `excluded_paths` and its line in the result cites no other file, or it is `disproved` by quoting the exact code right after a `path:line` in a file that exists, within 2 lines of that line. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped findings are listed in the report, so you can check the work.",
+    "- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a glob in your `excluded_paths` and its line in the result cites no other file, or it is `disproved` by quoting the whole cited line right after its `path:line` in a file that exists. That line must have at least 6 characters besides spaces, so `end` or `}` never proves anything. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped findings are listed in the report, so you can check the work.",
   ]) {
     assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
   }
@@ -2567,6 +2571,7 @@ test('README states how the capture, the wait, and the proof behave, and what th
     '2.1.306',
     'A finding is deleted only when it is proven wrong',
     'They never touch your own `/code-review` runs.',
+    'within 2 lines of that line',
   ]) {
     assert.ok(!flat.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
   }

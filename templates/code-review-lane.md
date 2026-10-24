@@ -298,12 +298,13 @@ Drop a raw finding in only two cases:
    `reason: "disproved"` and a `proof` that names which of those it is and quotes the exact line
    or lines that show it, with `path:line`, for example
    `already handled: lib/cart.rb:18 if (!items) return [];`. "Speculative" or "depends on runtime
-   state" is not proof when that state is realistic. The review checks the proof three ways:
+   state" is not proof when that state is realistic. The review checks the proof four ways:
    - the path names a file that exists in the repository, such as `lib/cart.rb` or `Makefile`;
    - the line is a line of that file, from 1 to its last line;
-   - the text right after `path:line` is the quoted code: at least 3 characters besides spaces,
-     found in that file within 2 lines of that line. Spaces, line breaks, backticks, and `*` do
-     not count when comparing.
+   - that line has at least 6 characters besides spaces, so a short line such as `end`, `}`, or
+     `nil` can never be the proof: cite a longer line near it;
+   - the text right after `path:line` holds that whole line, quoted exactly. It may run on into
+     the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.
 
    So write the quoted code right after `path:line`, and nothing after it.
 

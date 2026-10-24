@@ -662,6 +662,7 @@ const LANE_REPO = repoOf({
   'dist/app.js': numbered(3, { 2: 'return;' }),
   Makefile: numbered(14, { 12: 'test: build lint' }),
   'a.rb': numbered(3, { 2: '  guard()' }),
+  'lib/a.rb': numbered(5, { 1: 'def total(items)', 2: '  return 0 if items.nil?', 3: 'end', 4: '}' }),
 });
 const lane = (scored, dropped = [], over = {}) =>
   checkLaneOutput({
@@ -843,7 +844,7 @@ test('a disproved proof must cite a line inside the file', () => {
   }
 });
 
-test('a disproved proof must quote at least 3 characters of code right after path:line', () => {
+test('a disproved proof must quote code right after path:line', () => {
   for (const proof of ['lib/cart.rb:18', 'lib/cart.rb:18 ;;', 'lib/cart.rb:18: - ', 'already handled: lib/cart.rb:18']) {
     const r = disproved(proof);
     assert.equal(r.ok, false, proof);
@@ -851,25 +852,43 @@ test('a disproved proof must quote at least 3 characters of code right after pat
   }
 });
 
-test('a disproved proof whose quote is not within 2 lines of the cited line fails', () => {
-  for (const proof of ['lib/cart.rb:5 if (!items) return [];', 'lib/cart.rb:15 if (!items) return [];', 'lib/cart.rb:18 if (!items) return null;']) {
+test('a disproved proof whose quote does not hold the whole cited line fails', () => {
+  for (const proof of [
+    'lib/cart.rb:5 if (!items) return [];',
+    'lib/cart.rb:16 if (!items) return [];',
+    'lib/cart.rb:20 if (!items) return [];',
+    'lib/cart.rb:18 if (!items) return null;',
+    'lib/cart.rb:18 return',
+    'lib/cart.rb:18 return [];',
+    'already handled: lib/cart.rb:17-19 if (!items) return [];',
+    'lib/a.rb:2 return 0 if items',
+  ]) {
     const r = disproved(proof);
     assert.equal(r.ok, false, proof);
-    assert.match(r.reason, /quoted code is not in lib\/cart\.rb within 2 lines of line \d+/, proof);
+    assert.match(r.reason, /quote after lib\/(?:cart|a)\.rb:\d+ does not hold that whole line of lib\/(?:cart|a)\.rb/, proof);
   }
 });
 
-test('a disproved proof that quotes the code near the cited line passes', () => {
+test('a cited line shorter than 6 characters besides spaces can never support a disproof', () => {
+  for (const proof of ['lib/a.rb:3 end', 'misreads the code: lib/a.rb:3 end', 'lib/a.rb:4 }', 'lib/a.rb:3 end\n}', 'lib/a.rb:3 end def total(items)']) {
+    const r = disproved(proof);
+    assert.equal(r.ok, false, proof);
+    assert.match(r.reason, /cites lib\/a\.rb:\d, a line with fewer than 6 characters besides spaces/, proof);
+  }
+});
+
+test('a disproved proof that quotes the whole cited line passes, alone or with its neighbours', () => {
   for (const proof of [
     'already handled: lib/cart.rb:18 if (!items) return [];',
-    'already handled: lib/cart.rb:16 if (!items) return [];',
-    'already handled: lib/cart.rb:20 if (!items) return [];',
-    'already handled: lib/cart.rb:17-19 if (!items) return [];',
+    'already handled: lib/cart.rb:17-19 // line 17\n  if (!items) return [];\n// line 19',
+    'already handled: lib/cart.rb:18 if (!items) return []; // line 19',
+    'already handled: lib/cart.rb:18 // line 17 if (!items) return [];',
+    'lib/a.rb:2 def total(items) return 0 if items.nil? end',
+    'lib/a.rb:2 return 0 if items.nil?',
     'lib/cart.rb:18: if(!items)\n  return [];',
     'misreads the code: `lib/cart.rb:18` - `if (!items) return [];`',
-    'lib/cart.rb:18 — if (!items) return [];',
-    'lib/cart.rb:18 – if (!items) return [];',
-    'lib/cart.rb:18 return',
+    'lib/cart.rb:18 \u2014 if (!items) return [];',
+    'lib/cart.rb:18 \u2013 if (!items) return [];',
     'Makefile:12 test: build lint',
     './lib/cart.rb:18 if (!items) return [];',
     '/repo/lib/cart.rb:18 if (!items) return [];',
@@ -957,11 +976,11 @@ test('fence closing rules: same character, at least as long, up to 3 spaces of i
 });
 
 test('dropped output renders "excluded path: dist/**" and the proof text', () => {
-  const r = lane([scoredFor(2)], [excludedDrop(3), { raw: 1, reason: 'disproved', proof: 'app/pay.js:39 guard()' }]);
+  const r = lane([scoredFor(2)], [excludedDrop(3), { raw: 1, reason: 'disproved', proof: 'app/pay.js:39 guard();' }]);
   assert.equal(r.ok, true, r.reason);
   assert.deepEqual(r.dropped, [
     { file: 'dist/app.js', line: 2, summary: 'generated', why: 'excluded path: dist/**' },
-    { file: 'app/pay.js', line: 40, summary: 'double charge', why: 'app/pay.js:39 guard()' },
+    { file: 'app/pay.js', line: 40, summary: 'double charge', why: 'app/pay.js:39 guard();' },
   ]);
 });
 

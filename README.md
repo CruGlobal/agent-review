@@ -196,9 +196,10 @@ same thing whichever engine found it. The rules:
   fails. Without those it stays as a suggestion at 6.
 - A finding is dropped only for one of two reasons. It is `excluded` because its file matches a
   glob in your `excluded_paths` and its line in the result cites no other file, or it is
-  `disproved` by quoting the exact code right after a `path:line` in a file that exists, within 2
-  lines of that line. If the scorer just doubts it, the finding stays, at 4 or below, with a
-  note. Dropped findings are listed in the report, so you can check the work.
+  `disproved` by quoting the whole cited line right after its `path:line` in a file that exists.
+  That line must have at least 6 characters besides spaces, so `end` or `}` never proves
+  anything. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped
+  findings are listed in the report, so you can check the work.
 - Every finding the lane listed must be scored or dropped exactly once, by its number.
 - On a re-review, a finding outside the new commits scores 6 at most. It shows up as a
   suggestion and cannot block you.

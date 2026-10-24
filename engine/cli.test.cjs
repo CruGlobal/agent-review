@@ -1251,7 +1251,7 @@ test('code-review-proof checks a disproof against the files under --root', () =>
     for (const [proof, pattern] of [
       ['x.y:1 nah', /no file x\.y exists in the repository/],
       ['lib/cart.rb:99 if (!items) return [];', /lib\/cart\.rb has 20 lines/],
-      ['lib/cart.rb:5 if (!items) return [];', /not in lib\/cart\.rb within 2 lines of line 5/],
+      ['lib/cart.rb:5 if (!items) return [];', /quote after lib\/cart\.rb:5 does not hold that whole line of lib\/cart\.rb/],
       ['../outside.rb:1 secret = 1', /no file \.\.\/outside\.rb exists/],
       [`${parent}/outside.rb:1 secret = 1`, /no file .*outside\.rb exists/],
     ]) {

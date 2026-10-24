@@ -19404,8 +19404,7 @@ var require_codeReviewProof = __commonJS({
       return null;
     }
     var QUOTE_LEAD = /^[\s:;,\-\u2013\u2014]+/;
-    var MIN_QUOTE_CHARS = 3;
-    var QUOTE_WINDOW = 2;
+    var MIN_LINE_CHARS = 6;
     function squeezed(text) {
       return text.replace(/[\s`*]/g, "");
     }
@@ -19447,15 +19446,19 @@ var require_codeReviewProof = __commonJS({
           miss(1, `has a proof that cites ${at}, but ${path} has ${lines.length} lines`);
           continue;
         }
-        const code = squeezed(quote);
-        if (code.length < MIN_QUOTE_CHARS) {
-          miss(2, `has a proof that quotes no code after ${at}; put the exact code there right after it`);
+        const cited = squeezed(lines[line - 1]);
+        if (cited.length < MIN_LINE_CHARS) {
+          miss(2, `has a proof that cites ${at}, a line with fewer than ${MIN_LINE_CHARS} characters besides spaces, which cannot prove anything; cite a longer line and quote all of it`);
           continue;
         }
-        const near = squeezed(lines.slice(Math.max(0, line - 1 - QUOTE_WINDOW), line + QUOTE_WINDOW).join("\n"));
-        if (!near.includes(code)) {
+        const code = squeezed(quote);
+        if (code === "") {
+          miss(3, `has a proof that quotes no code after ${at}; put that whole line right after it`);
+          continue;
+        }
+        if (!code.includes(cited)) {
           const shownQuote = JSON.stringify(oneLine(quote).slice(0, 120));
-          miss(3, `has a proof whose quoted code is not in ${path} within ${QUOTE_WINDOW} lines of line ${line}: ${shownQuote}`);
+          miss(3, `has a proof whose quote after ${at} does not hold that whole line of ${path}: ${shownQuote}; quote all of line ${line} right after it`);
           continue;
         }
         return null;
