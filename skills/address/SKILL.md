@@ -296,6 +296,7 @@ it merges with the PR. Skip the commit if nothing was dismissed and no fix was a
 Summarize the result in the session and remind the user of anything still open. When fixes were
 pushed, lead with an explicit request to review the commit. Then read
 `agent-review config get reviews_run`: when `reviews_run` is `local`, no CI review exists, so tell
-the author to run `/agent-review:re-review` and promise no CI re-review (the report's head marker
-still names the old SHA, so the approve workflow refuses it until a re-review posts). If the status carries
+the author to run `/agent-review:re-review` and do not promise a CI re-review (the report's head marker
+still names the old SHA, so the approve workflow refuses it until a re-review posts). An
+`undefined` or failed `config get reviews_run` counts as CI (`local-and-ci`). If the status carries
 `irreversible: true`, remind the user that a human approval is required regardless.

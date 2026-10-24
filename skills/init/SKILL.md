@@ -626,11 +626,16 @@ recommendation. Do not skip a question because the recommendation looks obvious.
 Save the Where-reviews-run and approval answers where later blocks can read them. Each bash
 block is a separate shell, so these go in the same env file as the other cross-stage state. Use
 `local` or `local-and-ci` for `REVIEWS_RUN` and `yes` or `no` for `BOT_APPROVES`; this writes
-only to `/tmp`, not to the repo. Re-run it if the user changes either answer at the 3B gate:
+only to `/tmp`, not to the repo. Save `no` for `BOT_APPROVES` whenever `rollout.mode` is `shadow`,
+whatever the user answered, since shadow makes every caller `auto_approve: false`. Re-run it if
+the user changes either answer at the 3B gate:
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
-echo 'export REVIEWS_RUN="<local|local-and-ci>" BOT_APPROVES="<yes|no>"' >> /tmp/agent_review_init.sh
+REVIEWS_RUN="<local|local-and-ci>"; BOT_APPROVES="<yes|no>"
+case "$REVIEWS_RUN" in local|local-and-ci) ;; *) echo "❌ REVIEWS_RUN must be local or local-and-ci, got: $REVIEWS_RUN"; exit 1 ;; esac
+case "$BOT_APPROVES" in yes|no) ;; *) echo "❌ BOT_APPROVES must be yes or no, got: $BOT_APPROVES"; exit 1 ;; esac
+echo "export REVIEWS_RUN=\"$REVIEWS_RUN\" BOT_APPROVES=\"$BOT_APPROVES\"" >> /tmp/agent_review_init.sh
 ```
 
 Draft a development evaluation suite in memory: at least five realistic seeded defects drawn from
@@ -745,7 +750,9 @@ if [ "$BOT_APPROVES" = "no" ]; then
   for f in agent-review-approve agent-review-interact agent-review; do
     w=".github/workflows/$f.yml"
     [ -f "$w" ] || continue
-    tmp=$(mktemp) && sed 's/auto_approve: true/auto_approve: false/' "$w" > "$tmp" && mv "$tmp" "$w"
+    tmp=$(mktemp) || continue
+    sed 's/auto_approve: true/auto_approve: false/' "$w" > "$tmp" && cat "$tmp" > "$w"
+    rm -f "$tmp"
   done
 fi
 ```

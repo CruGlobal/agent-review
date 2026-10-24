@@ -102,7 +102,8 @@ Write the merged results over `.github/workflows/agent-review*.yml`.
 
 ### Local-only repo with CI files still installed
 
-Skip this part unless `reviews_run` is `local` and at least one of
+Never offer the removal below while the approve workflow is missing. If the user accepted adding
+it in Stage 2, it is staged and removal is fine. Skip this part unless `reviews_run` is `local` and at least one of
 `.github/workflows/agent-review.yml`, `agent-review-interact.yml`, or `agent-review-readiness.yml`
 exists. Those files still run on labeled PRs and cost money, so offer to remove them in the same
 PR as any other changes.
@@ -119,7 +120,7 @@ gh api "repos/$REPO/rules/branches/$DEFAULT" --jq '[.[] | select(.type=="require
 
 The first call is classic branch protection. GitHub also returns a 404 to anyone without admin
 rights on a protected branch, so a 404 counts as "could not verify", not as "none". It counts as
-"none" only when `gh api repos/{o}/{r} --jq .permissions.admin` is `true`. If it is not `true`,
+"none" only when `gh api "repos/$REPO" --jq .permissions.admin` is `true`. If it is not `true`,
 warn that classic protection could not be checked and require an explicit yes before removal.
 The second lists
 rulesets that apply to the branch and may include a `required_status_checks` rule. These

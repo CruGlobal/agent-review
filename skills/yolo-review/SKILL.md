@@ -48,9 +48,17 @@ re-reviews cheap.
    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" | tr -d '\r' \
      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 > /tmp/yolo_ledger.json
+   UPDATED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .updated_at // empty" | head -1)
+   if [ -z "$UPDATED" ] || [[ "$UPDATED" < "$START_TS" ]]; then
+     echo "❌ No report newer than this run started: the review failed before posting. Show its error and stop."; exit 1
+   fi
    OPEN=$(node -e 'const l=require("/tmp/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
    echo "open blockers: $OPEN"
    ```
+
+   The guard in that block uses the report only if its comment was updated at or after `START_TS`.
+   Otherwise stop and show the review's error; never run address against an older report.
 
    If `OPEN` is greater than 0, invoke the
    `agent-review:address` with the argument `fix blockers`.

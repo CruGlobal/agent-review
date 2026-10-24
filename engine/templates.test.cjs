@@ -3106,7 +3106,7 @@ test('init keeps the approval answer in BOT_APPROVES and flips auto_approve with
   assert.ok(block, 'the approval-off block exists');
   assert.ok(block.includes('. /tmp/agent_review_init.sh'), 'it sources the env file');
   assert.ok(block.includes('if [ "$BOT_APPROVES" = "no" ]; then'), 'wrapped in the answer');
-  assert.ok(/sed [^\n]*> "\$tmp"/.test(block) && block.includes('mv "$tmp"'), 'sed to a temp file, then mv');
+  assert.ok(/sed [^\n]*> "\$tmp"/.test(block) && block.includes('cat "$tmp" > "$w"'), 'sed to a temp file, then write back in place (keeps the mode)');
   assert.ok(!block.includes('-i.bak') && !block.includes('.bak'), 'no .bak files');
 });
 
@@ -3119,8 +3119,8 @@ test('init names no consuming repo in the approval advice', () => {
 
 test('update-files treats a classic-protection 404 as could-not-verify unless the user is an admin', () => {
   const s = stageSlice(skillText('update-files'), '### Local-only repo with CI files still installed', '### Diff and PR');
-  assert.ok(s.includes('gh api repos/{o}/{r} --jq .permissions.admin'));
-  assert.ok(/404[^\n]*could not verify/i.test(s.replace(/\n/g, ' ').replace(/\s+/g, ' ')) || /could not verify/i.test(s));
+  assert.ok(/a 404 counts as "could not verify"/.test(s.replace(/\s+/g, ' ')), 'the 404 is tied to could-not-verify');
+  assert.ok(s.includes('gh api "repos/$REPO" --jq .permissions.admin'), 'admin check reuses $REPO');
   assert.ok(s.includes('`true`') && /explicit yes/.test(s), 'non-admin 404 warns and needs an explicit yes');
   assert.ok(!s.includes('a 404 means none is set'), 'the old "404 means none" rule is gone');
 });
@@ -3149,4 +3149,21 @@ test('README labels the engine sample as a local-only code-review example, not t
   const r = readFileSync(join(ROOT, 'README.md'), 'utf8');
   assert.ok(!r.includes('These are the defaults, so'));
   assert.ok(/example of a local-only, code-review repo/.test(r.replace(/\s+/g, ' ')));
+});
+
+test('task 11 fix round: shadow, Stage 4 guard, validation, file mode, address, yolo guard', () => {
+  const init = skillText('init');
+  const flat = init.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('Save `no` for `BOT_APPROVES` whenever `rollout.mode` is `shadow`'), 'shadow is saved as no');
+  const threeA = stageSlice(init, '### 3A', '### 3B');
+  assert.ok(threeA.includes('case "$REVIEWS_RUN" in local|local-and-ci)') && threeA.includes('case "$BOT_APPROVES" in yes|no)'), '3A validates both values');
+  const threeC = stageSlice(init, '### 3C', '### 3D');
+  assert.ok(threeC.includes('cat "$tmp" > "$w"') && threeC.includes('rm -f "$tmp"') && !threeC.includes('mv "$tmp"'), 'keeps file mode, removes temp');
+  const upd = skillText('update-files');
+  const s4 = stageSlice(upd, '## Stage 4', '### Diff and PR').replace(/\s+/g, ' ');
+  assert.ok(s4.includes('Never offer the removal below while the approve workflow is missing') && s4.includes('it is staged and removal is fine'), 'Stage 4 carries the guard');
+  const addr = skillText('address').replace(/\s+/g, ' ');
+  assert.ok(addr.includes('do not promise a CI re-review') && addr.includes('`undefined` or failed `config get reviews_run` counts as CI'));
+  const yolo = skillText('yolo-review');
+  assert.ok(yolo.includes('.updated_at') && yolo.includes('[[ "$UPDATED" < "$START_TS" ]]'), 'yolo step 3 has the START_TS guard in the bash block');
 });
