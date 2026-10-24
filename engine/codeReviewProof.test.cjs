@@ -170,7 +170,8 @@ test('an unusable list-like block fails with stage capture even beside a usable 
     '[{"file": "a.rb", "line": 3},]',
     '{"findings": "none"}',
     '{"findings": [{"file": ""}]}',
-    '[1, 2]',
+    '[{"file": "b.rb", "line": 1}, 2]',
+    '{"file": "b.rb", "line": 9',
   ]) {
     for (const info of ['json', '']) {
       for (const result of [`${real}\n${fenced(info, bad)}`, `${fenced(info, bad)}\n${real}`]) {
@@ -179,6 +180,36 @@ test('an unusable list-like block fails with stage capture even beside a usable 
         assertFails(r, 'capture', result);
         assert.equal(r.mode, null, result);
       }
+    }
+  }
+});
+
+test('a fenced array of strings or numbers, or an unparsable block with no "file", is not a findings list', () => {
+  const real = fenced('json', J([{ file: 'a.rb', line: 3, summary: 's' }]));
+  for (const quoted of [
+    fenced('json', '["dist/**", "vendor/**"]'),
+    fenced('', '[1, 2, 3].each { |x| puts x }'),
+    fenced('json', '[1, 2]'),
+    fenced('', '[package]\nname = "x"'),
+    fenced('json', '[[1, 2], [3]]'),
+  ]) {
+    for (const result of [`${real}\nAlso:\n${quoted}`, `${quoted}\n${real}`]) {
+      assert.deepEqual(jsonFindings(result), { list: [{ file: 'a.rb', line: 3, summary: 's' }], problem: null }, result);
+      assertGrounded(ground(result, raws(['a.rb', 3])), 'json', result);
+    }
+  }
+  const text = `- lib/a.rb:3: total skips the guard\n\n${fenced('', '[package]\nname = "cart"')}`;
+  assert.deepEqual(jsonFindings(text), { list: null, problem: null });
+  assertGrounded(ground(text, raws(['lib/a.rb', 3])), 'text', 'an unlabeled [package] fence beside text findings');
+});
+
+test('a cut-off findings list in a closed fence still fails closed', () => {
+  const real = fenced('json', J([{ file: 'a.rb', line: 3, summary: 's' }]));
+  for (const info of ['json', '']) {
+    const cut = fenced(info, '[{"file": "a.rb", "line":');
+    for (const result of [cut, `${real}\n${cut}`, `- lib/a.rb:3: x\n${cut}`]) {
+      assert.match(jsonFindings(result).problem, /fenced block \d+ looks like a findings list/, result);
+      assertFails(ground(result, raws(['a.rb', 3])), 'capture', result);
     }
   }
 });

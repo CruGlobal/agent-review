@@ -2522,6 +2522,18 @@ test('the capture spec records the fresh-review changes to the hooks in section 
   assert.ok(!amendment.includes('—'), 'new prose uses no em dashes');
 });
 
+const SECTION4_FRESH_NEEDLES = [
+  'parses to an object with a `findings` key, parses to an array that is empty or holds at least one plain object, or does not parse and contains `"file"`',
+];
+
+test('the capture spec records the fresh-review changes to the check in section 4', () => {
+  const amendment = specAmendment('### 4. The check', '### 5.');
+  for (const needle of SECTION4_FRESH_NEEDLES) {
+    assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('\u2014'), 'new prose uses no em dashes');
+});
+
 test('README states how the capture, the wait, and the proof behave, and what they cannot catch', () => {
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
   const engine = readme.slice(readme.indexOf('**How the result is captured.**'), readme.indexOf('**`effort=max` works'));

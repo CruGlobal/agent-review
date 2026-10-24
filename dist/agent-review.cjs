@@ -19103,11 +19103,10 @@ var require_codeReviewProof = __commonJS({
       if (block.info !== "json" && block.info !== "") return null;
       const body = block.body.trim();
       const parsed = parseJson(body);
-      if (!parsed) {
-        return body.startsWith("[") || body.startsWith("{") && body.includes('"findings"') ? { list: null } : null;
-      }
+      if (!parsed) return body.includes('"file"') ? { list: null } : null;
       const { value } = parsed;
-      if (!Array.isArray(value) && !(isPlainObject(value) && Object.hasOwn(value, "findings"))) return null;
+      const listLike = Array.isArray(value) ? value.length === 0 || value.some(isPlainObject) : isPlainObject(value) && Object.hasOwn(value, "findings");
+      if (!listLike) return null;
       const list = unwrapFindings(value);
       return { list: list && list.every(hasFile) ? list : null };
     }

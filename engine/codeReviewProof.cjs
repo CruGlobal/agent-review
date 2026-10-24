@@ -50,17 +50,18 @@ function hasFile(value) {
 }
 
 // Returns null for a block that is not list-like, else { list } with list null when the block is
-// unusable. A block that fails to parse is still list-like when it starts like a list, so a cut-off
-// or malformed list can never pass as quoted config.
+// unusable. A block that fails to parse is still list-like when it names "file", so a cut-off or
+// malformed list can never pass as quoted code.
 function listOf(block) {
   if (block.info !== 'json' && block.info !== '') return null;
   const body = block.body.trim();
   const parsed = parseJson(body);
-  if (!parsed) {
-    return body.startsWith('[') || (body.startsWith('{') && body.includes('"findings"')) ? { list: null } : null;
-  }
+  if (!parsed) return body.includes('"file"') ? { list: null } : null;
   const { value } = parsed;
-  if (!Array.isArray(value) && !(isPlainObject(value) && Object.hasOwn(value, 'findings'))) return null;
+  const listLike = Array.isArray(value)
+    ? value.length === 0 || value.some(isPlainObject)
+    : isPlainObject(value) && Object.hasOwn(value, 'findings');
+  if (!listLike) return null;
   const list = unwrapFindings(value);
   return { list: list && list.every(hasFile) ? list : null };
 }
