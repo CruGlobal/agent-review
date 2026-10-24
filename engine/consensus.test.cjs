@@ -233,8 +233,8 @@ test('(h) chill profile drops an uncorroborated severity-3 finding but keeps a c
   assert.equal(findings[0].severity, 3);
 });
 
-// --- Controller ruling: automatic merging requires a clique, not a connected ---
-// --- component. A-B and B-C can each satisfy sameGroup while A-C does not.   ---
+// --- Automatic merging requires a clique, not a connected component. ---
+// --- A-B and B-C can each satisfy sameGroup while A-C does not.      ---
 
 test('(clique) A-B and B-C match but A-C does not: NOT one group of 3 -- A+B merge, C stays separate, with a candidate pair', () => {
   const findingsByAgent = {
@@ -344,7 +344,7 @@ test('(jaccard) token sets just under 0.5 Jaccard are pinned and do not group', 
   assert.equal(candidates.length, 1); // still close in file/line, so it's a candidate
 });
 
-// --- Controller ruling: `fix` threads through the pipeline additively, merged like `line` ---
+// --- `fix` threads through the pipeline additively, merged like `line` ---
 // --- (highest-severity member's fix wins). ---
 
 test('(fix) singleton entries carry the raw fix field through, empty string when absent', () => {

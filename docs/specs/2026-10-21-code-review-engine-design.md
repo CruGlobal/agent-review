@@ -489,3 +489,4 @@ else stands.
   when it cannot read the config. F: the start-up line prints after auto mode resolves, shows the
   final mode and a skip, notes the `--max-findings` reset whenever `max_findings` is not set, and
   notes any leftover CI workflow.
+- On 2026-10-23, a hook now captures `/code-review`'s result and the proof checks the lane against that capture, so the lane no longer saves `/tmp/code_review_raw.txt` itself. See `docs/specs/2026-10-23-code-review-capture-design.md`.

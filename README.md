@@ -171,8 +171,19 @@ repo-specific one) when its own triggers match. The depth words (`quick`, `stand
 do not add or remove reviewers under this engine. `/code-review` has no security pass and never
 asks for tests, which is why those reviewers stay on.
 
-**How findings are scored.** The lane saves what `/code-review` returned, and then agent-review
-reads each finding, looks at the code, and scores it on its own 1 to 10 scale. A 7 means the
+**How the result is captured.** The lane does not copy `/code-review`'s answer by hand. A plugin
+hook writes it to a private file, `/tmp/agent-review-<uid>`, which only your user can open
+(mode 0700, owned by you, checked before every read and write). The hooks act only while a
+review is running, and a capture expires after 3 hours. They never touch your
+own `/code-review` runs. The lane reads the capture with `agent-review capture show`.
+
+**The review waits for `/code-review` to finish.** The lane waits with `agent-review
+capture-wait`, up to a limit that depends on the effort: `low` 10 minutes, `medium` 15, `high`
+20, `xhigh` 40, `max` 120. If the limit passes first, the review fails closed and posts no
+report.
+
+**How findings are scored.** The lane lists the findings it read from the captured text, and then
+agent-review reads each finding, looks at the code, and scores it on its own 1 to 10 scale. A 7 means the
 same thing whichever engine found it. The rules:
 
 - Cleanups (simplification, efficiency, reuse, and similar) score 6 at most, so they never block.
@@ -180,7 +191,10 @@ same thing whichever engine found it. The rules:
   fails. Without those it stays as a suggestion at 6.
 - A finding is deleted only when it is proven wrong by quoting the exact code. If the scorer just
   doubts it, the finding stays, at 4 or below, with a note.
-- Deleted findings are listed in the report, with the quote, so you can check the work.
+- A finding is dropped only for one of two reasons. It is `excluded` by a glob in your
+  `excluded_paths`, or it is `disproved` by a quoted `path:line`. Dropped findings are listed in
+  the report, so you can check the work.
+- Every finding the lane listed must be scored or dropped exactly once, by its number.
 - On a re-review, a finding outside the new commits scores 6 at most. It shows up as a
   suggestion and cannot block you.
 - On every review, not only re-reviews, a reworded suggestion within 5 lines of an older open or
@@ -189,8 +203,11 @@ same thing whichever engine found it. The rules:
 - If another reviewer flags the same spot with a lower score, a proven 7 or more from any
   reviewer keeps its score through the merge instead of being averaged down.
 
-**It stops if `/code-review` did not really run.** If the saved output is missing or does not
-look like a `/code-review` result, the review stops and posts nothing. It never quietly falls
+**It stops if `/code-review` did not really run.** The check `agent-review code-review-proof`
+compares the lane's list with the text the hook captured. At `xhigh` and `max` the lane's list
+must match the result's JSON list one to one. At the other levels it must match the result's
+finding lines, one entry per line. If the capture is missing, or the lane's list does not match it,
+the review stops and posts nothing. It never quietly falls
 back to the old reviewers, and it never approves without its main finder. It needs a Claude Code
 that has the built-in `/code-review` (this was built and tested on 2.1.306). If you see the stop
 message, update Claude Code, or run again with `engine=agent-review`.
@@ -420,9 +437,9 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   So rules learned from the `architecture` or `simplification` reviewer never match a `code-review`
   finding. And `/code-review` rewords the same finding from run to run, so its findings rarely
   match each other either. Expect dismissed findings to come back, and dismiss them again.
-- **The `/code-review` proof is written by the reviewer it checks.** Only the reviewing subagent
-  sees what the Skill tool returns, so that subagent saves `/tmp/code_review_raw.txt` itself. The
-  engine checks the file's shape, but it cannot prove the subagent did not make it up.
+- **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
+  lane, and the check reads that file. But a lane runs as the same user, so it could replace the
+  file. The check cannot rule that out.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.
@@ -438,6 +455,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | Path | What it is |
 | --- | --- |
 | `.claude-plugin/` | `marketplace.json` + `plugin.json` — plugin/marketplace manifests |
+| `hooks/` | `hooks.json` - the capture hooks (`PostToolUse` on `Skill`, and `SubagentStop`). They run `agent-review hook ...` and do nothing unless a review has armed capture |
 | `skills/init/` | `/agent-review:init` — bootstrap skill (stack scan + PR-history mining) |
 | `skills/review/` | `/agent-review:review` — review orchestrator skill (also the `incremental` mode) |
 | `skills/re-review/` | `/agent-review:re-review` — thin driver: `review auto incremental` |

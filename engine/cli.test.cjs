@@ -99,7 +99,7 @@ test('ctx()-derived reviewDirRel reaches buildPlan and suppresses self-match und
     excluded_paths: [],
     risk: {
       // Zero-point pattern for the reviewer's own config path: keeps this file
-      // out of the unmatched-coverage guarantee's floor (Task 1) so this test
+      // out of the unmatched-coverage guarantee's floor so this test
       // isolates only what it's meant to check — content self-match suppression.
       patterns: [{ glob: '.review/**', points: 0, tier: 'low' }],
       volume_multiplier: [{ upTo: null, points: 0 }],
@@ -498,9 +498,8 @@ function writeMinimalConfig(root) {
   ].join('\n'));
 }
 
-// Regression coverage: `run`'s positional mode arg used to be validated against MODES
-// but never actually passed into buildPlan's input object, so plan.mode was always the
-// buildPlan default ('standard') regardless of what was requested on the command line.
+// `run`'s positional mode arg must reach buildPlan's input, so plan.mode matches the request
+// instead of defaulting to 'standard'.
 test('run <mode> passes the requested mode through to buildPlan, visible in both the preflight output and the tmp plan file', () => {
   const root = tmpGitRepo();
   try {

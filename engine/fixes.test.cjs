@@ -1,5 +1,5 @@
 'use strict';
-// Regression tests for the dogfood-review fixes (PR #1858).
+// Pins for review-fix behavior: fix threading, merging, and reporting.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { writeFileSync, mkdtempSync, rmSync } = require('node:fs');

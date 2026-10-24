@@ -170,7 +170,7 @@ test('an unusable list-like block fails with stage capture even beside a usable 
   }
 });
 
-test('a list padded with a no-break space or BOM is usable (final review #42)', () => {
+test('a list padded with a no-break space or BOM is usable ', () => {
   for (const pad of ['\u00a0', '\ufeff', '  ']) {
     const result = fenced('json', `${pad}${J([{ file: 'a.rb', line: 3 }])}${pad}`);
     assert.deepEqual(jsonFindings(result), { list: [{ file: 'a.rb', line: 3 }], problem: null }, J(pad));
@@ -211,7 +211,7 @@ test('an all-empty JSON list never erases text finding lines', () => {
   }
 });
 
-test('text shapes from final review #3 each ground a matching entry', () => {
+test('each supported text shape grounds a matching entry', () => {
   for (const [line, file, at] of [
     ['**app/a.rb:12**: x', 'app/a.rb', 12],
     ['1. `a.js:3`: x', 'a.js', 3],

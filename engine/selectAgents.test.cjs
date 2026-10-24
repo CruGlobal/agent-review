@@ -76,7 +76,7 @@ test('selected agents carry their config triggers verbatim', () => {
   assert.equal(architecture.triggers, undefined);
 });
 
-// Task 2 (slice) reads `always` off the plan agent directly — it sits beside
+// Slicing reads `always` off the plan agent directly — it sits beside
 // `triggers` in config, not inside it — to decide the full-diff rule.
 test('selected agents carry the config always flag beside triggers', () => {
   const sel = selectAgents(
@@ -196,7 +196,7 @@ test('falls back to the first escalating agent in config order when there is no 
   assert.equal(forced.id, 'data-integrity', 'first escalates:true agent in config order wins');
 });
 
-// I4a (final review, belt-and-suspenders): an operator explicitly de-escalating
+// An operator explicitly de-escalating
 // the security lane must not silently defeat the coverage guarantee when a
 // genuinely escalating lane is available — prefer it over an id-only match.
 test('coverage guarantee prefers a genuinely escalating lane over a de-escalated security lane', () => {

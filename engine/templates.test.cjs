@@ -990,7 +990,7 @@ test('the Build the Review Plan & Load Evidence block sources review_env.sh befo
   // for --mode and the gate-plan aliasing check respectively. Skipping the source line silently
   // sends `--mode ''` (auto mode never resolves) and aliases an empty $FULL_RANGE to an empty
   // $RANGE (wrongly treating every re-review as the full PR).
-  // Task 4 split the CI-path setup into three blocks per the brief's original grouping (mode
+  // The CI-path setup is three blocks (mode
   // parse/CI-detect/config-validate/dirs; PR-context/diff-manifest; plan/evidence, with an
   // explicit REVIEW_SCOPE model checkpoint between the second and third) — this is the third.
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
@@ -1016,7 +1016,7 @@ test('a score-0 skip computes status from carried-forward state and surfaces ope
   assert.ok(/previously-found blocker\(s\) remain open/.test(skip), 'carried-forward open blockers must be surfaced in the skip note');
 });
 
-// --- Ponytail-consensus Task 3: skill rewiring — engine consensus replaces in-context ---
+// --- Ponytail-consensus: skill rewiring — engine consensus replaces in-context ---
 // --- grouping/averaging, agents hand off via files at every stage that reads findings. ---
 
 function stageSlice(skill, startHeader, endHeader) {
@@ -1096,7 +1096,7 @@ test('I5: quick mode always retains a coverage-forced lane, even past the 3-agen
   );
 });
 
-test('the launched-subset plan derives at Stage 1 launch time, from lanes actually launched (controller ruling)', () => {
+test('the launched-subset plan derives at Stage 1 launch time, from lanes actually launched', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
   assert.ok(
@@ -1126,7 +1126,7 @@ test('the launched-subset plan derives at Stage 1 launch time, from lanes actual
   );
   assert.ok(
     !buildPlanBlock.includes('/tmp/review_plan_launched.json'),
-    'the old post-slice launched-subset derivation must be gone — Task 3 fix moved it to Stage 1 launch time',
+    'the old post-slice launched-subset derivation must be gone; it derives at Stage 1 launch time',
   );
 });
 
@@ -1158,7 +1158,7 @@ test('Stage 2 collect cross-checks each lane\'s returned N against its findings 
   );
 });
 
-test('a lane that fails twice stops the run with no report — never wired into irreversible/status (controller ruling)', () => {
+test('a lane that fails twice stops the run with no report — never wired into irreversible/status', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
   assert.ok(
@@ -1236,7 +1236,7 @@ test('Stage 3 debate prompt sources both self and peer findings from /tmp/agent_
   );
 });
 
-test('Stage 4 rebuttal prompt re-sources YOUR ORIGINAL FINDINGS from the agent\'s own findings file (controller addition B)', () => {
+test('Stage 4 rebuttal prompt re-sources YOUR ORIGINAL FINDINGS from the agent\'s own findings file', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage4 = stageSlice(skill, '## Stage 4 — Rebuttals', '## Stage 5 — Consensus Synthesis');
   assert.ok(/\/tmp\/agent_findings\//.test(stage4), 'rebuttal prompt must reference the findings-file path');
@@ -1254,7 +1254,7 @@ test('the archetype instructs writing the findings file via node -e and JSON.str
   assert.ok(/recommendation: ≤ ?4 lines/.test(archetype), 'archetype must cap recommendation to <=4 lines');
 });
 
-// --- Ponytail-consensus Task 4: CI bash-block consolidation — fewer separate Bash-tool turns ---
+// --- Ponytail-consensus: CI bash-block consolidation — fewer separate Bash-tool turns ---
 // --- for a CI run. Each turn is a fresh shell (see the "Cross-stage state" note), and every ---
 // --- turn boundary is a place a bwrap sandbox bind-race can strike mid-review. ---
 
@@ -1278,7 +1278,7 @@ function countBashFences(text) {
 }
 
 test('the REVIEW_SCOPE checkpoint is an explicit model decision between the diff manifest and the plan invocation', () => {
-  // Controller ruling: REVIEW_SCOPE requires the model to read the diff manifest's output before
+  // REVIEW_SCOPE requires the model to read the diff manifest's output before
   // the plan runs — a genuine judgment call, not scriptable, so it cannot live inside a merged
   // bash block. This pins that the checkpoint sits between the two blocks (not folded into
   // either), and that the plan block picks up whatever the model set.
@@ -1335,16 +1335,15 @@ test('the CI path uses at most 14 bash turns (Stage 0A through Stage 6)', () => 
   }
   // Stage 5B ("SKIP THIS ENTIRE STAGE IN CI MODE") and the local-only plugin-staleness check
   // ("**Locally** the opposite can be stale...") never execute during a CI run, so they are
-  // outside the CI-path turn budget — Task 4 leaves both untouched rather than risk a merge
-  // across code that only ever runs locally.
+  // outside the CI-path turn budget — they stay unmerged because they only ever run locally.
   //
-  // The budget is 12, not 10 (a controller ruling after review): REVIEW_SCOPE requires the model
+  // The budget is 12, not 10: REVIEW_SCOPE requires the model
   // to read the diff manifest's changed-file list and stat output — a genuine decision, not
   // scriptable — before the plan invocation. That checkpoint can't sit inside a merged bash
   // block, so Stage 0A/0's setup is three turns (mode-parse/CI-detect/config-validate/dirs;
   // PR-context/diff-manifest; plan/evidence) instead of one, +2 over the fence-count-only budget.
   //
-  // 13, not 12 (rtk-slicing controller ruling, Task 3 fix): the launched-subset plan consumed by
+  // 13, not 12: the launched-subset plan consumed by
   // Stage 2's cross-check and Stage 5's consensus must derive from the lanes ACTUALLY launched —
   // the one point where slice-empty skips, quick mode's 3-agent cap, and deep mode's config-only
   // expansion all converge. That set is only fully known immediately after Stage 1 issues its
@@ -1352,7 +1351,7 @@ test('the CI path uses at most 14 bash turns (Stage 0A through Stage 6)', () => 
   // impact" bash block (which must run BEFORE those Task calls, to feed the archetype prompts) —
   // it is an unavoidable extra turn, +1 over the previous budget.
   //
-  // 14, not 13 (round-3 controller ruling): the start-up line is its own every-mode turn after
+  // 14, not 13: the start-up line is its own every-mode turn after
   // Auto Mode Resolution, because a model skips that auto-only section on a standard run.
   const ciPath = skill.slice(stage0AStart, stage5BStart) + skill.slice(stage6Start, localOnlyStart);
   const count = countBashFences(ciPath);
@@ -1951,7 +1950,7 @@ test('posted review comments keep every marker on one line under zsh and bash, s
   assert.strictEqual(selfChecks.length, 2, 'both comment-assembly blocks must be followed by the marker self-check');
 
   const head = 'a'.repeat(40);
-  // A finding whose evidence holds a line break: zsh's echo turned its \n escape into a real one (PR #3665).
+  // A finding whose evidence holds a line break: zsh's echo turned its \n escape into a real one.
   const ledger = [{ n: 1, id: 'f1', evidence: 'L586: a = {...}\nL587: b = {...}', status: 'open' }];
   const status = { v: 1, head, risk: 'LOW', openBlockers: 0, pass: true, irreversible: false, irreversibleReasons: [] };
   const shells = ['bash', 'zsh'].filter((sh) => {
@@ -2305,7 +2304,7 @@ test('init writes engine and reviews_run only for a non-default answer', () => {
   const guarded = blocks.filter((block) => block.includes('if [ "$REVIEWS_RUN" = "local-and-ci" ]; then'));
   assert.equal(guarded.length, 2, 'the 3C copy block and the 3E git add block');
   for (const block of guarded) {
-    // Task 11 (#8): the answer is saved in 3A, so the block sources it and never reads config back.
+    // The answer is saved in 3A, so the block sources it and never reads config back.
     assert.ok(block.includes('. /tmp/agent_review_init.sh'), `the guard block sources the saved answer:\n${block}`);
     assert.ok(block.indexOf('. /tmp/agent_review_init.sh') < block.indexOf('if [ "$REVIEWS_RUN"'), 'the source comes before the guard');
   }
@@ -2389,14 +2388,14 @@ test('README says CI findings carry in only until you post your own local report
   assert.ok(!ci.includes('—'), 'new prose uses no em dashes');
 });
 
-test('README names the self-written proof file as a known limitation', () => {
+test('README names the overwritable capture file as a known limitation', () => {
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
   const limits = readme.slice(readme.indexOf('## Known limitations'), readme.indexOf('## Repo layout'));
-  const start = limits.indexOf('**The `/code-review` proof is written by the reviewer it checks.**');
-  assert.notStrictEqual(start, -1, 'the known limitations list the proof file');
+  const start = limits.indexOf('**A lane could still overwrite the capture file on purpose.**');
+  assert.notStrictEqual(start, -1, 'the known limitations list the capture file');
   const bullet = limits.slice(start, limits.indexOf('\n- **', start)).replace(/\s+/g, ' ');
-  assert.ok(bullet.includes('`/tmp/code_review_raw.txt`'));
-  assert.ok(bullet.includes('cannot prove'), bullet);
+  assert.ok(bullet.includes('cannot rule that out'), bullet);
+  assert.ok(!bullet.includes('code_review_raw.txt'), 'the old lane file is gone');
   assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
 });
 

@@ -128,7 +128,7 @@ test('sliceForAgent is pure — same inputs, same output, no I/O side effects', 
   assert.deepEqual(a, b);
 });
 
-// --- Fix report follow-ups (controller rulings) ---
+// --- Fix report follow-ups ---
 
 test('content-trigger slicing sees deletions too — a removed dangerous call must be caught', () => {
   const diff = [
