@@ -98,6 +98,12 @@ If `last_assistant_message` is missing or empty, `result` is the last assistant 
 
 Both writes are atomic: write a temp file, then rename it.
 
+**Amendment, 2026-10-23 (headless check, plan Task 1).** A headless run on Claude Code 2.1.309 omits `background` from `tool_response` entirely. Its keys are `success`, `commandName`, `status: "forked"`, `agentId`, and `result`. The rule `background === true` sends it down the foreground path, as intended.
+- `result` is the fork's full final text, with no `Result:` header. It equals the fork's `last_assistant_message`.
+- In both runs (`low` and `xhigh`), the fork's `SubagentStop` fired before `PostToolUse(Skill)`.
+- The payload's `agent_id` is the caller's id. The fork is identified only by `tool_response.agentId`.
+- The Bash sandbox shares `/tmp` with the hooks.
+
 **Wiring and tests.** The hook logic lives in a pure, unit-tested engine module (`engine/captureHook.cjs`). It takes the payload and the arming and pending state, and returns the file writes to make. The CLI wrapper does the I/O. Engine tests cover:
 - not armed;
 - args mismatch;
