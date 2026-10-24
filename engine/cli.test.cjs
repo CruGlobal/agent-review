@@ -1181,6 +1181,55 @@ test('code-review-proof lists --promote in its usage and needs a value for it', 
   }
 });
 
+// A git repository at <parent>/repo with `files` committed; lane files and the capture go in parent.
+function proofRepo(files) {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-crproof-git-'));
+  const root = join(parent, 'repo');
+  mkdirSync(root);
+  const git = (...args) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim();
+  git('init', '-q');
+  git('config', 'user.email', 'test@example.com');
+  git('config', 'user.name', 'Test');
+  for (const [path, text] of Object.entries(files)) {
+    mkdirSync(join(root, path, '..'), { recursive: true });
+    writeFileSync(join(root, path), text);
+  }
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return { parent, root, git };
+}
+
+test('code-review-proof reads root-level file names from git ls-files under --root', () => {
+  const { parent, root } = proofRepo({ Gemfile: 'gem "rack"\n', 'lib/cart.rb': 'x = 1\n' });
+  try {
+    writeFileSync(join(root, 'untracked.rb'), 'y = 2\n');
+    const result = [
+      '- Gemfile:12 pins an old rack',
+      '- cart.rb:3 skips the guard',
+      'Calls to api.stripe.com:443 time out, the base image ruby:3.3 is old, and untracked.rb:1 is new.',
+    ].join('\n');
+    const raw = [
+      { n: 1, file: 'Gemfile', line: 12, summary: 's' },
+      { n: 2, file: 'cart.rb', line: 3, summary: 's' },
+    ];
+    const scored = raw.map((entry) => ({ ...PROOF_SCORED[0], raw: entry.n, file: entry.file, line: entry.line }));
+    const f = proofFiles(parent, { raw, scored, dropped: [], result });
+    const proof = () => withCaptureDir(f.capDir, () => JSON.parse(run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere'])).s));
+    const ok = proof();
+    assert.equal(ok.ok, true, ok.reason);
+    assert.equal(ok.mode, 'text');
+
+    writeFileSync(f.raw, JSON.stringify([raw[1]].map((entry) => ({ ...entry, n: 1 }))));
+    writeFileSync(f.findings, JSON.stringify([{ ...scored[1], raw: 1 }]));
+    const lost = proof();
+    assert.equal(lost.ok, false);
+    assert.equal(lost.stage, 'lane');
+    assert.match(lost.reason, /\(Gemfile:12\) is a finding line that no raw entry claims/);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test('code-review-proof checks a disproof against the files under --root', () => {
   const parent = mkdtempSync(join(os.tmpdir(), 'ar-crproof-disproof-'));
   const root = join(parent, 'repo');

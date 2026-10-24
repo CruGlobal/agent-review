@@ -17,6 +17,7 @@ const {
   checkGrounding,
   checkLaneOutput,
   checkCodeReviewRun,
+  trackedLookup,
 } = require('./codeReviewProof.cjs');
 const { EFFORTS } = require('./vocabulary.cjs');
 const { CAPTURE_SOURCE } = require('./captureHook.cjs');
@@ -38,8 +39,10 @@ const captureOf = (result, over = {}) => ({
   ...over,
 });
 const raws = (...spots) => spots.map(([file, line], i) => ({ n: i + 1, file, line, summary: `${file} finding ${i + 1}` }));
+// A path with no "/" is a location only when the repository tracks it, so these are the root-level files the tests cite.
+const TRACKED = trackedLookup(['a.rb', 'b.rb', 'c.rb', 'd.rb', 'x.rb', 'y.rb', 'a.js', 'app.js']);
 const ground = (result, rawEntries, over = {}) =>
-  checkGrounding({ capture: captureOf(result), runId: 'r1', rawEntries, fileExists: () => false, root: '/repo', ...over });
+  checkGrounding({ capture: captureOf(result), runId: 'r1', rawEntries, tracked: TRACKED, root: '/repo', ...over });
 const assertGrounded = (r, mode, label) => {
   assert.deepEqual(r, { ok: true, stage: null, reason: 'ok', mode }, label);
 };
@@ -271,7 +274,7 @@ test('each supported text shape grounds a matching entry', () => {
   ]) {
     const result = `Correctness:\n${line}\nCleanups:\n(none)\n`;
     assert.deepEqual(
-      findingLines(result).map((l) => [l.index, l.mentions.map((m) => [repoRelative(m.file, '/repo'), m.line])]),
+      findingLines(result, TRACKED).map((l) => [l.index, l.mentions.map((m) => [repoRelative(m.file, '/repo'), m.line])]),
       [[1, [[file, at]]]],
       line,
     );
@@ -320,6 +323,45 @@ test('localhost:3000 and https://example.com:443/x are not mentions', () => {
   assert.deepEqual(findingLines('Gemfile:12 pins an old rack', () => false), [], 'a bare name needs the file to exist');
   assert.deepEqual(findingLines('Gemfile:12 pins an old rack'), [], 'no callback means no bare names');
   assert.deepEqual(findingLines('2026:10 and a.rb:x are not mentions', () => true), []);
+});
+
+test('a path with no / is a mention only when the repository tracks that path or that file name', () => {
+  const tracked = trackedLookup(['Gemfile', 'lib/cart.rb', 'docker/Dockerfile']);
+  const mentions = (line) => findingLines(line, tracked).map((l) => l.mentions);
+  assert.deepEqual(mentions('calls to api.stripe.com:443 time out'), [], 'a host and port');
+  assert.deepEqual(mentions('the base image ruby:3.3 is old'), [], 'an image tag');
+  assert.deepEqual(mentions('Gemfile:12 pins an old rack'), [[{ file: 'Gemfile', line: 12 }]], 'a tracked path');
+  assert.deepEqual(mentions('cart.rb:12 skips the guard'), [[{ file: 'cart.rb', line: 12 }]], 'a tracked file name');
+  assert.deepEqual(mentions('Dockerfile:3 pins ruby:3.3'), [[{ file: 'Dockerfile', line: 3 }]]);
+  assert.deepEqual(mentions('- "Gemfile":12 pins rack'), [[{ file: 'Gemfile"', line: 12 }]], 'wrappers are trimmed before the lookup');
+  assert.deepEqual(mentions('car.rb:12 and rb:3 and lib:4'), [], 'no partial names');
+  assert.deepEqual(
+    mentions('base image docker.io/library/ruby:3.3 is old'),
+    [[{ file: 'docker.io/library/ruby', line: 3 }]],
+    'a path with a / keeps the old rule',
+  );
+  assert.deepEqual(findingLines('- a.rb:3: bug').map((l) => l.mentions), [], 'with no file information a no-slash path is not a mention');
+  assert.deepEqual(findingLines('- a.rb:3: bug', () => false).map((l) => l.mentions), []);
+
+  const prose = '(none)\n\nCalls to api.stripe.com:443 time out, and the base image ruby:3.3 is old.';
+  assertGrounded(ground(prose, [], { tracked }), 'empty');
+  assertGrounded(ground('- Gemfile:12 pins an old rack\n', raws(['Gemfile', 12]), { tracked }), 'text');
+  assertGrounded(ground('- cart.rb:12 skips the guard\n', raws(['cart.rb', 12]), { tracked }), 'text');
+  assertFails(ground('- cart.rb:12 skips the guard\n', [], { tracked }), 'lane', 'a tracked file name must be claimed');
+});
+
+test('a path:0 mention is a mention of the file with no line, which a null-line entry claims', () => {
+  assert.deepEqual(findingLines('lib/a.rb:0 - x')[0].mentions, [{ file: 'lib/a.rb', line: null }]);
+  assertGrounded(ground('lib/a.rb:0 - x', raws(['lib/a.rb', null])), 'text');
+  for (const zero of ['lib/a.rb:00 - x', 'lib/a.rb:0-4 - x', '`lib/a.rb:0`: x']) {
+    assertGrounded(ground(zero, raws(['lib/a.rb', null])), 'text', zero);
+  }
+  assertGrounded(ground('- lib/a.rb:0 - x\n- lib/b.rb:5: y\n', raws(['lib/b.rb', 5], ['lib/a.rb', null])), 'text');
+  const lost = ground('lib/a.rb:0 - x', []);
+  assertFails(lost, 'lane', 'a path:0 line still needs a claim');
+  assert.match(lost.reason, /\(lib\/a\.rb:0\) is a finding line/);
+  assertFails(ground('lib/a.rb:0 - x', raws(['lib/b.rb', null])), 'lane', 'only an entry for its own file claims it');
+  assertFails(ground('lib/a.rb:0 - x', raws(['lib/a.rb', 1])), 'lane', 'a lined entry does not claim it');
 });
 
 test('snake_case paths survive normalization', () => {
@@ -386,7 +428,7 @@ test('findings inside a plain or prose fence must be claimed', () => {
   for (const info of ['', 'text', 'txt', 'md', 'markdown', 'plain', 'TEXT', 'text title="Findings"']) {
     for (const fence of ['```', '~~~']) {
       const result = `Correctness:\n${fence}${info}\n- a.rb:3: total skips the guard\n${fence}\n(none)\n`;
-      assert.deepEqual(findingLines(result).map((l) => [l.index, l.mentions]), [[2, [{ file: 'a.rb', line: 3 }]]], `${fence}${info}`);
+      assert.deepEqual(findingLines(result, TRACKED).map((l) => [l.index, l.mentions]), [[2, [{ file: 'a.rb', line: 3 }]]], `${fence}${info}`);
       assertFails(ground(result, []), 'lane', `${fence}${info}`);
       assertGrounded(ground(result, raws(['a.rb', 3])), 'text', `${fence}${info}`);
     }
@@ -396,7 +438,7 @@ test('findings inside a plain or prose fence must be claimed', () => {
 test('a fence labeled with a language citing lib/b.rb:9 still needs no claim', () => {
   for (const info of ['ruby', 'js', 'python', 'sh', 'console', 'diff', 'json', 'textile']) {
     const result = `- a.rb:3: total skips the guard. The caller:\n${fenced(info, '# lib/b.rb:9\ntotal(cart) # from lib/b.rb:9:in `checkout`')}`;
-    assert.deepEqual(findingLines(result).map((l) => l.index), [0], info);
+    assert.deepEqual(findingLines(result, TRACKED).map((l) => l.index), [0], info);
     assertGrounded(ground(result, raws(['a.rb', 3])), 'text', info);
   }
   const listLike = `All good.\n${fenced('', '{"findings": [], "note": "see lib/b.rb:9"}')}`;
@@ -441,7 +483,7 @@ test("a mention's path matches with wrapper characters trimmed", () => {
 
 test('finding lines skip fenced lines and index every line of the result', () => {
   const result = `intro\n${fenced('ruby', 'a.rb:1 inside a fence')}- b.rb:2: x\n`;
-  assert.deepEqual(findingLines(result).map((l) => [l.index, l.mentions]), [[4, [{ file: 'b.rb', line: 2 }]]]);
+  assert.deepEqual(findingLines(result, TRACKED).map((l) => [l.index, l.mentions]), [[4, [{ file: 'b.rb', line: 2 }]]]);
   assert.equal(explicitEmpty(`${fenced('', '(none)')}`), false, 'a fenced marker does not count');
   assert.equal(explicitEmpty('  (none)  \r'), true);
   assert.equal(explicitEmpty('No findings.'), true);
@@ -468,7 +510,7 @@ test('a 50,000-character whitespace line is read in under 100 ms', () => {
   for (const line of lines) {
     for (const result of [`- a.rb:1: bug\n${line}\n`, `- a.rb:1: bug\n\`\`\`\n${line}\n\`\`\`\n`]) {
       const start = process.hrtime.bigint();
-      findingLines(result, () => false);
+      findingLines(result, TRACKED);
       explicitEmpty(result);
       jsonFindings(result);
       ground(result, raws(['a.rb', 1], ['a.rb', 1]));
@@ -520,7 +562,7 @@ test('the capture must exist, come from the hook, match the run, and hold text',
     ['blank result', { ...good, result: ' \n\t' }, /empty/],
   ];
   for (const [label, capture, reason] of cases) {
-    const r = checkGrounding({ capture, runId: 'r1', rawEntries: [], fileExists: () => false, root: '/repo' });
+    const r = checkGrounding({ capture, runId: 'r1', rawEntries: [], tracked: TRACKED, root: '/repo' });
     assertFails(r, 'capture', label);
     assert.match(r.reason, reason, label);
     assert.equal(r.mode, null, label);

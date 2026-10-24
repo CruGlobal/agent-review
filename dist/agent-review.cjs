@@ -19142,12 +19142,12 @@ var require_codeReviewProof = __commonJS({
     }
     var PATH_LEAD = /^[(\[{<"'\u201c\u2018|]+/;
     var LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}])/u;
-    function mentionPath(path, fileExists) {
+    function mentionPath(path, isBareFile) {
       if (!new RegExp("\\p{L}", "u").test(path) || path.startsWith("//")) return false;
-      if (path.includes("/") || path.includes(".")) return true;
-      return Boolean(fileExists && fileExists(path));
+      if (path.includes("/")) return true;
+      return typeof isBareFile === "function" && Boolean(isBareFile(path) || isBareFile(trimWrappers(path)));
     }
-    function mentionsIn(line, fileExists) {
+    function mentionsIn(line, isBareFile) {
       const mentions = [];
       for (const token of line.split(/\s+/)) {
         if (!token.includes(":")) continue;
@@ -19156,13 +19156,22 @@ var require_codeReviewProof = __commonJS({
           const at = LINE_PART.exec(parts[i + 1]);
           if (!at) continue;
           const file = parts[i].replace(PATH_LEAD, "");
-          if (mentionPath(file, fileExists)) mentions.push({ file, line: Number(at[1]) });
+          const number = Number(at[1]);
+          if (mentionPath(file, isBareFile)) mentions.push({ file, line: number > 0 ? number : null });
         }
       }
       return mentions;
     }
+    function mentionSpot(mention) {
+      return `${mention.file}:${mention.line ?? 0}`;
+    }
+    function trackedLookup(paths) {
+      const names = /* @__PURE__ */ new Set();
+      for (const path of paths) names.add(String(path).slice(String(path).lastIndexOf("/") + 1));
+      return (name) => names.has(name);
+    }
     var PROSE_FENCES = /* @__PURE__ */ new Set(["", "text", "txt", "md", "markdown", "plain"]);
-    function textLines(text, fileExists) {
+    function textLines(text, tracked) {
       const { blocks, outside, outsideAt } = scanFences(String(text));
       const raw = outside.map((line, k) => ({ index: outsideAt[k], line }));
       for (const block of blocks) {
@@ -19172,11 +19181,11 @@ var require_codeReviewProof = __commonJS({
       raw.sort((a, b) => a.index - b.index);
       return raw.map(({ index, line }) => {
         const normalized = normalizeLine(line);
-        return { index, text: normalized, mentions: mentionsIn(normalized, fileExists) };
+        return { index, text: normalized, mentions: mentionsIn(normalized, tracked) };
       });
     }
-    function findingLines(text, fileExists) {
-      return textLines(text, fileExists).filter((line) => line.mentions.length > 0);
+    function findingLines(text, tracked) {
+      return textLines(text, tracked).filter((line) => line.mentions.length > 0);
     }
     function jsonLine(value) {
       const m = /^\s*(\d+)/.exec(typeof value === "string" ? value : "");
@@ -19291,7 +19300,7 @@ var require_codeReviewProof = __commonJS({
     function textMatch(rawEntries, lines, root) {
       const candidates = rawEntries.map((entry) => {
         const path = repoRelative(entry.file, root);
-        const fits = entry.line === null ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path, root) : (l) => l.mentions.some((m) => m.line === entry.line && mentionNames(m.file, path, root));
+        const fits = entry.line === null ? (l) => l.mentions.length === 0 ? namesPathIn(l.text, path, root) : l.mentions.some((m) => m.line === null && mentionNames(m.file, path, root)) : (l) => l.mentions.some((m) => m.line === entry.line && mentionNames(m.file, path, root));
         return lines.filter(fits).map((l) => l.index);
       });
       const owner = matchLines(candidates);
@@ -19308,13 +19317,13 @@ var require_codeReviewProof = __commonJS({
       }
       const unclaimed = lines.find((l) => l.mentions.length > 0 && !owner.has(l.index));
       if (unclaimed) {
-        const where = unclaimed.mentions.map((m) => `${m.file}:${m.line}`).join(", ");
+        const where = unclaimed.mentions.map(mentionSpot).join(", ");
         const quoted = JSON.stringify(unclaimed.text.trim().slice(0, 200));
         problems.push(`line ${unclaimed.index + 1} of /code-review's result (${where}) is a finding line that no raw entry claims: ${quoted}`);
       }
       return { mismatch: problems.length > 0 ? problems.join("; ") : null, claimedLines };
     }
-    function ground({ capture, runId, rawEntries, fileExists, root }) {
+    function ground({ capture, runId, rawEntries, tracked, root }) {
       const failAt = (stage, reason, mode2 = null) => ({ verdict: { ok: false, stage, reason, mode: mode2 }, claimedLines: null });
       const unusable = captureProblem(capture, runId);
       if (unusable) return failAt("capture", unusable);
@@ -19326,7 +19335,7 @@ var require_codeReviewProof = __commonJS({
       if (list && list.length > 0) {
         mode = "json";
       } else {
-        lines = textLines(result, fileExists);
+        lines = textLines(result, tracked);
         if (lines.some((l) => l.mentions.length > 0)) mode = "text";
         else if (list || explicitEmpty(result)) mode = "empty";
         else return failAt("capture", "/code-review's result has no findings list and no explicit (none)");
@@ -19412,9 +19421,10 @@ var require_codeReviewProof = __commonJS({
       const read = typeof readLines === "function" ? readLines : () => null;
       const text = normalizeLine(typeof proof === "string" ? proof : "");
       const tries = [];
+      const isBareFile = (path) => path.includes(".") || exists(path);
       for (const token of text.matchAll(/\S+/g)) {
         const quote = text.slice(token.index + token[0].length).replace(QUOTE_LEAD, "");
-        for (const mention of mentionsIn(token[0], exists)) tries.push({ ...mention, quote });
+        for (const mention of mentionsIn(token[0], isBareFile)) tries.push({ ...mention, quote });
       }
       if (tries.length === 0) return "needs a proof that cites a path:line and then quotes the code there";
       let best = null;
@@ -19422,7 +19432,7 @@ var require_codeReviewProof = __commonJS({
         if (!best || rank > best.rank) best = { rank, problem };
       };
       for (const { file, line, quote } of tries) {
-        const at = `${file}:${line}`;
+        const at = mentionSpot({ file, line });
         const path = existingPath(file, root, exists);
         if (!path) {
           miss(0, `has a proof that cites ${at}, but no file ${file} exists in the repository`);
@@ -19433,7 +19443,7 @@ var require_codeReviewProof = __commonJS({
           miss(0, `has a proof that cites ${at}, but ${path} cannot be read`);
           continue;
         }
-        if (line < 1 || line > lines.length) {
+        if (line === null || line > lines.length) {
           miss(1, `has a proof that cites ${at}, but ${path} has ${lines.length} lines`);
           continue;
         }
@@ -19472,7 +19482,7 @@ var require_codeReviewProof = __commonJS({
         const kept = claimed ? claimed.mentions.find((m) => !isExcludedMention(m, excludedPaths, root)) : null;
         if (kept) {
           return {
-            problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${kept.file}:${kept.line}, which no excluded glob matches; score it instead`
+            problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${mentionSpot(kept)}, which no excluded glob matches; score it instead`
           };
         }
         return { why: `excluded path: ${entry.glob}` };
@@ -19538,6 +19548,7 @@ var require_codeReviewProof = __commonJS({
       scoredText,
       droppedText,
       excludedPaths = [],
+      tracked,
       fileExists,
       readLines,
       root
@@ -19549,7 +19560,7 @@ var require_codeReviewProof = __commonJS({
         capture: parsedCapture ? parsedCapture.value : null,
         runId,
         rawEntries,
-        fileExists,
+        tracked,
         root
       });
       const count = Array.isArray(rawEntries) ? rawEntries.length : 0;
@@ -19568,7 +19579,8 @@ var require_codeReviewProof = __commonJS({
       looksFinished,
       checkGrounding,
       checkLaneOutput,
-      checkCodeReviewRun
+      checkCodeReviewRun,
+      trackedLookup
     };
   }
 });
@@ -20586,7 +20598,8 @@ var require_cli = __commonJS({
       CAPTURE_LIMIT_MINUTES,
       checkCodeReviewRun,
       looksFinished,
-      repoRelative
+      repoRelative,
+      trackedLookup
     } = require_codeReviewProof();
     var {
       MAX_RESULT_BYTES,
@@ -20957,6 +20970,17 @@ var require_cli = __commonJS({
         }
         const sleepMs = Math.min(pollMs, deadline - now, limitAt - now, hooksRan ? Infinity : hooksDueAt - now);
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+      }
+    }
+    var GIT_MAX_BUFFER = 512 * 1024 * 1024;
+    function gitIn(root, args) {
+      return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: GIT_MAX_BUFFER });
+    }
+    function trackedFiles(root) {
+      try {
+        return gitIn(root, ["ls-files", "-z"]).split("\0").filter(Boolean);
+      } catch {
+        return [];
       }
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]";
@@ -21469,6 +21493,11 @@ var require_cli = __commonJS({
               return null;
             }
           };
+          let lookup = null;
+          const tracked = (name) => {
+            lookup ??= trackedLookup(trackedFiles(C.ROOT));
+            return lookup(name);
+          };
           const r = checkCodeReviewRun({
             captureText: readIfPresent(capturePath),
             runId,
@@ -21476,6 +21505,7 @@ var require_cli = __commonJS({
             scoredText: scoredBytes?.toString("utf8") ?? null,
             droppedText: readIfPresent(droppedPath),
             excludedPaths,
+            tracked,
             fileExists,
             readLines,
             root: C.ROOT

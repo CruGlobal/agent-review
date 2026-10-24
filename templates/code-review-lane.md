@@ -118,11 +118,14 @@ Find the entries this way:
    string uses the number it starts with (`"42-45"` gives 42). Any other `line` that is not a
    whole number above 0 gives `null`.
 2. Finding lines. Otherwise, every line of the result that cites a location is one raw finding.
-   A location is `path:line` or `path:start-end`, where the path holds a letter and a `/` or a
-   `.`, or names a file in the repository, as in `lib/cart.rb:51` or `Makefile:12`. For
-   `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49. A web
-   address such as `https://example.com:443` is not a location. Backticks and `*` around a
-   location do not matter. This covers bullets, nested bullets, and lines inside a fenced block
+   A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or
+   has no `/` and is a file the repository tracks, by its whole path or by its file name, as in
+   `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the repository has `lib/cart.rb`. So a
+   host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not
+   locations. For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.
+   `path:0` is a location with no line: its raw `line` is `null`. A web address such as
+   `https://example.com:443` is not a location. Backticks and `*` around a location do not
+   matter. This covers bullets, nested bullets, and lines inside a fenced block
    with no label or labeled `text`, `txt`, `md`, `markdown`, or `plain`, but not lines inside a
    code block labeled with a language, such as `js` or `ruby`. List each such line once, using
    the first location on it, even when two lines cite the same location and even when a line

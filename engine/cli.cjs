@@ -46,6 +46,7 @@ const {
   checkCodeReviewRun,
   looksFinished,
   repoRelative,
+  trackedLookup,
 } = require('./codeReviewProof.cjs');
 const {
   MAX_RESULT_BYTES,
@@ -473,6 +474,21 @@ function captureWait({ runId, effort, timeoutSeconds }) {
     }
     const sleepMs = Math.min(pollMs, deadline - now, limitAt - now, hooksRan ? Infinity : hooksDueAt - now);
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+  }
+}
+
+const GIT_MAX_BUFFER = 512 * 1024 * 1024;
+
+function gitIn(root, args) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: GIT_MAX_BUFFER });
+}
+
+// A git failure gives an empty list, and then no path without a "/" counts as a location.
+function trackedFiles(root) {
+  try {
+    return gitIn(root, ['ls-files', '-z']).split('\0').filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
@@ -1025,6 +1041,11 @@ function main(rawArgv) {
           return null;
         }
       };
+      let lookup = null;
+      const tracked = (name) => {
+        lookup ??= trackedLookup(trackedFiles(C.ROOT));
+        return lookup(name);
+      };
       const r = checkCodeReviewRun({
         captureText: readIfPresent(capturePath),
         runId,
@@ -1032,6 +1053,7 @@ function main(rawArgv) {
         scoredText: scoredBytes?.toString('utf8') ?? null,
         droppedText: readIfPresent(droppedPath),
         excludedPaths,
+        tracked,
         fileExists,
         readLines,
         root: C.ROOT,

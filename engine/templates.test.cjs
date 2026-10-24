@@ -860,6 +860,9 @@ test('lane template lists raw findings the way the check grounds them', () => {
     'For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.',
     'When none of these fits, or the result cannot be used, write `[]` as the raw list anyway,',
     'A web address such as `https://example.com:443` is not a location.',
+    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and is a file the repository tracks, by its whole path or by its file name, as in `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the repository has `lib/cart.rb`.',
+    'So a host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not locations.',
+    '`path:0` is a location with no line: its raw `line` is `null`.',
     'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
     'List each such line once, using the first location on it, even when two lines cite the same location and even when a line seems to give only context.',
     'A list that is `[]` never cancels a finding line.',
@@ -871,6 +874,7 @@ test('lane template lists raw findings the way the check grounds them', () => {
     assert.ok(step2.includes(`\`${label}\``), `a fence labeled ${label} holds prose the check reads`);
   }
   assert.ok(!step2.includes('the last such list'), 'two different lists fail the check, so the last one never wins');
+  assert.ok(!step2.includes('where the path holds a letter and a `/` or a `.`'), 'a dot alone no longer makes a location');
   const json = step2.indexOf('1. JSON list.');
   const lines = step2.indexOf('2. Finding lines.');
   const none = step2.indexOf('3. Nothing.');
@@ -2524,6 +2528,8 @@ test('the capture spec records the fresh-review changes to the hooks in section 
 
 const SECTION4_FRESH_NEEDLES = [
   'parses to an object with a `findings` key, parses to an array that is empty or holds at least one plain object, or does not parse and contains `"file"`',
+  'A mention path with no `/` counts only when the repository tracks a file with that exact path or with that file name (`git ls-files` under `--root`, read once per run)',
+  'A `path:0` mention names its file with no line, and a raw entry with `line: null` claims it.',
 ];
 
 test('the capture spec records the fresh-review changes to the check in section 4', () => {
