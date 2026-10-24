@@ -2521,7 +2521,7 @@ test('code-review lane template names the categories in vocabulary order', () =>
 test('hooks.json registers both capture hooks', () => {
   const config = JSON.parse(readFileSync(join(ROOT, 'hooks/hooks.json'), 'utf8'));
   assert.deepStrictEqual(Object.keys(config.hooks).sort(), ['PostToolUse', 'SubagentStop']);
-  const command = (name) => `node "\${CLAUDE_PLUGIN_ROOT}/bin/agent-review" hook ${name}`;
+  const command = (name) => `node "\${CLAUDE_PLUGIN_ROOT}/bin/agent-review" hook ${name} 2>/dev/null || true`;
 
   assert.strictEqual(config.hooks.PostToolUse.length, 1);
   const [post] = config.hooks.PostToolUse;
@@ -2532,6 +2532,26 @@ test('hooks.json registers both capture hooks', () => {
   const [stop] = config.hooks.SubagentStop;
   assert.ok(!('matcher' in stop), 'SubagentStop has no matcher');
   assert.deepStrictEqual(stop.hooks, [{ type: 'command', command: command('subagent-stop'), timeout: 10 }]);
+});
+
+test('the hook commands exit 0 and print nothing when node is not on PATH', () => {
+  const { spawnSync } = require('node:child_process');
+  const config = JSON.parse(readFileSync(join(ROOT, 'hooks/hooks.json'), 'utf8'));
+  const empty = mkdtempSync(join(os.tmpdir(), 'ar-no-node-'));
+  try {
+    for (const entry of [...config.hooks.PostToolUse, ...config.hooks.SubagentStop]) {
+      for (const { command } of entry.hooks) {
+        const r = spawnSync('/bin/sh', ['-c', command], {
+          input: '{}',
+          encoding: 'utf8',
+          env: { PATH: empty, CLAUDE_PLUGIN_ROOT: ROOT },
+        });
+        assert.deepStrictEqual({ status: r.status, stdout: r.stdout, stderr: r.stderr }, { status: 0, stdout: '', stderr: '' }, command);
+      }
+    }
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
 });
 
 const REVIEW_SKILL = join(ROOT, 'skills/review/SKILL.md');

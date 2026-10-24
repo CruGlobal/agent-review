@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/agent-review\" hook post-skill",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/agent-review\" hook post-skill 2>/dev/null || true",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/agent-review\" hook subagent-stop",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/bin/agent-review\" hook subagent-stop 2>/dev/null || true",
             "timeout": 10
           }
         ]
