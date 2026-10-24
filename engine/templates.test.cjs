@@ -3478,5 +3478,70 @@ test('init saves shadow as no and validates its answers, update-files guards Sta
   const addr = skillText('address').replace(/\s+/g, ' ');
   assert.ok(addr.includes('do not promise a CI re-review') && addr.includes('`undefined` or failed `config get reviews_run` counts as CI'));
   const yolo = skillText('yolo-review');
-  assert.ok(yolo.includes('.updated_at') && yolo.includes('[[ "$UPDATED" < "$START_TS" ]]'), 'yolo step 3 has the START_TS guard in the bash block');
+  assert.ok(yolo.includes('.updated_at') && yolo.includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'yolo step 3 has the REVIEW_TS guard in the bash block');
+});
+
+const REVIEW_TS_BLOCK = [
+  'REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+  'echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
+].join('\n');
+
+function yoloStep(text, from, to) {
+  return text.slice(text.indexOf(from), to ? text.indexOf(to) : undefined);
+}
+
+function indentedBashBlocks(text) {
+  return [...text.matchAll(/^ {3}```bash\n([\s\S]*?)\n {3}```$/gm)].map((m) => m[1].replace(/^ {3}/gm, ''));
+}
+
+test('yolo-review takes a fresh timestamp right before each review call and judges the report against it', (t) => {
+  const yolo = skillText('yolo-review');
+  const step2 = yoloStep(yolo, '2. **Review**', '3. **Fix blockers**');
+  const step3 = yoloStep(yolo, '3. **Fix blockers**', '4. **Re-review**');
+  const step4 = yoloStep(yolo, '4. **Re-review**', '5. **Bounded loop**');
+  for (const [label, step, call] of [
+    ['step 2', step2, 'invoke `agent-review:review` with the argument `auto`'],
+    ['step 4', step4, 'invoke `agent-review:review` with the arguments `auto incremental`'],
+  ]) {
+    assert.deepStrictEqual(indentedBashBlocks(step), [REVIEW_TS_BLOCK], `${label} has the timestamp block`);
+    assert.ok(step.indexOf('REVIEW_TS=') < step.indexOf(call), `${label} takes the timestamp before the review call`);
+  }
+  const guard = indentedBashBlocks(step3);
+  assert.strictEqual(guard.length, 1);
+  assert.ok(guard[0].includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'the guard compares against the per-call timestamp');
+  assert.ok(!guard[0].includes('START_TS'), 'the run start never stands in for the latest review call');
+  assert.ok(flatText(step3).includes('The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`'), step3);
+  assert.ok(yoloStep(yolo, '6. **Approval**').includes('select(.submittedAt > \\"$START_TS\\")'), 'approval still counts from the run start');
+
+  const { mkdirSync, writeFileSync } = require('node:fs');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-yolo-'));
+    try {
+      const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
+      mkdirSync(join(dir, 'bin'));
+      writeFileSync(join(dir, 'yolo_env.sh'), 'export PR_NUMBER="7" START_TS="2000-01-01T00:00:00Z"\n');
+      const stubGh = (updated) =>
+        writeFileSync(
+          join(dir, 'bin', 'gh'),
+          `#!/bin/sh\ncase "$*" in\n  *updated_at*) echo "${updated}" ;;\n  *agent-review-ledger*|*.body*) echo '<!-- agent-review-ledger: [] -->' ;;\n  *) echo x ;;\nesac\n`,
+          { mode: 0o755 },
+        );
+      const sh = (script) =>
+        require('node:child_process').spawnSync(shell, ['-c', at(script)], {
+          encoding: 'utf8',
+          env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir },
+        });
+      assert.strictEqual(sh(REVIEW_TS_BLOCK).status, 0, shell);
+      stubGh('2001-01-01T00:00:00Z');
+      const stale = sh(guard[0]);
+      assert.strictEqual(stale.status, 1, `${shell}: a report older than the latest review call stops the run`);
+      assert.match(stale.stdout, /\u274c No report newer than the latest review call/);
+      stubGh('2999-01-01T00:00:00Z');
+      const fresh = sh(guard[0]);
+      assert.strictEqual(fresh.status, 0, `${shell}: ${fresh.stdout}${fresh.stderr}`);
+      assert.match(fresh.stdout, /open blockers: 0/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });

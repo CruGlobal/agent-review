@@ -33,7 +33,14 @@ re-reviews cheap.
    echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > /tmp/yolo_env.sh
    ```
 
-2. **Review** — invoke `agent-review:review` with the argument `auto` (or the user's
+2. **Review** — right before the review call, take a fresh timestamp:
+
+   ```bash
+   REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   echo "export REVIEW_TS=\"$REVIEW_TS\"" >> /tmp/yolo_env.sh
+   ```
+
+   Then invoke `agent-review:review` with the argument `auto` (or the user's
    mode), plus the user's `engine=` and `effort=` tokens, if any. It posts the report and prints
    the findings. If the review fails before posting (a config error, an invalid `engine=` or
    `effort=` token), stop and show its error; never run address against an older report.
@@ -50,22 +57,31 @@ re-reviews cheap.
      | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 > /tmp/yolo_ledger.json
    UPDATED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .updated_at // empty" | head -1)
-   if [ -z "$UPDATED" ] || [[ "$UPDATED" < "$START_TS" ]]; then
-     echo "❌ No report newer than this run started: the review failed before posting. Show its error and stop."; exit 1
+   if [ -z "$UPDATED" ] || [[ "$UPDATED" < "$REVIEW_TS" ]]; then
+     echo "❌ No report newer than the latest review call: that review failed before posting. Show its error and stop."; exit 1
    fi
    OPEN=$(node -e 'const l=require("/tmp/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
    echo "open blockers: $OPEN"
    ```
 
-   The guard in that block uses the report only if its comment was updated at or after `START_TS`.
-   Otherwise stop and show the review's error; never run address against an older report.
+   The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`,
+   the time taken right before the latest review or re-review call. Address also edits the
+   comment, so an older time would let a failed re-review pass. Otherwise stop and show the
+   review's error; never run address against an older report.
 
    If `OPEN` is greater than 0, invoke the
    `agent-review:address` with the argument `fix blockers`.
    Never dismiss — not with any code, not for any reason; a finding that cannot
    be fixed stays open and is reported at the end. If `OPEN` is 0, skip to step 6.
 
-4. **Re-review** — invoke `agent-review:review` with the arguments `auto incremental`, plus the
+4. **Re-review** — right before the re-review call, take a fresh timestamp:
+
+   ```bash
+   REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+   echo "export REVIEW_TS=\"$REVIEW_TS\"" >> /tmp/yolo_env.sh
+   ```
+
+   Then invoke `agent-review:review` with the arguments `auto incremental`, plus the
    user's `engine=` and `effort=` tokens, if any.
 
 5. **Bounded loop** — recompute `OPEN` as in step 3. If it is greater than 0 and any open
