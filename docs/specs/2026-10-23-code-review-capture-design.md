@@ -111,6 +111,8 @@ Both writes are atomic: write a temp file, then rename it.
 - The hooks read a subagent transcript only from an absolute path that ends in `.jsonl`.
 - The lane reads the result with `agent-review capture show --run <id>`. It prints the captured `result` exactly, with no added newline, or exits 1 when no capture for that run exists. No template names a capture path.
 
+**Amendment, 2026-10-24 (fresh review).** An arming file older than 6 hours counts as not armed, in place of the 3 hours above. At `max`, `/code-review` can take up to 120 minutes, the lane can then take an hour to score, and a relaunch with the same capture runs `capture-wait` again, so 3 hours could expire the arm while a valid capture was still in place.
+
 **Wiring and tests.** The hook logic lives in a pure, unit-tested engine module (`engine/captureHook.cjs`). It takes the payload and the arming and pending state, and returns the file writes to make. The CLI wrapper does the I/O. Engine tests cover:
 - not armed;
 - args mismatch;

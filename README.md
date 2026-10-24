@@ -174,7 +174,7 @@ asks for tests, which is why those reviewers stay on.
 **How the result is captured.** The lane does not copy `/code-review`'s answer by hand. A plugin
 hook writes it to a private directory, `/tmp/agent-review-<uid>`, which only your user can open
 (mode 0700, owned by you, checked before every read and write). The hooks act only while a
-review has armed capture, and an arm expires after 3 hours. They never touch a `/code-review` you
+review has armed capture, and an arm expires after 6 hours. They never touch a `/code-review` you
 run yourself in the main conversation. While a review is armed, though, a `/code-review` run in
 another subagent of yours writes a mismatch record and fails that review's wait, and the hooks
 keep the final message of every subagent that stops in your sessions (the newest 50) in that

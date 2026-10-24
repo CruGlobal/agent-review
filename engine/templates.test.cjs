@@ -2500,13 +2500,29 @@ test('the capture spec records the final-review changes to the check in section 
   assert.ok(!amendment.includes('—'), 'new prose uses no em dashes');
 });
 
+const specAmendment = (heading, nextHeading) => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const section = spec.slice(spec.indexOf(heading), spec.indexOf(nextHeading));
+  const start = section.indexOf('**Amendment, 2026-10-24 (fresh review).**');
+  assert.notStrictEqual(start, -1, `${heading} has a fresh-review amendment`);
+  return section.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+};
+
+test('the capture spec records the fresh-review changes to the hooks in section 1', () => {
+  const amendment = specAmendment('### 1. Capture hooks', '### 2.');
+  for (const needle of ['An arming file older than 6 hours counts as not armed']) {
+    assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('—'), 'new prose uses no em dashes');
+});
+
 test('README states how the capture, the wait, and the proof behave, and what they cannot catch', () => {
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
   const engine = readme.slice(readme.indexOf('**How the result is captured.**'), readme.indexOf('**`effort=max` works'));
   const flat = engine.replace(/\s+/g, ' ');
   for (const needle of [
     'A plugin hook writes it to a private directory, `/tmp/agent-review-<uid>`,',
-    'The hooks act only while a review has armed capture, and an arm expires after 3 hours.',
+    'The hooks act only while a review has armed capture, and an arm expires after 6 hours.',
     'They never touch a `/code-review` you run yourself in the main conversation.',
     "While a review is armed, though, a `/code-review` run in another subagent of yours writes a mismatch record and fails that review's wait, and the hooks keep the final message of every subagent that stops in your sessions (the newest 50) in that directory until the review disarms.",
     'If the hooks never run, for example because Claude Code was not restarted after the plugin was installed, the wait fails within a minute and gives the reason, and the lane\'s reply, which the review prints when it fails, carries it as `/code-review did not finish: <reason>`.',
@@ -2522,6 +2538,7 @@ test('README states how the capture, the wait, and the proof behave, and what th
   for (const stale of [
     'a private file',
     'a capture expires after 3 hours',
+    'an arm expires after 3 hours',
     "At `xhigh` and `max` the lane's list must match",
     '2.1.306',
     'A finding is deleted only when it is proven wrong',

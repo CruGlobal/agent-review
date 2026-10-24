@@ -18876,7 +18876,7 @@ var require_captureHook = __commonJS({
       stops: "code_review_capture.stops.jsonl",
       mismatch: "code_review_capture.mismatch.json"
     };
-    var ARM_MAX_AGE_SECONDS = 10800;
+    var ARM_MAX_AGE_SECONDS = 21600;
     var STOP_BUFFER_LINES = 50;
     var CAPTURE_SOURCE = "agent-review-capture-hook";
     var SKILL_HEADER = new RegExp(

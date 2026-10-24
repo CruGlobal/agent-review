@@ -74,7 +74,7 @@ test('capture constants match the documented names', () => {
     stops: 'code_review_capture.stops.jsonl',
     mismatch: 'code_review_capture.mismatch.json',
   });
-  assert.equal(ARM_MAX_AGE_SECONDS, 10800);
+  assert.equal(ARM_MAX_AGE_SECONDS, 21600);
   assert.equal(STOP_BUFFER_LINES, 50);
   assert.equal(CAPTURE_SOURCE, 'agent-review-capture-hook');
   assert.equal(captureDir({}), `/tmp/agent-review-${process.getuid()}`);
@@ -109,6 +109,7 @@ test('capture dir owned by another uid is refused', () => {
 test('armedState accepts a fresh arm and rejects missing, malformed, disarmed, or stale ones', () => {
   assert.equal(armedState(ARM, NOW), ARM);
   assert.equal(armedState({ ...ARM, created: NOW - ARM_MAX_AGE_SECONDS }, NOW).run_id, 'r1');
+  assert.equal(armedState({ ...ARM, created: NOW - 5 * 3600 }, NOW).run_id, 'r1', 'a max relaunch 5 hours after arming is still armed');
   for (const arm of [
     null,
     undefined,
@@ -117,7 +118,7 @@ test('armedState accepts a fresh arm and rejects missing, malformed, disarmed, o
     {},
     { ...ARM, armed: false },
     { ...ARM, armed: 'true' },
-    { ...ARM, created: NOW - 10801 },
+    { ...ARM, created: NOW - 21601 },
     { ...ARM, created: 'yesterday' },
     { ...ARM, run_id: '' },
     { ...ARM, args: undefined },
@@ -127,7 +128,7 @@ test('armedState accepts a fresh arm and rejects missing, malformed, disarmed, o
 });
 
 test('not armed: neither hook writes anything', () => {
-  for (const arm of [null, { ...ARM, armed: false }, { ...ARM, created: NOW - 10801 }]) {
+  for (const arm of [null, { ...ARM, armed: false }, { ...ARM, created: NOW - 21601 }]) {
     const label = JSON.stringify(arm);
     for (const payload of [
       skillPayload(),

@@ -11,7 +11,7 @@ const CAPTURE_FILES = {
   stops: 'code_review_capture.stops.jsonl',
   mismatch: 'code_review_capture.mismatch.json',
 };
-const ARM_MAX_AGE_SECONDS = 10800;
+const ARM_MAX_AGE_SECONDS = 21600;
 const STOP_BUFFER_LINES = 50;
 const CAPTURE_SOURCE = 'agent-review-capture-hook';
 
