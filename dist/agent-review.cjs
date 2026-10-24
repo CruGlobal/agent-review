@@ -18958,14 +18958,20 @@ var require_captureHook = __commonJS({
       const armed = armedState(arm, now);
       if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
       const input = isObject(payload.tool_input) ? payload.tool_input : {};
-      if (input.skill !== CODE_REVIEW_SKILL) return {};
+      const skill = typeof input.skill === "string" ? input.skill : "";
       const args = typeof input.args === "string" ? input.args : "";
-      if (args !== armed.args) {
-        return { mismatch: { run_id: armed.run_id, expected: armed.args, got: args, ts: now } };
+      const mismatch = (got, reason) => ({
+        mismatch: { run_id: armed.run_id, expected: armed.args, got, ...reason ? { reason } : {}, ts: now }
+      });
+      if (skill !== CODE_REVIEW_SKILL) {
+        if (!skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return {};
+        return mismatch(`skill ${JSON.stringify(skill)} with args ${JSON.stringify(args)}`, "wrong skill");
       }
+      if (args !== armed.args) return mismatch(args);
       const response = payload.tool_response;
       const tr = isObject(response) ? response : {};
       const forkId = nonEmpty(tr.agentId) ? tr.agentId : null;
+      if (tr.background === true && !forkId) return mismatch(args, "no fork id");
       const forkStops = forkId && Array.isArray(stops) ? stops.filter((s) => isObject(s) && s.agent_id === forkId) : [];
       const latest = forkStops.at(-1);
       const record = (mode, result2) => captureRecord({
@@ -18981,6 +18987,7 @@ var require_captureHook = __commonJS({
       if (tr.background === true) {
         const written = {
           pending: {
+            run_id: armed.run_id,
             fork_id: forkId,
             args,
             caller: payload.agent_id,
@@ -19026,6 +19033,7 @@ var require_captureHook = __commonJS({
       };
     }
     module2.exports = {
+      CODE_REVIEW_SKILL,
       CAPTURE_FILES,
       ARM_MAX_AGE_SECONDS,
       STOP_BUFFER_LINES,
@@ -19111,6 +19119,10 @@ var require_codeReviewProof = __commonJS({
         else problem ??= `fenced block ${i + 1} looks like a findings list, but not every item is an object with a non-empty string file`;
       }
       const nonEmpty = lists.filter((list2) => list2.length > 0);
+      const distinct = new Set(nonEmpty.map((list2) => JSON.stringify(list2))).size;
+      if (distinct > 1) {
+        problem ??= `it holds ${distinct} different findings lists, so which one is the findings cannot be told`;
+      }
       const list = nonEmpty.length > 0 ? nonEmpty[nonEmpty.length - 1] : lists.length > 0 ? [] : null;
       return { list, problem };
     }
@@ -19175,9 +19187,9 @@ var require_codeReviewProof = __commonJS({
       while (path.startsWith("./")) path = path.slice(2);
       return path;
     }
-    function looksFinished(result, effort) {
+    function looksFinished(result, effort, mode) {
       if (typeof result !== "string") return false;
-      if (effort !== "max") return true;
+      if (effort !== "max" || mode === "foreground") return true;
       return jsonFindings(result).list !== null || explicitEmpty(result);
     }
     var PATH_CHAR = /[\p{L}\p{N}_./-]/u;
@@ -20599,6 +20611,7 @@ var require_cli = __commonJS({
       formatStartup
     } = require_cliCommands();
     var {
+      CODE_REVIEW_SKILL,
       CAPTURE_FILES,
       STOP_BUFFER_LINES,
       CAPTURE_SOURCE,
@@ -20861,12 +20874,30 @@ var require_cli = __commonJS({
       const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
       return Number.isInteger(ms) && ms > 0 ? ms : 5e3;
     }
+    function captureHookGraceMs(env = process.env) {
+      const ms = Number(env.AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS);
+      return Number.isInteger(ms) && ms > 0 ? ms : 6e4;
+    }
+    var HOOKS_DID_NOT_RUN = "the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed";
+    function mismatchReason(mismatch) {
+      const rearm = "the run must be re-armed with capture arm before /code-review is called again";
+      if (mismatch.reason === "no fork id") {
+        return `/code-review ran in the background, but its Skill reply named no fork id, so its result cannot be captured; ${rearm}`;
+      }
+      if (mismatch.reason === "wrong skill") {
+        const builtIn = JSON.stringify(CODE_REVIEW_SKILL);
+        return `/code-review was called as ${mismatch.got}, not as the built-in ${builtIn} skill with args ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+      }
+      return `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+    }
     function captureWait({ runId, effort, timeoutSeconds }) {
       const dir = captureDir();
       const file = (key) => join(dir, CAPTURE_FILES[key]);
       const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
       const pollMs = capturePollMs();
-      const deadline = Date.now() + timeoutSeconds * 1e3;
+      const started = Date.now();
+      const deadline = started + timeoutSeconds * 1e3;
+      const hooksDueAt = started + captureHookGraceMs();
       const report = (status, reason, capture = null) => {
         out(JSON.stringify({
           status,
@@ -20894,17 +20925,12 @@ var require_cli = __commonJS({
         }
         const found = readJsonOrNull(file("capture"));
         const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
-        if (capture && looksFinished(capture.result, effort)) {
+        if (capture && looksFinished(capture.result, effort, capture.mode)) {
           return report("finished", `the /code-review capture for run ${runId} looks finished`, capture);
         }
         const mismatch = readJsonOrNull(file("mismatch"));
-        if (mismatch?.run_id === runId) {
-          return report(
-            "failed",
-            `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; the run must be re-armed with capture arm before /code-review is called again`,
-            capture
-          );
-        }
+        if (mismatch?.run_id === runId) return report("failed", mismatchReason(mismatch), capture);
+        const hooksRan = capture !== null || readJsonOrNull(file("pending"))?.run_id === runId;
         const now = Date.now();
         const limitAt = (armed.created + limitMinutes * 60) * 1e3;
         if (now >= limitAt) {
@@ -20914,6 +20940,7 @@ var require_cli = __commonJS({
             capture
           );
         }
+        if (!hooksRan && now >= hooksDueAt) return report("failed", HOOKS_DID_NOT_RUN);
         if (now >= deadline) {
           const left = Math.ceil((limitAt - now) / 6e4);
           return report(
@@ -20922,7 +20949,8 @@ var require_cli = __commonJS({
             capture
           );
         }
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
+        const sleepMs = Math.min(pollMs, deadline - now, limitAt - now, hooksRan ? Infinity : hooksDueAt - now);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
       }
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]";
@@ -20987,9 +21015,9 @@ var require_cli = __commonJS({
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
-  capture disarm                 turn off /code-review result capture: delete the arm file
+  capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
-  capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, another effort, or the effort's time limit passed)
+  capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args or skill mismatch, not armed, another effort, no hook file for the run within 60 seconds, or the effort's time limit passed)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -21485,7 +21513,7 @@ var require_cli = __commonJS({
             return 0;
           }
           if (sub === "disarm") {
-            rmSync(file("arm"), { force: true });
+            for (const key of Object.keys(CAPTURE_FILES)) rmSync(file(key), { force: true });
             out("disarmed");
             return 0;
           }

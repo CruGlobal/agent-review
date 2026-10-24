@@ -197,6 +197,7 @@ test('background fork writes pending with the fork id', () => {
   });
   assert.equal(written.pending.fork_id, 'f1');
   assert.deepEqual(written.pending, {
+    run_id: 'r1',
     fork_id: 'f1',
     args: 'xhigh 12',
     caller: 'lane1',
@@ -206,6 +207,44 @@ test('background fork writes pending with the fork id', () => {
   });
   assert.equal(written.capture, undefined);
   assert.equal(written.mismatch, undefined);
+});
+
+test('a background reply with no fork id writes only a mismatch', () => {
+  for (const agentId of [undefined, '', '  ', 7]) {
+    const response = { success: true, status: 'forked', background: true, result: 'Running in the background' };
+    if (agentId !== undefined) response.agentId = agentId;
+    const written = postSkillWrites({
+      payload: skillPayload({ tool_response: response }),
+      arm: ARM,
+      stops: [stopEntry('f1', 'done')],
+      now: NOW,
+      readTranscript: noTranscript,
+    });
+    assert.deepEqual(
+      written,
+      { mismatch: { run_id: 'r1', expected: 'xhigh 12', got: 'xhigh 12', reason: 'no fork id', ts: NOW } },
+      JSON.stringify(agentId),
+    );
+  }
+});
+
+test('a subagent calling a plugin skill named *:code-review writes a mismatch naming the skill and args', () => {
+  const base = { arm: ARM, stops: [], now: NOW, readTranscript: noTranscript };
+  for (const skill of ['code-review:code-review', 'other-plugin:code-review']) {
+    const written = postSkillWrites({ ...base, payload: skillPayload({ tool_input: { skill } }) });
+    assert.deepEqual(
+      written,
+      { mismatch: { run_id: 'r1', expected: 'xhigh 12', got: `skill "${skill}" with args "xhigh 12"`, reason: 'wrong skill', ts: NOW } },
+      skill,
+    );
+  }
+  const mainThread = skillPayload({ tool_input: { skill: 'code-review:code-review' } });
+  delete mainThread.agent_id;
+  assert.deepEqual(postSkillWrites({ ...base, payload: mainThread }), {}, 'a main-thread call never fails a review');
+  for (const skill of ['code-reviewer', 'my-code-review', 'code-review:review', ':code-review-x']) {
+    assert.deepEqual(postSkillWrites({ ...base, payload: skillPayload({ tool_input: { skill } }) }), {}, skill);
+  }
+  assert.deepEqual(postSkillWrites({ ...base, arm: null, payload: skillPayload({ tool_input: { skill: 'code-review:code-review' } }) }), {}, 'not armed');
 });
 
 test('background fork whose stop is already buffered also writes the capture', () => {

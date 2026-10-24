@@ -102,19 +102,27 @@ function captureRecord({ mode, armed, args, forkId, result, transcript, stopCoun
   };
 }
 
+// A plugin command such as code-review:code-review is never the built-in skill, so an armed
+// lane that calls one has missed the capture and must fail fast instead of waiting it out.
 function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
   const armed = armedState(arm, now);
   if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
   const input = isObject(payload.tool_input) ? payload.tool_input : {};
-  if (input.skill !== CODE_REVIEW_SKILL) return {};
+  const skill = typeof input.skill === 'string' ? input.skill : '';
   const args = typeof input.args === 'string' ? input.args : '';
-  if (args !== armed.args) {
-    return { mismatch: { run_id: armed.run_id, expected: armed.args, got: args, ts: now } };
+  const mismatch = (got, reason) => ({
+    mismatch: { run_id: armed.run_id, expected: armed.args, got, ...(reason ? { reason } : {}), ts: now },
+  });
+  if (skill !== CODE_REVIEW_SKILL) {
+    if (!skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return {};
+    return mismatch(`skill ${JSON.stringify(skill)} with args ${JSON.stringify(args)}`, 'wrong skill');
   }
+  if (args !== armed.args) return mismatch(args);
 
   const response = payload.tool_response;
   const tr = isObject(response) ? response : {};
   const forkId = nonEmpty(tr.agentId) ? tr.agentId : null;
+  if (tr.background === true && !forkId) return mismatch(args, 'no fork id');
   const forkStops = forkId && Array.isArray(stops)
     ? stops.filter((s) => isObject(s) && s.agent_id === forkId)
     : [];
@@ -134,6 +142,7 @@ function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
   if (tr.background === true) {
     const written = {
       pending: {
+        run_id: armed.run_id,
         fork_id: forkId,
         args,
         caller: payload.agent_id,
@@ -193,6 +202,7 @@ function subagentStopWrites({ payload, arm, pending, capture, now, readTranscrip
 }
 
 module.exports = {
+  CODE_REVIEW_SKILL,
   CAPTURE_FILES,
   ARM_MAX_AGE_SECONDS,
   STOP_BUFFER_LINES,

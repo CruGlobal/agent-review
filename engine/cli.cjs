@@ -76,6 +76,7 @@ const {
   formatStartup,
 } = require('./cliCommands.cjs');
 const {
+  CODE_REVIEW_SKILL,
   CAPTURE_FILES,
   STOP_BUFFER_LINES,
   CAPTURE_SOURCE,
@@ -388,13 +389,37 @@ function capturePollMs(env = process.env) {
   return Number.isInteger(ms) && ms > 0 ? ms : 5000;
 }
 
+// The PostToolUse hook finishes before the Skill reply reaches the lane, so on a working install
+// one of this run's hook files exists long before this grace period ends.
+function captureHookGraceMs(env = process.env) {
+  const ms = Number(env.AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS);
+  return Number.isInteger(ms) && ms > 0 ? ms : 60000;
+}
+
+const HOOKS_DID_NOT_RUN =
+  'the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed';
+
+function mismatchReason(mismatch) {
+  const rearm = 'the run must be re-armed with capture arm before /code-review is called again';
+  if (mismatch.reason === 'no fork id') {
+    return `/code-review ran in the background, but its Skill reply named no fork id, so its result cannot be captured; ${rearm}`;
+  }
+  if (mismatch.reason === 'wrong skill') {
+    const builtIn = JSON.stringify(CODE_REVIEW_SKILL);
+    return `/code-review was called as ${mismatch.got}, not as the built-in ${builtIn} skill with args ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+  }
+  return `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+}
+
 // main() is synchronous, so the wait blocks the thread with Atomics.wait instead of a timer.
 function captureWait({ runId, effort, timeoutSeconds }) {
   const dir = captureDir();
   const file = (key) => join(dir, CAPTURE_FILES[key]);
   const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
   const pollMs = capturePollMs();
-  const deadline = Date.now() + timeoutSeconds * 1000;
+  const started = Date.now();
+  const deadline = started + timeoutSeconds * 1000;
+  const hooksDueAt = started + captureHookGraceMs();
   const report = (status, reason, capture = null) => {
     out(JSON.stringify({
       status,
@@ -422,18 +447,12 @@ function captureWait({ runId, effort, timeoutSeconds }) {
     }
     const found = readJsonOrNull(file('capture'));
     const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
-    if (capture && looksFinished(capture.result, effort)) {
+    if (capture && looksFinished(capture.result, effort, capture.mode)) {
       return report('finished', `the /code-review capture for run ${runId} looks finished`, capture);
     }
     const mismatch = readJsonOrNull(file('mismatch'));
-    if (mismatch?.run_id === runId) {
-      return report(
-        'failed',
-        `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ` +
-          `${JSON.stringify(mismatch.expected)}; the run must be re-armed with capture arm before /code-review is called again`,
-        capture,
-      );
-    }
+    if (mismatch?.run_id === runId) return report('failed', mismatchReason(mismatch), capture);
+    const hooksRan = capture !== null || readJsonOrNull(file('pending'))?.run_id === runId;
     const now = Date.now();
     const limitAt = (armed.created + limitMinutes * 60) * 1000;
     if (now >= limitAt) {
@@ -443,6 +462,7 @@ function captureWait({ runId, effort, timeoutSeconds }) {
         capture,
       );
     }
+    if (!hooksRan && now >= hooksDueAt) return report('failed', HOOKS_DID_NOT_RUN);
     if (now >= deadline) {
       const left = Math.ceil((limitAt - now) / 60000);
       return report(
@@ -451,7 +471,8 @@ function captureWait({ runId, effort, timeoutSeconds }) {
         capture,
       );
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
+    const sleepMs = Math.min(pollMs, deadline - now, limitAt - now, hooksRan ? Infinity : hooksDueAt - now);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
   }
 }
 
@@ -521,9 +542,9 @@ const USAGE = `usage: agent-review <command>
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
-  capture disarm                 turn off /code-review result capture: delete the arm file
+  capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
-  capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, another effort, or the effort's time limit passed)
+  capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args or skill mismatch, not armed, another effort, no hook file for the run within 60 seconds, or the effort's time limit passed)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -1058,7 +1079,7 @@ function main(rawArgv) {
         return 0;
       }
       if (sub === 'disarm') {
-        rmSync(file('arm'), { force: true });
+        for (const key of Object.keys(CAPTURE_FILES)) rmSync(file(key), { force: true });
         out('disarmed');
         return 0;
       }

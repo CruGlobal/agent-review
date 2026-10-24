@@ -144,10 +144,23 @@ test('a quoted [] after a real list never replaces it', () => {
       assertFails(ground(result, []), 'lane', 'the [] does not make an empty raw list pass');
     }
   }
-  const later = fenced('json', J([{ file: 'b.rb', line: 9 }]));
-  assert.deepEqual(jsonFindings(`${real}${fenced('json', '[]')}${later}`).list, [{ file: 'b.rb', line: 9 }], 'the last non-empty list wins');
   assert.deepEqual(jsonFindings(`All good.\n${fenced('json', '[]')}`), { list: [], problem: null });
   assert.deepEqual(jsonFindings('All good.'), { list: null, problem: null });
+});
+
+test('two different non-empty findings lists fail with stage capture', () => {
+  const real = fenced('json', J([{ file: 'lib/a.rb', line: 10, summary: 'injection' }]));
+  const example = fenced('json', J([{ file: 'config/x.yml', line: 1 }]));
+  const p3 = `Findings:\n${real}Suggested fixture:\n${example}`;
+  assert.match(jsonFindings(p3).problem, /2 different findings lists/);
+  const r = ground(p3, raws(['config/x.yml', 1]));
+  assertFails(r, 'capture', 'the later example list must not hide the real one');
+  assertFails(ground(p3, raws(['lib/a.rb', 10])), 'capture', 'neither list is trusted');
+  assertFails(ground(`${real}${fenced('json', '[]')}${example}`, raws(['config/x.yml', 1])), 'capture', 'an empty list between them changes nothing');
+
+  const repeated = `${real}\nAgain, in full:\n${fenced('', J([{ file: 'lib/a.rb', line: 10, summary: 'injection' }]))}`;
+  assert.deepEqual(jsonFindings(repeated), { list: [{ file: 'lib/a.rb', line: 10, summary: 'injection' }], problem: null });
+  assertGrounded(ground(repeated, raws(['lib/a.rb', 10])), 'json');
 });
 
 test('an unusable list-like block fails with stage capture even beside a usable one', () => {

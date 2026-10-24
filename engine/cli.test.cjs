@@ -26,6 +26,8 @@ const {
   captureWaitTimeout,
 } = require('./cli.cjs');
 const { buildPlan } = require('./plan.cjs');
+const { looksFinished } = require('./codeReviewProof.cjs');
+const { EFFORTS } = require('./vocabulary.cjs');
 
 // The CLI writes stdout synchronously through fs.writeSync(1, ...), so in-process captures
 // stub that for fd 1 as well as process.stdout.write.
@@ -1704,9 +1706,9 @@ test('a command printing through out() delivers more than 64 KiB through a pipe 
 
 const FAST_POLL = { AGENT_REVIEW_CAPTURE_POLL_MS: '10' };
 
-function captureWait(dir, args) {
+function captureWait(dir, args, env = {}) {
   const started = Date.now();
-  const r = spawnCli(['capture-wait', ...args], { dir, env: FAST_POLL });
+  const r = spawnCli(['capture-wait', ...args], { dir, env: { ...FAST_POLL, ...env } });
   assert.equal(r.stderr, '', 'capture-wait reports through its JSON line');
   assert.match(r.stdout, /^[^\n]+\n$/, `one JSON line: ${JSON.stringify(r.stdout)}`);
   const json = JSON.parse(r.stdout);
@@ -1943,5 +1945,115 @@ test('capture-wait fails with no arm for the run or a refused dir, and checks it
   } finally {
     chmodSync(parent, 0o700);
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+const HOOKS_DID_NOT_RUN =
+  'the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed';
+const SHORT_HOOK_GRACE = { AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS: '150' };
+
+test('capture-wait fails fast when no hook wrote anything for the run', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    armRun(dir);
+    const silent = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30'], SHORT_HOOK_GRACE);
+    assert.equal(silent.code, 1);
+    assert.deepEqual(silent.json, { status: 'failed', reason: HOOKS_DID_NOT_RUN, stop_count: null, mode: null });
+    assert.ok(silent.ms >= 150 && silent.ms < 5000, `failed soon after the grace period (${silent.ms} ms)`);
+
+    writeFileSync(join(dir, 'code_review_capture.pending.json'), JSON.stringify({ run_id: 'r0', fork_id: 'f1' }));
+    assert.equal(
+      captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30'], SHORT_HOOK_GRACE).json.reason,
+      HOOKS_DID_NOT_RUN,
+      "another run's pending file is not this run's",
+    );
+
+    writeFileSync(join(dir, 'code_review_capture.pending.json'), JSON.stringify({ run_id: 'r1', fork_id: 'f1' }));
+    const pending = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0.4'], SHORT_HOOK_GRACE);
+    assert.equal(pending.code, 3, 'a pending file shows the hooks ran, so the wait goes on');
+    rmSync(join(dir, 'code_review_capture.pending.json'));
+
+    armRun(dir, { args: 'max 12' });
+    writeCapture(dir, { result: 'I launched helpers.' });
+    assert.equal(
+      captureWait(dir, ['--run', 'r1', '--effort', 'max', '--timeout', '0.4'], SHORT_HOOK_GRACE).code,
+      3,
+      'an unfinished capture shows the hooks ran',
+    );
+    rmSync(join(dir, 'code_review_capture.json'));
+
+    armRun(dir);
+    const quick = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '0.2']);
+    assert.equal(quick.code, 3, 'the default grace is far longer than this call');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture-wait names a wrong skill or a missing fork id from the hook', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    armCapture(dir);
+    const wrongSkill = { ...HEADLESS_SKILL, tool_input: { skill: 'code-review:code-review', args: 'xhigh 12' } };
+    assert.deepEqual(spawnCli(['hook', 'post-skill'], { dir, input: JSON.stringify(wrongSkill) }), QUIET);
+    const wrong = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(wrong.code, 1);
+    assert.ok(wrong.ms < 5000, `failed at once (${wrong.ms} ms)`);
+    assert.ok(wrong.json.reason.includes('skill "code-review:code-review" with args "xhigh 12"'), wrong.json.reason);
+    assert.match(wrong.json.reason, /built-in "code-review" skill/);
+    assert.match(wrong.json.reason, /re-armed/);
+
+    armCapture(dir);
+    rmSync(join(dir, 'code_review_capture.mismatch.json'));
+    const noFork = { ...HEADLESS_SKILL, tool_response: { success: true, status: 'forked', background: true, result: 'Running' } };
+    assert.deepEqual(spawnCli(['hook', 'post-skill'], { dir, input: JSON.stringify(noFork) }), QUIET);
+    assert.equal(existsSync(join(dir, 'code_review_capture.pending.json')), false, 'no pending file without a fork id');
+    const lost = captureWait(dir, ['--run', 'r1', '--effort', 'xhigh', '--timeout', '30']);
+    assert.equal(lost.code, 1);
+    assert.match(lost.json.reason, /no fork id/);
+    assert.match(lost.json.reason, /re-armed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a foreground capture counts as finished at every effort, max included', () => {
+  assert.equal(looksFinished('I launched helpers and will merge their findings.', 'max', 'foreground'), true);
+  assert.equal(looksFinished('I launched helpers and will merge their findings.', 'max', 'forked'), false);
+  assert.equal(looksFinished(undefined, 'max', 'foreground'), false, 'a capture with no text is never finished');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    for (const effort of EFFORTS) {
+      armRun(dir, { args: `${effort} 12` });
+      writeCapture(dir, { mode: 'foreground', stop_count: 0, result: 'Reviewed. Nothing stood out beyond style.' });
+      const r = captureWait(dir, ['--run', 'r1', '--effort', effort, '--timeout', '0.05']);
+      assert.equal(r.code, 0, effort);
+      assert.deepEqual([r.json.status, r.json.mode], ['finished', 'foreground'], effort);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('capture disarm removes the arm and every capture file, and nothing else', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    assert.equal(spawnCli(['capture', 'arm', '--run', 'r1', '--args', 'xhigh 12'], { dir }).code, 0);
+    for (const name of [
+      'code_review_capture.json',
+      'code_review_capture.pending.json',
+      'code_review_capture.stops.jsonl',
+      'code_review_capture.mismatch.json',
+    ]) {
+      writeFileSync(join(dir, name), '{}');
+    }
+    writeFileSync(join(dir, 'unrelated.json'), '{}');
+    const r = spawnCli(['capture', 'disarm'], { dir });
+    assert.deepEqual(r, { code: 0, stdout: 'disarmed\n', stderr: '' });
+    assert.deepEqual(readdirSync(dir), ['unrelated.json']);
+    assert.equal(spawnCli(['capture', 'show', '--run', 'r1'], { dir }).code, 1, 'nothing can read the capture after disarm');
+    assert.match(run(['help']).s, /^ {2}capture disarm {2,}.*every capture file/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

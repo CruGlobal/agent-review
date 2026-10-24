@@ -66,7 +66,8 @@ function listOf(block) {
 }
 
 // A quoted `[]`, such as one in a suggested fix, must never replace a real list, so the list is
-// `[]` only when every qualifying list is empty.
+// `[]` only when every qualifying list is empty. Two different non-empty lists leave no way to
+// tell the findings from a quoted example, so the result cannot be used.
 function jsonFindings(text) {
   const lists = [];
   let problem = null;
@@ -81,6 +82,10 @@ function jsonFindings(text) {
     else problem ??= `fenced block ${i + 1} looks like a findings list, but not every item is an object with a non-empty string file`;
   }
   const nonEmpty = lists.filter((list) => list.length > 0);
+  const distinct = new Set(nonEmpty.map((list) => JSON.stringify(list))).size;
+  if (distinct > 1) {
+    problem ??= `it holds ${distinct} different findings lists, so which one is the findings cannot be told`;
+  }
   const list = nonEmpty.length > 0 ? nonEmpty[nonEmpty.length - 1] : lists.length > 0 ? [] : null;
   return { list, problem };
 }
@@ -160,10 +165,11 @@ function repoRelative(file, root) {
   return path;
 }
 
-// Only max starts helpers, so only there can a stop arrive before the findings do.
-function looksFinished(result, effort) {
+// Only max starts helpers, so only there can a stop arrive before the findings do. A foreground
+// capture is the Skill's own reply, which comes only once /code-review is done.
+function looksFinished(result, effort, mode) {
   if (typeof result !== 'string') return false;
-  if (effort !== 'max') return true;
+  if (effort !== 'max' || mode === 'foreground') return true;
   return jsonFindings(result).list !== null || explicitEmpty(result);
 }
 
