@@ -728,116 +728,144 @@ test('startup notes leftover CI files when any of the three CI workflows remains
   }
 });
 
-test('code-review-proof reads a bare finding on an existing extensionless file under --root', () => {
-  const root = mkdtempSync(join(os.tmpdir(), 'ar-crproof-root-'));
+const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--capture <f>\]/;
+
+function proofFiles(dir, { raw, scored, dropped, result }) {
+  const files = { capture: join(dir, 'capture.json'), raw: join(dir, 'raw.json'), findings: join(dir, 'findings.json'), dropped: join(dir, 'dropped.json') };
+  writeFileSync(files.capture, JSON.stringify({ source: 'agent-review-capture-hook', run_id: 'r1', result }));
+  writeFileSync(files.raw, JSON.stringify(raw));
+  writeFileSync(files.findings, JSON.stringify(scored));
+  writeFileSync(files.dropped, JSON.stringify(dropped));
+  return files;
+}
+
+const proofArgs = (f, extra = []) => ['code-review-proof', '--raw', f.raw, '--findings', f.findings, '--dropped', f.dropped, '--run', 'r1', ...extra];
+const PROOF_RESULT = 'Result:\n```json\n[{"file":"dist/app.js","line":4,"summary":"s"},{"file":"src/a.js","line":2,"summary":"s"}]\n```\n';
+const PROOF_RAW = [
+  { n: 1, file: 'dist/app.js', line: 4, summary: 's' },
+  { n: 2, file: 'src/a.js', line: 2, summary: 's' },
+];
+const PROOF_SCORED = [
+  { raw: 2, file: 'src/a.js', line: 2, message: 'm', severity: 5, category: 'correctness', confidence: 'High', evidence: '', outside_range: false, doubted: false, recategorized_from: null },
+];
+
+test('code-review-proof exits 1 with a usage line when a flag is missing', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
   try {
-    const raw = join(root, 'raw.txt');
-    writeFileSync(raw, 'Skill "code-review" completed (forked execution).\n\nResult:\nMakefile:12 - the test target skips lint\nsrc/a.js:4 - a real one\n');
-    const missing = run(['code-review-proof', '--raw', raw, '--root', root]);
-    assert.deepEqual(JSON.parse(missing.s), { ok: true, reason: 'ok', count: 1 }, 'no Makefile, so only the path-like line counts');
-    writeFileSync(join(root, 'Makefile'), 'all:\n');
-    const present = run(['code-review-proof', '--raw', raw, '--root', root]);
-    assert.deepEqual(JSON.parse(present.s), { ok: true, reason: 'ok', count: 2 });
-    mkdirSync(join(root, 'Dir'));
-    writeFileSync(raw, 'Skill "code-review" completed (forked execution).\n\nResult:\nDir:3 - a directory\n');
-    assert.equal(run(['code-review-proof', '--raw', raw, '--root', root]).code, 1, 'a directory is not a file');
+    const f = proofFiles(dir, { raw: PROOF_RAW, scored: PROOF_SCORED, dropped: [], result: PROOF_RESULT });
+    const full = proofArgs(f);
+    for (const name of ['--raw', '--findings', '--dropped', '--run']) {
+      const at = full.indexOf(name);
+      const r = run([...full.slice(0, at), ...full.slice(at + 2)]);
+      assert.equal(r.code, 1, name);
+      assert.match(r.s, PROOF_USAGE, name);
+    }
+    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--capture <f>\] /m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof checks the whole run and reads excluded_paths from the repo config', () => {
+  const root = optionsRoot();
+  const configPath = join(root, 'rd', 'config.yml');
+  writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('excluded_paths: []', 'excluded_paths: ["dist/**"]'));
+  try {
+    const dropped = [{ raw: 1, reason: 'excluded', glob: 'dist/**' }];
+    const f = proofFiles(root, { raw: PROOF_RAW, scored: PROOF_SCORED, dropped, result: PROOF_RESULT });
+    const args = proofArgs(f, ['--capture', f.capture, '--root', root, '--review-dir', 'rd']);
+
+    const ok = run(args);
+    assert.equal(ok.code, 0, ok.s);
+    assert.deepEqual(JSON.parse(ok.s), {
+      ok: true,
+      stage: null,
+      reason: 'ok',
+      count: 2,
+      mode: 'json',
+      dropped: [{ file: 'dist/app.js', line: 4, summary: 's', why: 'excluded path: dist/**' }],
+    });
+
+    const otherDir = run(proofArgs(f, ['--capture', f.capture, '--root', root, '--review-dir', 'nowhere']));
+    assert.equal(otherDir.code, 1, 'with no config there are no excluded paths');
+    const refused = JSON.parse(otherDir.s);
+    assert.equal(refused.stage, 'lane');
+    assert.match(refused.reason, /not in the config's excluded_paths/);
+
+    writeFileSync(f.dropped, '[]');
+    const lost = run(args);
+    assert.equal(lost.code, 1);
+    assert.match(JSON.parse(lost.s).reason, /raw entry 1 \(dist\/app\.js:4\) is neither scored nor dropped/);
+
+    writeFileSync(f.capture, JSON.stringify({ source: 'agent-review-capture-hook', run_id: 'other', result: PROOF_RESULT }));
+    const wrongRun = JSON.parse(run(args).s);
+    assert.equal(wrongRun.stage, 'capture');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('code-review-proof exit codes', () => {
-  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
-  try {
-    const findings = [
-      { file: 'a.js', line: 1, summary: 's', failure_scenario: 'f' },
-      { file: 'b.js', line: 2, summary: 's', failure_scenario: 'f' },
-    ];
-    const file = join(dir, 'raw.txt');
-    writeFileSync(
-      file,
-      `Skill "code-review" completed (forked execution).\n\nResult:\nProse.\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`,
-    );
-    const ok = run(['code-review-proof', '--raw', file]);
-    assert.equal(ok.code, 0);
-    const parsed = JSON.parse(ok.s);
-    assert.equal(parsed.ok, true);
-    assert.equal(parsed.count, 2);
-
-    const missing = run(['code-review-proof', '--raw', join(dir, 'nope.txt')]);
-    assert.equal(missing.code, 1);
-    const bad = JSON.parse(missing.s);
-    assert.equal(bad.ok, false);
-    assert.equal(bad.count, 0);
-    assert.match(bad.reason, /did not run/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('code-review-proof checks found = scored + dropped when given both files', () => {
-  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
-  try {
-    const raw = join(dir, 'raw.txt');
-    const lane = join(dir, 'code-review.json');
-    const dropped = join(dir, 'dropped.json');
-    const findings = [{ file: 'a.js', line: 1 }, { file: 'b.js', line: 2 }];
-    writeFileSync(raw, `Skill "code-review" completed (forked execution).\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`);
-    writeFileSync(lane, JSON.stringify({ findings: [{ agent: 'code-review', category: 'correctness', severity: 8, file: 'a.js', line: 1 }] }));
-    writeFileSync(dropped, JSON.stringify([{ file: 'b.js', line: 2, summary: 's', proof: 'p' }]));
-
-    const ok = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', dropped]);
-    assert.equal(ok.code, 0, ok.s);
-    assert.deepEqual(JSON.parse(ok.s), { ok: true, reason: 'ok', count: 2 });
-
-    const omitted = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', join(dir, 'none.json')]);
-    assert.equal(omitted.code, 1);
-    const bad = JSON.parse(omitted.s);
-    assert.equal(bad.ok, false);
-    assert.equal(bad.count, 2);
-    assert.match(bad.reason, /found 2, but the lane scored 1 and dropped 0/);
-
-    const emptyDrop = join(dir, 'empty-drop.json');
-    writeFileSync(emptyDrop, JSON.stringify([{}]));
-    const unproven = run(['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', emptyDrop]);
-    assert.equal(unproven.code, 1, 'a drop with no file, line, summary, or proof fails even when the counts add up');
-    assert.match(JSON.parse(unproven.s).reason, /dropped entry 1 needs a non-empty string file/);
-
-    const lone = run(['code-review-proof', '--raw', raw, '--findings', lane]);
-    assert.equal(lone.code, 1);
-    assert.match(lone.s, /^usage: agent-review code-review-proof --raw <f> \[--findings <f> --dropped <f>\]/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('code-review-proof reads excluded_paths from the repo config', () => {
+test('code-review-proof prints stage config when the config cannot be read', () => {
   const root = optionsRoot();
-  const configPath = join(root, 'rd', 'config.yml');
-  writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('excluded_paths: []', 'excluded_paths: ["dist/**"]'));
   try {
-    const raw = join(root, 'raw.txt');
-    const lane = join(root, 'code-review.json');
-    const dropped = join(root, 'dropped.json');
-    const findings = [{ file: 'dist/app.js', line: 4 }, { file: 'src/a.js', line: 2 }];
-    writeFileSync(raw, `Skill "code-review" completed (forked execution).\n\n\`\`\`json\n${JSON.stringify(findings)}\n\`\`\`\n`);
-    writeFileSync(lane, JSON.stringify({ findings: [{ agent: 'code-review', category: 'correctness', severity: 5, file: 'src/a.js', line: 2 }] }));
-    writeFileSync(dropped, JSON.stringify([{ file: 'dist/app.js', line: 4, summary: 's', proof: 'excluded path: dist/**' }]));
-    const args = ['code-review-proof', '--raw', raw, '--findings', lane, '--dropped', dropped];
+    const f = proofFiles(root, { raw: PROOF_RAW, scored: PROOF_SCORED, dropped: [], result: PROOF_RESULT });
+    writeFileSync(join(root, 'rd', 'config.yml'), 'version: [');
+    const r = run(proofArgs(f, ['--capture', f.capture, '--root', root, '--review-dir', 'rd']));
+    assert.equal(r.code, 1);
+    const parsed = JSON.parse(r.s);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.stage, 'config');
+    assert.match(parsed.reason, /^could not read excluded_paths from the review config: /);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
-    const ok = run([...args, '--root', root, '--review-dir', 'rd']);
-    assert.equal(ok.code, 0, ok.s);
-    assert.deepEqual(JSON.parse(ok.s), { ok: true, reason: 'ok', count: 2 });
+test('code-review-proof without --capture reads the capture dir after checking it', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-'));
+  const saved = process.env.AGENT_REVIEW_CAPTURE_DIR;
+  try {
+    const f = proofFiles(dir, { raw: PROOF_RAW, scored: PROOF_SCORED, dropped: [{ raw: 1, reason: 'excluded', glob: 'dist/**' }], result: PROOF_RESULT });
+    const capDir = join(dir, 'cap');
+    process.env.AGENT_REVIEW_CAPTURE_DIR = capDir;
+    const missing = run(proofArgs(f));
+    assert.equal(missing.code, 1);
+    assert.equal(JSON.parse(missing.s).stage, 'capture');
+    assert.match(JSON.parse(missing.s).reason, /does not exist/);
 
-    const otherDir = run([...args, '--root', root, '--review-dir', 'nowhere']);
-    assert.equal(otherDir.code, 1, 'with no config there are no excluded paths');
-    assert.match(JSON.parse(otherDir.s).reason, /cites excluded path "dist\/\*\*", which is not in the config's excluded_paths/);
+    mkdirSync(capDir, { mode: 0o700 });
+    chmodSync(capDir, 0o700);
+    const noFile = JSON.parse(run(proofArgs(f)).s);
+    assert.equal(noFile.stage, 'capture');
+    assert.match(noFile.reason, /no \/code-review capture was found/);
 
-    writeFileSync(configPath, 'version: [');
-    const broken = run([...args, '--root', root, '--review-dir', 'rd']);
-    assert.equal(broken.code, 1);
-    const reason = JSON.parse(broken.s).reason;
-    assert.match(reason, /^could not read excluded_paths from the review config: /);
+    writeFileSync(join(capDir, 'code_review_capture.json'), readFileSync(f.capture));
+    const found = JSON.parse(run(proofArgs(f)).s);
+    assert.equal(found.stage, 'lane', 'the capture is read; the drop glob is not configured here');
+
+    chmodSync(capDir, 0o755);
+    const open = JSON.parse(run(proofArgs(f)).s);
+    assert.equal(open.stage, 'capture');
+    assert.match(open.reason, /permission bits/);
+  } finally {
+    if (saved === undefined) delete process.env.AGENT_REVIEW_CAPTURE_DIR;
+    else process.env.AGENT_REVIEW_CAPTURE_DIR = saved;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a default-engine repo's other commands are unaffected", () => {
+  const root = optionsRoot();
+  try {
+    const at = ['--root', root, '--review-dir', 'rd'];
+    assert.doesNotMatch(readFileSync(join(root, 'rd', 'config.yml'), 'utf8'), /^engine:/m);
+    const get = run(['config', 'get', 'profile', ...at]);
+    assert.equal(get.code, 0, get.s);
+    assert.equal(get.s, 'standard\n');
+    const options = run(['options', '--args', '', ...at]);
+    assert.equal(options.code, 0, options.s);
+    assert.equal(JSON.parse(options.s).engine.value, 'agent-review');
+    assert.equal(run(['config', 'validate', ...at]).code, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

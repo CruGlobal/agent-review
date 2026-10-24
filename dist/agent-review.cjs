@@ -19051,16 +19051,11 @@ var require_captureHook = __commonJS({
 var require_codeReviewProof = __commonJS({
   "engine/codeReviewProof.cjs"(exports2, module2) {
     "use strict";
-    var { minimatch } = require_commonjs3();
     var { unwrapFindings } = require_unwrapFindings();
-    var { ENGINE_CODE_REVIEW, CATEGORIES } = require_vocabulary();
+    var { CATEGORIES, CLEANUP_CATEGORIES } = require_vocabulary();
+    var { pathMatches } = require_selectAgents();
     var { CAPTURE_SOURCE } = require_captureHook();
-    var SKILL_NAME = ENGINE_CODE_REVIEW;
-    var FIX = "update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes";
     var CAPTURE_LIMIT_MINUTES = Object.freeze({ low: 10, medium: 15, high: 20, xhigh: 40, max: 120 });
-    function fail(reason) {
-      return { ok: false, reason, findings: [] };
-    }
     var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
     var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
     function scanFences(text) {
@@ -19124,60 +19119,6 @@ var require_codeReviewProof = __commonJS({
       const nonEmpty = lists.filter((list2) => list2.length > 0);
       const list = nonEmpty.length > 0 ? nonEmpty[nonEmpty.length - 1] : lists.length > 0 ? [] : null;
       return { list, problem };
-    }
-    var MARKER = String.raw`^\s*(?:[-*]|\d+\.(?=\s))?\s*`;
-    var TEXT = String.raw`\s*(\S.*?)\s*$`;
-    var DASH = String.raw`(?:[\u2014\u2013]|\s-\s)`;
-    var BACKTICKED_LINE = new RegExp(`${MARKER}\`([^\\s\`:]+):(\\d+)[^\`]*\`\\s*(?:${DASH}|:)${TEXT}`);
-    var BARE_LINE = new RegExp(
-      `${MARKER}([^\\s\`:]+):(\\d+)(?:[-\u2013\u2014]\\d+)?(?![-\u2013\u2014]?\\d)\\S*?\\s*${DASH}${TEXT}`
-    );
-    var SCENARIO_LINE = /^\s+Failure scenario:\s*(\S.*?)\s*$/;
-    var NO_FINDINGS_LINE = /^\s*(?:No findings\.|\(none\))\s*$/;
-    function namesFile(file, fileExists) {
-      if (/[./]/.test(file) && new RegExp("\\p{L}", "u").test(file)) return true;
-      return Boolean(fileExists && fileExists(file));
-    }
-    function textFindings(lines, fileExists) {
-      const findings = [];
-      for (const line of lines) {
-        const scenario = SCENARIO_LINE.exec(line);
-        if (scenario && findings.length > 0) {
-          findings[findings.length - 1].failure_scenario = scenario[1];
-          continue;
-        }
-        const bare = BARE_LINE.exec(line);
-        const m = BACKTICKED_LINE.exec(line) || (bare && namesFile(bare[1], fileExists) ? bare : null);
-        if (m) findings.push({ file: m[1], line: Number(m[2]), summary: m[3] });
-      }
-      return findings;
-    }
-    function checkCodeReviewProof({ rawText, fileExists }) {
-      if (rawText === null || rawText === void 0 || String(rawText).trim() === "") {
-        return fail(`/code-review did not run: its raw output is missing. Fix: ${FIX}.`);
-      }
-      const text = String(rawText);
-      const head = text.split("\n").slice(0, 3).join("\n");
-      if (!new RegExp(`^Skill "${SKILL_NAME}" completed`, "m").test(head)) {
-        return fail(
-          `/code-review did not run: the output lacks the Skill "${SKILL_NAME}" completed header. Fix: ${FIX}.`
-        );
-      }
-      const noList = fail(
-        "/code-review ran but returned no findings list the engine can read; rerun with effort=xhigh or engine=agent-review"
-      );
-      const { list, problem } = jsonFindings(text);
-      if (problem) return noList;
-      if (list && list.length > 0) return { ok: true, reason: "ok", findings: list };
-      const { outside } = scanFences(text);
-      const resultAt = outside.findIndex((line) => /^Result:/.test(line));
-      const afterResult = resultAt < 0 ? [] : outside.slice(resultAt + 1);
-      const lines = textFindings(afterResult, fileExists);
-      if (list) return { ok: true, reason: "ok", findings: lines };
-      if (resultAt < 0) return noList;
-      if (lines.length > 0) return { ok: true, reason: "ok", findings: lines };
-      if (afterResult.some((line) => NO_FINDINGS_LINE.test(line))) return { ok: true, reason: "ok", findings: [] };
-      return noList;
     }
     function explicitEmpty(text) {
       return scanFences(String(text)).outside.some((line) => {
@@ -19396,103 +19337,138 @@ var require_codeReviewProof = __commonJS({
     function isText(value) {
       return typeof value === "string" && value.trim() !== "";
     }
-    var EXCLUDED_PROOF = /^\s*excluded[\s_-]*paths?\s*[:-](.*)$/is;
     function spot(file, line) {
       return line == null ? `${file}, no line` : `${file}:${line}`;
     }
     function shown(value) {
       return value === void 0 ? "none" : JSON.stringify(value);
     }
-    function scoredEntryProblem(entry, index) {
-      if (!isPlainObject(entry)) return `the code-review scored finding ${index + 1} is not an object`;
-      const { file, line, severity, category } = entry;
-      const label = `the code-review scored finding ${index + 1} (${spot(file, line)})`;
-      if (typeof severity !== "number" || !Number.isFinite(severity) || severity < 1 || severity > 10) {
-        return `${label} needs a numeric severity from 1 to 10, not ${shown(severity)}`;
+    var CONFIDENCES = ["High", "Medium", "Low"];
+    var DISPROOF = /\S+:\d+/;
+    function isLine(value) {
+      return value === null || Number.isInteger(value) && value > 0;
+    }
+    function scoredEntryProblem(entry, i, rawByN, root) {
+      const label = `scored entry ${i + 1}`;
+      if (!isPlainObject(entry)) return `${label} is not an object`;
+      const raw = rawByN.get(entry.raw);
+      if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
+      const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
+      const want = repoRelative(raw.file, root);
+      if (entry.file !== want) return `${where} has file ${shown(entry.file)}, but its raw entry's repo-relative file is ${JSON.stringify(want)}`;
+      if (!isLine(entry.line)) return `${where} needs a positive integer line, or null, not ${shown(entry.line)}`;
+      if (!isText(entry.message)) return `${where} needs a non-empty string message`;
+      if (!Number.isInteger(entry.severity) || entry.severity < 1 || entry.severity > 10) {
+        return `${where} needs an integer severity from 1 to 10, not ${shown(entry.severity)}`;
       }
-      if (!CATEGORIES.includes(category)) {
-        return `${label} has category ${shown(category)}, which is not one of the nine names: ${CATEGORIES.join(", ")}`;
+      if (!CATEGORIES.includes(entry.category)) {
+        return `${where} has category ${shown(entry.category)}, which is not one of the nine names: ${CATEGORIES.join(", ")}`;
+      }
+      if (!CONFIDENCES.includes(entry.confidence)) {
+        return `${where} needs confidence High, Medium, or Low, not ${shown(entry.confidence)}`;
+      }
+      if (typeof entry.evidence !== "string") return `${where} needs a string evidence`;
+      for (const key of ["outside_range", "doubted"]) {
+        if (typeof entry[key] !== "boolean") return `${where} needs ${key} to be true or false, not ${shown(entry[key])}`;
+      }
+      if (entry.recategorized_from !== null && !CLEANUP_CATEGORIES.includes(entry.recategorized_from)) {
+        return `${where} needs recategorized_from to be null or one of ${CLEANUP_CATEGORIES.join(", ")}, not ${shown(entry.recategorized_from)}`;
       }
       return null;
     }
-    function excludedDropProblem(entry, excludedPaths) {
-      const m = EXCLUDED_PROOF.exec(entry.proof);
-      if (!m) return null;
-      const glob = m[1].trim();
-      if (!excludedPaths.includes(glob)) {
-        return `cites excluded path ${JSON.stringify(glob)}, which is not in the config's excluded_paths`;
-      }
-      if (!minimatch(entry.file, glob, { dot: true })) {
-        return `cites excluded path ${JSON.stringify(glob)}, which ${entry.file} does not match`;
-      }
-      return null;
-    }
-    function droppedEntryProblem(entry) {
-      if (!hasFile(entry)) return "needs a non-empty string file";
-      if (entry.line !== null && !Number.isInteger(entry.line)) {
-        return "needs an integer line, or null when the raw finding has no line";
-      }
-      if (!isText(entry.summary)) return "needs a non-empty summary";
-      if (!isText(entry.proof)) return "needs a non-empty proof";
-      return null;
-    }
-    function unmatchedDrop(rawFindings, dropped, excludedPaths) {
-      const claimed = /* @__PURE__ */ new Set();
-      for (const [i, entry] of dropped.entries()) {
-        const label = `the code-review dropped entry ${i + 1}`;
-        const problem = droppedEntryProblem(entry);
-        if (problem) return `${label} ${problem}`;
-        const where = spot(entry.file, entry.line);
-        const excluded = excludedDropProblem(entry, excludedPaths);
-        if (excluded) return `${label} (${where}) ${excluded}`;
-        const spots = rawFindings.map((raw, index) => ({ raw, index })).filter(({ raw }) => raw.file === entry.file && jsonLine(raw.line) === entry.line);
-        if (spots.length === 0) return `${label} (${where}) matches no raw /code-review finding at that file and line`;
-        const free = spots.find(({ index }) => !claimed.has(index));
-        if (!free) return `${label} (${where}) matches a raw finding that another dropped entry already accounts for`;
-        claimed.add(free.index);
-      }
-      return null;
-    }
-    function checkFindingAccounting({ rawFindings, findingsText, droppedText, excludedPaths = [] }) {
-      const count = rawFindings.length;
-      const lane = findingsText == null ? null : parseJson(findingsText);
-      const scored = lane && unwrapFindings(lane.value);
-      if (!scored) {
-        return { ok: false, reason: "the code-review lane findings file is missing or has no findings list" };
-      }
-      let dropped = [];
-      if (droppedText != null) {
-        const parsed = parseJson(droppedText);
-        if (!parsed || !Array.isArray(parsed.value)) {
-          return { ok: false, reason: "the code-review dropped file is not a JSON array" };
+    function droppedEntryProblem(entry, i, rawByN, excludedPaths, root) {
+      const label = `dropped entry ${i + 1}`;
+      if (!isPlainObject(entry)) return `${label} is not an object`;
+      const raw = rawByN.get(entry.raw);
+      if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
+      const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
+      if (entry.reason === "excluded") {
+        if (!excludedPaths.includes(entry.glob)) {
+          return `${where} cites glob ${shown(entry.glob)}, which is not in the config's excluded_paths`;
         }
-        dropped = parsed.value;
+        if (!pathMatches(repoRelative(raw.file, root), [entry.glob])) {
+          return `${where} cites glob ${JSON.stringify(entry.glob)}, which ${raw.file} does not match`;
+        }
+        return { why: `excluded path: ${entry.glob}` };
       }
-      if (count !== scored.length + dropped.length) {
-        return {
-          ok: false,
-          reason: `/code-review found ${count}, but the lane scored ${scored.length} and dropped ${dropped.length}; every raw finding must be scored or dropped exactly once`
-        };
+      if (entry.reason === "disproved") {
+        if (!isText(entry.proof) || !DISPROOF.test(entry.proof)) {
+          return `${where} needs a proof that names a file:line`;
+        }
+        return { why: entry.proof };
       }
+      return `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"`;
+    }
+    function laneFail(reason) {
+      return { ok: false, reason, dropped: [] };
+    }
+    function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root }) {
+      const scoredParsed = scoredText == null ? null : parseJson(scoredText);
+      const scored = scoredParsed && unwrapFindings(scoredParsed.value);
+      if (!scored) return laneFail("the scored findings file is missing or has no findings list");
+      const droppedParsed = droppedText == null ? null : parseJson(droppedText);
+      if (!droppedParsed || !Array.isArray(droppedParsed.value)) {
+        return laneFail("the dropped file is missing or is not a JSON array");
+      }
+      const droppedEntries = droppedParsed.value;
+      const rawByN = new Map(rawEntries.map((entry) => [entry.n, entry]));
+      const used = /* @__PURE__ */ new Map();
+      const use = (n, what) => {
+        if (used.has(n)) return `raw entry ${n} is accounted for twice: by ${used.get(n)} and by ${what}`;
+        used.set(n, what);
+        return null;
+      };
       for (const [i, entry] of scored.entries()) {
-        const problem2 = scoredEntryProblem(entry, i);
-        if (problem2) return { ok: false, reason: problem2 };
+        const problem = scoredEntryProblem(entry, i, rawByN, root);
+        if (problem) return laneFail(problem);
+        const twice = use(entry.raw, `scored entry ${i + 1}`);
+        if (twice) return laneFail(twice);
       }
-      const problem = unmatchedDrop(rawFindings, dropped, excludedPaths);
-      if (problem) return { ok: false, reason: problem };
-      return { ok: true, reason: "ok" };
+      const dropped = [];
+      for (const [i, entry] of droppedEntries.entries()) {
+        const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root);
+        if (typeof result === "string") return laneFail(result);
+        const twice = use(entry.raw, `dropped entry ${i + 1}`);
+        if (twice) return laneFail(twice);
+        const raw = rawByN.get(entry.raw);
+        dropped.push({ file: repoRelative(raw.file, root), line: raw.line, summary: raw.summary, why: result.why });
+      }
+      const lost = rawEntries.find((entry) => !used.has(entry.n));
+      if (lost) {
+        return laneFail(
+          `raw entry ${lost.n} (${spot(lost.file, lost.line)}) is neither scored nor dropped; every raw finding must be scored or dropped exactly once`
+        );
+      }
+      return { ok: true, reason: "ok", dropped };
+    }
+    function checkCodeReviewRun({ captureText, runId, rawText, scoredText, droppedText, excludedPaths = [], fileExists, root }) {
+      const parsedCapture = captureText == null ? null : parseJson(captureText);
+      const parsedRaw = rawText == null ? null : parseJson(rawText);
+      const rawEntries = parsedRaw ? parsedRaw.value : null;
+      const grounded = checkGrounding({
+        capture: parsedCapture ? parsedCapture.value : null,
+        runId,
+        rawEntries,
+        fileExists,
+        root
+      });
+      const count = Array.isArray(rawEntries) ? rawEntries.length : 0;
+      if (!grounded.ok) return { ...grounded, count, dropped: [] };
+      const lane = checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths, root });
+      if (!lane.ok) return { ok: false, stage: "lane", reason: lane.reason, count, mode: grounded.mode, dropped: [] };
+      return { ok: true, stage: null, reason: "ok", count, mode: grounded.mode, dropped: lane.dropped };
     }
     module2.exports = {
       CAPTURE_LIMIT_MINUTES,
-      checkCodeReviewProof,
-      checkFindingAccounting,
       jsonFindings,
       explicitEmpty,
       findingLines,
       jsonLine,
       repoRelative,
       looksFinished,
-      checkGrounding
+      checkGrounding,
+      checkLaneOutput,
+      checkCodeReviewRun
     };
   }
 });
@@ -20496,8 +20472,7 @@ var require_cli = __commonJS({
     var { evaluateApproval } = require_approval();
     var {
       CAPTURE_LIMIT_MINUTES,
-      checkCodeReviewProof,
-      checkFindingAccounting,
+      checkCodeReviewRun,
       looksFinished
     } = require_codeReviewProof();
     var {
@@ -20841,6 +20816,7 @@ var require_cli = __commonJS({
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
       }
     }
+    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--capture <f>]";
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -20856,7 +20832,7 @@ var require_cli = __commonJS({
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--capture <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not)
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -21240,37 +21216,47 @@ var require_cli = __commonJS({
           const rawPath = flag(rest, "--raw");
           const findingsPath = flag(rest, "--findings");
           const droppedPath = flag(rest, "--dropped");
-          if (!rawPath || Boolean(findingsPath) !== Boolean(droppedPath)) {
-            out("usage: agent-review code-review-proof --raw <f> [--findings <f> --dropped <f>]");
+          const runId = flag(rest, "--run");
+          if (!rawPath || !findingsPath || !droppedPath || !runId) {
+            out(CODE_REVIEW_PROOF_USAGE);
             return 1;
           }
           const readIfPresent = (p) => existsSync(p) ? readFileSync(p, "utf8") : null;
+          const refuse = (stage, reason) => {
+            out(JSON.stringify({ ok: false, stage, reason, count: 0, mode: null, dropped: [] }));
+            return 1;
+          };
+          let excludedPaths;
+          try {
+            excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+          } catch (e) {
+            return refuse("config", `could not read excluded_paths from the review config: ${e.message}`);
+          }
+          let capturePath = flag(rest, "--capture");
+          if (!capturePath) {
+            const dir = captureDir();
+            const dirError = captureDirError(dir);
+            if (dirError) return refuse("capture", dirError);
+            capturePath = join(dir, CAPTURE_FILES.capture);
+          }
           const fileExists = (p) => {
             const target = resolve(C.ROOT, p);
             const rel = relative(C.ROOT, target);
             if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return false;
             return existsSync(target) && statSync(target).isFile();
           };
-          const r = checkCodeReviewProof({ rawText: readIfPresent(rawPath), fileExists });
-          let { ok, reason } = r;
-          if (ok && findingsPath) {
-            let excludedPaths;
-            try {
-              excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
-            } catch (e) {
-              reason = `could not read excluded_paths from the review config: ${e.message}`;
-              out(JSON.stringify({ ok: false, reason, count: r.findings.length }));
-              return 1;
-            }
-            ({ ok, reason } = checkFindingAccounting({
-              rawFindings: r.findings,
-              findingsText: readIfPresent(findingsPath),
-              droppedText: readIfPresent(droppedPath),
-              excludedPaths
-            }));
-          }
-          out(JSON.stringify({ ok, reason, count: r.findings.length }));
-          return ok ? 0 : 1;
+          const r = checkCodeReviewRun({
+            captureText: readIfPresent(capturePath),
+            runId,
+            rawText: readIfPresent(rawPath),
+            scoredText: readIfPresent(findingsPath),
+            droppedText: readIfPresent(droppedPath),
+            excludedPaths,
+            fileExists,
+            root: C.ROOT
+          });
+          out(JSON.stringify(r));
+          return r.ok ? 0 : 1;
         }
         case "capture": {
           const sub = rest[0];
