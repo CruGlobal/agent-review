@@ -44,6 +44,7 @@ agent-review capture show --run {{RUN_ID}} | tail -c +20001 | head -c 20000
 ```
 
 If a part still comes back cut short, halve the page size and read that part again in two halves.
+A part can end in the middle of a line. Join that cut line with the start of the next part before you read it.
 Read every part. This applies to `agent-review capture show` and `agent-review diff-for` output
 alike. Never save the output to a file to page through it.
 

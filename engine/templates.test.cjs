@@ -772,6 +772,7 @@ test('lane template pages long output by bytes through a pipe, never through a f
     "If the Bash tool cuts a command's output short, run the command again piped through `head -c 20000` to read the first part,",
     'then through `tail -c +20001 | head -c 20000` for the second, `tail -c +40001 | head -c 20000` for the third, and so on, until a part prints nothing.',
     'If a part still comes back cut short, halve the page size and read that part again in two halves.',
+    'A part can end in the middle of a line. Join that cut line with the start of the next part before you read it.',
     'This applies to `agent-review capture show` and `agent-review diff-for` output alike.',
     'Never save the output to a file to page through it.',
   ]) {

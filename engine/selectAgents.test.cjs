@@ -77,7 +77,7 @@ test('selected agents carry their config triggers verbatim', () => {
 });
 
 // Slicing reads `always` off the plan agent directly; it sits beside
-// `triggers` in config, not inside it — to decide the full-diff rule.
+// `triggers` in config, not inside it; to decide the full-diff rule.
 test('selected agents carry the config always flag beside triggers', () => {
   const sel = selectAgents(
     { files: ['pages/api/foo.ts'], diffText: '' },
@@ -198,7 +198,7 @@ test('falls back to the first escalating agent in config order when there is no 
 
 // An operator explicitly de-escalating
 // the security lane must not silently defeat the coverage guarantee when a
-// genuinely escalating lane is available — prefer it over an id-only match.
+// genuinely escalating lane is available; prefer it over an id-only match.
 test('coverage guarantee prefers a genuinely escalating lane over a de-escalated security lane', () => {
   const cfg = {
     ...coverageConfig,
