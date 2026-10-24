@@ -26,19 +26,35 @@ const {
 } = require('./cli.cjs');
 const { buildPlan } = require('./plan.cjs');
 
-function run(args) {
-  const orig = process.stdout.write.bind(process.stdout);
+// The CLI writes stdout synchronously through fs.writeSync(1, ...), so in-process captures
+// stub that for fd 1 as well as process.stdout.write.
+function captureStdout(fn) {
+  const fs = require('node:fs');
+  const origWrite = process.stdout.write;
+  const origWriteSync = fs.writeSync;
   let s = '';
   process.stdout.write = (x) => {
     s += x;
     return true;
   };
-  let code;
+  fs.writeSync = (fd, buf, offset, ...rest) => {
+    if (fd !== 1) return origWriteSync.call(fs, fd, buf, offset, ...rest);
+    const chunk = typeof buf === 'string' ? Buffer.from(buf) : Buffer.from(buf).subarray(offset || 0);
+    s += chunk.toString('utf8');
+    return chunk.length;
+  };
+  let result;
   try {
-    code = main(args);
+    result = fn();
   } finally {
-    process.stdout.write = orig;
+    process.stdout.write = origWrite;
+    fs.writeSync = origWriteSync;
   }
+  return { result, s };
+}
+
+function run(args) {
+  const { result: code, s } = captureStdout(() => main(args));
   return { code, s };
 }
 
@@ -119,13 +135,8 @@ test('ctx()-derived reviewDirRel reaches buildPlan and suppresses self-match und
   );
 });
 
-// Self-contained stdout capture (works regardless of existing helpers in this file).
 function captured(fn) {
-  const chunks = [];
-  const orig = process.stdout.write;
-  process.stdout.write = (s) => (chunks.push(String(s)), true);
-  try { fn(); } finally { process.stdout.write = orig; }
-  return chunks.join('');
+  return captureStdout(fn).s;
 }
 
 test('usage names the agent-review binary', () => {
@@ -1239,6 +1250,64 @@ test('capture show prints the result for the matching run and fails for another 
     assert.equal(usage.code, 1);
     assert.match(usage.stdout, /usage: agent-review capture/);
     assert.match(run(['help']).s, /^ {2}capture show --run <id> {2,}/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('hooks exit 0 silently when the session cwd was removed', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const gone = join(parent, 'gone');
+    const dir = join(parent, 'capture');
+    mkdirSync(dir, { mode: 0o700 });
+    armCapture(dir);
+    const inRemovedCwd = (args, captureDirPath, input = '') => {
+      const r = spawnSync(
+        'sh',
+        ['-c', 'mkdir "$1" && cd "$1" && rmdir "$1" && shift && exec "$@"', 'sh', gone, process.execPath, CLI, ...args],
+        { input, encoding: 'utf8', env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: captureDirPath } },
+      );
+      return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+    };
+
+    const control = inRemovedCwd(['help'], dir);
+    assert.equal(control.code, 1, 'a command that needs the cwd fails there, so the cwd really is gone');
+    assert.match(control.stderr, /uv_cwd|ENOENT/);
+
+    const missing = join(parent, 'missing');
+    assert.deepEqual(inRemovedCwd(['hook', 'post-skill'], missing, JSON.stringify(HEADLESS_SKILL)), QUIET);
+    assert.deepEqual(inRemovedCwd(['hook', 'subagent-stop'], missing, JSON.stringify(FORK_STOP)), QUIET);
+
+    assert.deepEqual(inRemovedCwd(['hook', 'subagent-stop'], dir, JSON.stringify(FORK_STOP)), QUIET);
+    assert.deepEqual(inRemovedCwd(['hook', 'post-skill'], dir, JSON.stringify(HEADLESS_SKILL)), QUIET);
+    const capture = readCaptureJson(dir, 'code_review_capture.json');
+    assert.equal(capture.result, '- a.rb:1: bug', 'an armed hook still captures from a removed cwd');
+    assert.equal(capture.stop_count, 1);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('a command printing through out() delivers more than 64 KiB through a pipe intact', () => {
+  const { mergeLedger } = require('./reportState.cjs');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-out-'));
+  try {
+    const findings = { kept: Array.from({ length: 1500 }, (_, i) => ({
+      signature: `sig-${i}`, agent: 'correctness', category: 'correctness',
+      severity: 5, file: `lib/file_${i}.rb`, line: i + 1, message: `café finding ${i} `.padEnd(120, 'x'),
+    })) };
+    const findingsPath = join(dir, 'findings.json');
+    writeFileSync(findingsPath, JSON.stringify(findings));
+    const expected = JSON.stringify(mergeLedger([], findings), null, 2) + '\n';
+    assert.ok(Buffer.byteLength(expected) > 3 * 65536, `fixture is ${Buffer.byteLength(expected)} bytes`);
+
+    const r = spawnSync(process.execPath, [CLI, 'ledger', '--findings', findingsPath], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stderr, '');
+    assert.equal(Buffer.byteLength(r.stdout), Buffer.byteLength(expected));
+    assert.equal(r.stdout, expected);
+    assert.equal(run(['ledger', '--findings', findingsPath]).s, expected, 'in-process output is the same bytes');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

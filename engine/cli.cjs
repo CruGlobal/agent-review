@@ -13,9 +13,9 @@ const {
   lstatSync,
   openSync,
   closeSync,
-  writeSync,
   constants: fsConstants,
 } = require('node:fs');
+const nodeFs = require('node:fs');
 const os = require('node:os');
 const { createHash, randomBytes } = require('node:crypto');
 const { loadConfig } = require('./loadConfig.cjs');
@@ -83,8 +83,25 @@ const {
 
 const { repoRoot, reviewDir } = require('./paths.cjs');
 
+// process.stdout is asynchronous on a macOS pipe and the CLI exits right after main() returns,
+// so output must be written synchronously or it is cut short at the pipe buffer. Tests capture
+// it by stubbing nodeFs.writeSync, so call it through the module object.
+function writeStdoutSync(text) {
+  const buf = Buffer.from(text, 'utf8');
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += nodeFs.writeSync(1, buf, offset);
+    } catch (e) {
+      if (e.code === 'EPIPE') return;
+      if (e.code !== 'EAGAIN') throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+    }
+  }
+}
+
 function out(s) {
-  process.stdout.write(s + '\n');
+  writeStdoutSync(s + '\n');
 }
 
 // Returns the value after `name`, or undefined if absent or the next token is itself a flag.
@@ -245,20 +262,6 @@ function writeFileAtomic(path, text) {
   }
 }
 
-// process.stdout is asynchronous on a macOS pipe and the CLI exits right after main() returns,
-// so a large result would be cut short without a synchronous write.
-function writeStdoutSync(text) {
-  const buf = Buffer.from(text, 'utf8');
-  let offset = 0;
-  while (offset < buf.length) {
-    try {
-      offset += writeSync(1, buf, offset);
-    } catch (e) {
-      if (e.code !== 'EAGAIN') throw e;
-    }
-  }
-}
-
 function parseJsonOrNull(text) {
   try {
     return JSON.parse(text);
@@ -397,6 +400,8 @@ function stripGlobalFlags(argv) {
 }
 
 function main(rawArgv) {
+  // Before ctx(): process.cwd() throws when the session's cwd was removed, and a hook must never fail.
+  if (rawArgv[0] === 'hook') return runHook(rawArgv[1]);
   const C = ctx(rawArgv);
   const argv = stripGlobalFlags(rawArgv);
   const cmd = argv[0];
@@ -679,7 +684,7 @@ function main(rawArgv) {
           JSON.parse(readFileSync(requestPath, 'utf8')),
           JSON.parse(readFileSync(resultPath, 'utf8')),
         );
-        process.stdout.write(entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''));
+        writeStdoutSync(entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''));
         return 0;
       }
       if (sub === 'finalize') {
