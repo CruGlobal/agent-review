@@ -1831,7 +1831,7 @@ test('capture-wait fails at once on a mismatch record and prints both args', () 
   }
 });
 
-test('capture-wait: a finished matching capture wins over a mismatch record (review probe M2)', () => {
+test('capture-wait: a finished matching capture wins over a mismatch record', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
   try {
     armRun(dir, { args: 'xhigh 12' });
@@ -1848,7 +1848,7 @@ test('capture-wait: a finished matching capture wins over a mismatch record (rev
   }
 });
 
-test('capture-wait fails when --effort is not the armed effort (review M5)', () => {
+test('capture-wait fails when --effort is not the armed effort', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
   try {
     armRun(dir, { args: 'xhigh 12 --max-findings all' });
@@ -1869,7 +1869,7 @@ test('capture-wait fails when --effort is not the armed effort (review M5)', () 
   }
 });
 
-test('capture-wait --timeout defaults to 540 and clamps to 590 seconds (review M8)', () => {
+test('capture-wait --timeout defaults to 540 and clamps to 590 seconds', () => {
   assert.equal(captureWaitTimeout(undefined), 540);
   assert.equal(captureWaitTimeout('0'), 0);
   assert.equal(captureWaitTimeout('0.05'), 0.05);

@@ -76,7 +76,7 @@ test('selected agents carry their config triggers verbatim', () => {
   assert.equal(architecture.triggers, undefined);
 });
 
-// Slicing reads `always` off the plan agent directly — it sits beside
+// Slicing reads `always` off the plan agent directly; it sits beside
 // `triggers` in config, not inside it — to decide the full-diff rule.
 test('selected agents carry the config always flag beside triggers', () => {
   const sel = selectAgents(

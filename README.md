@@ -172,15 +172,19 @@ do not add or remove reviewers under this engine. `/code-review` has no security
 asks for tests, which is why those reviewers stay on.
 
 **How the result is captured.** The lane does not copy `/code-review`'s answer by hand. A plugin
-hook writes it to a private file, `/tmp/agent-review-<uid>`, which only your user can open
+hook writes it to a private directory, `/tmp/agent-review-<uid>`, which only your user can open
 (mode 0700, owned by you, checked before every read and write). The hooks act only while a
-review is running, and a capture expires after 3 hours. They never touch your
-own `/code-review` runs. The lane reads the capture with `agent-review capture show`.
+review has armed capture, and an arm expires after 3 hours. They never touch a `/code-review` you
+run yourself in the main conversation. While a review is armed, though, a `/code-review` run in
+another subagent of yours writes a mismatch record and fails that review's wait, and the hooks
+keep the final message of every subagent that stops in your sessions (the newest 50) in that
+directory until the review disarms. The lane reads the capture with `agent-review capture show`.
 
 **The review waits for `/code-review` to finish.** The lane waits with `agent-review
 capture-wait`, up to a limit that depends on the effort: `low` 10 minutes, `medium` 15, `high`
 20, `xhigh` 40, `max` 120. If the limit passes first, the review fails closed and posts no
-report.
+report. If the hooks never run, for example because Claude Code was not restarted after the
+plugin was installed, the wait fails within a minute and says so.
 
 **How findings are scored.** The lane lists the findings it read from the captured text, and then
 agent-review reads each finding, looks at the code, and scores it on its own 1 to 10 scale. A 7 means the
@@ -189,11 +193,11 @@ same thing whichever engine found it. The rules:
 - Cleanups (simplification, efficiency, reuse, and similar) score 6 at most, so they never block.
 - To score 7 or more, a finding needs a changed line, High confidence, and evidence of how it
   fails. Without those it stays as a suggestion at 6.
-- A finding is deleted only when it is proven wrong by quoting the exact code. If the scorer just
-  doubts it, the finding stays, at 4 or below, with a note.
-- A finding is dropped only for one of two reasons. It is `excluded` by a glob in your
-  `excluded_paths`, or it is `disproved` by a quoted `path:line`. Dropped findings are listed in
-  the report, so you can check the work.
+- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a
+  glob in your `excluded_paths` and its line in the result cites no other file, or it is
+  `disproved` by quoting the exact code right after a `path:line` in a file that exists, within 2
+  lines of that line. If the scorer just doubts it, the finding stays, at 4 or below, with a
+  note. Dropped findings are listed in the report, so you can check the work.
 - Every finding the lane listed must be scored or dropped exactly once, by its number.
 - On a re-review, a finding outside the new commits scores 6 at most. It shows up as a
   suggestion and cannot block you.
@@ -204,13 +208,19 @@ same thing whichever engine found it. The rules:
   reviewer keeps its score through the merge instead of being averaged down.
 
 **It stops if `/code-review` did not really run.** The check `agent-review code-review-proof`
-compares the lane's list with the text the hook captured. At `xhigh` and `max` the lane's list
-must match the result's JSON list one to one. At the other levels it must match the result's
-finding lines, one entry per line. If the capture is missing, or the lane's list does not match it,
-the review stops and posts nothing. It never quietly falls
-back to the old reviewers, and it never approves without its main finder. It needs a Claude Code
-that has the built-in `/code-review` (this was built and tested on 2.1.306). If you see the stop
-message, update Claude Code, or run again with `engine=agent-review`.
+compares the lane's list with the text the hook captured. When the result holds a JSON findings
+list, the lane's list must match it one to one. `xhigh` and `max` results usually hold one.
+Otherwise the lane's list must match the result's finding lines, one entry per line. That text
+mode has a cost, and it is usual at `low`, `medium`, and `high`: a line that cites a location
+only as context still counts as a finding. The lane must list it and score or drop it, and a
+line it leaves out fails the run. The check also holds every scored finding to the field rules:
+its raw finding's file, a whole-number severity from 1 to 10, one of the nine category names, a
+confidence of High, Medium, or Low, and the `outside_range`, `doubted`, and `recategorized_from`
+fields. If the capture is missing, or the lane's list does not match it, the review stops and
+posts nothing. It never quietly falls back to the old reviewers, and it never approves without
+its main finder. It needs a Claude Code that has the built-in `/code-review` (this was built and
+tested on 2.1.309). If you see the stop message, update Claude Code, or run again with
+`engine=agent-review`.
 
 **`effort=max` works, but it is slow and costly.** It fans out to many helper agents. On a
 15-line diff, the test run used about 20 of them and took more than 15 minutes. `xhigh` is the
@@ -440,6 +450,10 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
   lane, and the check reads that file. But a lane runs as the same user, so it could replace the
   file. The check cannot rule that out.
+- **A lane could add a finding `/code-review` never made.** In text mode, a raw entry with no
+  line number may claim any result line that names its file and cites no location, which a line
+  of context can do. The check cannot tell such a line from a finding. This can only add a
+  finding, never hide one.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.

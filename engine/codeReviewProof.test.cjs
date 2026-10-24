@@ -183,7 +183,7 @@ test('an unusable list-like block fails with stage capture even beside a usable 
   }
 });
 
-test('a list padded with a no-break space or BOM is usable ', () => {
+test('a list padded with a no-break space or BOM is usable', () => {
   for (const pad of ['\u00a0', '\ufeff', '  ']) {
     const result = fenced('json', `${pad}${J([{ file: 'a.rb', line: 3 }])}${pad}`);
     assert.deepEqual(jsonFindings(result), { list: [{ file: 'a.rb', line: 3 }], problem: null }, J(pad));
@@ -338,7 +338,7 @@ test('an entry with no line takes a line that names its path and has no mention'
   assertGrounded(ground('- The constants live in lib/cart.rb.\n- a.rb:3: bug\n', raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'a full stop ends the path');
 });
 
-test('findings inside a plain or prose fence must be claimed (review probes L1, L2)', () => {
+test('findings inside a plain or prose fence must be claimed', () => {
   const l1 = 'Correctness:\n```\n- a.rb:3: total skips the guard\n```\nCleanups:\n(none)\n';
   const emptyL1 = ground(l1, []);
   assertFails(emptyL1, 'lane', 'L1');
@@ -373,7 +373,7 @@ test('a fence labeled with a language citing lib/b.rb:9 still needs no claim', (
   assertGrounded(ground(listLike, []), 'empty', 'its quoted location needs no claim');
 });
 
-test('a no-line entry grounds on its path written after the root or ./ (review probes B1, B2, B3)', () => {
+test('a no-line entry grounds on its path written after the root or ./', () => {
   const tail = '- a.rb:3: bug\n';
   assertGrounded(ground(`- /repo/lib/cart.rb never freezes its constants\n${tail}`, raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'B1');
   assertGrounded(ground(`- /repo/lib/cart.rb never freezes its constants\n${tail}`, raws(['/repo/lib/cart.rb', null], ['a.rb', 3])), 'text', 'B2');
@@ -388,7 +388,7 @@ test('a no-line entry grounds on its path written after the root or ./ (review p
   }
 });
 
-test("a mention's path matches with wrapper characters trimmed (review probes C1, C2)", () => {
+test("a mention's path matches with wrapper characters trimmed", () => {
   assert.deepEqual(findingLines('- "lib/cart.rb":50 bug').map((l) => l.mentions), [[{ file: 'lib/cart.rb"', line: 50 }]], 'C1 finds one mention as written');
   assert.deepEqual(findingLines('- _lib/a.rb_:9 bug').map((l) => l.mentions), [[{ file: '_lib/a.rb_', line: 9 }]], 'C2 finds one mention as written');
   for (const [line, file, at] of [

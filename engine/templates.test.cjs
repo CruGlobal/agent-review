@@ -1095,7 +1095,7 @@ test('a score-0 skip computes status from carried-forward state and surfaces ope
   assert.ok(/previously-found blocker\(s\) remain open/.test(skip), 'carried-forward open blockers must be surfaced in the skip note');
 });
 
-// --- Ponytail-consensus: skill rewiring — engine consensus replaces in-context ---
+// --- Skill wiring: engine consensus replaces in-context consensus ---
 // --- grouping/averaging, agents hand off via files at every stage that reads findings. ---
 
 function stageSlice(skill, startHeader, endHeader) {
@@ -1122,7 +1122,7 @@ test('the review skill slices per agent and skips empty lanes', () => {
 
 // --- Final review fix wave (I1, I2, I3, I5) ---
 
-test('I1: a lane with no slice_manifest entry at all (deep config-only) is a full-diff lane', () => {
+test('a lane with no slice_manifest entry at all (deep config-only) is a full-diff lane', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const diffPathRow = skill.split('\n').find((l) => l.includes('{{DIFF_PATH}}'));
   assert.ok(diffPathRow, '{{DIFF_PATH}} placeholder row not found');
@@ -1132,7 +1132,7 @@ test('I1: a lane with no slice_manifest entry at all (deep config-only) is a ful
   );
 });
 
-test('I2: {{RISK_CONTEXT}} surfaces the lane\'s model tier for the archetype\'s read budget', () => {
+test('{{RISK_CONTEXT}} surfaces the lane\'s model tier for the archetype\'s read budget', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const riskContextRow = skill.split('\n').find((l) => l.includes('{{RISK_CONTEXT}}'));
   assert.ok(riskContextRow, '{{RISK_CONTEXT}} placeholder row not found');
@@ -1142,7 +1142,7 @@ test('I2: {{RISK_CONTEXT}} surfaces the lane\'s model tier for the archetype\'s 
   );
 });
 
-test('I3: skipped-lane notes are plumbed through a file from Stage 1 to Stage 6', () => {
+test('skipped-lane notes are plumbed through a file from Stage 1 to Stage 6', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('/tmp/skipped_lanes.txt'), 'a skipped-lanes file must exist');
   assert.ok(
@@ -1166,7 +1166,7 @@ test('I3: skipped-lane notes are plumbed through a file from Stage 1 to Stage 6'
   );
 });
 
-test('I5: quick mode always retains a coverage-forced lane, even past the 3-agent cap', () => {
+test('quick mode always retains a coverage-forced lane, even past the 3-agent cap', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '## Stage 1 — Launch Specialized Review Agents');
   assert.ok(
@@ -1237,7 +1237,7 @@ test('Stage 2 collect cross-checks each lane\'s returned N against its findings 
   );
 });
 
-test('a lane that fails twice stops the run with no report — never wired into irreversible/status', () => {
+test('a lane that fails twice stops the run with no report and is never wired into irreversible/status', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
   assert.ok(
@@ -1333,7 +1333,7 @@ test('the archetype instructs writing the findings file via node -e and JSON.str
   assert.ok(/recommendation: ≤ ?4 lines/.test(archetype), 'archetype must cap recommendation to <=4 lines');
 });
 
-// --- Ponytail-consensus: CI bash-block consolidation — fewer separate Bash-tool turns ---
+// --- CI bash-block consolidation: fewer separate Bash-tool turns ---
 // --- for a CI run. Each turn is a fresh shell (see the "Cross-stage state" note), and every ---
 // --- turn boundary is a place a bwrap sandbox bind-race can strike mid-review. ---
 
@@ -1414,7 +1414,7 @@ test('the CI path uses at most 14 bash turns (Stage 0A through Stage 6)', () => 
   }
   // Stage 5B ("SKIP THIS ENTIRE STAGE IN CI MODE") and the local-only plugin-staleness check
   // ("**Locally** the opposite can be stale...") never execute during a CI run, so they are
-  // outside the CI-path turn budget — they stay unmerged because they only ever run locally.
+  // outside the CI-path turn budget; they stay unmerged because they only ever run locally.
   //
   // The budget is 12, not 10: REVIEW_SCOPE requires the model
   // to read the diff manifest's changed-file list and stat output — a genuine decision, not
@@ -1437,7 +1437,7 @@ test('the CI path uses at most 14 bash turns (Stage 0A through Stage 6)', () => 
   assert.ok(count <= 14, `CI-path bash fence count is ${count}, expected <= 14`);
 });
 
-test('every Task-4-consolidated block sources review_env.sh as its first non-comment line', () => {
+test('every consolidated CI-path block sources review_env.sh as its first non-comment line', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const sections = [
     [
@@ -1515,7 +1515,7 @@ test('the smoke-test tier routing block remains its own bash turn — the launch
   );
 });
 
-test('Task 4 consolidation preserves every fail-closed exit message verbatim', () => {
+test('the consolidated CI-path blocks keep every fail-closed exit message verbatim', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   for (const message of [
     '❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first.',
@@ -1541,7 +1541,7 @@ test('the review gates load the config without the code-review engine checks', (
   }
 });
 
-test('Task-4-merged blocks never append to a scratch file other than review_env.sh', () => {
+test('the merged CI-path blocks never append to a scratch file other than review_env.sh', () => {
   // A bwrap bind-race rerun replays a whole merged block from the top — a `>>` onto any file
   // besides review_env.sh (whose duplicate export lines are harmless) would duplicate data on
   // retry. `>` and `mkdir -p` are fine; so is `tee -a`/`>>` when the target IS review_env.sh.
@@ -2478,6 +2478,66 @@ test('README names the overwritable capture file as a known limitation', () => {
   assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
 });
 
+test('the capture spec records the final-review changes to the check in section 4', () => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const section4 = spec.slice(spec.indexOf('### 4. The check'), spec.indexOf('### 5.'));
+  const start = section4.indexOf('**Amendment, 2026-10-24 (final review).**');
+  assert.notStrictEqual(start, -1, 'section 4 has a dated amendment');
+  const amendment = section4.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+  for (const needle of [
+    '`--capture` is removed',
+    '`/tmp/agent-review-<uid>`',
+    '`--promote <f>`',
+    'a line from 1 to the file\'s line count',
+    'within 2 lines',
+    'every mention on its claimed finding line',
+    'within 60 seconds',
+    'Two different non-empty qualifying JSON lists fail closed with `stage: capture`',
+  ]) {
+    assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('—'), 'new prose uses no em dashes');
+});
+
+test('README states how the capture, the wait, and the proof behave, and what they cannot catch', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const engine = readme.slice(readme.indexOf('**How the result is captured.**'), readme.indexOf('**`effort=max` works'));
+  const flat = engine.replace(/\s+/g, ' ');
+  for (const needle of [
+    'A plugin hook writes it to a private directory, `/tmp/agent-review-<uid>`,',
+    'The hooks act only while a review has armed capture, and an arm expires after 3 hours.',
+    'They never touch a `/code-review` you run yourself in the main conversation.',
+    "While a review is armed, though, a `/code-review` run in another subagent of yours writes a mismatch record and fails that review's wait, and the hooks keep the final message of every subagent that stops in your sessions (the newest 50) in that directory until the review disarms.",
+    'If the hooks never run, for example because Claude Code was not restarted after the plugin was installed, the wait fails within a minute and says so.',
+    "When the result holds a JSON findings list, the lane's list must match it one to one. `xhigh` and `max` results usually hold one.",
+    "Otherwise the lane's list must match the result's finding lines, one entry per line.",
+    "That text mode has a cost, and it is usual at `low`, `medium`, and `high`: a line that cites a location only as context still counts as a finding. The lane must list it and score or drop it, and a line it leaves out fails the run.",
+    "The check also holds every scored finding to the field rules: its raw finding's file, a whole-number severity from 1 to 10, one of the nine category names, a confidence of High, Medium, or Low, and the `outside_range`, `doubted`, and `recategorized_from` fields.",
+    'this was built and tested on 2.1.309',
+    "- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a glob in your `excluded_paths` and its line in the result cites no other file, or it is `disproved` by quoting the exact code right after a `path:line` in a file that exists, within 2 lines of that line. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped findings are listed in the report, so you can check the work.",
+  ]) {
+    assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
+  }
+  for (const stale of [
+    'a private file',
+    'a capture expires after 3 hours',
+    "At `xhigh` and `max` the lane's list must match",
+    '2.1.306',
+    'A finding is deleted only when it is proven wrong',
+    'They never touch your own `/code-review` runs.',
+  ]) {
+    assert.ok(!flat.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
+  }
+  assert.ok(!engine.includes('—'), 'new prose uses no em dashes');
+
+  const limits = readme.slice(readme.indexOf('## Known limitations'), readme.indexOf('## Repo layout'));
+  const start = limits.indexOf('**A lane could add a finding `/code-review` never made.**');
+  assert.notStrictEqual(start, -1, 'the known limitations name the invented no-line entry');
+  const bullet = limits.slice(start, limits.indexOf('\n- **', start)).replace(/\s+/g, ' ');
+  assert.ok(bullet.includes('This can only add a finding, never hide one.'), bullet);
+  assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
+});
+
 test('README makes no claim about resetting a remembered /code-review limit', () => {
   const readme = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
   assert.ok(!readme.includes('resets any limit'), 'the reset claim is gone');
@@ -3320,7 +3380,7 @@ test('README labels the engine sample as a local-only code-review example, not t
   assert.ok(/example of a local-only, code-review repo/.test(r.replace(/\s+/g, ' ')));
 });
 
-test('task 11 fix round: shadow, Stage 4 guard, validation, file mode, address, yolo guard', () => {
+test('init saves shadow as no and validates its answers, update-files guards Stage 4, address and yolo-review guard CI and stale reports', () => {
   const init = skillText('init');
   const flat = init.replace(/\s+/g, ' ');
   assert.ok(flat.includes('Save `no` for `BOT_APPROVES` whenever `rollout.mode` is `shadow`'), 'shadow is saved as no');

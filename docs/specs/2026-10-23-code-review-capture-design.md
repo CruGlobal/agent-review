@@ -184,6 +184,8 @@ The `REFUTED` drop rule is removed. `/code-review` already leaves REFUTED findin
 
 It reads `excluded_paths` from the config, and checks file existence under `--root`. Output: `{ok, reason, count}`. It fails closed with a clear reason when any of these does not hold.
 
+**Amendment, 2026-10-24 (final review).** `--capture` is removed: the proof always reads the capture from the private capture directory, `/tmp/agent-review-<uid>`, so no caller can point it at a hand-written file. `--promote <f>` writes the exact findings bytes the proof checked to `<f>`, atomically, when `ok` is true, and removes `<f>` when it is false; Stage 2 promotes to `/tmp/agent_findings/code-review.json`, so consensus reads exactly the proved file. A `disproved` proof must cite a file that exists under `--root`, a line from 1 to the file's line count, and quoted code right after that `path:line`, at least 3 non-space characters, that appears within 2 lines of it when whitespace is ignored. In text mode an `excluded` drop needs every mention on its claimed finding line to match an excluded glob, so a second location cannot carry a finding out. `capture-wait` fails within 60 seconds when no pending, capture, or mismatch file for the run exists, because then the hooks did not run. Two different non-empty qualifying JSON lists fail closed with `stage: capture`; this replaces "the last" qualifying list below.
+
 **Capture**
 - The capture file exists, parses, has `source === "agent-review-capture-hook"`, and has a `run_id` matching `--run`. Its `result` is a string.
 
