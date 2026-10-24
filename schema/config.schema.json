@@ -271,6 +271,30 @@
         }
       }
     },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "enum": ["agent-review", "code-review"] },
+        "code_review": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "effort": { "type": "string", "enum": ["low", "medium", "high", "xhigh", "max"] },
+            "model": { "type": "string", "enum": ["opus", "sonnet", "haiku"] },
+            "replaces": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+            "always": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+            "max_findings": {
+              "oneOf": [
+                { "type": "integer", "minimum": 1 },
+                { "type": "string", "const": "all" }
+              ]
+            }
+          }
+        }
+      }
+    },
+    "reviews_run": { "type": "string", "enum": ["local", "local-and-ci"] },
     "rollout": {
       "type": "object",
       "additionalProperties": false,

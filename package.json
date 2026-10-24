@@ -1,6 +1,6 @@
 {
   "name": "agent-review",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
   "license": "MIT",
@@ -9,7 +9,7 @@
   },
   "scripts": {
     "test": "node engine/run-tests.cjs",
-    "build": "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review",
+    "build": "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review bin/agent-review-hook",
     "check-dist": "npm run build && git diff --exit-code dist/",
     "stamp-templates": "node engine/stampTemplates.cjs",
     "test:e2e": "bash test/e2e-review.sh"

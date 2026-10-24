@@ -148,4 +148,26 @@ function sliceForAgent({ agent, diffText }) {
   return { mode: diff ? 'sliced' : 'empty', diff, files, hunks };
 }
 
-module.exports = { sliceForAgent, parseDiff };
+// A block whose paths cannot be read may belong to an asked-for file, so it is kept whenever any
+// file is asked for.
+function blocksForFiles(diffText, files) {
+  const wanted = new Set(files);
+  if (wanted.size === 0) return '';
+  return parseDiff(diffText)
+    .filter((block) => block.unparseable || wanted.has(block.file) || wanted.has(block.oldFile))
+    .map((block) => block.header + block.hunks.join(''))
+    .join('');
+}
+
+// A block whose paths cannot be read never counts as a file's block here: the caller must not
+// treat such a file as unchanged.
+function filesWithoutBlocks(diffText, files) {
+  const named = new Set();
+  for (const block of parseDiff(diffText)) {
+    if (block.file != null) named.add(block.file);
+    if (block.oldFile != null) named.add(block.oldFile);
+  }
+  return [...new Set(files)].filter((file) => !named.has(file));
+}
+
+module.exports = { sliceForAgent, parseDiff, blocksForFiles, filesWithoutBlocks };

@@ -4,6 +4,43 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
+// engine/vocabulary.cjs
+var require_vocabulary = __commonJS({
+  "engine/vocabulary.cjs"(exports2, module2) {
+    "use strict";
+    var ENGINE_DEFAULT = "agent-review";
+    var ENGINE_CODE_REVIEW = "code-review";
+    var CODE_REVIEW_LANE = "code-review";
+    var ENGINES = [ENGINE_DEFAULT, ENGINE_CODE_REVIEW];
+    var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+    var MODES = ["auto", "quick", "standard", "deep"];
+    var FINAL_MODES = ["skip", "quick", "standard", "deep"];
+    var CATEGORIES = [
+      "correctness",
+      "security",
+      "data-integrity",
+      "testing",
+      "simplification",
+      "efficiency",
+      "reuse",
+      "altitude",
+      "conventions"
+    ];
+    var CLEANUP_CATEGORIES = ["simplification", "efficiency", "reuse", "altitude", "conventions"];
+    module2.exports = {
+      ENGINE_DEFAULT,
+      ENGINE_CODE_REVIEW,
+      CODE_REVIEW_LANE,
+      ENGINES,
+      EFFORTS,
+      MODES,
+      FINAL_MODES,
+      CATEGORIES,
+      CLEANUP_CATEGORIES
+    };
+  }
+});
+
 // node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS({
   "node_modules/yaml/dist/nodes/identity.js"(exports2) {
@@ -16784,6 +16821,170 @@ var require_loadConfig = __commonJS({
   }
 });
 
+// engine/options.cjs
+var require_options = __commonJS({
+  "engine/options.cjs"(exports2, module2) {
+    "use strict";
+    var {
+      ENGINE_DEFAULT,
+      ENGINE_CODE_REVIEW,
+      CODE_REVIEW_LANE,
+      ENGINES,
+      EFFORTS,
+      MODES
+    } = require_vocabulary();
+    var ENGINE_DEFAULTS = {
+      effort: "xhigh",
+      model: "opus",
+      replaces: ["architecture", "simplification"],
+      always: ["security", "testing", "standards"]
+    };
+    function codeReviewLanes(crCfg) {
+      return {
+        always: crCfg.always || ENGINE_DEFAULTS.always,
+        replaces: crCfg.replaces || ENGINE_DEFAULTS.replaces
+      };
+    }
+    function laneOverlapMessage(id, crCfg) {
+      const key = (name) => crCfg[name] ? name : `${name} (default)`;
+      return `engine.code_review lists ${id} in both ${key("always")} and ${key("replaces")}`;
+    }
+    function alwaysLaneProblems(crCfg, agents) {
+      const { always, replaces } = codeReviewLanes(crCfg);
+      const byId = new Map((agents || []).map((a) => [a.id, a]));
+      const problems = [];
+      for (const id of always) {
+        const agent = byId.get(id);
+        if (!agent) problems.push({ id, kind: "unknown" });
+        else if (agent.enabled === false) problems.push({ id, kind: "disabled" });
+        if (replaces.includes(id)) problems.push({ id, kind: "overlap" });
+      }
+      return problems;
+    }
+    var RESERVED_ID = CODE_REVIEW_LANE;
+    var RESERVED_ID_MESSAGE = `agent id "${RESERVED_ID}" is reserved for the code-review engine`;
+    function hasReservedId(agents) {
+      return (agents || []).some((a) => a.id === RESERVED_ID);
+    }
+    function codeReviewEngineProblems(config) {
+      const crCfg = config.engine && config.engine.code_review || {};
+      const problems = hasReservedId(config.agents) ? [RESERVED_ID_MESSAGE] : [];
+      for (const { id, kind } of alwaysLaneProblems(crCfg, config.agents)) {
+        problems.push(
+          kind === "overlap" ? laneOverlapMessage(id, crCfg) : `engine.code_review.always references ${kind} agent: ${id}`
+        );
+      }
+      return problems;
+    }
+    var CI_NOTE = "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
+    function setOnce(state, key, value) {
+      if (state[key] != null && state[key] !== value) {
+        throw new Error(
+          key === "mode" ? `two mode words given: "${state[key]}" and "${value}"; pass only one` : `conflicting ${key}= values ("${state[key]}" and "${value}")`
+        );
+      }
+      state[key] = value;
+    }
+    function parseReviewArgs(raw) {
+      const tokens = String(raw || "").toLowerCase().split(/\s+/).filter(Boolean);
+      const state = { mode: null, engine: null, effort: null };
+      const parsed = { ci: false, incremental: false, unknown: [] };
+      for (const tok of tokens) {
+        if (MODES.includes(tok)) setOnce(state, "mode", tok);
+        else if (tok === "ci") parsed.ci = true;
+        else if (tok === "incremental") parsed.incremental = true;
+        else if (/^(engine|effort)=.+$/.test(tok)) {
+          const [key, value] = [tok.slice(0, tok.indexOf("=")), tok.slice(tok.indexOf("=") + 1)];
+          setOnce(state, key, value);
+        } else parsed.unknown.push(tok);
+      }
+      return {
+        mode: state.mode,
+        ci: parsed.ci,
+        incremental: parsed.incremental,
+        engine: state.engine,
+        effort: state.effort,
+        unknown: parsed.unknown
+      };
+    }
+    function orList(items) {
+      if (items.length <= 2) return items.join(" or ");
+      return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
+    }
+    function pick(argValue, configValue, defaultValue) {
+      if (argValue != null) return { value: argValue, source: "argument" };
+      if (configValue != null) return { value: configValue, source: "config" };
+      return { value: defaultValue, source: "default" };
+    }
+    function resolveOptions({ args, config, ci }) {
+      const parsed = parseReviewArgs(args);
+      const cfg = config || {};
+      const engineCfg = cfg.engine || {};
+      const crCfg = engineCfg.code_review || {};
+      const notes = [];
+      if (parsed.engine != null && !ENGINES.includes(parsed.engine)) {
+        throw new Error(`unknown engine "${parsed.engine}" (use ${orList(ENGINES)})`);
+      }
+      if (parsed.effort != null && !EFFORTS.includes(parsed.effort)) {
+        throw new Error(`unknown effort "${parsed.effort}" (use ${orList(EFFORTS)})`);
+      }
+      const isCi = Boolean(ci) || parsed.ci;
+      let engine = pick(parsed.engine, engineCfg.name, ENGINE_DEFAULT);
+      if (isCi && engine.value === ENGINE_CODE_REVIEW) {
+        engine = { value: ENGINE_DEFAULT, source: "ci" };
+        notes.push(CI_NOTE);
+      }
+      const mode = parsed.mode != null ? { value: parsed.mode, source: "argument" } : { value: "standard", source: "default" };
+      const reviewsRun = pick(null, cfg.reviews_run, "local-and-ci");
+      let effort = null;
+      let model = null;
+      let maxFindings = null;
+      let replaces = [];
+      let always = [];
+      if (engine.value === ENGINE_CODE_REVIEW) {
+        effort = pick(parsed.effort, crCfg.effort, ENGINE_DEFAULTS.effort);
+        model = pick(null, crCfg.model, ENGINE_DEFAULTS.model);
+        if (crCfg.max_findings != null) maxFindings = { value: crCfg.max_findings, source: "config" };
+        const lanes = codeReviewLanes(crCfg);
+        replaces = lanes.replaces.slice();
+        always = lanes.always.slice();
+        const problems = codeReviewEngineProblems(cfg);
+        if (problems.length) throw new Error(problems.join("; "));
+        const known = new Set((cfg.agents || []).map((a) => a.id));
+        for (const id of crCfg.replaces || []) {
+          if (!known.has(id)) notes.push(`engine.code_review.replaces lists an unknown lane: ${id}`);
+        }
+      } else if (parsed.effort != null) {
+        notes.push(`effort=${parsed.effort} ignored: the agent-review engine does not use it.`);
+      }
+      if (parsed.unknown.length) {
+        notes.push(`ignored unknown argument(s): ${parsed.unknown.join(", ")}`);
+      }
+      return {
+        mode,
+        engine,
+        effort,
+        model,
+        maxFindings,
+        replaces,
+        always,
+        reviewsRun,
+        incremental: parsed.incremental,
+        ci: isCi,
+        notes
+      };
+    }
+    module2.exports = {
+      ENGINE_DEFAULTS,
+      CI_NOTE,
+      alwaysLaneProblems,
+      codeReviewEngineProblems,
+      parseReviewArgs,
+      resolveOptions
+    };
+  }
+});
+
 // engine/args.cjs
 var require_args = __commonJS({
   "engine/args.cjs"(exports2, module2) {
@@ -16898,6 +17099,7 @@ var require_selectAgents = __commonJS({
     "use strict";
     var { minimatch } = require_commonjs3();
     var { matchingPattern } = require_scoreRisk();
+    var { ENGINE_CODE_REVIEW } = require_vocabulary();
     var OPTS = { dot: true };
     function isExcluded(file, config) {
       return (config.excluded_paths || []).some((g) => minimatch(file, g, OPTS));
@@ -16953,26 +17155,31 @@ var require_selectAgents = __commonJS({
         return reviewed.length > 0;
       return reviewed.some((f) => !matchingPattern(f, config).matched);
     }
-    function selectAgents({ files, diffText, reviewDirRel }, config) {
+    function selectAgents({ files, diffText, reviewDirRel }, config, engine = null) {
+      const external = engine && engine.name === ENGINE_CODE_REVIEW;
+      const replaced = new Set(external ? engine.replaces || [] : []);
+      const forcedIds = new Set(external ? engine.always || [] : []);
+      const candidates = config.agents.filter((a) => !replaced.has(a.id));
       const reviewed = files.filter((f) => !isExcluded(f, config));
       const contentText = codeDiff(diffText, config, reviewDirRel);
       const out = [];
-      for (const a of config.agents) {
+      for (const a of candidates) {
         if (a.enabled === false) continue;
-        const matchedBy = agentMatches(a, reviewed, contentText);
+        const forced = forcedIds.has(a.id);
+        const matchedBy = forced ? a.always ? "always" : "engine-always" : agentMatches(a, reviewed, contentText);
         if (matchedBy)
           out.push({
             id: a.id,
             model: a.model || "smart",
             escalates: a.escalates || false,
-            always: a.always || false,
+            always: forced || a.always || false,
             triggers: a.triggers,
             matchedBy
           });
       }
       const hasEscalating = out.some((a) => a.escalates);
       if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
-        const eligible = config.agents.filter((a) => a.enabled !== false);
+        const eligible = candidates.filter((a) => a.enabled !== false);
         const forced = eligible.find((a) => a.id === "security" && a.escalates === true) || eligible.find((a) => a.escalates === true) || eligible.find((a) => a.id === "security");
         if (forced && !out.some((o) => o.id === forced.id)) {
           out.push({
@@ -17106,6 +17313,7 @@ var require_plan = __commonJS({
     var { resolveRules } = require_resolveRules();
     var { detectSpecial } = require_detectSpecial();
     var { resolveTiers } = require_resolveTiers();
+    var { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE } = require_vocabulary();
     function resolveMode(requested, risk) {
       if (requested !== "auto") return requested;
       if (risk.score === 0) return "skip";
@@ -17114,10 +17322,19 @@ var require_plan = __commonJS({
       if (risk.level === "CRITICAL") return "deep";
       return "standard";
     }
-    function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel, mode = "standard" }, config) {
+    function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel, mode = "standard", options }, config) {
       const special = detectSpecial(diffText, files, config);
       const risk = scoreRisk({ files, linesChanged, scope, special }, config);
-      const selected = selectAgents({ files, diffText, reviewDirRel }, config);
+      const external = options && options.engine.value === ENGINE_CODE_REVIEW;
+      const engine = external ? {
+        name: ENGINE_CODE_REVIEW,
+        effort: options.effort.value,
+        model: options.model.value,
+        maxFindings: options.maxFindings ? options.maxFindings.value : null,
+        replaces: options.replaces,
+        always: options.always
+      } : null;
+      const selected = selectAgents({ files, diffText, reviewDirRel }, config, engine);
       const resolved = resolveMode(mode, risk);
       const tiered = resolveTiers({
         agents: selected,
@@ -17128,11 +17345,41 @@ var require_plan = __commonJS({
         ...a,
         rules: resolveRules(a.id, files, config)
       }));
+      if (!engine) {
+        return {
+          profile: config.profile,
+          risk: { ...risk, special },
+          mode: { requested: mode, resolved },
+          agents
+        };
+      }
+      const agentById = new Map(config.agents.map((a) => [a.id, a]));
+      const sources = [
+        CODE_REVIEW_LANE,
+        ...engine.replaces.filter((id) => agentById.has(id) && agentById.get(id).enabled !== false)
+      ];
+      const rules = [];
+      for (const id of sources) {
+        for (const r of resolveRules(id, files, config))
+          if (!rules.includes(r)) rules.push(r);
+      }
       return {
         profile: config.profile,
         risk: { ...risk, special },
         mode: { requested: mode, resolved },
-        agents
+        engine,
+        agents: [
+          {
+            id: CODE_REVIEW_LANE,
+            model: engine.model,
+            escalates: false,
+            always: true,
+            matchedBy: "engine",
+            tier: engine.model,
+            rules
+          },
+          ...agents
+        ]
       };
     }
     function linesChangedFromStat(statText) {
@@ -18054,18 +18301,373 @@ var require_learningsStore = __commonJS({
   }
 });
 
+// engine/unwrapFindings.cjs
+var require_unwrapFindings = __commonJS({
+  "engine/unwrapFindings.cjs"(exports2, module2) {
+    "use strict";
+    function unwrapFindings(value) {
+      if (Array.isArray(value)) return value;
+      if (value !== null && typeof value === "object" && Array.isArray(value.findings)) return value.findings;
+      return null;
+    }
+    module2.exports = { unwrapFindings };
+  }
+});
+
+// engine/consensus.cjs
+var require_consensus = __commonJS({
+  "engine/consensus.cjs"(exports2, module2) {
+    "use strict";
+    var { unwrapFindings } = require_unwrapFindings();
+    var { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require_vocabulary();
+    var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
+    function confidenceRank(c) {
+      return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
+    }
+    function tokenize(message) {
+      return String(message || "").toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\d+/g, " ").split(/\s+/).filter(Boolean);
+    }
+    function jaccard(tokensA, tokensB) {
+      const a = new Set(tokensA);
+      const b = new Set(tokensB);
+      let inter = 0;
+      for (const t of a) if (b.has(t)) inter++;
+      const union = (/* @__PURE__ */ new Set([...a, ...b])).size;
+      return union === 0 ? 0 : inter / union;
+    }
+    function sameGroup(a, b) {
+      if (!a.file || a.file !== b.file) return false;
+      const bothNull = a.line == null && b.line == null;
+      const withinRange = a.line != null && b.line != null && Math.abs(a.line - b.line) <= 3;
+      if (!bothNull && !withinRange) return false;
+      return jaccard(tokenize(a.message), tokenize(b.message)) >= 0.5;
+    }
+    function parseLane(value, laneId) {
+      if (value === void 0) {
+        throw new Error(`missing findings for lane "${laneId}"`);
+      }
+      let parsed = value;
+      if (typeof value === "string") {
+        try {
+          parsed = JSON.parse(value);
+        } catch (e) {
+          throw new Error(
+            `unparseable findings JSON for lane "${laneId}": ${e.message}`
+          );
+        }
+      }
+      const list = unwrapFindings(parsed);
+      if (list) return list;
+      throw new Error(
+        `findings for lane "${laneId}" must be an array or {findings:[...]}`
+      );
+    }
+    function normalizeFinding(raw, laneId) {
+      const line = raw.line == null || raw.line === "" ? null : Number(raw.line);
+      const severity = Number(raw.severity);
+      return {
+        agent: laneId,
+        category: raw.category != null ? String(raw.category) : "",
+        severity: Number.isFinite(severity) ? severity : 0,
+        file: String(raw.file || ""),
+        line: Number.isFinite(line) ? line : null,
+        message: raw.message != null ? String(raw.message) : "",
+        confidence: raw.confidence != null ? String(raw.confidence) : "",
+        evidence: raw.evidence != null ? String(raw.evidence) : "",
+        recommendation: raw.recommendation != null ? String(raw.recommendation) : "",
+        fix: raw.fix != null ? String(raw.fix) : ""
+      };
+    }
+    function blockerBarFailure(f) {
+      if (f.line === null) return "severity >= 7 requires a line anchor";
+      if (String(f.confidence || "").toLowerCase() !== "high") {
+        return "severity >= 7 requires High confidence";
+      }
+      if (!String(f.evidence || "").trim()) {
+        return "severity >= 7 requires concrete evidence";
+      }
+      return null;
+    }
+    function validateFinding(f) {
+      if (!f.file) return "missing file";
+      if (!f.message) return "missing message";
+      if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
+        return `invalid severity: ${f.severity}`;
+      }
+      if (f.severity >= 7) return blockerBarFailure(f);
+      return null;
+    }
+    var CLEANUP_SET = new Set(CLEANUP_CATEGORIES);
+    var CODE_REVIEW_CAP = 6;
+    var DOUBTED_CAP = 4;
+    function normalizedName(value) {
+      return String(value == null ? "" : value).trim().toLowerCase();
+    }
+    function codeReviewCap(f, raw) {
+      if (raw.doubted === true) return DOUBTED_CAP;
+      if (raw.outside_range === true) return CODE_REVIEW_CAP;
+      if (CLEANUP_SET.has(normalizedName(f.category))) return CODE_REVIEW_CAP;
+      const from = normalizedName(raw.recategorized_from);
+      if (from) {
+        const kept = CLEANUP_SET.has(from) && ["correctness", "security"].includes(normalizedName(f.category));
+        if (!kept) return CODE_REVIEW_CAP;
+      }
+      if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
+      return null;
+    }
+    function capCodeReviewFinding(finding, raw) {
+      const cap = codeReviewCap(finding, raw || {});
+      return cap !== null && finding.severity > cap ? { ...finding, severity: cap } : finding;
+    }
+    function canonicalOrder(a, b) {
+      return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
+    }
+    function buildCliques(findings) {
+      const ordered = [...findings].sort(canonicalOrder);
+      const cliques = [];
+      for (const finding of ordered) {
+        const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
+        if (clique) clique.push(finding);
+        else cliques.push([finding]);
+      }
+      return cliques;
+    }
+    function toEntry(m) {
+      return {
+        agent: m.agent,
+        category: m.category,
+        severity: m.severity,
+        file: m.file,
+        line: m.line,
+        message: m.message,
+        confidence: m.confidence,
+        evidence: m.evidence,
+        recommendation: m.recommendation,
+        fix: m.fix,
+        corroboration: 1,
+        needsHumanReview: false,
+        _minSeverity: m.severity,
+        _maxSeverity: m.severity
+      };
+    }
+    function combineMembers(members, codeReviewEngine) {
+      const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
+      const primary = ordered.reduce(
+        (best, m) => m.severity > best.severity ? m : best,
+        ordered[0]
+      );
+      const agents = [
+        ...new Set(
+          ordered.flatMap(
+            (m) => String(m.agents || m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
+          )
+        )
+      ].sort();
+      const bestConfidence = ordered.reduce(
+        (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
+        ordered[0]
+      );
+      const longestTrimmed = (field) => ordered.map((m) => String(m[field] || "").trim()).reduce((best, v) => v.length > best.length ? v : best, "");
+      const longestField = (field) => ordered.reduce(
+        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
+        ordered[0]
+      )[field];
+      const corroboration = ordered.reduce(
+        (sum, m) => sum + (m.corroboration || 1),
+        0
+      );
+      const minSeverity = Math.min(
+        ...ordered.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
+      );
+      const maxSeverity = Math.max(
+        ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
+      );
+      const weightedSum = ordered.reduce(
+        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+        0
+      );
+      const meanSeverity = Math.round(weightedSum / corroboration);
+      const evidence = codeReviewEngine ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestField("evidence");
+      return {
+        agent: primary.agent,
+        agents: agents.join(","),
+        category: primary.category,
+        severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+        file: primary.file,
+        line: primary.line,
+        message: primary.message,
+        confidence: bestConfidence.confidence,
+        evidence,
+        recommendation: longestField("recommendation"),
+        fix: primary.fix,
+        corroboration,
+        needsHumanReview: maxSeverity - minSeverity >= 4,
+        _minSeverity: minSeverity,
+        _maxSeverity: maxSeverity,
+        _meanSeverity: meanSeverity
+      };
+    }
+    function unionFind(n) {
+      const parent = Array.from({ length: n }, (_, i) => i);
+      function find(x) {
+        while (parent[x] !== x) {
+          parent[x] = parent[parent[x]];
+          x = parent[x];
+        }
+        return x;
+      }
+      function union(x, y) {
+        const rx = find(x);
+        const ry = find(y);
+        if (rx !== ry) parent[rx] = ry;
+      }
+      return { find, union };
+    }
+    function applyProfileCutoff(entries, profile) {
+      if (profile !== "chill") return entries;
+      return entries.filter((e) => e.severity >= 4 || e.corroboration >= 2);
+    }
+    function sortEntries(entries) {
+      return [...entries].sort(
+        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
+      );
+    }
+    function lineDistance(a, b) {
+      if (a == null && b == null) return 0;
+      if (a == null || b == null) return null;
+      return Math.abs(a - b);
+    }
+    function buildCandidates(entries) {
+      const candidates = [];
+      for (let i = 0; i < entries.length; i++) {
+        for (let j = i + 1; j < entries.length; j++) {
+          const a = entries[i];
+          const b = entries[j];
+          if (a.file !== b.file || !a.file) continue;
+          const dist = lineDistance(a.line, b.line);
+          if (dist == null || dist > 10) continue;
+          const reason = a.line == null && b.line == null ? `both findings in ${a.file} have no line anchor` : `both findings in ${a.file} within ${dist} line(s) (L${a.line} vs L${b.line})`;
+          candidates.push({ a: i, b: j, reason });
+        }
+      }
+      return candidates;
+    }
+    function applyDecisions(entries, decisions, codeReviewEngine) {
+      if (!Array.isArray(decisions)) {
+        throw new Error("consensus: decisions must be an array");
+      }
+      const n = entries.length;
+      const { find, union } = unionFind(n);
+      for (const d of decisions) {
+        const pair = d && (d.merge || d.keep);
+        if (!Array.isArray(pair) || pair.length !== 2) {
+          throw new Error(`consensus: invalid decision entry ${JSON.stringify(d)}`);
+        }
+        const [i, j] = pair;
+        if (!Number.isInteger(i) || !Number.isInteger(j) || i < 0 || j < 0 || i >= n || j >= n) {
+          throw new Error(
+            `consensus: unknown finding index in decision ${JSON.stringify(d)}`
+          );
+        }
+        if (d.merge) union(i, j);
+      }
+      const groupsByRoot = /* @__PURE__ */ new Map();
+      for (let i = 0; i < n; i++) {
+        const root = find(i);
+        if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
+        groupsByRoot.get(root).push(entries[i]);
+      }
+      return [...groupsByRoot.values()].map(
+        (members) => members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine)
+      );
+    }
+    function stripInternal(entry) {
+      const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+      return rest;
+    }
+    function consensusFrom({
+      plan,
+      findingsByAgent = {},
+      profile = "standard",
+      decisions
+    } = {}) {
+      const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
+      const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === ENGINE_CODE_REVIEW);
+      if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
+        throw new Error(
+          "consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review"
+        );
+      }
+      const errors = [];
+      const perLane = {};
+      for (const laneId of laneIds) {
+        try {
+          perLane[laneId] = parseLane(findingsByAgent[laneId], laneId);
+        } catch (e) {
+          errors.push(e.message);
+        }
+      }
+      if (errors.length) {
+        throw new Error(`consensus: ${errors.join("; ")}`);
+      }
+      const all = [];
+      const droppedInvalid = [];
+      for (const laneId of laneIds) {
+        for (const raw of perLane[laneId]) {
+          const normalized = normalizeFinding(raw, laneId);
+          const finding = codeReviewEngine && laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw) : normalized;
+          const reason = validateFinding(finding);
+          if (reason) {
+            const messageSlice = String(finding.message || "").slice(0, 200);
+            droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
+            console.warn(
+              `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`
+            );
+            continue;
+          }
+          all.push(finding);
+        }
+      }
+      let entries = buildCliques(all).map(
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
+      );
+      const beforeCutoff = entries.length;
+      entries = applyProfileCutoff(entries, profile);
+      const droppedByProfile = beforeCutoff - entries.length;
+      entries = sortEntries(entries);
+      if (decisions !== void 0) {
+        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
+      }
+      const candidates = buildCandidates(entries);
+      const findings = entries.map(stripInternal);
+      const stats = {
+        raw: all.length,
+        groups: findings.filter((e) => e.corroboration > 1).length,
+        singletons: findings.filter((e) => e.corroboration === 1).length,
+        droppedByProfile,
+        droppedInvalid,
+        needsHumanReview: findings.filter((e) => e.needsHumanReview).length
+      };
+      return { findings, candidates, stats };
+    }
+    module2.exports = { consensusFrom, capCodeReviewFinding, tokenize, jaccard, parseLane };
+  }
+});
+
 // engine/reportState.cjs
 var require_reportState = __commonJS({
   "engine/reportState.cjs"(exports2, module2) {
     "use strict";
     var { signature } = require_findingSignature();
+    var { unwrapFindings } = require_unwrapFindings();
+    var { tokenize, jaccard } = require_consensus();
     var STATUSES = /* @__PURE__ */ new Set(["open", "fixed", "dismissed"]);
     var RISKS = /* @__PURE__ */ new Set(["LOW", "MEDIUM", "HIGH", "CRITICAL"]);
     function findingList(input) {
-      if (Array.isArray(input)) return input;
-      if (input && Array.isArray(input.kept)) return input.kept;
-      if (input && Array.isArray(input.findings)) return input.findings;
-      throw new Error("findings must be an array or an object with kept/findings");
+      if (input && !Array.isArray(input) && Array.isArray(input.kept)) return input.kept;
+      const list = unwrapFindings(input);
+      if (!list) throw new Error("findings must be an array or an object with kept/findings");
+      return list;
     }
     function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
       const severity = Number(raw.severity);
@@ -18127,7 +18729,27 @@ var require_reportState = __commonJS({
         return clean;
       });
     }
-    function mergeLedger(previousInput, findingsInput) {
+    var LOCATION_WINDOW = 5;
+    var LOCATION_WORDING = 0.5;
+    function sameCategory(a, b) {
+      return a.trim().toLowerCase() === b.trim().toLowerCase();
+    }
+    function nearLine(a, b) {
+      if (a === null && b === null) return true;
+      return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+    }
+    function similarWording(a, b) {
+      return jaccard(tokenize(a), tokenize(b)) >= LOCATION_WORDING;
+    }
+    function isStaticFinding(finding) {
+      return finding.agent === "static-analysis" || finding.category.startsWith("static-analysis/");
+    }
+    function matchesEarlierSpot(finding, previous) {
+      return finding.severity < 7 && !isStaticFinding(finding) && previous.some(
+        (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line) && similarWording(entry.message, finding.message)
+      );
+    }
+    function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
       const previous = cleanPrevious(previousInput || []);
       const seen = new Set(previous.map((entry) => entry.signature));
       let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
@@ -18139,6 +18761,7 @@ var require_reportState = __commonJS({
       const merged = [...previous];
       for (const finding of additions) {
         if (seen.has(finding.signature)) continue;
+        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
         seen.add(finding.signature);
         merged.push({ n: next++, ...finding, status: "open" });
       }
@@ -18237,6 +18860,731 @@ var require_approval = __commonJS({
       };
     }
     module2.exports = { evaluateApproval, MARKER };
+  }
+});
+
+// engine/captureHook.cjs
+var require_captureHook = __commonJS({
+  "engine/captureHook.cjs"(exports2, module2) {
+    "use strict";
+    var { ENGINE_CODE_REVIEW } = require_vocabulary();
+    var CODE_REVIEW_SKILL = ENGINE_CODE_REVIEW;
+    var CAPTURE_FILES = {
+      arm: "agent_review_capture.json",
+      pending: "code_review_capture.pending.json",
+      capture: "code_review_capture.json",
+      stops: "code_review_capture.stops.jsonl",
+      mismatch: "code_review_capture.mismatch.json"
+    };
+    var ARM_MAX_AGE_SECONDS = 21600;
+    var STOP_BUFFER_LINES = 50;
+    var CAPTURE_SOURCE = "agent-review-capture-hook";
+    var SKILL_HEADER = new RegExp(`^\\s*Skill "${CODE_REVIEW_SKILL}" completed`);
+    var RESULT_LINE_WITHIN = 3;
+    function isObject(v) {
+      return v !== null && typeof v === "object" && !Array.isArray(v);
+    }
+    function nonEmpty(v) {
+      return typeof v === "string" && v.trim() !== "";
+    }
+    function captureDir(env = process.env) {
+      return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
+    }
+    function captureDirProblem(stat, uid) {
+      if (!stat) return "does not exist";
+      if (stat.isSymbolicLink()) return "is a symlink";
+      if (!stat.isDirectory()) return "is not a directory";
+      if (stat.uid !== uid) return `is owned by uid ${stat.uid}, not ${uid}`;
+      if (stat.mode & 63) {
+        return `has group or other permission bits (mode ${(stat.mode & 511).toString(8)}; it must be 700)`;
+      }
+      return null;
+    }
+    function armedState(arm, nowSeconds) {
+      if (!isObject(arm) || arm.armed !== true) return null;
+      if (!nonEmpty(arm.run_id) || typeof arm.args !== "string") return null;
+      if (!Number.isFinite(arm.created) || nowSeconds - arm.created > ARM_MAX_AGE_SECONDS) return null;
+      return arm;
+    }
+    function stripSkillHeader(text) {
+      const lines = text.split("\n");
+      const header = lines.findIndex((line) => line.trim() !== "");
+      if (header < 0 || !SKILL_HEADER.test(lines[header])) return text;
+      const last = Math.min(header + RESULT_LINE_WITHIN, lines.length - 1);
+      for (let i = header + 1; i <= last; i++) {
+        if (lines[i].trim() === "Result:") return lines.slice(i + 1).join("\n");
+      }
+      return text;
+    }
+    function lastAssistantText(jsonl) {
+      const lines = String(jsonl).split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].trim()) continue;
+        let entry;
+        try {
+          entry = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (!isObject(entry) || entry.type !== "assistant" || !isObject(entry.message)) continue;
+        const { content } = entry.message;
+        if (nonEmpty(content)) return content;
+        if (!Array.isArray(content)) continue;
+        for (let j = content.length - 1; j >= 0; j--) {
+          const block = content[j];
+          if (isObject(block) && block.type === "text" && nonEmpty(block.text)) return block.text;
+        }
+      }
+      return null;
+    }
+    function stopResult(stop, readTranscript) {
+      if (nonEmpty(stop.last_assistant_message)) return stop.last_assistant_message;
+      if (!nonEmpty(stop.agent_transcript_path) || typeof readTranscript !== "function") return "";
+      try {
+        const text = readTranscript(stop.agent_transcript_path);
+        return typeof text === "string" ? text : "";
+      } catch {
+        return "";
+      }
+    }
+    function captureRecord({ mode, armed, args, forkId, result, transcript, stopCount, now }) {
+      return {
+        source: CAPTURE_SOURCE,
+        mode,
+        run_id: armed.run_id,
+        args,
+        fork_id: forkId,
+        result,
+        transcript: nonEmpty(transcript) ? transcript : null,
+        stop_count: stopCount,
+        ts: now
+      };
+    }
+    function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
+      const armed = armedState(arm, now);
+      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
+      const input = isObject(payload.tool_input) ? payload.tool_input : {};
+      const skill = typeof input.skill === "string" ? input.skill.replace(/^\//, "") : "";
+      const args = typeof input.args === "string" ? input.args : "";
+      const mismatch = (got, reason) => ({
+        mismatch: { run_id: armed.run_id, expected: armed.args, got, ...reason ? { reason } : {}, ts: now }
+      });
+      if (skill !== CODE_REVIEW_SKILL) {
+        if (!skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return {};
+        return mismatch(`skill ${JSON.stringify(skill)} with args ${JSON.stringify(args)}`, "wrong skill");
+      }
+      if (args !== armed.args) return mismatch(args);
+      const response = payload.tool_response;
+      const tr = isObject(response) ? response : {};
+      const forkId = nonEmpty(tr.agentId) ? tr.agentId : null;
+      if (tr.background === true && !forkId) return mismatch(args, "no fork id");
+      const forkStops = forkId && Array.isArray(stops) ? stops.filter((s) => isObject(s) && s.agent_id === forkId) : [];
+      const latest = forkStops.at(-1);
+      const record = (mode, result2) => captureRecord({
+        mode,
+        armed,
+        args,
+        forkId,
+        result: result2,
+        transcript: latest && latest.agent_transcript_path,
+        stopCount: forkStops.length,
+        now
+      });
+      if (tr.background === true) {
+        const written = {
+          pending: {
+            run_id: armed.run_id,
+            fork_id: forkId,
+            args,
+            caller: payload.agent_id,
+            tool_use_id: payload.tool_use_id ?? null,
+            session_id: payload.session_id ?? null,
+            ts: now
+          }
+        };
+        if (latest) written.capture = record("forked", stopResult(latest, readTranscript));
+        return written;
+      }
+      const fromResponse = [tr.result, response].filter((v) => typeof v === "string").map(stripSkillHeader).find(nonEmpty);
+      let result = "";
+      if (fromResponse !== void 0) result = fromResponse;
+      else if (latest) result = stopResult(latest, readTranscript);
+      return { capture: record("foreground", result) };
+    }
+    function subagentStopWrites({ payload, arm, pending, capture, now, readTranscript } = {}) {
+      const armed = armedState(arm, now);
+      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return { stop: null };
+      const stop = {
+        agent_id: payload.agent_id,
+        last_assistant_message: typeof payload.last_assistant_message === "string" ? payload.last_assistant_message : null,
+        agent_transcript_path: typeof payload.agent_transcript_path === "string" ? payload.agent_transcript_path : null,
+        ts: now
+      };
+      if (!isObject(pending) || !nonEmpty(pending.fork_id) || pending.fork_id !== stop.agent_id) {
+        return { stop };
+      }
+      const previous = isObject(capture) && capture.run_id === armed.run_id && capture.fork_id === pending.fork_id && Number.isInteger(capture.stop_count) ? capture.stop_count : 0;
+      return {
+        stop,
+        capture: captureRecord({
+          mode: "forked",
+          armed,
+          args: typeof pending.args === "string" ? pending.args : armed.args,
+          forkId: pending.fork_id,
+          result: stopResult(stop, readTranscript),
+          transcript: stop.agent_transcript_path,
+          stopCount: previous + 1,
+          now
+        })
+      };
+    }
+    module2.exports = {
+      CODE_REVIEW_SKILL,
+      CAPTURE_FILES,
+      ARM_MAX_AGE_SECONDS,
+      STOP_BUFFER_LINES,
+      CAPTURE_SOURCE,
+      captureDir,
+      captureDirProblem,
+      armedState,
+      stripSkillHeader,
+      lastAssistantText,
+      postSkillWrites,
+      subagentStopWrites
+    };
+  }
+});
+
+// engine/codeReviewProof.cjs
+var require_codeReviewProof = __commonJS({
+  "engine/codeReviewProof.cjs"(exports2, module2) {
+    "use strict";
+    var { unwrapFindings } = require_unwrapFindings();
+    var { CATEGORIES, CLEANUP_CATEGORIES } = require_vocabulary();
+    var { pathMatches } = require_selectAgents();
+    var { CAPTURE_SOURCE } = require_captureHook();
+    var CAPTURE_LIMIT_MINUTES = Object.freeze({ low: 10, medium: 15, high: 20, xhigh: 40, max: 120 });
+    var FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+    var FENCE_CLOSE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+    function scanFences(text) {
+      const blocks = [];
+      const outside = [];
+      const outsideAt = [];
+      let open = null;
+      for (const [index, line] of text.split("\n").map((l) => l.replace(/\r$/, "")).entries()) {
+        if (open) {
+          const close = FENCE_CLOSE.exec(line);
+          if (close && close[1][0] === open.fence[0] && close[1].length >= open.fence.length) {
+            blocks.push({ info: open.info, body: open.body.join("\n"), lines: open.body, start: open.start, closed: true });
+            open = null;
+          } else {
+            open.body.push(line);
+          }
+          continue;
+        }
+        const start = FENCE_OPEN.exec(line);
+        if (start && !(start[1][0] === "`" && start[2].includes("`"))) {
+          open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [], start: index };
+        } else {
+          outside.push(line);
+          outsideAt.push(index);
+        }
+      }
+      if (open) blocks.push({ info: open.info, body: open.body.join("\n"), lines: open.body, start: open.start, closed: false });
+      return { blocks, outside, outsideAt };
+    }
+    function isPlainObject(value) {
+      return value !== null && typeof value === "object" && !Array.isArray(value);
+    }
+    function hasFile(value) {
+      return isPlainObject(value) && typeof value.file === "string" && value.file.trim() !== "";
+    }
+    function listOf(block) {
+      if (block.info !== "json" && block.info !== "") return null;
+      const body = block.body.trim();
+      const parsed = parseJson(body);
+      if (!parsed) return body.includes('"file"') ? { list: null } : null;
+      const { value } = parsed;
+      const listLike = Array.isArray(value) ? value.length === 0 || value.some(isPlainObject) : isPlainObject(value) && Object.hasOwn(value, "findings");
+      if (!listLike) return null;
+      const list = unwrapFindings(value);
+      return { list: list && list.every(hasFile) ? list : null };
+    }
+    function jsonFindings(text) {
+      const lists = [];
+      let problem = null;
+      for (const [i, block] of scanFences(String(text)).blocks.entries()) {
+        if (!block.closed) {
+          problem ??= `fenced block ${i + 1} is never closed, so the result was cut short`;
+          continue;
+        }
+        const found = listOf(block);
+        if (!found) continue;
+        if (found.list) lists.push(found.list);
+        else problem ??= `fenced block ${i + 1} looks like a findings list, but not every item is an object with a non-empty string file`;
+      }
+      const nonEmpty = lists.filter((list2) => list2.length > 0);
+      const distinct = new Set(nonEmpty.map((list2) => JSON.stringify(list2))).size;
+      if (distinct > 1) {
+        problem ??= `it holds ${distinct} different findings lists, so which one is the findings cannot be told`;
+      }
+      const list = nonEmpty.length > 0 ? nonEmpty[nonEmpty.length - 1] : lists.length > 0 ? [] : null;
+      return { list, problem };
+    }
+    function explicitEmpty(text) {
+      return scanFences(String(text)).outside.some((line) => {
+        const trimmed = line.trim();
+        return trimmed === "(none)" || trimmed === "No findings.";
+      });
+    }
+    function normalizeLine(line) {
+      return line.replace(/[`*]/g, "");
+    }
+    var PATH_LEAD = /^[(\[{<"'\u201c\u2018|]+/;
+    var LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}])/u;
+    function mentionPath(path, isBareFile) {
+      if (!new RegExp("\\p{L}", "u").test(path) || path.startsWith("//")) return false;
+      if (path.includes("/")) return true;
+      return typeof isBareFile === "function" && Boolean(isBareFile(path) || isBareFile(trimWrappers(path)));
+    }
+    function mentionsIn(line, isBareFile) {
+      const mentions = [];
+      for (const token of line.split(/\s+/)) {
+        if (!token.includes(":")) continue;
+        const parts = token.split(":");
+        for (let i = 0; i + 1 < parts.length; i++) {
+          const at = LINE_PART.exec(parts[i + 1]);
+          if (!at) continue;
+          const file = parts[i].replace(PATH_LEAD, "");
+          const number = Number(at[1]);
+          if (mentionPath(file, isBareFile)) mentions.push({ file, line: number > 0 ? number : null });
+        }
+      }
+      return mentions;
+    }
+    function mentionSpot(mention) {
+      return `${mention.file}:${mention.line ?? 0}`;
+    }
+    function trackedLookup(paths) {
+      const names = /* @__PURE__ */ new Set();
+      for (const path of paths) names.add(String(path).slice(String(path).lastIndexOf("/") + 1));
+      return (name) => names.has(name);
+    }
+    var PROSE_FENCES = /* @__PURE__ */ new Set(["", "text", "txt", "md", "markdown", "plain"]);
+    function textLines(text, tracked) {
+      const { blocks, outside, outsideAt } = scanFences(String(text));
+      const raw = outside.map((line, k) => ({ index: outsideAt[k], line }));
+      for (const block of blocks) {
+        if (!PROSE_FENCES.has(block.info) || listOf(block)) continue;
+        block.lines.forEach((line, j) => raw.push({ index: block.start + 1 + j, line }));
+      }
+      raw.sort((a, b) => a.index - b.index);
+      return raw.map(({ index, line }) => {
+        const normalized = normalizeLine(line);
+        return { index, text: normalized, mentions: mentionsIn(normalized, tracked) };
+      });
+    }
+    function findingLines(text, tracked) {
+      return textLines(text, tracked).filter((line) => line.mentions.length > 0);
+    }
+    function jsonLine(value) {
+      const m = /^\s*(\d+)/.exec(typeof value === "string" ? value : "");
+      const line = Number.isInteger(value) ? value : m ? Number(m[1]) : null;
+      return line > 0 ? line : null;
+    }
+    function repoRelative(file, root) {
+      let path = String(file);
+      if (typeof root === "string" && root !== "") {
+        const prefix = root.endsWith("/") ? root : `${root}/`;
+        if (path.startsWith(prefix)) path = path.slice(prefix.length);
+      }
+      while (path.startsWith("./")) path = path.slice(2);
+      return path;
+    }
+    function looksFinished(result, effort, mode) {
+      if (typeof result !== "string") return false;
+      if (effort !== "max" || mode === "foreground") return true;
+      const { list } = jsonFindings(result);
+      return Array.isArray(list) && list.length > 0 || explicitEmpty(result);
+    }
+    var PATH_CHAR = /[\p{L}\p{N}_./-]/u;
+    function pathStartsAt(text, at, root) {
+      const prefixes = ["", "./"];
+      if (typeof root === "string" && root !== "") prefixes.push(root.endsWith("/") ? root : `${root}/`);
+      return prefixes.some((prefix) => {
+        const from = at - prefix.length;
+        if (from < 0 || text.slice(from, at) !== prefix) return false;
+        return from === 0 || !PATH_CHAR.test(text[from - 1]);
+      });
+    }
+    function namesPathIn(text, path, root) {
+      if (path === "") return false;
+      for (let at = text.indexOf(path); at >= 0; at = text.indexOf(path, at + 1)) {
+        if (!pathStartsAt(text, at, root)) continue;
+        const after = text.slice(at + path.length, at + path.length + 2);
+        if (/^(?:[\p{L}\p{N}_/-]|\.[\p{L}\p{N}_])/u.test(after)) continue;
+        return true;
+      }
+      return false;
+    }
+    var WRAPPERS = /* @__PURE__ */ new Set(["_", '"', "'", ")", "]", "}", ">"]);
+    function trimWrappers(path) {
+      let start = 0;
+      let end = path.length;
+      while (start < end && WRAPPERS.has(path[start])) start++;
+      while (end > start && WRAPPERS.has(path[end - 1])) end--;
+      return path.slice(start, end);
+    }
+    function mentionNames(mentionFile, path, root) {
+      return repoRelative(mentionFile, root) === path || repoRelative(trimWrappers(mentionFile), root) === path;
+    }
+    function captureProblem(capture, runId) {
+      if (!isPlainObject(capture)) return "no /code-review capture was found for this run";
+      if (capture.source !== CAPTURE_SOURCE) {
+        return `the capture's source is ${shown(capture.source)}, not ${JSON.stringify(CAPTURE_SOURCE)}, so the capture hook did not write it`;
+      }
+      if (!isText(capture.run_id)) return "the capture names no run";
+      if (capture.run_id !== runId) return `the capture is for run ${capture.run_id}, not run ${runId}`;
+      if (typeof capture.result !== "string") return "the capture holds no result text";
+      if (capture.result.trim() === "") return "/code-review's captured result is empty";
+      return null;
+    }
+    function rawShapeProblem(rawEntries) {
+      if (!Array.isArray(rawEntries)) return "the raw findings list is missing or is not a JSON array";
+      for (const [i, entry] of rawEntries.entries()) {
+        const label = `raw entry ${i + 1}`;
+        if (!isPlainObject(entry)) return `${label} is not an object`;
+        if (entry.n !== i + 1) return `${label} has n ${shown(entry.n)}; n must count 1, 2, 3, ... in order`;
+        if (!isText(entry.file)) return `${label} needs a non-empty string file`;
+        if (entry.line !== null && !(Number.isInteger(entry.line) && entry.line > 0)) {
+          return `${label} (${entry.file}) needs a positive integer line, or null when the result gives no line, not ${shown(entry.line)}`;
+        }
+        if (!isText(entry.summary)) return `${label} (${spot(entry.file, entry.line)}) needs a non-empty summary`;
+      }
+      return null;
+    }
+    function jsonMismatch(rawEntries, list, root) {
+      if (rawEntries.length !== list.length) {
+        return `/code-review's JSON list has ${list.length} findings, but the raw list has ${rawEntries.length}; copy the list one to one`;
+      }
+      for (const [i, item] of list.entries()) {
+        const raw = rawEntries[i];
+        const want = { file: repoRelative(item.file, root), line: jsonLine(item.line) };
+        if (repoRelative(raw.file, root) !== want.file || raw.line !== want.line) {
+          return `raw entry ${i + 1} is ${spot(raw.file, raw.line)}, but JSON finding ${i + 1} is ${spot(want.file, want.line)}; copy the list in order`;
+        }
+      }
+      return null;
+    }
+    function matchLines(candidates) {
+      const owner = /* @__PURE__ */ new Map();
+      const claim = (entry, seen) => {
+        const free = candidates[entry].find((line) => !owner.has(line));
+        if (free !== void 0) {
+          owner.set(free, entry);
+          return true;
+        }
+        for (const line of candidates[entry]) {
+          if (seen.has(line)) continue;
+          seen.add(line);
+          if (claim(owner.get(line), seen)) {
+            owner.set(line, entry);
+            return true;
+          }
+        }
+        return false;
+      };
+      for (let entry = 0; entry < candidates.length; entry++) claim(entry, /* @__PURE__ */ new Set());
+      return owner;
+    }
+    function textMatch(rawEntries, lines, root) {
+      const candidates = rawEntries.map((entry) => {
+        const path = repoRelative(entry.file, root);
+        const fits = entry.line === null ? (l) => l.mentions.length === 0 ? namesPathIn(l.text, path, root) : l.mentions.some((m) => m.line === null && mentionNames(m.file, path, root)) : (l) => l.mentions.some((m) => m.line === entry.line && mentionNames(m.file, path, root));
+        return lines.filter(fits).map((l) => l.index);
+      });
+      const owner = matchLines(candidates);
+      const byIndex = new Map(lines.map((l) => [l.index, l]));
+      const claimedLines = rawEntries.map(() => null);
+      for (const [index, entry] of owner) claimedLines[entry] = byIndex.get(index);
+      const claimed = new Set(owner.values());
+      const problems = [];
+      const lost = rawEntries.findIndex((_, i) => !claimed.has(i));
+      if (lost >= 0) {
+        const entry = rawEntries[lost];
+        const wanted = entry.line === null ? "names that file with no line number and no other location" : "mentions that file and line";
+        problems.push(`raw entry ${lost + 1} (${spot(entry.file, entry.line)}) has no line of its own in /code-review's result that ${wanted}`);
+      }
+      const unclaimed = lines.find((l) => l.mentions.length > 0 && !owner.has(l.index));
+      if (unclaimed) {
+        const where = unclaimed.mentions.map(mentionSpot).join(", ");
+        const quoted = JSON.stringify(unclaimed.text.trim().slice(0, 200));
+        problems.push(`line ${unclaimed.index + 1} of /code-review's result (${where}) is a finding line that no raw entry claims: ${quoted}`);
+      }
+      return { mismatch: problems.length > 0 ? problems.join("; ") : null, claimedLines };
+    }
+    function ground({ capture, runId, rawEntries, tracked, root }) {
+      const failAt = (stage, reason, mode2 = null) => ({ verdict: { ok: false, stage, reason, mode: mode2 }, claimedLines: null });
+      const unusable = captureProblem(capture, runId);
+      if (unusable) return failAt("capture", unusable);
+      const { result } = capture;
+      const { list, problem } = jsonFindings(result);
+      if (problem) return failAt("capture", `/code-review's result cannot be read: ${problem}`);
+      let mode;
+      let lines = [];
+      if (list && list.length > 0) {
+        mode = "json";
+      } else {
+        lines = textLines(result, tracked);
+        if (lines.some((l) => l.mentions.length > 0)) mode = "text";
+        else if (list || explicitEmpty(result)) mode = "empty";
+        else return failAt("capture", "/code-review's result has no findings list and no explicit (none)");
+      }
+      const shape = rawShapeProblem(rawEntries);
+      if (shape) return failAt("lane", shape, mode);
+      let mismatch = null;
+      let claimedLines = null;
+      if (mode === "json") mismatch = jsonMismatch(rawEntries, list, root);
+      else if (mode === "text") ({ mismatch, claimedLines } = textMatch(rawEntries, lines, root));
+      else if (rawEntries.length > 0) {
+        mismatch = `/code-review reported no findings, but the raw list has ${rawEntries.length}`;
+      }
+      if (mismatch) return failAt("lane", mismatch, mode);
+      return { verdict: { ok: true, stage: null, reason: "ok", mode }, claimedLines };
+    }
+    function checkGrounding(input) {
+      return ground(input).verdict;
+    }
+    function parseJson(text) {
+      try {
+        return { value: JSON.parse(text) };
+      } catch {
+        return null;
+      }
+    }
+    function isText(value) {
+      return typeof value === "string" && value.trim() !== "";
+    }
+    function spot(file, line) {
+      return line == null ? `${file}, no line` : `${file}:${line}`;
+    }
+    function shown(value) {
+      return value === void 0 ? "none" : JSON.stringify(value);
+    }
+    var CONFIDENCES = ["High", "Medium", "Low"];
+    function isLine(value) {
+      return value === null || Number.isInteger(value) && value > 0;
+    }
+    function scoredEntryProblem(entry, i, rawByN, root) {
+      const label = `scored entry ${i + 1}`;
+      if (!isPlainObject(entry)) return `${label} is not an object`;
+      const raw = rawByN.get(entry.raw);
+      if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
+      const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
+      const want = repoRelative(raw.file, root);
+      if (!isText(entry.file) || entry.file !== want) return `${where} has file ${shown(entry.file)}, but its raw entry's repo-relative file is ${JSON.stringify(want)}`;
+      if (!isLine(entry.line)) return `${where} needs a positive integer line, or null, not ${shown(entry.line)}`;
+      if (!isText(entry.message)) return `${where} needs a non-empty string message`;
+      if (!Number.isInteger(entry.severity) || entry.severity < 1 || entry.severity > 10) {
+        return `${where} needs an integer severity from 1 to 10, not ${shown(entry.severity)}`;
+      }
+      if (!CATEGORIES.includes(entry.category)) {
+        return `${where} has category ${shown(entry.category)}, which is not one of the nine names: ${CATEGORIES.join(", ")}`;
+      }
+      if (!CONFIDENCES.includes(entry.confidence)) {
+        return `${where} needs confidence High, Medium, or Low, not ${shown(entry.confidence)}`;
+      }
+      if (typeof entry.evidence !== "string") return `${where} needs a string evidence`;
+      for (const key of ["outside_range", "doubted"]) {
+        if (typeof entry[key] !== "boolean") return `${where} needs ${key} to be true or false, not ${shown(entry[key])}`;
+      }
+      if (entry.recategorized_from !== null && !CLEANUP_CATEGORIES.includes(entry.recategorized_from)) {
+        return `${where} needs recategorized_from to be null or one of ${CLEANUP_CATEGORIES.join(", ")}, not ${shown(entry.recategorized_from)}`;
+      }
+      return null;
+    }
+    var QUOTE_LEAD = /^[\s:;,\-\u2013\u2014]+/;
+    var MIN_LINE_CHARS = 6;
+    function squeezed(text) {
+      return text.replace(/[\s`*]/g, "");
+    }
+    function existingPath(file, root, fileExists) {
+      for (const candidate of [file, trimWrappers(file)]) {
+        const path = repoRelative(candidate, root);
+        if (path !== "" && fileExists(path)) return path;
+      }
+      return null;
+    }
+    function disproofProblem(proof, { fileExists, readLines, root }) {
+      const exists = typeof fileExists === "function" ? fileExists : () => false;
+      const read = typeof readLines === "function" ? readLines : () => null;
+      const text = normalizeLine(typeof proof === "string" ? proof : "");
+      const tries = [];
+      const isBareFile = (path) => path.includes(".") || exists(path);
+      for (const token of text.matchAll(/\S+/g)) {
+        const rest = text.slice(token.index + token[0].length);
+        for (const mention of mentionsIn(token[0], isBareFile)) tries.push({ ...mention, rest });
+      }
+      if (tries.length === 0) return "needs a proof that cites a path:line and then quotes the code there";
+      let best = null;
+      const miss = (rank, problem) => {
+        if (!best || rank > best.rank) best = { rank, problem };
+      };
+      for (const { file, line, rest } of tries) {
+        const at = mentionSpot({ file, line });
+        const path = existingPath(file, root, exists);
+        if (!path) {
+          miss(0, `has a proof that cites ${at}, but no file ${file} exists in the repository`);
+          continue;
+        }
+        const lines = read(path);
+        if (!Array.isArray(lines)) {
+          miss(0, `has a proof that cites ${at}, but ${path} cannot be read`);
+          continue;
+        }
+        if (line === null || line > lines.length) {
+          miss(1, `has a proof that cites ${at}, but ${path} has ${lines.length} lines`);
+          continue;
+        }
+        const cited = squeezed(lines[line - 1]);
+        if (cited.length < MIN_LINE_CHARS) {
+          miss(2, `has a proof that cites ${at}, a line with fewer than ${MIN_LINE_CHARS} characters besides spaces, which cannot prove anything; cite a longer line and quote all of it`);
+          continue;
+        }
+        const quote = rest.replace(QUOTE_LEAD, "");
+        if (squeezed(quote) === "") {
+          miss(3, `has a proof that quotes no code after ${at}; put that whole line right after it`);
+          continue;
+        }
+        if (!squeezed(rest).includes(cited)) {
+          const shownQuote = JSON.stringify(oneLine(quote).slice(0, 120));
+          miss(3, `has a proof whose quote after ${at} does not hold that whole line of ${path}: ${shownQuote}; quote all of line ${line} right after it`);
+          continue;
+        }
+        return null;
+      }
+      return best.problem;
+    }
+    function isExcludedMention(mention, excludedPaths, root) {
+      return [mention.file, trimWrappers(mention.file)].some((file) => pathMatches(repoRelative(file, root), excludedPaths));
+    }
+    function droppedEntryProblem(entry, i, rawByN, excludedPaths, root, repo, claimedLines) {
+      const label = `dropped entry ${i + 1}`;
+      if (!isPlainObject(entry)) return { problem: `${label} is not an object` };
+      const raw = rawByN.get(entry.raw);
+      if (!raw) return { problem: `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry` };
+      const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
+      if (entry.reason === "excluded") {
+        if (!excludedPaths.includes(entry.glob)) {
+          return { problem: `${where} cites glob ${shown(entry.glob)}, which is not in the config's excluded_paths` };
+        }
+        if (!pathMatches(repoRelative(raw.file, root), [entry.glob])) {
+          return { problem: `${where} cites glob ${JSON.stringify(entry.glob)}, which ${repoRelative(raw.file, root)} does not match` };
+        }
+        const claimed = claimedLines ? claimedLines[raw.n - 1] : null;
+        const kept = claimed ? claimed.mentions.find((m) => !isExcludedMention(m, excludedPaths, root)) : null;
+        if (kept) {
+          return {
+            problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${mentionSpot(kept)}, which no excluded glob matches; score it instead`
+          };
+        }
+        return { why: `excluded path: ${entry.glob}` };
+      }
+      if (entry.reason === "disproved") {
+        const problem = disproofProblem(entry.proof, { ...repo, root });
+        if (problem) return { problem: `${where} ${problem}` };
+        return { why: entry.proof };
+      }
+      return { problem: `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"` };
+    }
+    function oneLine(text) {
+      return text.replace(/\s+/g, " ").trim();
+    }
+    function laneFail(reason) {
+      return { ok: false, reason, dropped: [] };
+    }
+    function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root, fileExists, readLines, claimedLines = null }) {
+      const shape = rawShapeProblem(rawEntries);
+      if (shape) return laneFail(shape);
+      const scoredParsed = scoredText == null ? null : parseJson(scoredText);
+      const scored = scoredParsed && unwrapFindings(scoredParsed.value);
+      if (!scored) return laneFail("the scored findings file is missing or has no findings list");
+      const droppedParsed = droppedText == null ? null : parseJson(droppedText);
+      if (!droppedParsed || !Array.isArray(droppedParsed.value)) {
+        return laneFail("the dropped file is missing or is not a JSON array");
+      }
+      const droppedEntries = droppedParsed.value;
+      const rawByN = new Map(rawEntries.map((entry) => [entry.n, entry]));
+      const used = /* @__PURE__ */ new Map();
+      const use = (n, what) => {
+        if (used.has(n)) return `raw entry ${n} is accounted for twice: by ${used.get(n)} and by ${what}`;
+        used.set(n, what);
+        return null;
+      };
+      for (const [i, entry] of scored.entries()) {
+        const problem = scoredEntryProblem(entry, i, rawByN, root);
+        if (problem) return laneFail(problem);
+        const twice = use(entry.raw, `scored entry ${i + 1}`);
+        if (twice) return laneFail(twice);
+      }
+      const dropped = [];
+      for (const [i, entry] of droppedEntries.entries()) {
+        const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root, { fileExists, readLines }, claimedLines);
+        if (result.problem) return laneFail(result.problem);
+        const twice = use(entry.raw, `dropped entry ${i + 1}`);
+        if (twice) return laneFail(twice);
+        const raw = rawByN.get(entry.raw);
+        dropped.push({ file: repoRelative(raw.file, root), line: raw.line, summary: oneLine(raw.summary), why: oneLine(result.why) });
+      }
+      const lost = rawEntries.find((entry) => !used.has(entry.n));
+      if (lost) {
+        return laneFail(
+          `raw entry ${lost.n} (${spot(lost.file, lost.line)}) is neither scored nor dropped; every raw finding must be scored or dropped exactly once`
+        );
+      }
+      return { ok: true, reason: "ok", dropped };
+    }
+    function checkCodeReviewRun({
+      captureText,
+      runId,
+      rawText,
+      scoredText,
+      droppedText,
+      excludedPaths = [],
+      tracked,
+      fileExists,
+      readLines,
+      root
+    }) {
+      const parsedCapture = captureText == null ? null : parseJson(captureText);
+      const parsedRaw = rawText == null ? null : parseJson(rawText);
+      const rawEntries = parsedRaw ? parsedRaw.value : null;
+      const { verdict: grounded, claimedLines } = ground({
+        capture: parsedCapture ? parsedCapture.value : null,
+        runId,
+        rawEntries,
+        tracked,
+        root
+      });
+      const count = Array.isArray(rawEntries) ? rawEntries.length : 0;
+      if (!grounded.ok) return { ...grounded, count, dropped: [] };
+      const lane = checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths, root, fileExists, readLines, claimedLines });
+      if (!lane.ok) return { ok: false, stage: "lane", reason: lane.reason, count, mode: grounded.mode, dropped: [] };
+      return { ok: true, stage: null, reason: "ok", count, mode: grounded.mode, dropped: lane.dropped };
+    }
+    module2.exports = {
+      CAPTURE_LIMIT_MINUTES,
+      jsonFindings,
+      explicitEmpty,
+      findingLines,
+      jsonLine,
+      repoRelative,
+      looksFinished,
+      checkGrounding,
+      checkLaneOutput,
+      checkCodeReviewRun,
+      trackedLookup
+    };
   }
 });
 
@@ -18859,310 +20207,6 @@ var require_evidence = __commonJS({
   }
 });
 
-// engine/consensus.cjs
-var require_consensus = __commonJS({
-  "engine/consensus.cjs"(exports2, module2) {
-    "use strict";
-    var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
-    function confidenceRank(c) {
-      return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
-    }
-    function tokenize(message) {
-      return String(message || "").toLowerCase().replace(/['"`]/g, "").replace(/[^a-z0-9\s]/g, " ").replace(/\d+/g, " ").split(/\s+/).filter(Boolean);
-    }
-    function jaccard(tokensA, tokensB) {
-      const a = new Set(tokensA);
-      const b = new Set(tokensB);
-      let inter = 0;
-      for (const t of a) if (b.has(t)) inter++;
-      const union = (/* @__PURE__ */ new Set([...a, ...b])).size;
-      return union === 0 ? 0 : inter / union;
-    }
-    function sameGroup(a, b) {
-      if (!a.file || a.file !== b.file) return false;
-      const bothNull = a.line == null && b.line == null;
-      const withinRange = a.line != null && b.line != null && Math.abs(a.line - b.line) <= 3;
-      if (!bothNull && !withinRange) return false;
-      return jaccard(tokenize(a.message), tokenize(b.message)) >= 0.5;
-    }
-    function parseLane(value, laneId) {
-      if (value === void 0) {
-        throw new Error(`missing findings for lane "${laneId}"`);
-      }
-      let parsed = value;
-      if (typeof value === "string") {
-        try {
-          parsed = JSON.parse(value);
-        } catch (e) {
-          throw new Error(
-            `unparseable findings JSON for lane "${laneId}": ${e.message}`
-          );
-        }
-      }
-      if (Array.isArray(parsed)) return parsed;
-      if (parsed && Array.isArray(parsed.findings)) return parsed.findings;
-      throw new Error(
-        `findings for lane "${laneId}" must be an array or {findings:[...]}`
-      );
-    }
-    function normalizeFinding(raw, laneId) {
-      const line = raw.line == null || raw.line === "" ? null : Number(raw.line);
-      const severity = Number(raw.severity);
-      return {
-        agent: laneId,
-        category: raw.category != null ? String(raw.category) : "",
-        severity: Number.isFinite(severity) ? severity : 0,
-        file: String(raw.file || ""),
-        line: Number.isFinite(line) ? line : null,
-        message: raw.message != null ? String(raw.message) : "",
-        confidence: raw.confidence != null ? String(raw.confidence) : "",
-        evidence: raw.evidence != null ? String(raw.evidence) : "",
-        recommendation: raw.recommendation != null ? String(raw.recommendation) : "",
-        fix: raw.fix != null ? String(raw.fix) : ""
-      };
-    }
-    function validateFinding(f) {
-      if (!f.file) return "missing file";
-      if (!f.message) return "missing message";
-      if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
-        return `invalid severity: ${f.severity}`;
-      }
-      if (f.severity >= 7) {
-        if (f.line === null) return "severity >= 7 requires a line anchor";
-        if (String(f.confidence || "").toLowerCase() !== "high") {
-          return "severity >= 7 requires High confidence";
-        }
-        if (!String(f.evidence || "").trim()) {
-          return "severity >= 7 requires concrete evidence";
-        }
-      }
-      return null;
-    }
-    function canonicalOrder(a, b) {
-      return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
-    }
-    function buildCliques(findings) {
-      const ordered = [...findings].sort(canonicalOrder);
-      const cliques = [];
-      for (const finding of ordered) {
-        const clique = cliques.find((c) => c.every((m) => sameGroup(m, finding)));
-        if (clique) clique.push(finding);
-        else cliques.push([finding]);
-      }
-      return cliques;
-    }
-    function toEntry(m) {
-      return {
-        agent: m.agent,
-        category: m.category,
-        severity: m.severity,
-        file: m.file,
-        line: m.line,
-        message: m.message,
-        confidence: m.confidence,
-        evidence: m.evidence,
-        recommendation: m.recommendation,
-        fix: m.fix,
-        corroboration: 1,
-        needsHumanReview: false,
-        _minSeverity: m.severity,
-        _maxSeverity: m.severity
-      };
-    }
-    function combineMembers(members) {
-      const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
-      const primary = ordered.reduce(
-        (best, m) => m.severity > best.severity ? m : best,
-        ordered[0]
-      );
-      const agents = [
-        ...new Set(
-          ordered.flatMap(
-            (m) => String(m.agents || m.agent || "").split(",").map((s) => s.trim()).filter(Boolean)
-          )
-        )
-      ].sort();
-      const bestConfidence = ordered.reduce(
-        (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
-        ordered[0]
-      );
-      const longestField = (field) => ordered.reduce(
-        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
-        ordered[0]
-      )[field];
-      const corroboration = ordered.reduce(
-        (sum, m) => sum + (m.corroboration || 1),
-        0
-      );
-      const minSeverity = Math.min(
-        ...ordered.map((m) => m._minSeverity != null ? m._minSeverity : m.severity)
-      );
-      const maxSeverity = Math.max(
-        ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
-      );
-      const weightedSum = ordered.reduce(
-        (sum, m) => sum + m.severity * (m.corroboration || 1),
-        0
-      );
-      const meanSeverity = weightedSum / corroboration;
-      return {
-        agent: primary.agent,
-        agents: agents.join(","),
-        category: primary.category,
-        severity: Math.round(meanSeverity),
-        file: primary.file,
-        line: primary.line,
-        message: primary.message,
-        confidence: bestConfidence.confidence,
-        evidence: longestField("evidence"),
-        recommendation: longestField("recommendation"),
-        fix: primary.fix,
-        corroboration,
-        needsHumanReview: maxSeverity - minSeverity >= 4,
-        _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity
-      };
-    }
-    function unionFind(n) {
-      const parent = Array.from({ length: n }, (_, i) => i);
-      function find(x) {
-        while (parent[x] !== x) {
-          parent[x] = parent[parent[x]];
-          x = parent[x];
-        }
-        return x;
-      }
-      function union(x, y) {
-        const rx = find(x);
-        const ry = find(y);
-        if (rx !== ry) parent[rx] = ry;
-      }
-      return { find, union };
-    }
-    function applyProfileCutoff(entries, profile) {
-      if (profile !== "chill") return entries;
-      return entries.filter((e) => e.severity >= 4 || e.corroboration >= 2);
-    }
-    function sortEntries(entries) {
-      return [...entries].sort(
-        (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
-      );
-    }
-    function lineDistance(a, b) {
-      if (a == null && b == null) return 0;
-      if (a == null || b == null) return null;
-      return Math.abs(a - b);
-    }
-    function buildCandidates(entries) {
-      const candidates = [];
-      for (let i = 0; i < entries.length; i++) {
-        for (let j = i + 1; j < entries.length; j++) {
-          const a = entries[i];
-          const b = entries[j];
-          if (a.file !== b.file || !a.file) continue;
-          const dist = lineDistance(a.line, b.line);
-          if (dist == null || dist > 10) continue;
-          const reason = a.line == null && b.line == null ? `both findings in ${a.file} have no line anchor` : `both findings in ${a.file} within ${dist} line(s) (L${a.line} vs L${b.line})`;
-          candidates.push({ a: i, b: j, reason });
-        }
-      }
-      return candidates;
-    }
-    function applyDecisions(entries, decisions) {
-      if (!Array.isArray(decisions)) {
-        throw new Error("consensus: decisions must be an array");
-      }
-      const n = entries.length;
-      const { find, union } = unionFind(n);
-      for (const d of decisions) {
-        const pair = d && (d.merge || d.keep);
-        if (!Array.isArray(pair) || pair.length !== 2) {
-          throw new Error(`consensus: invalid decision entry ${JSON.stringify(d)}`);
-        }
-        const [i, j] = pair;
-        if (!Number.isInteger(i) || !Number.isInteger(j) || i < 0 || j < 0 || i >= n || j >= n) {
-          throw new Error(
-            `consensus: unknown finding index in decision ${JSON.stringify(d)}`
-          );
-        }
-        if (d.merge) union(i, j);
-      }
-      const groupsByRoot = /* @__PURE__ */ new Map();
-      for (let i = 0; i < n; i++) {
-        const root = find(i);
-        if (!groupsByRoot.has(root)) groupsByRoot.set(root, []);
-        groupsByRoot.get(root).push(entries[i]);
-      }
-      return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members)
-      );
-    }
-    function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, ...rest } = entry;
-      return rest;
-    }
-    function consensusFrom({
-      plan,
-      findingsByAgent = {},
-      profile = "standard",
-      decisions
-    } = {}) {
-      const laneIds = plan && Array.isArray(plan.agents) ? plan.agents.map((a) => a.id) : Object.keys(findingsByAgent);
-      const errors = [];
-      const perLane = {};
-      for (const laneId of laneIds) {
-        try {
-          perLane[laneId] = parseLane(findingsByAgent[laneId], laneId);
-        } catch (e) {
-          errors.push(e.message);
-        }
-      }
-      if (errors.length) {
-        throw new Error(`consensus: ${errors.join("; ")}`);
-      }
-      const all = [];
-      const droppedInvalid = [];
-      for (const laneId of laneIds) {
-        for (const raw of perLane[laneId]) {
-          const finding = normalizeFinding(raw, laneId);
-          const reason = validateFinding(finding);
-          if (reason) {
-            const messageSlice = String(finding.message || "").slice(0, 200);
-            droppedInvalid.push({ lane: laneId, reason, message: messageSlice });
-            console.warn(
-              `consensus: dropping invalid finding from lane "${laneId}": ${reason} (message: "${messageSlice}")`
-            );
-            continue;
-          }
-          all.push(finding);
-        }
-      }
-      let entries = buildCliques(all).map(
-        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
-      );
-      const beforeCutoff = entries.length;
-      entries = applyProfileCutoff(entries, profile);
-      const droppedByProfile = beforeCutoff - entries.length;
-      entries = sortEntries(entries);
-      if (decisions !== void 0) {
-        entries = sortEntries(applyDecisions(entries, decisions));
-      }
-      const candidates = buildCandidates(entries);
-      const findings = entries.map(stripInternal);
-      const stats = {
-        raw: all.length,
-        groups: findings.filter((e) => e.corroboration > 1).length,
-        singletons: findings.filter((e) => e.corroboration === 1).length,
-        droppedByProfile,
-        droppedInvalid,
-        needsHumanReview: findings.filter((e) => e.needsHumanReview).length
-      };
-      return { findings, candidates, stats };
-    }
-    module2.exports = { consensusFrom, tokenize, jaccard, parseLane };
-  }
-});
-
 // engine/slice.cjs
 var require_slice = __commonJS({
   "engine/slice.cjs"(exports2, module2) {
@@ -19241,7 +20285,20 @@ var require_slice = __commonJS({
       const diff = parts.join("");
       return { mode: diff ? "sliced" : "empty", diff, files, hunks };
     }
-    module2.exports = { sliceForAgent, parseDiff };
+    function blocksForFiles(diffText, files) {
+      const wanted = new Set(files);
+      if (wanted.size === 0) return "";
+      return parseDiff(diffText).filter((block) => block.unparseable || wanted.has(block.file) || wanted.has(block.oldFile)).map((block) => block.header + block.hunks.join("")).join("");
+    }
+    function filesWithoutBlocks(diffText, files) {
+      const named = /* @__PURE__ */ new Set();
+      for (const block of parseDiff(diffText)) {
+        if (block.file != null) named.add(block.file);
+        if (block.oldFile != null) named.add(block.oldFile);
+      }
+      return [...new Set(files)].filter((file) => !named.has(file));
+    }
+    module2.exports = { sliceForAgent, parseDiff, blocksForFiles, filesWithoutBlocks };
   }
 });
 
@@ -19350,10 +20407,43 @@ var require_telemetry = __commonJS({
   }
 });
 
+// package.json
+var require_package = __commonJS({
+  "package.json"(exports2, module2) {
+    module2.exports = {
+      name: "agent-review",
+      version: "1.1.0",
+      private: true,
+      description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
+      license: "MIT",
+      engines: {
+        node: ">=20"
+      },
+      scripts: {
+        test: "node engine/run-tests.cjs",
+        build: "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review bin/agent-review-hook",
+        "check-dist": "npm run build && git diff --exit-code dist/",
+        "stamp-templates": "node engine/stampTemplates.cjs",
+        "test:e2e": "bash test/e2e-review.sh"
+      },
+      dependencies: {
+        ajv: "^8.17.1",
+        minimatch: "^10.0.1",
+        yaml: "^2.6.1"
+      },
+      devDependencies: {
+        esbuild: "^0.25.0"
+      }
+    };
+  }
+});
+
 // engine/cliCommands.cjs
 var require_cliCommands = __commonJS({
   "engine/cliCommands.cjs"(exports2, module2) {
     "use strict";
+    var { ENGINE_DEFAULT, ENGINE_CODE_REVIEW } = require_vocabulary();
+    var TOOL_NAME = require_package().name;
     function setLearningStatus(learnings, id, status) {
       const list = learnings && learnings.learnings || [];
       if (!list.some((l) => l.id === id))
@@ -19396,7 +20486,68 @@ var require_cliCommands = __commonJS({
       }
       return lines.join("\n");
     }
-    module2.exports = { setLearningStatus, listLearnings, preflightSummary };
+    var LEFTOVER_CI_NOTE = "this repo is local-only but still has CI review workflows, so PRs labeled agent-review still pay for CI reviews. Run /agent-review:update-files to remove them.";
+    var DEFAULT_ENGINE_MODE_NOTES = {
+      quick: "quick mode keeps at most 3 of these lanes.",
+      deep: "deep mode also runs every enabled lane listed as skipped."
+    };
+    function reviewerTag(agent, slice, model) {
+      if (slice && slice.mode === "empty") return "skipped: no matching hunks";
+      const by = agent.matchedBy || "";
+      if (by === "engine") return model || "engine";
+      if (by === "always" || by === "engine-always") return "always";
+      if (by === "unmatched-coverage") return "coverage";
+      return "trigger";
+    }
+    function unplannedLanes({ plan, configAgents }) {
+      const planned = new Set(plan.agents.map((a) => a.id));
+      const replaced = new Set(plan.engine && plan.engine.replaces || []);
+      return (configAgents || []).filter(
+        (a) => a.enabled !== false && !planned.has(a.id) && !replaced.has(a.id)
+      );
+    }
+    function reviewerList({ plan, sliceManifest, configAgents, model }) {
+      const manifest = sliceManifest || {};
+      const reviewers = plan.agents.map(
+        (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`
+      );
+      for (const a of unplannedLanes({ plan, configAgents })) {
+        reviewers.push(`${a.id} [skipped: no trigger matched]`);
+      }
+      return reviewers.join(", ");
+    }
+    function formatStartup({
+      options,
+      plan,
+      sliceManifest,
+      configAgents,
+      scopeLabel,
+      ciFilesPresent,
+      mode
+    }) {
+      const withSource = (o) => `${o.value} (${o.source})`;
+      const head = [TOOL_NAME, `engine: ${withSource(options.engine)}`];
+      if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
+      const { requested } = plan.mode;
+      const resolved = mode || plan.mode.resolved;
+      head.push(`mode: ${requested === resolved ? resolved : `${requested} \u2192 ${resolved}`}`);
+      head.push(`scope: ${scopeLabel || "full review"}`);
+      const model = options.model && options.model.value;
+      const reviewers = resolved === "skip" ? "none (no-risk diff skipped)" : reviewerList({ plan, sliceManifest, configAgents, model });
+      const lines = [head.join(" \xB7 "), `reviewers: ${reviewers}`];
+      const modeNote = resolved === "deep" && !unplannedLanes({ plan, configAgents }).length ? null : DEFAULT_ENGINE_MODE_NOTES[resolved];
+      if (options.engine.value === ENGINE_DEFAULT && modeNote) lines.push(`note: ${modeNote}`);
+      for (const n of options.notes || []) lines.push(`note: ${n}`);
+      if (options.reviewsRun.value === "local" && ciFilesPresent)
+        lines.push(`note: ${LEFTOVER_CI_NOTE}`);
+      return lines.join("\n");
+    }
+    module2.exports = {
+      setLearningStatus,
+      listLearnings,
+      preflightSummary,
+      formatStartup
+    };
   }
 });
 
@@ -19404,19 +20555,27 @@ var require_cliCommands = __commonJS({
 var require_cli = __commonJS({
   "engine/cli.cjs"(exports2, module2) {
     "use strict";
-    var { join, relative, dirname } = require("node:path");
+    var { join, relative, dirname, resolve, isAbsolute } = require("node:path");
     var { execFileSync } = require("node:child_process");
+    var { MODES, FINAL_MODES, ENGINE_CODE_REVIEW, EFFORTS } = require_vocabulary();
     var {
       readFileSync,
       writeFileSync,
       existsSync,
       rmSync,
       mkdirSync,
-      statSync
+      statSync,
+      renameSync,
+      lstatSync,
+      openSync,
+      closeSync,
+      constants: fsConstants
     } = require("node:fs");
+    var nodeFs = require("node:fs");
     var os = require("node:os");
-    var { createHash } = require("node:crypto");
+    var { createHash, randomBytes } = require("node:crypto");
     var { loadConfig } = require_loadConfig();
+    var { resolveOptions, codeReviewEngineProblems } = require_options();
     var { buildPlan, linesChangedFromStat } = require_plan();
     var {
       loadOrBuildIndex,
@@ -19439,6 +20598,13 @@ var require_cli = __commonJS({
     var { mergeLedger, buildStatus } = require_reportState();
     var { evaluateApproval } = require_approval();
     var {
+      CAPTURE_LIMIT_MINUTES,
+      checkCodeReviewRun,
+      looksFinished,
+      repoRelative,
+      trackedLookup
+    } = require_codeReviewProof();
+    var {
       MAX_RESULT_BYTES,
       prepareAddressRequest,
       validateAddressResult,
@@ -19456,23 +20622,63 @@ var require_cli = __commonJS({
     } = require_evalSuite();
     var { buildEvidence, verifyEvidenceLedger } = require_evidence();
     var { consensusFrom } = require_consensus();
-    var { sliceForAgent } = require_slice();
+    var { sliceForAgent, blocksForFiles, filesWithoutBlocks } = require_slice();
+    var { pathMatches } = require_selectAgents();
     var { validateContextManifest, contextInventory, packContext } = require_contextPack();
     var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
       setLearningStatus,
       listLearnings,
-      preflightSummary
+      preflightSummary,
+      formatStartup
     } = require_cliCommands();
+    var {
+      CODE_REVIEW_SKILL,
+      CAPTURE_FILES,
+      STOP_BUFFER_LINES,
+      CAPTURE_SOURCE,
+      captureDir,
+      captureDirProblem,
+      armedState,
+      lastAssistantText,
+      postSkillWrites,
+      subagentStopWrites
+    } = require_captureHook();
     var { repoRoot, reviewDir } = require_paths();
+    function writeStdoutSync(text) {
+      const buf = Buffer.from(text, "utf8");
+      let offset = 0;
+      while (offset < buf.length) {
+        try {
+          offset += nodeFs.writeSync(1, buf, offset);
+        } catch (e) {
+          if (e.code === "EPIPE") return;
+          if (e.code !== "EAGAIN") throw e;
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+        }
+      }
+    }
     function out(s) {
-      process.stdout.write(s + "\n");
+      writeStdoutSync(s + "\n");
     }
     function flag(argv, name) {
       const i = argv.indexOf(name);
       if (i < 0) return void 0;
       const v = argv[i + 1];
       return v === void 0 || v.startsWith("--") ? void 0 : v;
+    }
+    function optionsInput(argv) {
+      let args = "";
+      let ci = false;
+      for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === "--ci") ci = true;
+        else if (a === "--args") args = argv[++i] || "";
+        else if (a.startsWith("--args=")) args = a.slice("--args=".length);
+        else if (a === "--args-file") args = readFileSync(argv[++i], "utf8").replace(/\r?\n$/, "");
+        else if (a === "--root" || a === "--review-dir") i++;
+      }
+      return { args, ci };
     }
     function ctx(argv) {
       const opts = { root: flag(argv, "--root"), reviewDir: flag(argv, "--review-dir") };
@@ -19489,7 +20695,7 @@ var require_cli = __commonJS({
         INDEX: join(RD, "index")
       };
     }
-    var MODES = ["auto", "quick", "standard", "deep"];
+    var CI_REVIEW_WORKFLOWS = ["agent-review.yml", "agent-review-interact.yml", "agent-review-readiness.yml"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
@@ -19572,19 +20778,302 @@ var require_cli = __commonJS({
         opts
       });
     }
+    function nowSeconds() {
+      return Math.floor(Date.now() / 1e3);
+    }
+    function captureDirError(dir) {
+      let stat = null;
+      try {
+        stat = lstatSync(dir);
+      } catch (e) {
+        if (e.code !== "ENOENT") return `capture dir ${dir} cannot be checked: ${e.message}`;
+      }
+      const problem = captureDirProblem(stat, process.getuid());
+      return problem ? `capture dir ${dir} ${problem}` : null;
+    }
+    function writeFileAtomic(path, text) {
+      const tmp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
+      const fd = openSync(tmp, "wx", 384);
+      try {
+        try {
+          writeFileSync(fd, text);
+        } finally {
+          closeSync(fd);
+        }
+        renameSync(tmp, path);
+      } catch (e) {
+        rmSync(tmp, { force: true });
+        throw e;
+      }
+    }
+    function parseJsonOrNull(text) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    }
+    function readJsonOrNull(path) {
+      try {
+        return parseJsonOrNull(readFileSync(path, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+    function readStops(path) {
+      let text;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        return [];
+      }
+      return text.split("\n").filter((line) => line.trim()).map(parseJsonOrNull).filter(Boolean);
+    }
+    function readTranscript(path) {
+      if (typeof path !== "string" || !isAbsolute(path) || !path.endsWith(".jsonl")) return null;
+      try {
+        return lastAssistantText(readFileSync(path, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+    function appendStop(path, stop) {
+      const { O_WRONLY, O_APPEND, O_CREAT, O_NOFOLLOW } = fsConstants;
+      const fd = openSync(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 384);
+      try {
+        writeFileSync(fd, JSON.stringify(stop) + "\n");
+      } finally {
+        closeSync(fd);
+      }
+      const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+      if (lines.length > STOP_BUFFER_LINES) {
+        writeFileAtomic(path, lines.slice(-STOP_BUFFER_LINES).join("\n") + "\n");
+      }
+    }
+    function runHook(name) {
+      try {
+        const dir = captureDir();
+        if (captureDirError(dir)) return 0;
+        const file = (key) => join(dir, CAPTURE_FILES[key]);
+        const arm = readJsonOrNull(file("arm"));
+        const now = nowSeconds();
+        if (!armedState(arm, now)) return 0;
+        const base = { payload: JSON.parse(readFileSync(0, "utf8")), arm, now, readTranscript };
+        if (name === "post-skill") {
+          const first = postSkillWrites({ ...base, stops: [] });
+          if (first.mismatch) writeFileAtomic(file("mismatch"), JSON.stringify(first.mismatch));
+          if (first.pending) writeFileAtomic(file("pending"), JSON.stringify(first.pending));
+          if (!first.pending && !first.capture) return 0;
+          const { capture } = postSkillWrites({ ...base, stops: readStops(file("stops")) });
+          if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
+        } else if (name === "subagent-stop") {
+          const { stop } = subagentStopWrites({ ...base, pending: null, capture: null });
+          if (!stop) return 0;
+          appendStop(file("stops"), stop);
+          const pending = readJsonOrNull(file("pending"));
+          if (!pending) return 0;
+          const { capture } = subagentStopWrites({
+            ...base,
+            pending,
+            capture: readJsonOrNull(file("capture"))
+          });
+          if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
+        }
+      } catch {
+        return 0;
+      }
+      return 0;
+    }
+    var CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]`;
+    var CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
+    var CAPTURE_WAIT_MAX_SECONDS = 590;
+    function captureWaitTimeout(value) {
+      if (value === void 0) return 540;
+      if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
+      return Math.min(Number(value), CAPTURE_WAIT_MAX_SECONDS);
+    }
+    function capturePollMs(env = process.env) {
+      const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
+      return Number.isInteger(ms) && ms > 0 ? ms : 5e3;
+    }
+    function captureHookGraceMs(env = process.env) {
+      const ms = Number(env.AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS);
+      return Number.isInteger(ms) && ms > 0 ? ms : 6e4;
+    }
+    var HOOKS_DID_NOT_RUN = "the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed";
+    function mismatchReason(mismatch) {
+      const rearm = "the run must be re-armed with capture arm before /code-review is called again";
+      if (mismatch.reason === "no fork id") {
+        return `/code-review ran in the background, but its Skill reply named no fork id, so its result cannot be captured; ${rearm}`;
+      }
+      if (mismatch.reason === "wrong skill") {
+        const builtIn = JSON.stringify(CODE_REVIEW_SKILL);
+        return `/code-review was called as ${mismatch.got}, not as the built-in ${builtIn} skill with args ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+      }
+      return `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+    }
+    function captureWait({ runId, effort, timeoutSeconds }) {
+      const dir = captureDir();
+      const file = (key) => join(dir, CAPTURE_FILES[key]);
+      const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
+      const pollMs = capturePollMs();
+      const started = Date.now();
+      const deadline = started + timeoutSeconds * 1e3;
+      const hooksDueAt = started + captureHookGraceMs();
+      const report = (status, reason, capture = null) => {
+        out(JSON.stringify({
+          status,
+          reason,
+          stop_count: capture ? capture.stop_count ?? null : null,
+          mode: capture ? capture.mode ?? null : null
+        }));
+        return CAPTURE_WAIT_EXIT[status];
+      };
+      for (; ; ) {
+        const dirError = captureDirError(dir);
+        if (dirError) return report("failed", dirError);
+        const arm = readJsonOrNull(file("arm"));
+        const armed = armedState(arm, nowSeconds());
+        if (!armed) return report("failed", `/code-review capture is not armed for run ${runId}`);
+        if (armed.run_id !== runId) {
+          return report("failed", `/code-review capture is armed for run ${armed.run_id}, not run ${runId}`);
+        }
+        const armedEffort = armed.args.trim().split(/\s+/)[0];
+        if (armedEffort !== effort) {
+          return report(
+            "failed",
+            `capture-wait --effort ${effort} does not match the armed args ${JSON.stringify(armed.args)}, whose effort is ${JSON.stringify(armedEffort)}`
+          );
+        }
+        const found = readJsonOrNull(file("capture"));
+        const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
+        if (capture && looksFinished(capture.result, effort, capture.mode)) {
+          return report("finished", `the /code-review capture for run ${runId} looks finished`, capture);
+        }
+        const mismatch = readJsonOrNull(file("mismatch"));
+        if (mismatch?.run_id === runId) return report("failed", mismatchReason(mismatch), capture);
+        const hooksRan = capture !== null || readJsonOrNull(file("pending"))?.run_id === runId;
+        const now = Date.now();
+        const limitAt = (armed.created + limitMinutes * 60) * 1e3;
+        if (now >= limitAt) {
+          return report(
+            "failed",
+            `/code-review did not finish within the ${limitMinutes}-minute limit for effort ${effort}`,
+            capture
+          );
+        }
+        if (!hooksRan && now >= hooksDueAt) return report("failed", HOOKS_DID_NOT_RUN);
+        if (now >= deadline) {
+          const left = Math.ceil((limitAt - now) / 6e4);
+          return report(
+            "waiting",
+            `no finished /code-review capture for run ${runId} yet; about ${left} of the ${limitMinutes} minutes are left, so run capture-wait again`,
+            capture
+          );
+        }
+        const sleepMs = Math.min(pollMs, deadline - now, limitAt - now, hooksRan ? Infinity : hooksDueAt - now);
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+      }
+    }
+    var GIT_MAX_BUFFER = 512 * 1024 * 1024;
+    function gitIn(root, args) {
+      return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], maxBuffer: GIT_MAX_BUFFER });
+    }
+    function filesAt(root, commit) {
+      if (!commit) return null;
+      try {
+        return gitIn(root, ["ls-tree", "-r", "--name-only", "-z", commit]).split("\0").filter(Boolean);
+      } catch {
+        return null;
+      }
+    }
+    var FileListError = class extends Error {
+    };
+    function commitIn(root, ref) {
+      if (!validRef(ref)) return null;
+      try {
+        return gitIn(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).trim() || null;
+      } catch {
+        return null;
+      }
+    }
+    function blobLines(root, commit, path) {
+      const rel = relative(root, resolve(root, path));
+      if (!commit || rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+      const spec = `${commit}:./${rel}`;
+      try {
+        if (gitIn(root, ["cat-file", "-t", spec]).trim() !== "blob") return null;
+        return gitIn(root, ["show", spec]).replace(/\r?\n$/, "").split(/\r?\n/);
+      } catch {
+        return null;
+      }
+    }
+    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]";
+    var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
+    function diffFor(diffPath, rawPath, root, excludedPaths) {
+      let raw;
+      try {
+        raw = JSON.parse(readFileSync(rawPath, "utf8"));
+      } catch (e) {
+        out(`error: could not read the raw findings list ${rawPath}: ${e.message}`);
+        return 1;
+      }
+      if (!Array.isArray(raw)) {
+        out(`error: the raw findings list ${rawPath} is not a JSON array`);
+        return 1;
+      }
+      const bad = raw.findIndex((entry) => typeof entry?.file !== "string" || entry.file.trim() === "");
+      if (bad >= 0) {
+        out(`error: raw entry ${bad + 1} needs a non-empty string file`);
+        return 1;
+      }
+      let diffText;
+      try {
+        diffText = readFileSync(diffPath, "utf8");
+      } catch (e) {
+        out(`error: could not read the diff ${diffPath}: ${e.message}`);
+        return 1;
+      }
+      const files = [...new Set(raw.map((entry) => repoRelative(entry.file, root)))].filter(
+        (file) => !pathMatches(file, excludedPaths)
+      );
+      let text = blocksForFiles(diffText, files);
+      const missing = filesWithoutBlocks(diffText, files);
+      if (missing.length > 0 && text !== "" && !text.endsWith("\n")) text += "\n";
+      text += missing.map((file) => `no diff block for ${file}
+`).join("");
+      writeStdoutSync(text);
+      return 0;
+    }
+    function excludedPathsOrNone(C) {
+      try {
+        return existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+      } catch {
+        return [];
+      }
+    }
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
-  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
+  options (--args "<raw>" | --args=<raw> | --args-file <f>) [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
+  startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
+  diff-for --diff <f> --raw <f>   print the diff blocks of the files a raw findings list names, in diff order (nothing for an empty list), skipping files in the config's excluded_paths; then print "no diff block for <file>" for each other named file that has no block
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>]   merge stable incremental finding state
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
+  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
+  capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
+  capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
+  capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args or skill mismatch, not armed, another effort, no hook file for the run within 60 seconds, or the effort's time limit passed)
+  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -19612,6 +21101,7 @@ var require_cli = __commonJS({
       return out2;
     }
     function main2(rawArgv) {
+      if (rawArgv[0] === "hook") return runHook(rawArgv[1]);
       const C = ctx(rawArgv);
       const argv = stripGlobalFlags(rawArgv);
       const cmd = argv[0];
@@ -19620,6 +21110,13 @@ var require_cli = __commonJS({
         case "config": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
           if (rest[0] === "validate") {
+            const engineName = cfg.engine && cfg.engine.name;
+            const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
+            if (problems.length) {
+              out(`Invalid review config (${C.CONFIG}):
+- ${problems.join("\n- ")}`);
+              return 1;
+            }
             out("config OK");
             return 0;
           }
@@ -19650,6 +21147,46 @@ var require_cli = __commonJS({
           out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
           return 0;
         }
+        case "options": {
+          try {
+            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const { args, ci } = optionsInput(rest);
+            const resolved = resolveOptions({ args, config: cfg, ci });
+            out(JSON.stringify(resolved, null, 2));
+            return 0;
+          } catch (e) {
+            out(`error: ${e.message}`);
+            return 1;
+          }
+        }
+        case "startup": {
+          try {
+            const mode = flag(rest, "--mode");
+            if (mode !== void 0 && !FINAL_MODES.includes(mode)) {
+              out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join("/")})`);
+              return 1;
+            }
+            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const slicesPath = flag(rest, "--slices");
+            out(
+              formatStartup({
+                options: JSON.parse(readFileSync(flag(rest, "--options"), "utf8")),
+                plan: JSON.parse(readFileSync(flag(rest, "--plan"), "utf8")),
+                sliceManifest: slicesPath ? JSON.parse(readFileSync(slicesPath, "utf8")) : {},
+                configAgents: cfg.agents || [],
+                scopeLabel: flag(rest, "--scope"),
+                ciFilesPresent: CI_REVIEW_WORKFLOWS.some(
+                  (name) => existsSync(join(C.ROOT, ".github/workflows", name))
+                ),
+                mode
+              })
+            );
+            return 0;
+          } catch (e) {
+            out(`error: ${e.message}`);
+            return 1;
+          }
+        }
         case "plan": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
           const filesPath = flag(rest, "--files");
@@ -19664,8 +21201,10 @@ var require_cli = __commonJS({
           const files = readFileSync(filesPath, "utf8").split("\n").map((s) => s.trim()).filter(Boolean);
           const diffText = diffPath ? readFileSync(diffPath, "utf8") : "";
           const linesChanged = statPath ? linesChangedFromStat(readFileSync(statPath, "utf8")) : 0;
+          const optionsPath = flag(rest, "--options");
+          const options = optionsPath ? JSON.parse(readFileSync(optionsPath, "utf8")) : void 0;
           const plan = buildPlan(
-            { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode },
+            { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode, options },
             cfg
           );
           out(JSON.stringify(plan, null, 2));
@@ -19723,6 +21262,15 @@ var require_cli = __commonJS({
           }
           out(JSON.stringify(manifest, null, 2));
           return 0;
+        }
+        case "diff-for": {
+          const diffPath = flag(rest, "--diff");
+          const rawPath = flag(rest, "--raw");
+          if (!diffPath || !rawPath) {
+            out(DIFF_FOR_USAGE);
+            return 1;
+          }
+          return diffFor(diffPath, rawPath, C.ROOT, excludedPathsOrNone(C));
         }
         case "emit": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
@@ -19826,7 +21374,7 @@ var require_cli = __commonJS({
               JSON.parse(readFileSync(requestPath, "utf8")),
               JSON.parse(readFileSync(resultPath, "utf8"))
             );
-            process.stdout.write(entries.map((entry) => JSON.stringify(entry)).join("\n") + (entries.length ? "\n" : ""));
+            writeStdoutSync(entries.map((entry) => JSON.stringify(entry)).join("\n") + (entries.length ? "\n" : ""));
             return 0;
           }
           if (sub === "finalize") {
@@ -19863,13 +21411,14 @@ var require_cli = __commonJS({
         case "ledger": {
           const findingsPath = flag(rest, "--findings");
           if (!findingsPath) {
-            out("usage: agent-review ledger --findings <file> [--previous <file>]");
+            out("usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location]");
             return 1;
           }
           const previousPath = flag(rest, "--previous");
           const previous = previousPath ? JSON.parse(readFileSync(previousPath, "utf8")) : [];
           const findings = JSON.parse(readFileSync(findingsPath, "utf8"));
-          out(JSON.stringify(mergeLedger(previous, findings), null, 2));
+          const matchSuggestionsByLocation = rest.includes("--match-suggestions-by-location");
+          out(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation }), null, 2));
           return 0;
         }
         case "status": {
@@ -19905,6 +21454,166 @@ var require_cli = __commonJS({
           out(JSON.stringify(evaluateApproval(readFileSync(reportPath, "utf8"), { head })));
           return 0;
         }
+        case "code-review-proof": {
+          const rawPath = flag(rest, "--raw");
+          const findingsPath = flag(rest, "--findings");
+          const droppedPath = flag(rest, "--dropped");
+          const runId = flag(rest, "--run");
+          const promotePath = flag(rest, "--promote");
+          const headArg = flag(rest, "--head");
+          if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes("--capture") || rest.includes("--promote") && !promotePath || rest.includes("--head") && headArg === void 0) {
+            out(CODE_REVIEW_PROOF_USAGE);
+            return 1;
+          }
+          const readBytes = (p) => {
+            try {
+              return readFileSync(p);
+            } catch {
+              return null;
+            }
+          };
+          const readIfPresent = (p) => readBytes(p)?.toString("utf8") ?? null;
+          const scoredBytes = readBytes(findingsPath);
+          const finish = (verdict) => {
+            let r2 = verdict;
+            if (promotePath && r2.ok) {
+              try {
+                writeFileAtomic(promotePath, scoredBytes);
+              } catch (e) {
+                r2 = { ...r2, ok: false, stage: "config", reason: `could not save the proved findings to ${promotePath}: ${e.message}`, dropped: [] };
+              }
+            }
+            if (promotePath && !r2.ok) {
+              try {
+                rmSync(promotePath, { force: true });
+              } catch {
+              }
+            }
+            out(JSON.stringify(r2));
+            return r2.ok ? 0 : 1;
+          };
+          const refuse = (stage, reason) => finish({ ok: false, stage, reason, count: 0, mode: null, dropped: [] });
+          let excludedPaths;
+          try {
+            excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+          } catch (e) {
+            return refuse("config", `could not read excluded_paths from the review config: ${e.message}`);
+          }
+          let commit;
+          if (headArg !== void 0) {
+            commit = commitIn(C.ROOT, headArg);
+            if (!commit) return refuse("config", `--head ${JSON.stringify(headArg)} is not a commit in ${C.ROOT}`);
+          }
+          const dir = captureDir();
+          const dirError = captureDirError(dir);
+          if (dirError) return refuse("capture", dirError);
+          const capturePath = join(dir, CAPTURE_FILES.capture);
+          const atCommit = () => {
+            if (commit === void 0) commit = commitIn(C.ROOT, "HEAD");
+            return commit;
+          };
+          const blobs = /* @__PURE__ */ new Map();
+          const readLines = (p) => {
+            if (!blobs.has(p)) blobs.set(p, blobLines(C.ROOT, atCommit(), p));
+            return blobs.get(p);
+          };
+          const fileExists = (p) => readLines(p) !== null;
+          let lookup = null;
+          const tracked = (name) => {
+            if (!lookup) {
+              const files = filesAt(C.ROOT, atCommit());
+              if (!files) {
+                throw new FileListError(
+                  `could not list the files of commit ${headArg ?? "HEAD"} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`
+                );
+              }
+              lookup = trackedLookup(files);
+            }
+            return lookup(name);
+          };
+          let r;
+          try {
+            r = checkCodeReviewRun({
+              captureText: readIfPresent(capturePath),
+              runId,
+              rawText: readIfPresent(rawPath),
+              scoredText: scoredBytes?.toString("utf8") ?? null,
+              droppedText: readIfPresent(droppedPath),
+              excludedPaths,
+              tracked,
+              fileExists,
+              readLines,
+              root: C.ROOT
+            });
+          } catch (e) {
+            if (e instanceof FileListError) return refuse("config", e.message);
+            throw e;
+          }
+          return finish(r);
+        }
+        case "capture": {
+          const sub = rest[0];
+          const runId = flag(rest, "--run");
+          const argsAt = rest.indexOf("--args");
+          const args = argsAt < 0 ? void 0 : rest[argsAt + 1];
+          if (!["arm", "disarm", "show"].includes(sub) || sub !== "disarm" && !runId || sub === "arm" && !args) {
+            out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm | capture show --run <id>');
+            return 1;
+          }
+          const fail = (reason) => {
+            process.stderr.write(`error: ${reason}
+`);
+            return 1;
+          };
+          const dir = captureDir();
+          const file = (key) => join(dir, CAPTURE_FILES[key]);
+          if (sub === "arm") {
+            try {
+              mkdirSync(dir, { mode: 448 });
+            } catch (e) {
+              if (e.code !== "EEXIST") return fail(`could not create capture dir ${dir}: ${e.message}`);
+            }
+          }
+          const dirError = captureDirError(dir);
+          if (dirError) return fail(dirError);
+          if (sub === "arm") {
+            for (const key of ["capture", "pending", "stops", "mismatch"]) {
+              rmSync(file(key), { force: true });
+            }
+            writeFileAtomic(
+              file("arm"),
+              JSON.stringify({ armed: true, run_id: runId, args, created: nowSeconds() })
+            );
+            out(`armed ${runId}: ${args}`);
+            return 0;
+          }
+          if (sub === "disarm") {
+            for (const key of Object.keys(CAPTURE_FILES)) rmSync(file(key), { force: true });
+            out("disarmed");
+            return 0;
+          }
+          const capture = readJsonOrNull(file("capture"));
+          if (!capture || capture.source !== CAPTURE_SOURCE || typeof capture.result !== "string") {
+            return fail(`no capture for run ${runId}`);
+          }
+          if (capture.run_id !== runId) {
+            return fail(`the capture is for run ${capture.run_id}, not run ${runId}`);
+          }
+          writeStdoutSync(capture.result);
+          return 0;
+        }
+        case "capture-wait": {
+          const runId = flag(rest, "--run");
+          const effort = flag(rest, "--effort");
+          const timeoutSeconds = captureWaitTimeout(flag(rest, "--timeout"));
+          if (!runId || !EFFORTS.includes(effort) || timeoutSeconds === null) {
+            out(CAPTURE_WAIT_USAGE);
+            return 1;
+          }
+          return captureWait({ runId, effort, timeoutSeconds });
+        }
+        case "hook":
+          return runHook(rest[0]);
         case "evidence": {
           const verifyComment = flag(rest, "--verify-comment");
           const evidencePath = flag(rest, "--evidence");
@@ -20118,6 +21827,7 @@ var require_cli = __commonJS({
             ["-C", C.ROOT, "diff", "--stat", `${b}...HEAD`],
             { encoding: "utf8" }
           );
+          const options = resolveOptions({ args: mode, config: cfg, ci: false });
           const plan = buildPlan(
             {
               files,
@@ -20125,7 +21835,8 @@ var require_cli = __commonJS({
               linesChanged: linesChangedFromStat(stat),
               scope,
               reviewDirRel: C.reviewDirRel,
-              mode
+              mode,
+              options
             },
             cfg
           );
@@ -20177,7 +21888,9 @@ ${USAGE}`);
       ctx,
       changedFiles,
       resolveMinSupport,
-      planTmpPath
+      planTmpPath,
+      readTranscript,
+      captureWaitTimeout
     };
   }
 });

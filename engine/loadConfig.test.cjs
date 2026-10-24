@@ -3,7 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { join } = require('node:path');
 const { tmpdir } = require('node:os');
-const { mkdtempSync, mkdirSync, writeFileSync } = require('node:fs');
+const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, cpSync } = require('node:fs');
 const { stringify } = require('yaml');
 const {
   parseConfig,
@@ -224,4 +224,71 @@ test('escalates fallback warns exactly once; named-lane path never warns', () =>
   } finally {
     console.warn = originalWarn;
   }
+});
+
+const refsWith = (agents, engine) => {
+  const cfg = parseConfig(MINIMAL);
+  cfg.agents = agents;
+  if (engine) cfg.engine = engine;
+  return validateConfigReferences(cfg, join(tmpdir(), 'config.yml'));
+};
+
+test('references: the engine-only checks are left to config validate and resolveOptions', () => {
+  const misconfigured = [{ id: 'security', enabled: false }, { id: 'standards' }, { id: 'code-review' }];
+  for (const engine of [
+    undefined,
+    { name: 'agent-review' },
+    { name: 'code-review' },
+    { name: 'code-review', code_review: { always: ['security', 'testing'], replaces: ['security'] } },
+    { code_review: { replaces: ['architecture', 'simplification', 'security'] } },
+  ]) {
+    assert.deepEqual(refsWith(misconfigured, engine), [], JSON.stringify(engine));
+  }
+});
+
+test('the template config loads under either engine with testing disabled', () => {
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-template-'));
+  cpSync(join(__dirname, '..', 'templates', 'rules'), join(root, 'rules'), { recursive: true });
+  const cfg = parseConfig(readFileSync(join(__dirname, '..', 'templates', 'config.yml'), 'utf8'));
+  cfg.agents.find((a) => a.id === 'testing').enabled = false;
+  const configPath = join(root, 'config.yml');
+  for (const engine of [undefined, { name: 'agent-review' }, { name: 'code-review' }]) {
+    if (engine) cfg.engine = engine;
+    writeFileSync(configPath, stringify(cfg));
+    assert.doesNotThrow(() => loadConfig({ configPath, schemaPath }), JSON.stringify(engine));
+  }
+});
+
+test('loadConfig loads a code-review config whose default security lane is disabled', () => {
+  const agents = [{ id: 'security', enabled: false }, { id: 'testing' }, { id: 'standards' }];
+  for (const name of ['code-review', 'agent-review']) {
+    assert.doesNotThrow(() => loadFixtureWith({ agents, engine: { name } }), name);
+  }
+  assert.doesNotThrow(() => loadFixtureWith({ agents: [...agents, { id: 'code-review' }] }), 'the reserved id loads');
+});
+
+test('template config still validates, with the 1.1.0 keys left out', () => {
+  const configPath = join(__dirname, '..', 'templates', 'config.yml');
+  const cfg = loadConfig({ configPath, schemaPath });
+  assert.equal('engine' in cfg, false, 'plugin 1.0.0 cannot load a config with an engine key');
+  assert.equal('reviews_run' in cfg, false, 'plugin 1.0.0 cannot load a config with a reviews_run key');
+});
+
+test('the template\'s commented engine and reviews_run examples are valid once uncommented', () => {
+  const text = readFileSync(join(__dirname, '..', 'templates', 'config.yml'), 'utf8');
+  const lines = text.split('\n');
+  const start = lines.indexOf('# engine:');
+  const end = lines.indexOf('# reviews_run: local');
+  assert.ok(start >= 0 && end > start, 'the template shows both blocks as commented examples');
+  const example = new Set(lines.slice(start, end + 1).filter((line) => /^# (engine:|reviews_run:| {2})/.test(line)));
+  const live = lines.map((line) => (example.has(line) ? line.slice(2) : line)).join('\n');
+  const root = mkdtempSync(join(tmpdir(), 'agent-review-template-'));
+  cpSync(join(__dirname, '..', 'templates', 'rules'), join(root, 'rules'), { recursive: true });
+  const configPath = join(root, 'config.yml');
+  writeFileSync(configPath, live);
+  const cfg = loadConfig({ configPath, schemaPath });
+  assert.equal(cfg.engine.name, 'code-review');
+  assert.deepEqual(cfg.engine.code_review.always, ['security', 'testing', 'standards']);
+  assert.deepEqual(cfg.engine.code_review.replaces, ['architecture', 'simplification']);
+  assert.equal(cfg.reviews_run, 'local');
 });

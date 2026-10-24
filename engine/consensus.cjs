@@ -25,6 +25,9 @@
 // `buildCliques`) so the same input always groups the same way regardless of
 // input ordering (e.g. which agent's lane file was read first).
 
+const { unwrapFindings } = require('./unwrapFindings.cjs');
+const { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require('./vocabulary.cjs');
+
 const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
 
 function confidenceRank(c) {
@@ -79,8 +82,8 @@ function parseLane(value, laneId) {
       );
     }
   }
-  if (Array.isArray(parsed)) return parsed;
-  if (parsed && Array.isArray(parsed.findings)) return parsed.findings;
+  const list = unwrapFindings(parsed);
+  if (list) return list;
   throw new Error(
     `findings for lane "${laneId}" must be an array or {findings:[...]}`,
   );
@@ -103,6 +106,17 @@ function normalizeFinding(raw, laneId) {
   };
 }
 
+function blockerBarFailure(f) {
+  if (f.line === null) return 'severity >= 7 requires a line anchor';
+  if (String(f.confidence || '').toLowerCase() !== 'high') {
+    return 'severity >= 7 requires High confidence';
+  }
+  if (!String(f.evidence || '').trim()) {
+    return 'severity >= 7 requires concrete evidence';
+  }
+  return null;
+}
+
 // Per-finding validation, run after normalizeFinding, mirroring reportState.cjs's
 // cleanFinding/blocker rules so a finding that would later throw inside cleanFinding
 // (invalid severity, or a severity >= 7 "blocker" missing the evidence bar) is caught
@@ -116,16 +130,42 @@ function validateFinding(f) {
   if (!Number.isInteger(f.severity) || f.severity < 1 || f.severity > 10) {
     return `invalid severity: ${f.severity}`;
   }
-  if (f.severity >= 7) {
-    if (f.line === null) return 'severity >= 7 requires a line anchor';
-    if (String(f.confidence || '').toLowerCase() !== 'high') {
-      return 'severity >= 7 requires High confidence';
-    }
-    if (!String(f.evidence || '').trim()) {
-      return 'severity >= 7 requires concrete evidence';
-    }
-  }
+  if (f.severity >= 7) return blockerBarFailure(f);
   return null;
+}
+
+const CLEANUP_SET = new Set(CLEANUP_CATEGORIES);
+const CODE_REVIEW_CAP = 6;
+const DOUBTED_CAP = 4;
+
+function normalizedName(value) {
+  return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+// The first cap that applies, or null. A recategorization out of a cleanup
+// category only keeps its severity when it lands on correctness or security.
+function codeReviewCap(f, raw) {
+  if (raw.doubted === true) return DOUBTED_CAP;
+  if (raw.outside_range === true) return CODE_REVIEW_CAP;
+  if (CLEANUP_SET.has(normalizedName(f.category))) return CODE_REVIEW_CAP;
+  const from = normalizedName(raw.recategorized_from);
+  if (from) {
+    const kept = CLEANUP_SET.has(from) && ['correctness', 'security'].includes(normalizedName(f.category));
+    if (!kept) return CODE_REVIEW_CAP;
+  }
+  if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
+  return null;
+}
+
+// Applies only to the code-review lane under the code-review engine, before
+// validateFinding: `raw` is the lane's own entry, whose structured fields
+// (outside_range, doubted, recategorized_from) normalizeFinding does not keep.
+// Doubted, out-of-range and cleanup findings never block, and a 7+ that misses
+// the blocker bar is kept as a suggestion at the cap instead of being dropped by
+// validateFinding.
+function capCodeReviewFinding(finding, raw) {
+  const cap = codeReviewCap(finding, raw || {});
+  return cap !== null && finding.severity > cap ? { ...finding, severity: cap } : finding;
 }
 
 // Canonical order for deterministic clique construction: agent id, then file,
@@ -183,10 +223,12 @@ function toEntry(m) {
 // Combines >=2 members (raw findings on first grouping, or already-combined
 // entries on a decisions merge) into one output entry per the group rules:
 // agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
-// highest member's, evidence/recommendation = longest member's (independently
-// per field), line/category/message/fix = the highest-severity member's,
+// highest member's, recommendation = longest member's, under the code-review engine evidence = the primary's when it is
+// non-blank, else the longest, line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
+// Exception, under the code-review engine only: when any member is 7+ (every
+// surviving 7+ already passed the blocker bar) the group keeps that maximum.
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
@@ -194,7 +236,7 @@ function toEntry(m) {
 // wins. reduce() with a strict `>` comparison always keeps the first member it
 // saw on a tie, so sorting a local copy of `members` by agent id ascending
 // first is sufficient to make every tie-break deterministic.
-function combineMembers(members) {
+function combineMembers(members, codeReviewEngine) {
   const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
   const primary = ordered.reduce(
     (best, m) => (m.severity > best.severity ? m : best),
@@ -220,6 +262,10 @@ function combineMembers(members) {
       confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
     ordered[0],
   );
+  const longestTrimmed = (field) =>
+    ordered
+      .map((m) => String(m[field] || '').trim())
+      .reduce((best, v) => (v.length > best.length ? v : best), '');
   const longestField = (field) =>
     ordered.reduce(
       (best, m) =>
@@ -241,27 +287,34 @@ function combineMembers(members) {
   // Weighted by each member's own corroboration count (default 1 for a raw/singleton
   // member) — otherwise re-merging an already-corroborated group with a singleton via
   // `decisions` silently discounts the group's weight down to a single vote.
+  // A group that kept its maximum is weighted at its own mean, so the maximum is
+  // never counted twice.
   const weightedSum = ordered.reduce(
-    (sum, m) => sum + m.severity * (m.corroboration || 1),
+    (sum, m) =>
+      sum + (m._meanSeverity !== undefined ? m._meanSeverity : m.severity) * (m.corroboration || 1),
     0,
   );
-  const meanSeverity = weightedSum / corroboration;
+  const meanSeverity = Math.round(weightedSum / corroboration);
+  const evidence = codeReviewEngine
+    ? String(primary.evidence || '').trim() || longestTrimmed('evidence')
+    : longestField('evidence');
   return {
     agent: primary.agent,
     agents: agents.join(','),
     category: primary.category,
-    severity: Math.round(meanSeverity),
+    severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
     file: primary.file,
     line: primary.line,
     message: primary.message,
     confidence: bestConfidence.confidence,
-    evidence: longestField('evidence'),
+    evidence,
     recommendation: longestField('recommendation'),
     fix: primary.fix,
     corroboration,
     needsHumanReview: maxSeverity - minSeverity >= 4,
     _minSeverity: minSeverity,
     _maxSeverity: maxSeverity,
+    _meanSeverity: meanSeverity,
   };
 }
 
@@ -330,7 +383,7 @@ function buildCandidates(entries) {
 // they stay union-find: a `merge` decision is a deliberate instruction to
 // combine those two entries (and, transitively, anything else a decision also
 // merges them with), unlike the clique-restricted automatic pass above.
-function applyDecisions(entries, decisions) {
+function applyDecisions(entries, decisions, codeReviewEngine) {
   if (!Array.isArray(decisions)) {
     throw new Error('consensus: decisions must be an array');
   }
@@ -363,12 +416,12 @@ function applyDecisions(entries, decisions) {
     groupsByRoot.get(root).push(entries[i]);
   }
   return [...groupsByRoot.values()].map((members) =>
-    members.length === 1 ? members[0] : combineMembers(members),
+    members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine),
   );
 }
 
 function stripInternal(entry) {
-  const { _minSeverity, _maxSeverity, ...rest } = entry;
+  const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
   return rest;
 }
 
@@ -382,6 +435,12 @@ function consensusFrom({
     plan && Array.isArray(plan.agents)
       ? plan.agents.map((a) => a.id)
       : Object.keys(findingsByAgent);
+  const codeReviewEngine = Boolean(plan && plan.engine && plan.engine.name === ENGINE_CODE_REVIEW);
+  if (codeReviewEngine && !laneIds.includes(CODE_REVIEW_LANE)) {
+    throw new Error(
+      'consensus: the plan uses the code-review engine, but the code-review lane was not launched; launch it or rerun with engine=agent-review',
+    );
+  }
 
   const errors = [];
   const perLane = {};
@@ -400,7 +459,11 @@ function consensusFrom({
   const droppedInvalid = [];
   for (const laneId of laneIds) {
     for (const raw of perLane[laneId]) {
-      const finding = normalizeFinding(raw, laneId);
+      const normalized = normalizeFinding(raw, laneId);
+      const finding =
+        codeReviewEngine && laneId === CODE_REVIEW_LANE
+          ? capCodeReviewFinding(normalized, raw)
+          : normalized;
       const reason = validateFinding(finding);
       if (reason) {
         const messageSlice = String(finding.message || '').slice(0, 200);
@@ -419,7 +482,7 @@ function consensusFrom({
   // order findings were flattened in (laneIds order, dict key order, etc.)
   // because buildCliques re-sorts canonically before assigning.
   let entries = buildCliques(all).map((members) =>
-    members.length === 1 ? toEntry(members[0]) : combineMembers(members),
+    members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine),
   );
 
   const beforeCutoff = entries.length;
@@ -428,7 +491,7 @@ function consensusFrom({
   entries = sortEntries(entries);
 
   if (decisions !== undefined) {
-    entries = sortEntries(applyDecisions(entries, decisions));
+    entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
   }
 
   const candidates = buildCandidates(entries);
@@ -446,4 +509,4 @@ function consensusFrom({
   return { findings, candidates, stats };
 }
 
-module.exports = { consensusFrom, tokenize, jaccard, parseLane };
+module.exports = { consensusFrom, capCodeReviewFinding, tokenize, jaccard, parseLane };

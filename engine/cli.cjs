@@ -1,6 +1,7 @@
 'use strict';
-const { join, relative, dirname } = require('node:path');
+const { join, relative, dirname, resolve, isAbsolute } = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { MODES, FINAL_MODES, ENGINE_CODE_REVIEW, EFFORTS } = require('./vocabulary.cjs');
 const {
   readFileSync,
   writeFileSync,
@@ -8,10 +9,17 @@ const {
   rmSync,
   mkdirSync,
   statSync,
+  renameSync,
+  lstatSync,
+  openSync,
+  closeSync,
+  constants: fsConstants,
 } = require('node:fs');
+const nodeFs = require('node:fs');
 const os = require('node:os');
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const { loadConfig } = require('./loadConfig.cjs');
+const { resolveOptions, codeReviewEngineProblems } = require('./options.cjs');
 const { buildPlan, linesChangedFromStat } = require('./plan.cjs');
 const {
   loadOrBuildIndex,
@@ -34,6 +42,13 @@ const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
 const { evaluateApproval } = require('./approval.cjs');
 const {
+  CAPTURE_LIMIT_MINUTES,
+  checkCodeReviewRun,
+  looksFinished,
+  repoRelative,
+  trackedLookup,
+} = require('./codeReviewProof.cjs');
+const {
   MAX_RESULT_BYTES,
   prepareAddressRequest,
   validateAddressResult,
@@ -51,19 +66,50 @@ const {
 } = require('./evalSuite.cjs');
 const { buildEvidence, verifyEvidenceLedger } = require('./evidence.cjs');
 const { consensusFrom } = require('./consensus.cjs');
-const { sliceForAgent } = require('./slice.cjs');
+const { sliceForAgent, blocksForFiles, filesWithoutBlocks } = require('./slice.cjs');
+const { pathMatches } = require('./selectAgents.cjs');
 const { validateContextManifest, contextInventory, packContext } = require('./contextPack.cjs');
 const { readTelemetry, summarizeTelemetry, rolloutReadiness } = require('./telemetry.cjs');
 const {
   setLearningStatus,
   listLearnings,
   preflightSummary,
+  formatStartup,
 } = require('./cliCommands.cjs');
+const {
+  CODE_REVIEW_SKILL,
+  CAPTURE_FILES,
+  STOP_BUFFER_LINES,
+  CAPTURE_SOURCE,
+  captureDir,
+  captureDirProblem,
+  armedState,
+  lastAssistantText,
+  postSkillWrites,
+  subagentStopWrites,
+} = require('./captureHook.cjs');
 
 const { repoRoot, reviewDir } = require('./paths.cjs');
 
+// process.stdout is asynchronous on a macOS pipe and the CLI exits right after main() returns,
+// so output must be written synchronously or it is cut short at the pipe buffer. Tests capture
+// it by stubbing nodeFs.writeSync, so call it through the module object.
+function writeStdoutSync(text) {
+  const buf = Buffer.from(text, 'utf8');
+  let offset = 0;
+  while (offset < buf.length) {
+    try {
+      offset += nodeFs.writeSync(1, buf, offset);
+    } catch (e) {
+      if (e.code === 'EPIPE') return;
+      if (e.code !== 'EAGAIN') throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1);
+    }
+  }
+}
+
 function out(s) {
-  process.stdout.write(s + '\n');
+  writeStdoutSync(s + '\n');
 }
 
 // Returns the value after `name`, or undefined if absent or the next token is itself a flag.
@@ -72,6 +118,22 @@ function flag(argv, name) {
   if (i < 0) return undefined;
   const v = argv[i + 1];
   return v === undefined || v.startsWith('--') ? undefined : v;
+}
+
+// The review arguments are free text that may start with `--`, so they are read by position.
+// Only the `--ci` flag sets ci; a `--ci` inside the argument text is an unknown token.
+function optionsInput(argv) {
+  let args = '';
+  let ci = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--ci') ci = true;
+    else if (a === '--args') args = argv[++i] || '';
+    else if (a.startsWith('--args=')) args = a.slice('--args='.length);
+    else if (a === '--args-file') args = readFileSync(argv[++i], 'utf8').replace(/\r?\n$/, '');
+    else if (a === '--root' || a === '--review-dir') i++;
+  }
+  return { args, ci };
 }
 
 // Global flags (parsed before dispatch): --root, --review-dir.
@@ -90,9 +152,7 @@ function ctx(argv) {
     INDEX: join(RD, 'index'),
   };
 }
-// M1 (final review): `plan` and `run` validate the same mode vocabulary —
-// one constant, not two copies that can drift apart.
-const MODES = ['auto', 'quick', 'standard', 'deep'];
+const CI_REVIEW_WORKFLOWS = ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
 function learningPaths(cfg, C) {
@@ -195,19 +255,340 @@ function loadIndex(C, cfg, { force } = {}) {
   });
 }
 
+function nowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function captureDirError(dir) {
+  let stat = null;
+  try {
+    stat = lstatSync(dir);
+  } catch (e) {
+    if (e.code !== 'ENOENT') return `capture dir ${dir} cannot be checked: ${e.message}`;
+  }
+  const problem = captureDirProblem(stat, process.getuid());
+  return problem ? `capture dir ${dir} ${problem}` : null;
+}
+
+function writeFileAtomic(path, text) {
+  const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
+  const fd = openSync(tmp, 'wx', 0o600);
+  try {
+    try {
+      writeFileSync(fd, text);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function readJsonOrNull(path) {
+  try {
+    return parseJsonOrNull(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readStops(path) {
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  return text.split('\n').filter((line) => line.trim()).map(parseJsonOrNull).filter(Boolean);
+}
+
+function readTranscript(path) {
+  if (typeof path !== 'string' || !isAbsolute(path) || !path.endsWith('.jsonl')) return null;
+  try {
+    return lastAssistantText(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function appendStop(path, stop) {
+  const { O_WRONLY, O_APPEND, O_CREAT, O_NOFOLLOW } = fsConstants;
+  const fd = openSync(path, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW, 0o600);
+  try {
+    writeFileSync(fd, JSON.stringify(stop) + '\n');
+  } finally {
+    closeSync(fd);
+  }
+  const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
+  if (lines.length > STOP_BUFFER_LINES) {
+    writeFileAtomic(path, lines.slice(-STOP_BUFFER_LINES).join('\n') + '\n');
+  }
+}
+
+// Hooks run in every session that has the plugin installed, so this never prints, never throws,
+// and returns before reading stdin unless capture is armed.
+function runHook(name) {
+  try {
+    const dir = captureDir();
+    if (captureDirError(dir)) return 0;
+    const file = (key) => join(dir, CAPTURE_FILES[key]);
+    const arm = readJsonOrNull(file('arm'));
+    const now = nowSeconds();
+    if (!armedState(arm, now)) return 0;
+    const base = { payload: JSON.parse(readFileSync(0, 'utf8')), arm, now, readTranscript };
+    // Each hook writes its own record before it reads the other's, so when a fork's stop races
+    // post-skill, at least one of the two hooks sees both records and writes the capture.
+    if (name === 'post-skill') {
+      const first = postSkillWrites({ ...base, stops: [] });
+      if (first.mismatch) writeFileAtomic(file('mismatch'), JSON.stringify(first.mismatch));
+      if (first.pending) writeFileAtomic(file('pending'), JSON.stringify(first.pending));
+      if (!first.pending && !first.capture) return 0;
+      const { capture } = postSkillWrites({ ...base, stops: readStops(file('stops')) });
+      if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
+    } else if (name === 'subagent-stop') {
+      const { stop } = subagentStopWrites({ ...base, pending: null, capture: null });
+      if (!stop) return 0;
+      appendStop(file('stops'), stop);
+      const pending = readJsonOrNull(file('pending'));
+      if (!pending) return 0;
+      const { capture } = subagentStopWrites({
+        ...base,
+        pending,
+        capture: readJsonOrNull(file('capture')),
+      });
+      if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
+    }
+  } catch {
+    return 0;
+  }
+  return 0;
+}
+
+const CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]`;
+const CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
+// The Bash tool stops a command at 10 minutes, so one call must return before that.
+const CAPTURE_WAIT_MAX_SECONDS = 590;
+
+function captureWaitTimeout(value) {
+  if (value === undefined) return 540;
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
+  return Math.min(Number(value), CAPTURE_WAIT_MAX_SECONDS);
+}
+
+function capturePollMs(env = process.env) {
+  const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
+  return Number.isInteger(ms) && ms > 0 ? ms : 5000;
+}
+
+// The PostToolUse hook finishes before the Skill reply reaches the lane, so on a working install
+// one of this run's hook files exists long before this grace period ends.
+function captureHookGraceMs(env = process.env) {
+  const ms = Number(env.AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS);
+  return Number.isInteger(ms) && ms > 0 ? ms : 60000;
+}
+
+const HOOKS_DID_NOT_RUN =
+  'the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed';
+
+function mismatchReason(mismatch) {
+  const rearm = 'the run must be re-armed with capture arm before /code-review is called again';
+  if (mismatch.reason === 'no fork id') {
+    return `/code-review ran in the background, but its Skill reply named no fork id, so its result cannot be captured; ${rearm}`;
+  }
+  if (mismatch.reason === 'wrong skill') {
+    const builtIn = JSON.stringify(CODE_REVIEW_SKILL);
+    return `/code-review was called as ${mismatch.got}, not as the built-in ${builtIn} skill with args ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+  }
+  return `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; ${rearm}`;
+}
+
+// main() is synchronous, so the wait blocks the thread with Atomics.wait instead of a timer.
+function captureWait({ runId, effort, timeoutSeconds }) {
+  const dir = captureDir();
+  const file = (key) => join(dir, CAPTURE_FILES[key]);
+  const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
+  const pollMs = capturePollMs();
+  const started = Date.now();
+  const deadline = started + timeoutSeconds * 1000;
+  const hooksDueAt = started + captureHookGraceMs();
+  const report = (status, reason, capture = null) => {
+    out(JSON.stringify({
+      status,
+      reason,
+      stop_count: capture ? (capture.stop_count ?? null) : null,
+      mode: capture ? (capture.mode ?? null) : null,
+    }));
+    return CAPTURE_WAIT_EXIT[status];
+  };
+  for (;;) {
+    const dirError = captureDirError(dir);
+    if (dirError) return report('failed', dirError);
+    const arm = readJsonOrNull(file('arm'));
+    const armed = armedState(arm, nowSeconds());
+    if (!armed) return report('failed', `/code-review capture is not armed for run ${runId}`);
+    if (armed.run_id !== runId) {
+      return report('failed', `/code-review capture is armed for run ${armed.run_id}, not run ${runId}`);
+    }
+    const armedEffort = armed.args.trim().split(/\s+/)[0];
+    if (armedEffort !== effort) {
+      return report(
+        'failed',
+        `capture-wait --effort ${effort} does not match the armed args ${JSON.stringify(armed.args)}, whose effort is ${JSON.stringify(armedEffort)}`,
+      );
+    }
+    const found = readJsonOrNull(file('capture'));
+    const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
+    if (capture && looksFinished(capture.result, effort, capture.mode)) {
+      return report('finished', `the /code-review capture for run ${runId} looks finished`, capture);
+    }
+    const mismatch = readJsonOrNull(file('mismatch'));
+    if (mismatch?.run_id === runId) return report('failed', mismatchReason(mismatch), capture);
+    const hooksRan = capture !== null || readJsonOrNull(file('pending'))?.run_id === runId;
+    const now = Date.now();
+    const limitAt = (armed.created + limitMinutes * 60) * 1000;
+    if (now >= limitAt) {
+      return report(
+        'failed',
+        `/code-review did not finish within the ${limitMinutes}-minute limit for effort ${effort}`,
+        capture,
+      );
+    }
+    if (!hooksRan && now >= hooksDueAt) return report('failed', HOOKS_DID_NOT_RUN);
+    if (now >= deadline) {
+      const left = Math.ceil((limitAt - now) / 60000);
+      return report(
+        'waiting',
+        `no finished /code-review capture for run ${runId} yet; about ${left} of the ${limitMinutes} minutes are left, so run capture-wait again`,
+        capture,
+      );
+    }
+    const sleepMs = Math.min(pollMs, deadline - now, limitAt - now, hooksRan ? Infinity : hooksDueAt - now);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, sleepMs);
+  }
+}
+
+const GIT_MAX_BUFFER = 512 * 1024 * 1024;
+
+function gitIn(root, args) {
+  return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: GIT_MAX_BUFFER });
+}
+
+// null, never [], when the files cannot be listed: an empty list would let a finding line whose
+// path has no "/" go unclaimed.
+function filesAt(root, commit) {
+  if (!commit) return null;
+  try {
+    return gitIn(root, ['ls-tree', '-r', '--name-only', '-z', commit]).split('\0').filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+class FileListError extends Error {}
+
+function commitIn(root, ref) {
+  if (!validRef(ref)) return null;
+  try {
+    return gitIn(root, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`]).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// A disproof must quote the code /code-review reviewed, so files are read from the commit, never
+// from the working tree.
+function blobLines(root, commit, path) {
+  const rel = relative(root, resolve(root, path));
+  if (!commit || rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
+  const spec = `${commit}:./${rel}`;
+  try {
+    if (gitIn(root, ['cat-file', '-t', spec]).trim() !== 'blob') return null;
+    return gitIn(root, ['show', spec]).replace(/\r?\n$/, '').split(/\r?\n/);
+  } catch {
+    return null;
+  }
+}
+
+const CODE_REVIEW_PROOF_USAGE =
+  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]';
+const DIFF_FOR_USAGE = 'usage: agent-review diff-for --diff <f> --raw <f>';
+
+function diffFor(diffPath, rawPath, root, excludedPaths) {
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(rawPath, 'utf8'));
+  } catch (e) {
+    out(`error: could not read the raw findings list ${rawPath}: ${e.message}`);
+    return 1;
+  }
+  if (!Array.isArray(raw)) {
+    out(`error: the raw findings list ${rawPath} is not a JSON array`);
+    return 1;
+  }
+  const bad = raw.findIndex((entry) => typeof entry?.file !== 'string' || entry.file.trim() === '');
+  if (bad >= 0) {
+    out(`error: raw entry ${bad + 1} needs a non-empty string file`);
+    return 1;
+  }
+  let diffText;
+  try {
+    diffText = readFileSync(diffPath, 'utf8');
+  } catch (e) {
+    out(`error: could not read the diff ${diffPath}: ${e.message}`);
+    return 1;
+  }
+  const files = [...new Set(raw.map((entry) => repoRelative(entry.file, root)))].filter(
+    (file) => !pathMatches(file, excludedPaths),
+  );
+  let text = blocksForFiles(diffText, files);
+  const missing = filesWithoutBlocks(diffText, files);
+  if (missing.length > 0 && text !== '' && !text.endsWith('\n')) text += '\n';
+  text += missing.map((file) => `no diff block for ${file}\n`).join('');
+  writeStdoutSync(text);
+  return 0;
+}
+
+// diff-for only narrows what the lane reads, so a config it cannot read excludes nothing.
+function excludedPathsOrNone(C) {
+  try {
+    return existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+  } catch {
+    return [];
+  }
+}
+
 const USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
-  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>]   compute a review plan (JSON)
+  plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
+  options (--args "<raw>" | --args=<raw> | --args-file <f>) [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
+  startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
+  diff-for --diff <f> --raw <f>   print the diff blocks of the files a raw findings list names, in diff order (nothing for an empty list), skipping files in the config's excluded_paths; then print "no diff block for <file>" for each other named file that has no block
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>]   merge stable incremental finding state
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
+  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
+  capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
+  capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
+  capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args or skill mismatch, not armed, another effort, no hook file for the run within 60 seconds, or the effort's time limit passed)
+  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -238,6 +619,8 @@ function stripGlobalFlags(argv) {
 }
 
 function main(rawArgv) {
+  // Before ctx(): process.cwd() throws when the session's cwd was removed, and a hook must never fail.
+  if (rawArgv[0] === 'hook') return runHook(rawArgv[1]);
   const C = ctx(rawArgv);
   const argv = stripGlobalFlags(rawArgv);
   const cmd = argv[0];
@@ -246,6 +629,12 @@ function main(rawArgv) {
     case 'config': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       if (rest[0] === 'validate') {
+        const engineName = cfg.engine && cfg.engine.name;
+        const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
+        if (problems.length) {
+          out(`Invalid review config (${C.CONFIG}):\n- ${problems.join('\n- ')}`);
+          return 1;
+        }
         out('config OK');
         return 0;
       }
@@ -280,6 +669,48 @@ function main(rawArgv) {
       out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
       return 0;
     }
+    case 'options': {
+      try {
+        const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+        const { args, ci } = optionsInput(rest);
+        const resolved = resolveOptions({ args, config: cfg, ci });
+        out(JSON.stringify(resolved, null, 2));
+        return 0;
+      } catch (e) {
+        out(`error: ${e.message}`);
+        return 1;
+      }
+    }
+    case 'startup': {
+      try {
+        const mode = flag(rest, '--mode');
+        if (mode !== undefined && !FINAL_MODES.includes(mode)) {
+          out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join('/')})`);
+          return 1;
+        }
+        const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+        const slicesPath = flag(rest, '--slices');
+        out(
+          formatStartup({
+            options: JSON.parse(readFileSync(flag(rest, '--options'), 'utf8')),
+            plan: JSON.parse(readFileSync(flag(rest, '--plan'), 'utf8')),
+            sliceManifest: slicesPath
+              ? JSON.parse(readFileSync(slicesPath, 'utf8'))
+              : {},
+            configAgents: cfg.agents || [],
+            scopeLabel: flag(rest, '--scope'),
+            ciFilesPresent: CI_REVIEW_WORKFLOWS.some((name) =>
+              existsSync(join(C.ROOT, '.github/workflows', name)),
+            ),
+            mode,
+          }),
+        );
+        return 0;
+      } catch (e) {
+        out(`error: ${e.message}`);
+        return 1;
+      }
+    }
     case 'plan': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       const filesPath = flag(rest, '--files');
@@ -299,8 +730,12 @@ function main(rawArgv) {
       const linesChanged = statPath
         ? linesChangedFromStat(readFileSync(statPath, 'utf8'))
         : 0;
+      const optionsPath = flag(rest, '--options');
+      const options = optionsPath
+        ? JSON.parse(readFileSync(optionsPath, 'utf8'))
+        : undefined;
       const plan = buildPlan(
-        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode },
+        { files, diffText, linesChanged, scope, reviewDirRel: C.reviewDirRel, mode, options },
         cfg,
       );
       out(JSON.stringify(plan, null, 2));
@@ -362,6 +797,15 @@ function main(rawArgv) {
       }
       out(JSON.stringify(manifest, null, 2));
       return 0;
+    }
+    case 'diff-for': {
+      const diffPath = flag(rest, '--diff');
+      const rawPath = flag(rest, '--raw');
+      if (!diffPath || !rawPath) {
+        out(DIFF_FOR_USAGE);
+        return 1;
+      }
+      return diffFor(diffPath, rawPath, C.ROOT, excludedPathsOrNone(C));
     }
     case 'emit': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
@@ -465,7 +909,7 @@ function main(rawArgv) {
           JSON.parse(readFileSync(requestPath, 'utf8')),
           JSON.parse(readFileSync(resultPath, 'utf8')),
         );
-        process.stdout.write(entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''));
+        writeStdoutSync(entries.map((entry) => JSON.stringify(entry)).join('\n') + (entries.length ? '\n' : ''));
         return 0;
       }
       if (sub === 'finalize') {
@@ -502,7 +946,7 @@ function main(rawArgv) {
     case 'ledger': {
       const findingsPath = flag(rest, '--findings');
       if (!findingsPath) {
-        out('usage: agent-review ledger --findings <file> [--previous <file>]');
+        out('usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location]');
         return 1;
       }
       const previousPath = flag(rest, '--previous');
@@ -510,7 +954,8 @@ function main(rawArgv) {
         ? JSON.parse(readFileSync(previousPath, 'utf8'))
         : [];
       const findings = JSON.parse(readFileSync(findingsPath, 'utf8'));
-      out(JSON.stringify(mergeLedger(previous, findings), null, 2));
+      const matchSuggestionsByLocation = rest.includes('--match-suggestions-by-location');
+      out(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation }), null, 2));
       return 0;
     }
     case 'status': {
@@ -548,6 +993,182 @@ function main(rawArgv) {
       out(JSON.stringify(evaluateApproval(readFileSync(reportPath, 'utf8'), { head })));
       return 0;
     }
+    case 'code-review-proof': {
+      const rawPath = flag(rest, '--raw');
+      const findingsPath = flag(rest, '--findings');
+      const droppedPath = flag(rest, '--dropped');
+      const runId = flag(rest, '--run');
+      const promotePath = flag(rest, '--promote');
+      const headArg = flag(rest, '--head');
+      if (
+        !rawPath ||
+        !findingsPath ||
+        !droppedPath ||
+        !runId ||
+        rest.includes('--capture') ||
+        (rest.includes('--promote') && !promotePath) ||
+        (rest.includes('--head') && headArg === undefined)
+      ) {
+        out(CODE_REVIEW_PROOF_USAGE);
+        return 1;
+      }
+      const readBytes = (p) => {
+        try {
+          return readFileSync(p);
+        } catch {
+          return null;
+        }
+      };
+      const readIfPresent = (p) => readBytes(p)?.toString('utf8') ?? null;
+      // Read once: the bytes promoted are the bytes checked, even if the lane rewrites its file.
+      const scoredBytes = readBytes(findingsPath);
+      const finish = (verdict) => {
+        let r = verdict;
+        if (promotePath && r.ok) {
+          try {
+            writeFileAtomic(promotePath, scoredBytes);
+          } catch (e) {
+            r = { ...r, ok: false, stage: 'config', reason: `could not save the proved findings to ${promotePath}: ${e.message}`, dropped: [] };
+          }
+        }
+        if (promotePath && !r.ok) {
+          try {
+            rmSync(promotePath, { force: true });
+          } catch {
+            // The printed verdict is not ok either way.
+          }
+        }
+        out(JSON.stringify(r));
+        return r.ok ? 0 : 1;
+      };
+      const refuse = (stage, reason) => finish({ ok: false, stage, reason, count: 0, mode: null, dropped: [] });
+      let excludedPaths;
+      try {
+        excludedPaths = existsSync(C.CONFIG)
+          ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || []
+          : [];
+      } catch (e) {
+        return refuse('config', `could not read excluded_paths from the review config: ${e.message}`);
+      }
+      let commit;
+      if (headArg !== undefined) {
+        commit = commitIn(C.ROOT, headArg);
+        if (!commit) return refuse('config', `--head ${JSON.stringify(headArg)} is not a commit in ${C.ROOT}`);
+      }
+      const dir = captureDir();
+      const dirError = captureDirError(dir);
+      if (dirError) return refuse('capture', dirError);
+      const capturePath = join(dir, CAPTURE_FILES.capture);
+      const atCommit = () => {
+        if (commit === undefined) commit = commitIn(C.ROOT, 'HEAD');
+        return commit;
+      };
+      const blobs = new Map();
+      const readLines = (p) => {
+        if (!blobs.has(p)) blobs.set(p, blobLines(C.ROOT, atCommit(), p));
+        return blobs.get(p);
+      };
+      const fileExists = (p) => readLines(p) !== null;
+      let lookup = null;
+      const tracked = (name) => {
+        if (!lookup) {
+          const files = filesAt(C.ROOT, atCommit());
+          if (!files) {
+            throw new FileListError(
+              `could not list the files of commit ${headArg ?? 'HEAD'} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`,
+            );
+          }
+          lookup = trackedLookup(files);
+        }
+        return lookup(name);
+      };
+      let r;
+      try {
+        r = checkCodeReviewRun({
+          captureText: readIfPresent(capturePath),
+          runId,
+          rawText: readIfPresent(rawPath),
+          scoredText: scoredBytes?.toString('utf8') ?? null,
+          droppedText: readIfPresent(droppedPath),
+          excludedPaths,
+          tracked,
+          fileExists,
+          readLines,
+          root: C.ROOT,
+        });
+      } catch (e) {
+        if (e instanceof FileListError) return refuse('config', e.message);
+        throw e;
+      }
+      return finish(r);
+    }
+    case 'capture': {
+      const sub = rest[0];
+      const runId = flag(rest, '--run');
+      // Read raw, not through flag(): the args must match the Skill call exactly and may start with "--".
+      const argsAt = rest.indexOf('--args');
+      const args = argsAt < 0 ? undefined : rest[argsAt + 1];
+      if (
+        !['arm', 'disarm', 'show'].includes(sub) ||
+        (sub !== 'disarm' && !runId) ||
+        (sub === 'arm' && !args)
+      ) {
+        out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm | capture show --run <id>');
+        return 1;
+      }
+      const fail = (reason) => {
+        process.stderr.write(`error: ${reason}\n`);
+        return 1;
+      };
+      const dir = captureDir();
+      const file = (key) => join(dir, CAPTURE_FILES[key]);
+      if (sub === 'arm') {
+        try {
+          mkdirSync(dir, { mode: 0o700 });
+        } catch (e) {
+          if (e.code !== 'EEXIST') return fail(`could not create capture dir ${dir}: ${e.message}`);
+        }
+      }
+      const dirError = captureDirError(dir);
+      if (dirError) return fail(dirError);
+      if (sub === 'arm') {
+        for (const key of ['capture', 'pending', 'stops', 'mismatch']) {
+          rmSync(file(key), { force: true });
+        }
+        writeFileAtomic(
+          file('arm'),
+          JSON.stringify({ armed: true, run_id: runId, args, created: nowSeconds() }),
+        );
+        out(`armed ${runId}: ${args}`);
+        return 0;
+      }
+      if (sub === 'disarm') {
+        for (const key of Object.keys(CAPTURE_FILES)) rmSync(file(key), { force: true });
+        out('disarmed');
+        return 0;
+      }
+      const capture = readJsonOrNull(file('capture'));
+      if (!capture || capture.source !== CAPTURE_SOURCE || typeof capture.result !== 'string') {
+        return fail(`no capture for run ${runId}`);
+      }
+      if (capture.run_id !== runId) {
+        return fail(`the capture is for run ${capture.run_id}, not run ${runId}`);
+      }
+      writeStdoutSync(capture.result);
+      return 0;
+    }
+    case 'capture-wait': {
+      const runId = flag(rest, '--run');
+      const effort = flag(rest, '--effort');
+      const timeoutSeconds = captureWaitTimeout(flag(rest, '--timeout'));
+      if (!runId || !EFFORTS.includes(effort) || timeoutSeconds === null) {
+        out(CAPTURE_WAIT_USAGE);
+        return 1;
+      }
+      return captureWait({ runId, effort, timeoutSeconds });
+    }
+    case 'hook':
+      return runHook(rest[0]);
     case 'evidence': {
       const verifyComment = flag(rest, '--verify-comment');
       const evidencePath = flag(rest, '--evidence');
@@ -758,6 +1379,7 @@ function main(rawArgv) {
         ['-C', C.ROOT, 'diff', '--stat', `${b}...HEAD`],
         { encoding: 'utf8' },
       );
+      const options = resolveOptions({ args: mode, config: cfg, ci: false });
       const plan = buildPlan(
         {
           files,
@@ -766,6 +1388,7 @@ function main(rawArgv) {
           scope,
           reviewDirRel: C.reviewDirRel,
           mode,
+          options,
         },
         cfg,
       );
@@ -817,4 +1440,6 @@ module.exports = {
   changedFiles,
   resolveMinSupport,
   planTmpPath,
+  readTranscript,
+  captureWaitTimeout,
 };

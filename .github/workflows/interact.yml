@@ -265,6 +265,14 @@ jobs:
           ref: refs/pull/${{ inputs.pr_number }}/head
           fetch-depth: 0
           persist-credentials: false
+      - name: Read the trusted review engine
+        id: engine
+        if: inputs.auto_approve
+        uses: CruGlobal/agent-review/.github/actions/read-engine@main
+        with:
+          base_sha: ${{ needs.model.outputs.base_sha }}
+          runtime_dir: ${{ runner.temp }}/agent-review-runtime
+          trusted_dir: ${{ runner.temp }}/agent-review-engine-trusted
       - name: Download the model handoff
         uses: actions/download-artifact@v4
         with:
@@ -483,7 +491,7 @@ jobs:
           gh pr comment "$PR" --repo "$REPO" \
             --body-file "$RUNNER_TEMP/address-final/summary.md" >/dev/null
       - name: Approve when the ledger is fully addressed and the change is reversible
-        if: inputs.auto_approve
+        if: inputs.auto_approve && steps.engine.outputs.name == 'agent-review'
         uses: CruGlobal/agent-review/.github/actions/approve@main
         with:
           pr_number: ${{ inputs.pr_number }}

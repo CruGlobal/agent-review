@@ -1,15 +1,17 @@
 'use strict';
 
 const { signature } = require('./findingSignature.cjs');
+const { unwrapFindings } = require('./unwrapFindings.cjs');
+const { tokenize, jaccard } = require('./consensus.cjs');
 
 const STATUSES = new Set(['open', 'fixed', 'dismissed']);
 const RISKS = new Set(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
 
 function findingList(input) {
-  if (Array.isArray(input)) return input;
-  if (input && Array.isArray(input.kept)) return input.kept;
-  if (input && Array.isArray(input.findings)) return input.findings;
-  throw new Error('findings must be an array or an object with kept/findings');
+  if (input && !Array.isArray(input) && Array.isArray(input.kept)) return input.kept;
+  const list = unwrapFindings(input);
+  if (!list) throw new Error('findings must be an array or an object with kept/findings');
+  return list;
 }
 
 function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
@@ -89,7 +91,47 @@ function cleanPrevious(raw) {
   });
 }
 
-function mergeLedger(previousInput, findingsInput) {
+const LOCATION_WINDOW = 5;
+const LOCATION_WORDING = 0.5;
+
+function sameCategory(a, b) {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function nearLine(a, b) {
+  if (a === null && b === null) return true;
+  return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+}
+
+function similarWording(a, b) {
+  return jaccard(tokenize(a), tokenize(b)) >= LOCATION_WORDING;
+}
+
+function isStaticFinding(finding) {
+  return finding.agent === 'static-analysis' || finding.category.startsWith('static-analysis/');
+}
+
+// Blockers are excluded so a real or regressed blocker never hides behind an older entry.
+// Static findings are excluded because every static signature must reach the ledger.
+// Fixed entries and other lanes' entries never match, so a regression or a second lane's
+// finding at the same spot still reaches the ledger.
+function matchesEarlierSpot(finding, previous) {
+  return (
+    finding.severity < 7 &&
+    !isStaticFinding(finding) &&
+    previous.some(
+      (entry) =>
+        entry.status !== 'fixed' &&
+        entry.agent === finding.agent &&
+        entry.file === finding.file &&
+        sameCategory(entry.category, finding.category) &&
+        nearLine(entry.line, finding.line) &&
+        similarWording(entry.message, finding.message),
+    )
+  );
+}
+
+function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
   const previous = cleanPrevious(previousInput || []);
   const seen = new Set(previous.map((entry) => entry.signature));
   let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
@@ -107,6 +149,7 @@ function mergeLedger(previousInput, findingsInput) {
   const merged = [...previous];
   for (const finding of additions) {
     if (seen.has(finding.signature)) continue;
+    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
     seen.add(finding.signature);
     merged.push({ n: next++, ...finding, status: 'open' });
   }
