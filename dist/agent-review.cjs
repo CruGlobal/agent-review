@@ -19270,13 +19270,16 @@ var require_codeReviewProof = __commonJS({
       for (let entry = 0; entry < candidates.length; entry++) claim(entry, /* @__PURE__ */ new Set());
       return owner;
     }
-    function textMismatch(rawEntries, lines, root) {
+    function textMatch(rawEntries, lines, root) {
       const candidates = rawEntries.map((entry) => {
         const path = repoRelative(entry.file, root);
         const fits = entry.line === null ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path, root) : (l) => l.mentions.some((m) => m.line === entry.line && mentionNames(m.file, path, root));
         return lines.filter(fits).map((l) => l.index);
       });
       const owner = matchLines(candidates);
+      const byIndex = new Map(lines.map((l) => [l.index, l]));
+      const claimedLines = rawEntries.map(() => null);
+      for (const [index, entry] of owner) claimedLines[entry] = byIndex.get(index);
       const claimed = new Set(owner.values());
       const problems = [];
       const lost = rawEntries.findIndex((_, i) => !claimed.has(i));
@@ -19291,10 +19294,10 @@ var require_codeReviewProof = __commonJS({
         const quoted = JSON.stringify(unclaimed.text.trim().slice(0, 200));
         problems.push(`line ${unclaimed.index + 1} of /code-review's result (${where}) is a finding line that no raw entry claims: ${quoted}`);
       }
-      return problems.length > 0 ? problems.join("; ") : null;
+      return { mismatch: problems.length > 0 ? problems.join("; ") : null, claimedLines };
     }
-    function checkGrounding({ capture, runId, rawEntries, fileExists, root }) {
-      const failAt = (stage, reason, mode2 = null) => ({ ok: false, stage, reason, mode: mode2 });
+    function ground({ capture, runId, rawEntries, fileExists, root }) {
+      const failAt = (stage, reason, mode2 = null) => ({ verdict: { ok: false, stage, reason, mode: mode2 }, claimedLines: null });
       const unusable = captureProblem(capture, runId);
       if (unusable) return failAt("capture", unusable);
       const { result } = capture;
@@ -19313,13 +19316,17 @@ var require_codeReviewProof = __commonJS({
       const shape = rawShapeProblem(rawEntries);
       if (shape) return failAt("lane", shape, mode);
       let mismatch = null;
+      let claimedLines = null;
       if (mode === "json") mismatch = jsonMismatch(rawEntries, list, root);
-      else if (mode === "text") mismatch = textMismatch(rawEntries, lines, root);
+      else if (mode === "text") ({ mismatch, claimedLines } = textMatch(rawEntries, lines, root));
       else if (rawEntries.length > 0) {
         mismatch = `/code-review reported no findings, but the raw list has ${rawEntries.length}`;
       }
       if (mismatch) return failAt("lane", mismatch, mode);
-      return { ok: true, stage: null, reason: "ok", mode };
+      return { verdict: { ok: true, stage: null, reason: "ok", mode }, claimedLines };
+    }
+    function checkGrounding(input) {
+      return ground(input).verdict;
     }
     function parseJson(text) {
       try {
@@ -19369,7 +19376,68 @@ var require_codeReviewProof = __commonJS({
       }
       return null;
     }
-    function droppedEntryProblem(entry, i, rawByN, excludedPaths, root) {
+    var QUOTE_LEAD = /^[\s:;,\-–—]+/;
+    var MIN_QUOTE_CHARS = 3;
+    var QUOTE_WINDOW = 2;
+    function squeezed(text) {
+      return text.replace(/[\s`*]/g, "");
+    }
+    function existingPath(file, root, fileExists) {
+      for (const candidate of [file, trimWrappers(file)]) {
+        const path = repoRelative(candidate, root);
+        if (path !== "" && fileExists(path)) return path;
+      }
+      return null;
+    }
+    function disproofProblem(proof, { fileExists, readLines, root }) {
+      const exists = typeof fileExists === "function" ? fileExists : () => false;
+      const read = typeof readLines === "function" ? readLines : () => null;
+      const text = normalizeLine(typeof proof === "string" ? proof : "");
+      const tries = [];
+      for (const token of text.matchAll(/\S+/g)) {
+        const quote = text.slice(token.index + token[0].length).replace(QUOTE_LEAD, "");
+        for (const mention of mentionsIn(token[0], exists)) tries.push({ ...mention, quote });
+      }
+      if (tries.length === 0) return "needs a proof that cites a path:line and then quotes the code there";
+      let best = null;
+      const miss = (rank, problem) => {
+        if (!best || rank > best.rank) best = { rank, problem };
+      };
+      for (const { file, line, quote } of tries) {
+        const at = `${file}:${line}`;
+        const path = existingPath(file, root, exists);
+        if (!path) {
+          miss(0, `has a proof that cites ${at}, but no file ${file} exists in the repository`);
+          continue;
+        }
+        const lines = read(path);
+        if (!Array.isArray(lines)) {
+          miss(0, `has a proof that cites ${at}, but ${path} cannot be read`);
+          continue;
+        }
+        if (line < 1 || line > lines.length) {
+          miss(1, `has a proof that cites ${at}, but ${path} has ${lines.length} lines`);
+          continue;
+        }
+        const code = squeezed(quote);
+        if (code.length < MIN_QUOTE_CHARS) {
+          miss(2, `has a proof that quotes no code after ${at}; put the exact code there right after it`);
+          continue;
+        }
+        const near = squeezed(lines.slice(Math.max(0, line - 1 - QUOTE_WINDOW), line + QUOTE_WINDOW).join("\n"));
+        if (!near.includes(code)) {
+          const shownQuote = JSON.stringify(oneLine(quote).slice(0, 120));
+          miss(3, `has a proof whose quoted code is not in ${path} within ${QUOTE_WINDOW} lines of line ${line}: ${shownQuote}`);
+          continue;
+        }
+        return null;
+      }
+      return best.problem;
+    }
+    function isExcludedMention(mention, excludedPaths, root) {
+      return [mention.file, trimWrappers(mention.file)].some((file) => pathMatches(repoRelative(file, root), excludedPaths));
+    }
+    function droppedEntryProblem(entry, i, rawByN, excludedPaths, root, repo, claimedLines) {
       const label = `dropped entry ${i + 1}`;
       if (!isPlainObject(entry)) return { problem: `${label} is not an object` };
       const raw = rawByN.get(entry.raw);
@@ -19382,12 +19450,18 @@ var require_codeReviewProof = __commonJS({
         if (!pathMatches(repoRelative(raw.file, root), [entry.glob])) {
           return { problem: `${where} cites glob ${JSON.stringify(entry.glob)}, which ${repoRelative(raw.file, root)} does not match` };
         }
+        const claimed = claimedLines ? claimedLines[raw.n - 1] : null;
+        const kept = claimed ? claimed.mentions.find((m) => !isExcludedMention(m, excludedPaths, root)) : null;
+        if (kept) {
+          return {
+            problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${kept.file}:${kept.line}, which no excluded glob matches; list that line under its first location and score it`
+          };
+        }
         return { why: `excluded path: ${entry.glob}` };
       }
       if (entry.reason === "disproved") {
-        if (!isText(entry.proof) || mentionsIn(normalizeLine(entry.proof), null).length === 0) {
-          return { problem: `${where} needs a proof that names a file:line` };
-        }
+        const problem = disproofProblem(entry.proof, { ...repo, root });
+        if (problem) return { problem: `${where} ${problem}` };
         return { why: entry.proof };
       }
       return { problem: `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"` };
@@ -19398,7 +19472,7 @@ var require_codeReviewProof = __commonJS({
     function laneFail(reason) {
       return { ok: false, reason, dropped: [] };
     }
-    function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root }) {
+    function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root, fileExists, readLines, claimedLines = null }) {
       const shape = rawShapeProblem(rawEntries);
       if (shape) return laneFail(shape);
       const scoredParsed = scoredText == null ? null : parseJson(scoredText);
@@ -19424,7 +19498,7 @@ var require_codeReviewProof = __commonJS({
       }
       const dropped = [];
       for (const [i, entry] of droppedEntries.entries()) {
-        const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root);
+        const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root, { fileExists, readLines }, claimedLines);
         if (result.problem) return laneFail(result.problem);
         const twice = use(entry.raw, `dropped entry ${i + 1}`);
         if (twice) return laneFail(twice);
@@ -19439,11 +19513,21 @@ var require_codeReviewProof = __commonJS({
       }
       return { ok: true, reason: "ok", dropped };
     }
-    function checkCodeReviewRun({ captureText, runId, rawText, scoredText, droppedText, excludedPaths = [], fileExists, root }) {
+    function checkCodeReviewRun({
+      captureText,
+      runId,
+      rawText,
+      scoredText,
+      droppedText,
+      excludedPaths = [],
+      fileExists,
+      readLines,
+      root
+    }) {
       const parsedCapture = captureText == null ? null : parseJson(captureText);
       const parsedRaw = rawText == null ? null : parseJson(rawText);
       const rawEntries = parsedRaw ? parsedRaw.value : null;
-      const grounded = checkGrounding({
+      const { verdict: grounded, claimedLines } = ground({
         capture: parsedCapture ? parsedCapture.value : null,
         runId,
         rawEntries,
@@ -19452,7 +19536,7 @@ var require_codeReviewProof = __commonJS({
       });
       const count = Array.isArray(rawEntries) ? rawEntries.length : 0;
       if (!grounded.ok) return { ...grounded, count, dropped: [] };
-      const lane = checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths, root });
+      const lane = checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths, root, fileExists, readLines, claimedLines });
       if (!lane.ok) return { ok: false, stage: "lane", reason: lane.reason, count, mode: grounded.mode, dropped: [] };
       return { ok: true, stage: null, reason: "ok", count, mode: grounded.mode, dropped: lane.dropped };
     }
@@ -20173,7 +20257,15 @@ var require_slice = __commonJS({
       if (wanted.size === 0) return "";
       return parseDiff(diffText).filter((block) => block.unparseable || wanted.has(block.file) || wanted.has(block.oldFile)).map((block) => block.header + block.hunks.join("")).join("");
     }
-    module2.exports = { sliceForAgent, parseDiff, blocksForFiles };
+    function filesWithoutBlocks(diffText, files) {
+      const named = /* @__PURE__ */ new Set();
+      for (const block of parseDiff(diffText)) {
+        if (block.file != null) named.add(block.file);
+        if (block.oldFile != null) named.add(block.oldFile);
+      }
+      return [...new Set(files)].filter((file) => !named.has(file));
+    }
+    module2.exports = { sliceForAgent, parseDiff, blocksForFiles, filesWithoutBlocks };
   }
 });
 
@@ -20496,7 +20588,8 @@ var require_cli = __commonJS({
     } = require_evalSuite();
     var { buildEvidence, verifyEvidenceLedger } = require_evidence();
     var { consensusFrom } = require_consensus();
-    var { sliceForAgent, blocksForFiles } = require_slice();
+    var { sliceForAgent, blocksForFiles, filesWithoutBlocks } = require_slice();
+    var { pathMatches } = require_selectAgents();
     var { validateContextManifest, contextInventory, packContext } = require_contextPack();
     var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
@@ -20832,9 +20925,9 @@ var require_cli = __commonJS({
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
       }
     }
-    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>";
+    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
-    function diffFor(diffPath, rawPath, root) {
+    function diffFor(diffPath, rawPath, root, excludedPaths) {
       let raw;
       try {
         raw = JSON.parse(readFileSync(rawPath, "utf8"));
@@ -20858,8 +20951,23 @@ var require_cli = __commonJS({
         out(`error: could not read the diff ${diffPath}: ${e.message}`);
         return 1;
       }
-      writeStdoutSync(blocksForFiles(diffText, raw.map((entry) => repoRelative(entry.file, root))));
+      const files = [...new Set(raw.map((entry) => repoRelative(entry.file, root)))].filter(
+        (file) => !pathMatches(file, excludedPaths)
+      );
+      let text = blocksForFiles(diffText, files);
+      const missing = filesWithoutBlocks(diffText, files);
+      if (missing.length > 0 && text !== "" && !text.endsWith("\n")) text += "\n";
+      text += missing.map((file) => `no diff block for ${file}
+`).join("");
+      writeStdoutSync(text);
       return 0;
+    }
+    function excludedPathsOrNone(C) {
+      try {
+        return existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+      } catch {
+        return [];
+      }
     }
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
@@ -20870,14 +20978,14 @@ var require_cli = __commonJS({
   startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
-  diff-for --diff <f> --raw <f>   print the diff blocks of the files a raw findings list names, in diff order (nothing for an empty list)
+  diff-for --diff <f> --raw <f>   print the diff blocks of the files a raw findings list names, in diff order (nothing for an empty list), skipping files in the config's excluded_paths; then print "no diff block for <file>" for each other named file that has no block
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not)
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -21079,7 +21187,7 @@ var require_cli = __commonJS({
             out(DIFF_FOR_USAGE);
             return 1;
           }
-          return diffFor(diffPath, rawPath, C.ROOT);
+          return diffFor(diffPath, rawPath, C.ROOT, excludedPathsOrNone(C));
         }
         case "emit": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
@@ -21268,21 +21376,39 @@ var require_cli = __commonJS({
           const findingsPath = flag(rest, "--findings");
           const droppedPath = flag(rest, "--dropped");
           const runId = flag(rest, "--run");
-          if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes("--capture")) {
+          const promotePath = flag(rest, "--promote");
+          if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes("--capture") || rest.includes("--promote") && !promotePath) {
             out(CODE_REVIEW_PROOF_USAGE);
             return 1;
           }
-          const readIfPresent = (p) => {
+          const readBytes = (p) => {
             try {
-              return readFileSync(p, "utf8");
+              return readFileSync(p);
             } catch {
               return null;
             }
           };
-          const refuse = (stage, reason) => {
-            out(JSON.stringify({ ok: false, stage, reason, count: 0, mode: null, dropped: [] }));
-            return 1;
+          const readIfPresent = (p) => readBytes(p)?.toString("utf8") ?? null;
+          const scoredBytes = readBytes(findingsPath);
+          const finish = (verdict) => {
+            let r2 = verdict;
+            if (promotePath && r2.ok) {
+              try {
+                writeFileAtomic(promotePath, scoredBytes);
+              } catch (e) {
+                r2 = { ...r2, ok: false, stage: "config", reason: `could not save the proved findings to ${promotePath}: ${e.message}`, dropped: [] };
+              }
+            }
+            if (promotePath && !r2.ok) {
+              try {
+                rmSync(promotePath, { force: true });
+              } catch {
+              }
+            }
+            out(JSON.stringify(r2));
+            return r2.ok ? 0 : 1;
           };
+          const refuse = (stage, reason) => finish({ ok: false, stage, reason, count: 0, mode: null, dropped: [] });
           let excludedPaths;
           try {
             excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
@@ -21293,24 +21419,34 @@ var require_cli = __commonJS({
           const dirError = captureDirError(dir);
           if (dirError) return refuse("capture", dirError);
           const capturePath = join(dir, CAPTURE_FILES.capture);
-          const fileExists = (p) => {
+          const fileUnderRoot = (p) => {
             const target = resolve(C.ROOT, p);
             const rel = relative(C.ROOT, target);
-            if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return false;
-            return existsSync(target) && statSync(target).isFile();
+            if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
+            return existsSync(target) && statSync(target).isFile() ? target : null;
+          };
+          const fileExists = (p) => fileUnderRoot(p) !== null;
+          const readLines = (p) => {
+            const target = fileUnderRoot(p);
+            if (!target) return null;
+            try {
+              return readFileSync(target, "utf8").replace(/\r?\n$/, "").split(/\r?\n/);
+            } catch {
+              return null;
+            }
           };
           const r = checkCodeReviewRun({
             captureText: readIfPresent(capturePath),
             runId,
             rawText: readIfPresent(rawPath),
-            scoredText: readIfPresent(findingsPath),
+            scoredText: scoredBytes?.toString("utf8") ?? null,
             droppedText: readIfPresent(droppedPath),
             excludedPaths,
             fileExists,
+            readLines,
             root: C.ROOT
           });
-          out(JSON.stringify(r));
-          return r.ok ? 0 : 1;
+          return finish(r);
         }
         case "capture": {
           const sub = rest[0];

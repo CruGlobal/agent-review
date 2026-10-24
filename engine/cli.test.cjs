@@ -278,7 +278,7 @@ function rawEntry(n, file) {
   return { n, file, line: 2, summary: 'a finding' };
 }
 
-test("diff-for prints only the raw files' blocks, and nothing for []", () => {
+test("diff-for prints the raw files' blocks in diff order, and nothing for []", () => {
   const root = mkdtempSync(join(os.tmpdir(), 'ar-diff-for-'));
   const a = diffBlock('lib/a.rb', 'a = 1');
   const docs = diffBlock('docs/b.md', 'b');
@@ -300,12 +300,71 @@ test("diff-for prints only the raw files' blocks, and nothing for []", () => {
     rawEntry(5, 'lib/not_in_diff.rb'),
   ]);
   assert.equal(picked.code, 0);
-  assert.equal(picked.s, a + renamed + d, 'blocks come in diff order, once each, matched repo-relative by new or old path');
+  assert.equal(
+    picked.s,
+    `${a}${renamed}${d}no diff block for lib/not_in_diff.rb\n`,
+    'blocks come in diff order, once each, matched repo-relative by new or old path',
+  );
 
   const empty = diffFor([]);
   assert.equal(empty.code, 0);
   assert.equal(empty.s, '');
   rmSync(root, { recursive: true, force: true });
+});
+
+test('diff-for skips excluded paths and names every other raw file it has no block for', () => {
+  const root = optionsRoot();
+  try {
+    const configPath = join(root, 'rd', 'config.yml');
+    writeFileSync(configPath, readFileSync(configPath, 'utf8').replace('excluded_paths: []', 'excluded_paths: ["dist/**"]'));
+    const a = diffBlock('lib/a.rb', 'a = 1');
+    const bundle = diffBlock('dist/app.js', 'bundle');
+    const diffPath = join(root, 'diff.txt');
+    writeFileSync(diffPath, a + bundle);
+    const rawPath = join(root, 'raw.json');
+    writeFileSync(
+      rawPath,
+      JSON.stringify([
+        rawEntry(1, 'dist/app.js'),
+        rawEntry(2, 'lib/gone.rb'),
+        rawEntry(3, 'lib/a.rb'),
+        rawEntry(4, 'dist/other.js'),
+        rawEntry(5, `${root}/lib/gone.rb`),
+        rawEntry(6, 'my file.rb'),
+      ]),
+    );
+    const at = ['--diff', diffPath, '--raw', rawPath, '--root', root];
+    const filtered = run(['diff-for', ...at, '--review-dir', 'rd']);
+    assert.equal(filtered.code, 0, filtered.s);
+    assert.equal(
+      filtered.s,
+      `${a}no diff block for lib/gone.rb\nno diff block for my file.rb\n`,
+      'an excluded file gets neither a block nor a line, and each unmatched file is named once, repo-relative',
+    );
+
+    const noConfig = run(['diff-for', ...at, '--review-dir', 'nowhere']);
+    assert.equal(noConfig.code, 0, noConfig.s);
+    assert.equal(
+      noConfig.s,
+      `${a}${bundle}no diff block for lib/gone.rb\nno diff block for dist/other.js\nno diff block for my file.rb\n`,
+      'with no config, nothing is excluded',
+    );
+
+    writeFileSync(configPath, 'version: [');
+    const broken = run(['diff-for', ...at, '--review-dir', 'rd']);
+    assert.equal(broken.code, 0, broken.s);
+    assert.equal(broken.s, noConfig.s, 'a config that cannot be read filters nothing');
+
+    writeFileSync(diffPath, a.replace(/\n$/, ''));
+    writeFileSync(rawPath, JSON.stringify([rawEntry(1, 'lib/a.rb'), rawEntry(2, 'lib/gone.rb')]));
+    assert.equal(
+      run(['diff-for', ...at, '--review-dir', 'nowhere']).s,
+      `${a.replace(/\n$/, '')}\nno diff block for lib/gone.rb\n`,
+      'the first line starts on its own line',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('diff-for keeps a block whose paths it cannot read whenever the raw list names a file', () => {
@@ -866,7 +925,7 @@ test('startup notes leftover CI files when any of the three CI workflows remains
   }
 });
 
-const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>\n$/;
+const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--promote <f>\]\n$/;
 
 // Writes the lane files into dir and the capture into a private dir under it, which the
 // command reads through AGENT_REVIEW_CAPTURE_DIR.
@@ -927,7 +986,7 @@ test('code-review-proof exits 1 with a usage line when a flag is missing, and re
       assert.equal(withFlag.code, 1);
       assert.match(withFlag.s, PROOF_USAGE, 'the capture path is never accepted from the command line');
     });
-    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> {3}/m);
+    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--promote <f>\] {3}/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1034,6 +1093,124 @@ test('code-review-proof checks the capture dir before reading the capture', () =
     assert.match(open.reason, /permission bits/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const ONE_RESULT = 'Result:\n```json\n[{"file":"src/a.js","line":2,"summary":"s"}]\n```\n';
+const ONE_RAW = [{ n: 1, file: 'src/a.js', line: 2, summary: 's' }];
+// Odd spacing, a non-ASCII character, and trailing blank lines show the copy is byte for byte.
+const ONE_SCORED_TEXT = `{ "findings": [ ${JSON.stringify({ ...PROOF_SCORED[0], raw: 1, message: 'café m' })} ] }\n\n`;
+
+test('code-review-proof --promote copies the exact checked findings bytes when ok', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-promote-'));
+  try {
+    const f = proofFiles(dir, { raw: ONE_RAW, scored: [], dropped: [], result: ONE_RESULT });
+    writeFileSync(f.findings, ONE_SCORED_TEXT);
+    const target = join(dir, 'agent_findings', 'code-review.json');
+    mkdirSync(join(dir, 'agent_findings'));
+    writeFileSync(target, 'stale');
+    withCaptureDir(f.capDir, () => {
+      const r = run(proofArgs(f, ['--root', dir, '--review-dir', 'nowhere', '--promote', target]));
+      assert.equal(r.code, 0, r.s);
+      assert.equal(JSON.parse(r.s).ok, true);
+      assert.deepEqual(readFileSync(target), Buffer.from(ONE_SCORED_TEXT, 'utf8'), 'the promoted file is the checked bytes');
+      assert.deepEqual(readdirSync(join(dir, 'agent_findings')), ['code-review.json'], 'no temp file is left behind');
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof --promote writes nothing and removes a stale target when not ok', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-promote-'));
+  try {
+    const f = proofFiles(dir, { raw: ONE_RAW, scored: [], dropped: [], result: ONE_RESULT });
+    const target = join(dir, 'code-review.json');
+    const at = ['--root', dir, '--review-dir', 'nowhere', '--promote', target];
+    withCaptureDir(f.capDir, () => {
+      writeFileSync(target, 'stale');
+      const lane = run(proofArgs(f, at));
+      assert.equal(lane.code, 1);
+      assert.equal(JSON.parse(lane.s).stage, 'lane', 'raw entry 1 is neither scored nor dropped');
+      assert.equal(existsSync(target), false, 'a failed lane check removes the stale target');
+
+      writeFileSync(f.findings, ONE_SCORED_TEXT);
+      writeFileSync(f.capture, JSON.stringify({ source: 'agent-review-capture-hook', run_id: 'other', result: ONE_RESULT }));
+      writeFileSync(target, 'stale');
+      const capture = run(proofArgs(f, at));
+      assert.equal(JSON.parse(capture.s).stage, 'capture');
+      assert.equal(existsSync(target), false, 'a failed capture check removes the stale target');
+    });
+
+    writeFileSync(target, 'stale');
+    const refused = withCaptureDir(join(dir, 'absent'), () => run(proofArgs(f, at)));
+    assert.equal(JSON.parse(refused.s).stage, 'capture');
+    assert.equal(existsSync(target), false, 'a refused capture dir removes the stale target');
+
+    writeFileSync(f.capture, JSON.stringify({ source: 'agent-review-capture-hook', run_id: 'r1', result: ONE_RESULT }));
+    const unwritable = join(dir, 'missing-dir', 'code-review.json');
+    const failedWrite = withCaptureDir(f.capDir, () =>
+      run(proofArgs(f, ['--root', dir, '--review-dir', 'nowhere', '--promote', unwritable])),
+    );
+    assert.equal(failedWrite.code, 1);
+    const parsed = JSON.parse(failedWrite.s);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.stage, 'config');
+    assert.match(parsed.reason, /could not save the proved findings/);
+    assert.equal(existsSync(unwritable), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof lists --promote in its usage and needs a value for it', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-promote-'));
+  try {
+    const f = proofFiles(dir, { raw: ONE_RAW, scored: [], dropped: [], result: ONE_RESULT });
+    const r = withCaptureDir(f.capDir, () => run([...proofArgs(f), '--promote']));
+    assert.equal(r.code, 1);
+    assert.match(r.s, PROOF_USAGE);
+    assert.match(
+      run(['help']).s,
+      /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--promote <f>\] {3}.*--promote/m,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof checks a disproof against the files under --root', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-crproof-disproof-'));
+  const root = join(parent, 'repo');
+  try {
+    mkdirSync(join(root, 'lib'), { recursive: true });
+    const cart = Array.from({ length: 20 }, (_, i) => (i === 17 ? '  if (!items) return [];' : `# line ${i + 1}`));
+    writeFileSync(join(root, 'lib', 'cart.rb'), cart.join('\n') + '\n');
+    writeFileSync(join(root, 'Makefile'), Array.from({ length: 14 }, (_, i) => (i === 11 ? 'test: build lint' : `# ${i + 1}`)).join('\n'));
+    writeFileSync(join(parent, 'outside.rb'), 'secret = 1\n');
+    const result = 'Result:\n```json\n[{"file":"lib/cart.rb","line":18,"summary":"s"}]\n```\n';
+    const f = proofFiles(parent, { raw: [{ n: 1, file: 'lib/cart.rb', line: 18, summary: 's' }], scored: [], dropped: [], result });
+    const proofWith = (proof) => {
+      writeFileSync(f.dropped, JSON.stringify([{ raw: 1, reason: 'disproved', proof }]));
+      return withCaptureDir(f.capDir, () => JSON.parse(run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere'])).s));
+    };
+    const passed = proofWith('already handled: lib/cart.rb:18 if (!items) return [];');
+    assert.equal(passed.ok, true, passed.reason);
+    assert.equal(proofWith('Makefile:12 test: build lint').ok, true, 'a bare file name counts when the file exists');
+    for (const [proof, pattern] of [
+      ['x.y:1 nah', /no file x\.y exists in the repository/],
+      ['lib/cart.rb:99 if (!items) return [];', /lib\/cart\.rb has 20 lines/],
+      ['lib/cart.rb:5 if (!items) return [];', /not in lib\/cart\.rb within 2 lines of line 5/],
+      ['../outside.rb:1 secret = 1', /no file \.\.\/outside\.rb exists/],
+      [`${parent}/outside.rb:1 secret = 1`, /no file .*outside\.rb exists/],
+    ]) {
+      const r = proofWith(proof);
+      assert.equal(r.ok, false, proof);
+      assert.equal(r.stage, 'lane', proof);
+      assert.match(r.reason, pattern, proof);
+    }
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
   }
 });
 

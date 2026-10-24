@@ -559,6 +559,19 @@ const scoredFor = (n, over = {}) => ({
   ...over,
 });
 const excludedDrop = (n, over = {}) => ({ raw: n, reason: 'excluded', glob: 'dist/**', ...over });
+// An in-memory repository: fileExists and readLines take repo-relative paths, as the CLI's do.
+const repoOf = (files) => ({
+  fileExists: (path) => Object.hasOwn(files, path),
+  readLines: (path) => (Object.hasOwn(files, path) ? files[path].replace(/\n$/, '').split('\n') : null),
+});
+const numbered = (count, at) => Array.from({ length: count }, (_, i) => at[i + 1] ?? `// line ${i + 1}`).join('\n') + '\n';
+const LANE_REPO = repoOf({
+  'lib/cart.rb': numbered(20, { 18: '  if (!items) return [];' }),
+  'app/pay.js': numbered(45, { 39: '  guard();' }),
+  'dist/app.js': numbered(3, { 2: 'return;' }),
+  Makefile: numbered(14, { 12: 'test: build lint' }),
+  'a.rb': numbered(3, { 2: '  guard()' }),
+});
 const lane = (scored, dropped = [], over = {}) =>
   checkLaneOutput({
     rawEntries: LANE_RAW,
@@ -566,6 +579,7 @@ const lane = (scored, dropped = [], over = {}) =>
     droppedText: J(dropped),
     excludedPaths: ['dist/**'],
     root: '/repo',
+    ...LANE_REPO,
     ...over,
   });
 const GOOD_SCORED = [scoredFor(1), scoredFor(2)];
@@ -672,6 +686,36 @@ test('excluded drop passes only for a configured glob that matches the raw file'
   assert.equal(absolute.ok, true, 'the glob is matched against the repo-relative path');
 });
 
+test('in text mode an excluded drop needs every location on its claimed line to be excluded', () => {
+  const run = (result, raw, dropped) =>
+    checkCodeReviewRun({
+      captureText: J(captureOf(result)),
+      runId: 'r1',
+      rawText: J(raw),
+      scoredText: J({ findings: [] }),
+      droppedText: J(dropped),
+      excludedPaths: ['dist/**', 'vendor/**'],
+      fileExists: () => false,
+      root: '/repo',
+    });
+  const raw = [{ n: 1, file: 'dist/b.js', line: 5, summary: 's' }];
+  const drop = [{ raw: 1, reason: 'excluded', glob: 'dist/**' }];
+
+  const rides = run('- lib/a.rb:10 calls dist/b.js:5 and lets user input reach eval', raw, drop);
+  assert.equal(rides.ok, false);
+  assert.equal(rides.stage, 'lane');
+  assert.match(rides.reason, /dropped entry 1 \(raw 1, dist\/b\.js:5\) .*lib\/a\.rb:10/);
+
+  assert.deepEqual(
+    run('- dist/b.js:5 the bundle calls eval', raw, drop),
+    { ok: true, stage: null, reason: 'ok', count: 1, mode: 'text', dropped: [{ file: 'dist/b.js', line: 5, summary: 's', why: 'excluded path: dist/**' }] },
+    'a line whose only location is excluded still drops',
+  );
+  assert.equal(run('- dist/b.js:5 copies vendor/x.js:2', raw, drop).ok, true, 'every location on the line is excluded');
+  assert.equal(run('- `dist/b.js:5` copies (vendor/x.js:2)', raw, drop).ok, true, 'wrappers around a location do not matter');
+  assert.equal(run('- dist/b.js:5 copies ./lib/a.rb:10', raw, drop).ok, false, 'a repo-relative spelling of a kept path still counts');
+});
+
 test('a drop with reason "refuted" fails', () => {
   for (const reason of ['refuted', 'REFUTED', undefined]) {
     const r = lane(GOOD_SCORED, [{ raw: 3, reason, proof: 'REFUTED by the /code-review verifier' }]);
@@ -680,15 +724,73 @@ test('a drop with reason "refuted" fails', () => {
   }
 });
 
-test('a disproved drop needs a file:line in its proof', () => {
-  const disproved = (proof) => lane([scoredFor(1), scoredFor(2)], [{ raw: 3, reason: 'disproved', proof }]);
-  assert.equal(disproved('dist/app.js:2 return;').ok, true);
-  assert.equal(disproved('lib/cart.rb:18 if (!items) return [];').ok, true);
+const disproved = (proof, over = {}) => lane([scoredFor(1), scoredFor(2)], [{ raw: 3, reason: 'disproved', proof }], over);
+
+test('a disproved drop needs a proof that cites a path:line', () => {
   for (const proof of ['it is fine', '', '   ', undefined, 'see file: 12', 'discussed at 12:30', 'localhost:3000']) {
     const r = disproved(proof);
     assert.equal(r.ok, false, String(proof));
-    assert.match(r.reason, /names a file:line/);
+    assert.match(r.reason, /needs a proof that cites a path:line and then quotes the code there/, String(proof));
   }
+});
+
+test('a disproved proof must cite a file that exists in the repository', () => {
+  for (const proof of ['x.y:1 nah', 'host.com:3000 nope', 'lib/missing.rb:18 if (!items) return [];']) {
+    const r = disproved(proof);
+    assert.equal(r.ok, false, proof);
+    assert.match(r.reason, /dropped entry 1 \(raw 3, dist\/app\.js:2\) has a proof that cites \S+, but no file \S+ exists in the repository/, proof);
+  }
+  const noMakefile = disproved('Makefile:12 test: build lint', { fileExists: () => false });
+  assert.equal(noMakefile.ok, false, 'a bare name is a location only when that file exists');
+});
+
+test('a disproved proof must cite a line inside the file', () => {
+  for (const line of [0, 21, 99]) {
+    const r = disproved(`lib/cart.rb:${line} if (!items) return [];`);
+    assert.equal(r.ok, false, String(line));
+    assert.match(r.reason, /cites lib\/cart\.rb:\d+, but lib\/cart\.rb has 20 lines/, String(line));
+  }
+});
+
+test('a disproved proof must quote at least 3 characters of code right after path:line', () => {
+  for (const proof of ['lib/cart.rb:18', 'lib/cart.rb:18 ;;', 'lib/cart.rb:18: - ', 'already handled: lib/cart.rb:18']) {
+    const r = disproved(proof);
+    assert.equal(r.ok, false, proof);
+    assert.match(r.reason, /quotes no code after lib\/cart\.rb:18/, proof);
+  }
+});
+
+test('a disproved proof whose quote is not within 2 lines of the cited line fails', () => {
+  for (const proof of ['lib/cart.rb:5 if (!items) return [];', 'lib/cart.rb:15 if (!items) return [];', 'lib/cart.rb:18 if (!items) return null;']) {
+    const r = disproved(proof);
+    assert.equal(r.ok, false, proof);
+    assert.match(r.reason, /quoted code is not in lib\/cart\.rb within 2 lines of line \d+/, proof);
+  }
+});
+
+test('a disproved proof that quotes the code near the cited line passes', () => {
+  for (const proof of [
+    'already handled: lib/cart.rb:18 if (!items) return [];',
+    'already handled: lib/cart.rb:16 if (!items) return [];',
+    'already handled: lib/cart.rb:20 if (!items) return [];',
+    'already handled: lib/cart.rb:17-19 if (!items) return [];',
+    'lib/cart.rb:18: if(!items)\n  return [];',
+    'misreads the code: `lib/cart.rb:18` - `if (!items) return [];`',
+    'lib/cart.rb:18 return',
+    'Makefile:12 test: build lint',
+    './lib/cart.rb:18 if (!items) return [];',
+    '/repo/lib/cart.rb:18 if (!items) return [];',
+    'misreads: x.y:1 is wrong; lib/cart.rb:18 if (!items) return [];',
+  ]) {
+    const r = disproved(proof);
+    assert.equal(r.ok, true, `${proof}: ${r.reason}`);
+  }
+});
+
+test('a disproved drop fails closed when the repository cannot be read', () => {
+  const proof = 'already handled: lib/cart.rb:18 if (!items) return [];';
+  assert.equal(disproved(proof, { readLines: undefined }).ok, false);
+  assert.equal(disproved(proof, { fileExists: undefined }).ok, false);
 });
 
 test('dropped output keeps each drop on one line', () => {
@@ -699,6 +801,7 @@ test('dropped output keeps each drop on one line', () => {
     droppedText: J([{ raw: 1, reason: 'disproved', proof: 'a.rb:2\n  guard()\r\n' }]),
     excludedPaths: [],
     root: '/repo',
+    ...LANE_REPO,
   });
   assert.equal(r.ok, true, r.reason);
   assert.deepEqual(r.dropped, [{ file: 'a.rb', line: 3, summary: 'two lines of text', why: 'a.rb:2 guard()' }]);

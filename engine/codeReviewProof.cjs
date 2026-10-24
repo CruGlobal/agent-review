@@ -271,7 +271,8 @@ function matchLines(candidates) {
   return owner;
 }
 
-function textMismatch(rawEntries, lines, root) {
+// Returns the mismatch, or null, and the result line each raw entry claimed (by list position).
+function textMatch(rawEntries, lines, root) {
   const candidates = rawEntries.map((entry) => {
     const path = repoRelative(entry.file, root);
     const fits =
@@ -281,6 +282,9 @@ function textMismatch(rawEntries, lines, root) {
     return lines.filter(fits).map((l) => l.index);
   });
   const owner = matchLines(candidates);
+  const byIndex = new Map(lines.map((l) => [l.index, l]));
+  const claimedLines = rawEntries.map(() => null);
+  for (const [index, entry] of owner) claimedLines[entry] = byIndex.get(index);
   const claimed = new Set(owner.values());
   const problems = [];
   const lost = rawEntries.findIndex((_, i) => !claimed.has(i));
@@ -295,11 +299,12 @@ function textMismatch(rawEntries, lines, root) {
     const quoted = JSON.stringify(unclaimed.text.trim().slice(0, 200));
     problems.push(`line ${unclaimed.index + 1} of /code-review's result (${where}) is a finding line that no raw entry claims: ${quoted}`);
   }
-  return problems.length > 0 ? problems.join('; ') : null;
+  return { mismatch: problems.length > 0 ? problems.join('; ') : null, claimedLines };
 }
 
-function checkGrounding({ capture, runId, rawEntries, fileExists, root }) {
-  const failAt = (stage, reason, mode = null) => ({ ok: false, stage, reason, mode });
+// claimedLines is null outside text mode, where a raw entry claims no result line.
+function ground({ capture, runId, rawEntries, fileExists, root }) {
+  const failAt = (stage, reason, mode = null) => ({ verdict: { ok: false, stage, reason, mode }, claimedLines: null });
   const unusable = captureProblem(capture, runId);
   if (unusable) return failAt('capture', unusable);
   const { result } = capture;
@@ -318,13 +323,18 @@ function checkGrounding({ capture, runId, rawEntries, fileExists, root }) {
   const shape = rawShapeProblem(rawEntries);
   if (shape) return failAt('lane', shape, mode);
   let mismatch = null;
+  let claimedLines = null;
   if (mode === 'json') mismatch = jsonMismatch(rawEntries, list, root);
-  else if (mode === 'text') mismatch = textMismatch(rawEntries, lines, root);
+  else if (mode === 'text') ({ mismatch, claimedLines } = textMatch(rawEntries, lines, root));
   else if (rawEntries.length > 0) {
     mismatch = `/code-review reported no findings, but the raw list has ${rawEntries.length}`;
   }
   if (mismatch) return failAt('lane', mismatch, mode);
-  return { ok: true, stage: null, reason: 'ok', mode };
+  return { verdict: { ok: true, stage: null, reason: 'ok', mode }, claimedLines };
+}
+
+function checkGrounding(input) {
+  return ground(input).verdict;
 }
 
 function parseJson(text) {
@@ -382,7 +392,77 @@ function scoredEntryProblem(entry, i, rawByN, root) {
   return null;
 }
 
-function droppedEntryProblem(entry, i, rawByN, excludedPaths, root) {
+const QUOTE_LEAD = /^[\s:;,\-–—]+/;
+const MIN_QUOTE_CHARS = 3;
+const QUOTE_WINDOW = 2;
+
+// normalizeLine already dropped backticks and `*` from the proof, so the file's lines lose them too.
+function squeezed(text) {
+  return text.replace(/[\s`*]/g, '');
+}
+
+function existingPath(file, root, fileExists) {
+  for (const candidate of [file, trimWrappers(file)]) {
+    const path = repoRelative(candidate, root);
+    if (path !== '' && fileExists(path)) return path;
+  }
+  return null;
+}
+
+// A disproof passes when one of its mentions cites a line of a real file and the text right after
+// that mention, as quoted code, appears within QUOTE_WINDOW lines of it. Otherwise the problem of
+// the mention that got furthest names the check that failed.
+function disproofProblem(proof, { fileExists, readLines, root }) {
+  const exists = typeof fileExists === 'function' ? fileExists : () => false;
+  const read = typeof readLines === 'function' ? readLines : () => null;
+  const text = normalizeLine(typeof proof === 'string' ? proof : '');
+  const tries = [];
+  for (const token of text.matchAll(/\S+/g)) {
+    const quote = text.slice(token.index + token[0].length).replace(QUOTE_LEAD, '');
+    for (const mention of mentionsIn(token[0], exists)) tries.push({ ...mention, quote });
+  }
+  if (tries.length === 0) return 'needs a proof that cites a path:line and then quotes the code there';
+  let best = null;
+  const miss = (rank, problem) => {
+    if (!best || rank > best.rank) best = { rank, problem };
+  };
+  for (const { file, line, quote } of tries) {
+    const at = `${file}:${line}`;
+    const path = existingPath(file, root, exists);
+    if (!path) {
+      miss(0, `has a proof that cites ${at}, but no file ${file} exists in the repository`);
+      continue;
+    }
+    const lines = read(path);
+    if (!Array.isArray(lines)) {
+      miss(0, `has a proof that cites ${at}, but ${path} cannot be read`);
+      continue;
+    }
+    if (line < 1 || line > lines.length) {
+      miss(1, `has a proof that cites ${at}, but ${path} has ${lines.length} lines`);
+      continue;
+    }
+    const code = squeezed(quote);
+    if (code.length < MIN_QUOTE_CHARS) {
+      miss(2, `has a proof that quotes no code after ${at}; put the exact code there right after it`);
+      continue;
+    }
+    const near = squeezed(lines.slice(Math.max(0, line - 1 - QUOTE_WINDOW), line + QUOTE_WINDOW).join('\n'));
+    if (!near.includes(code)) {
+      const shownQuote = JSON.stringify(oneLine(quote).slice(0, 120));
+      miss(3, `has a proof whose quoted code is not in ${path} within ${QUOTE_WINDOW} lines of line ${line}: ${shownQuote}`);
+      continue;
+    }
+    return null;
+  }
+  return best.problem;
+}
+
+function isExcludedMention(mention, excludedPaths, root) {
+  return [mention.file, trimWrappers(mention.file)].some((file) => pathMatches(repoRelative(file, root), excludedPaths));
+}
+
+function droppedEntryProblem(entry, i, rawByN, excludedPaths, root, repo, claimedLines) {
   const label = `dropped entry ${i + 1}`;
   if (!isPlainObject(entry)) return { problem: `${label} is not an object` };
   const raw = rawByN.get(entry.raw);
@@ -395,12 +475,18 @@ function droppedEntryProblem(entry, i, rawByN, excludedPaths, root) {
     if (!pathMatches(repoRelative(raw.file, root), [entry.glob])) {
       return { problem: `${where} cites glob ${JSON.stringify(entry.glob)}, which ${repoRelative(raw.file, root)} does not match` };
     }
+    const claimed = claimedLines ? claimedLines[raw.n - 1] : null;
+    const kept = claimed ? claimed.mentions.find((m) => !isExcludedMention(m, excludedPaths, root)) : null;
+    if (kept) {
+      return {
+        problem: `${where} is dropped as excluded, but its line in /code-review's result also cites ${kept.file}:${kept.line}, which no excluded glob matches; list that line under its first location and score it`,
+      };
+    }
     return { why: `excluded path: ${entry.glob}` };
   }
   if (entry.reason === 'disproved') {
-    if (!isText(entry.proof) || mentionsIn(normalizeLine(entry.proof), null).length === 0) {
-      return { problem: `${where} needs a proof that names a file:line` };
-    }
+    const problem = disproofProblem(entry.proof, { ...repo, root });
+    if (problem) return { problem: `${where} ${problem}` };
     return { why: entry.proof };
   }
   return { problem: `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"` };
@@ -414,7 +500,8 @@ function laneFail(reason) {
   return { ok: false, reason, dropped: [] };
 }
 
-function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root }) {
+// claimedLines, from grounding in text mode, holds the result line each raw entry claimed.
+function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root, fileExists, readLines, claimedLines = null }) {
   const shape = rawShapeProblem(rawEntries);
   if (shape) return laneFail(shape);
   const scoredParsed = scoredText == null ? null : parseJson(scoredText);
@@ -440,7 +527,7 @@ function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = 
   }
   const dropped = [];
   for (const [i, entry] of droppedEntries.entries()) {
-    const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root);
+    const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root, { fileExists, readLines }, claimedLines);
     if (result.problem) return laneFail(result.problem);
     const twice = use(entry.raw, `dropped entry ${i + 1}`);
     if (twice) return laneFail(twice);
@@ -456,11 +543,21 @@ function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = 
   return { ok: true, reason: 'ok', dropped };
 }
 
-function checkCodeReviewRun({ captureText, runId, rawText, scoredText, droppedText, excludedPaths = [], fileExists, root }) {
+function checkCodeReviewRun({
+  captureText,
+  runId,
+  rawText,
+  scoredText,
+  droppedText,
+  excludedPaths = [],
+  fileExists,
+  readLines,
+  root,
+}) {
   const parsedCapture = captureText == null ? null : parseJson(captureText);
   const parsedRaw = rawText == null ? null : parseJson(rawText);
   const rawEntries = parsedRaw ? parsedRaw.value : null;
-  const grounded = checkGrounding({
+  const { verdict: grounded, claimedLines } = ground({
     capture: parsedCapture ? parsedCapture.value : null,
     runId,
     rawEntries,
@@ -469,7 +566,7 @@ function checkCodeReviewRun({ captureText, runId, rawText, scoredText, droppedTe
   });
   const count = Array.isArray(rawEntries) ? rawEntries.length : 0;
   if (!grounded.ok) return { ...grounded, count, dropped: [] };
-  const lane = checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths, root });
+  const lane = checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths, root, fileExists, readLines, claimedLines });
   if (!lane.ok) return { ok: false, stage: 'lane', reason: lane.reason, count, mode: grounded.mode, dropped: [] };
   return { ok: true, stage: null, reason: 'ok', count, mode: grounded.mode, dropped: lane.dropped };
 }

@@ -159,4 +159,15 @@ function blocksForFiles(diffText, files) {
     .join('');
 }
 
-module.exports = { sliceForAgent, parseDiff, blocksForFiles };
+// A block whose paths cannot be read never counts as a file's block here: the caller must not
+// treat such a file as unchanged.
+function filesWithoutBlocks(diffText, files) {
+  const named = new Set();
+  for (const block of parseDiff(diffText)) {
+    if (block.file != null) named.add(block.file);
+    if (block.oldFile != null) named.add(block.oldFile);
+  }
+  return [...new Set(files)].filter((file) => !named.has(file));
+}
+
+module.exports = { sliceForAgent, parseDiff, blocksForFiles, filesWithoutBlocks };

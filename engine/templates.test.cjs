@@ -766,14 +766,25 @@ test('the lane heredoc examples run, and their files pass the lane check', () =>
       });
     }
     const read = (kind) => readFileSync(join(dir, `code_review_${kind}.r-1.json`), 'utf8');
-    const result = checkLaneOutput({
-      rawEntries: JSON.parse(read('raw')),
-      scoredText: read('findings'),
-      droppedText: read('dropped'),
-      excludedPaths: ['dist/**'],
-      root: dir,
-    });
+    const numJs = ['function parseCount(s) {', '  // digits only', '', '', '', '', '  if (!/^\\d+$/.test(s)) return null;', '  return Number(s);', '}'];
+    const repo = {
+      fileExists: (path) => path === 'lib/num.js',
+      readLines: (path) => (path === 'lib/num.js' ? numJs : null),
+    };
+    const check = (over = {}) =>
+      checkLaneOutput({
+        rawEntries: JSON.parse(read('raw')),
+        scoredText: read('findings'),
+        droppedText: read('dropped'),
+        excludedPaths: ['dist/**'],
+        root: dir,
+        ...repo,
+        ...over,
+      });
+    const result = check();
     assert.deepStrictEqual({ ok: result.ok, reason: result.reason }, { ok: true, reason: 'ok' });
+    const moved = check({ readLines: (path) => (path === 'lib/num.js' ? ['', '', '', '', '', '', '', '', '', '', '', ...numJs] : null) });
+    assert.strictEqual(moved.ok, false, "the example proof's quote must sit near the line it cites");
     const proofs = JSON.parse(read('dropped')).map((entry) => entry.proof).filter(Boolean);
     assert.ok(proofs.some((p) => p.includes('if (!/^\\d+$/.test(s))')), 'a doubled backslash reaches the file as one');
     const evidence = JSON.parse(read('findings')).findings.map((f) => f.evidence);
