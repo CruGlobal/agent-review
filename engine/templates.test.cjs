@@ -2510,7 +2510,11 @@ const specAmendment = (heading, nextHeading) => {
 
 test('the capture spec records the fresh-review changes to the hooks in section 1', () => {
   const amendment = specAmendment('### 1. Capture hooks', '### 2.');
-  for (const needle of ['An arming file older than 6 hours counts as not armed']) {
+  for (const needle of [
+    'An arming file older than 6 hours counts as not armed',
+    'strips one leading `/` from `tool_input.skill`',
+    'a line that is exactly `Result:` follows within the next 3 lines',
+  ]) {
     assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
   }
   assert.ok(!amendment.includes('—'), 'new prose uses no em dashes');

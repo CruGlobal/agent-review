@@ -18879,9 +18879,8 @@ var require_captureHook = __commonJS({
     var ARM_MAX_AGE_SECONDS = 21600;
     var STOP_BUFFER_LINES = 50;
     var CAPTURE_SOURCE = "agent-review-capture-hook";
-    var SKILL_HEADER = new RegExp(
-      `^\\s*Skill "${CODE_REVIEW_SKILL}" completed[^\\n]*\\n(?:[^\\n]*\\n)*?[ \\t]*Result:[ \\t]*\\r?\\n?`
-    );
+    var SKILL_HEADER = new RegExp(`^\\s*Skill "${CODE_REVIEW_SKILL}" completed`);
+    var RESULT_LINE_WITHIN = 3;
     function isObject(v) {
       return v !== null && typeof v === "object" && !Array.isArray(v);
     }
@@ -18908,7 +18907,14 @@ var require_captureHook = __commonJS({
       return arm;
     }
     function stripSkillHeader(text) {
-      return text.replace(SKILL_HEADER, "");
+      const lines = text.split("\n");
+      const header = lines.findIndex((line) => line.trim() !== "");
+      if (header < 0 || !SKILL_HEADER.test(lines[header])) return text;
+      const last = Math.min(header + RESULT_LINE_WITHIN, lines.length - 1);
+      for (let i = header + 1; i <= last; i++) {
+        if (lines[i].trim() === "Result:") return lines.slice(i + 1).join("\n");
+      }
+      return text;
     }
     function lastAssistantText(jsonl) {
       const lines = String(jsonl).split("\n");
@@ -18958,7 +18964,7 @@ var require_captureHook = __commonJS({
       const armed = armedState(arm, now);
       if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
       const input = isObject(payload.tool_input) ? payload.tool_input : {};
-      const skill = typeof input.skill === "string" ? input.skill : "";
+      const skill = typeof input.skill === "string" ? input.skill.replace(/^\//, "") : "";
       const args = typeof input.args === "string" ? input.args : "";
       const mismatch = (got, reason) => ({
         mismatch: { run_id: armed.run_id, expected: armed.args, got, ...reason ? { reason } : {}, ts: now }

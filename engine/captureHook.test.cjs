@@ -248,6 +248,25 @@ test('a subagent calling a plugin skill named *:code-review writes a mismatch na
   assert.deepEqual(postSkillWrites({ ...base, arm: null, payload: skillPayload({ tool_input: { skill: 'code-review:code-review' } }) }), {}, 'not armed');
 });
 
+test('post-skill strips one leading / from the skill name before matching', () => {
+  const base = { arm: ARM, stops: [], now: NOW, readTranscript: noTranscript };
+  const slashed = postSkillWrites({ ...base, payload: skillPayload({ tool_input: { skill: '/code-review' } }) });
+  assert.deepEqual(slashed, postSkillWrites({ ...base, payload: skillPayload() }), '/code-review is the built-in skill');
+  assert.equal(slashed.pending.fork_id, 'f1');
+
+  assert.deepEqual(
+    postSkillWrites({ ...base, payload: skillPayload({ tool_input: { skill: '/code-review', args: 'low' } }) }),
+    { mismatch: { run_id: 'r1', expected: 'xhigh 12', got: 'low', ts: NOW } },
+  );
+  assert.deepEqual(
+    postSkillWrites({ ...base, payload: skillPayload({ tool_input: { skill: '/x:code-review' } }) }),
+    { mismatch: { run_id: 'r1', expected: 'xhigh 12', got: 'skill "x:code-review" with args "xhigh 12"', reason: 'wrong skill', ts: NOW } },
+  );
+  for (const skill of ['//code-review', '/simplify', '/']) {
+    assert.deepEqual(postSkillWrites({ ...base, payload: skillPayload({ tool_input: { skill } }) }), {}, skill);
+  }
+});
+
 test('background fork whose stop is already buffered also writes the capture', () => {
   const written = postSkillWrites({
     payload: skillPayload(),
@@ -487,14 +506,20 @@ test('stripSkillHeader leaves text without the header unchanged', () => {
     'Skill "code-review" completed, but there is no result line here',
     'Skill "simplify" completed (forked execution).\n\nResult:\nkept',
     'Intro.\nSkill "code-review" completed (forked execution).\nResult:\nkept',
+    'Skill "code-review" completed\nsummary line\nResult: the cart is wrong\nmore',
+    '- a.rb:1: x\nsummary\nResult:\n- b.rb:2: y',
+    'Skill "code-review" completed (forked execution).\n\n\n\nResult:\n- a.rb:1: x',
+    'Skill "code-review" completed (forked execution).\nResult: (none)',
   ]) {
     assert.equal(stripSkillHeader(text), text, JSON.stringify(text));
   }
-  assert.equal(stripSkillHeader('Skill "code-review" completed (forked execution).\nResult: (none)'), '(none)');
   assert.equal(
     stripSkillHeader('Skill "code-review" completed (forked execution).\n\nResult:\n- a.rb:1: x\nResult: kept'),
     '- a.rb:1: x\nResult: kept',
   );
+  assert.equal(stripSkillHeader('\n  Skill "code-review" completed (forked execution).\r\n\r\n  Result:  \r\n(none)'), '(none)');
+  assert.equal(stripSkillHeader('Skill "code-review" completed (forked execution).\n\n\nResult:\n(none)'), '(none)', 'Result: on the third line after the header');
+  assert.equal(stripSkillHeader('Skill "code-review" completed (forked execution).\nResult:'), '');
 });
 
 test('lastAssistantText returns the last assistant text block in a transcript', () => {
