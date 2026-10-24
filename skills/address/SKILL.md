@@ -162,8 +162,8 @@ findings are actually addressed. This mode judges; it does not edit code.
    commit first (never commit for them in check mode). On confirmation, run
    [Stage 3](#stage-3--update-the-ledger) and [Stage 4](#stage-4--record-outcomes-in-the-learning-layer)
    for those items with `status: fixed`.
-4. Remind the dev the push still triggers an incremental CI re-review — check mode is fast
-   local feedback, not the final verdict.
+4. Remind the dev that check mode is fast local feedback, not the final verdict. After the
+   push, a re-review is still needed: CI runs it unless `reviews_run` is `local` (see Stage 5).
 
 ## Stage 1 — Get the instruction
 
@@ -235,8 +235,8 @@ echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh
 ```
 
 Confirm with the user before pushing. In argument mode, push without confirming: the argument is
-the instruction, and yolo depends on it. The push triggers an incremental re-review of exactly these
-commits — that is the verification loop, not a cost bug.
+the instruction, and yolo depends on it. When CI reviews run, the push triggers an incremental
+re-review of exactly these commits — that is the verification loop, not a cost bug.
 
 ## Stage 3 — Update the ledger
 
@@ -294,5 +294,8 @@ it merges with the PR. Skip the commit if nothing was dismissed and no fix was a
 ## Stage 5 — Report back
 
 Summarize the result in the session and remind the user of anything still open. When fixes were
-pushed, lead with an explicit request to review the commit. If the status carries
+pushed, lead with an explicit request to review the commit. Then read
+`agent-review config get reviews_run`: when `reviews_run` is `local`, no CI review exists, so tell
+the author to run `/agent-review:re-review` and promise no CI re-review (the report's head marker
+still names the old SHA, so the approve workflow refuses it until a re-review posts). If the status carries
 `irreversible: true`, remind the user that a human approval is required regardless.

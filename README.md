@@ -131,8 +131,9 @@ switch to Claude Code's built-in `/code-review` as the main finder instead. Ever
 the review stays the same: the numbered findings, the 1 to 10 severity, fix and dismiss, the
 re-review, and the approval.
 
-**Turn it on** in `.claude/review/config.yml`. These are the defaults, so
-`name: code-review` with no other keys behaves the same as this:
+**Turn it on** in `.claude/review/config.yml`. This is an example of a local-only, code-review
+repo, not the defaults. `name: code-review` alone keeps CI reviews on, because `reviews_run`
+defaults to `local-and-ci`:
 
 ```yaml
 engine:

@@ -50,7 +50,10 @@ succeeded (a missing key), means CI reviews are on, which is the behavior descri
 of this stage. If the command itself failed (`unknown`), the value is unknown: say so and ask the
 user whether the repo is local-only before comparing or offering any CI files.
 
-**Local-only repo (`reviews_run` is `local`):** compare only `agent-review-approve.yml`. Do not
+**Local-only repo (`reviews_run` is `local`):** compare only `agent-review-approve.yml`. If it is
+missing, offer it by default (not skip) and say "this is the only path that approves": without
+it no locally posted report is ever approved. Never offer the CI-file removal in Stage 4 while
+the approve workflow is missing. Do not
 compare or offer `agent-review.yml`, `agent-review-interact.yml`, or `agent-review-readiness.yml`,
 and say they were skipped because the repo is local-only. Then see Stage 4 for CI files that are
 still installed. Stage 3 applies to the approve file only.
@@ -61,8 +64,9 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   pre-0.3.0). If the marker already equals the latest version, report "up to date" and skip it.
 - **File missing**: the repo never installed that piece. Offer it, don't force it — ask the
   user whether to add it, and default to skipping `agent-review-readiness.yml` (the rollout
-  gate) and `agent-review-approve.yml` (approval of locally posted reports; a stronger trust
-  grant than the CI path) unless they want them.
+  gate) and, in a CI repo, `agent-review-approve.yml` (approval of locally posted reports; a
+  stronger trust grant than the CI path) unless they want them. In a local-only repo the approve
+  file is the default yes, as above.
 
 If every file is current, say so and stop here. In a local-only repo, do not stop before the
 removal check in Stage 4 if any CI file is still installed.
@@ -113,15 +117,19 @@ gh api "repos/$REPO/branches/$DEFAULT/protection/required_status_checks" --jq '.
 gh api "repos/$REPO/rules/branches/$DEFAULT" --jq '[.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context]'
 ```
 
-The first call is classic branch protection (a 404 means none is set). The second lists
+The first call is classic branch protection. GitHub also returns a 404 to anyone without admin
+rights on a protected branch, so a 404 counts as "could not verify", not as "none". It counts as
+"none" only when `gh api repos/{o}/{r} --jq .permissions.admin` is `true`. If it is not `true`,
+warn that classic protection could not be checked and require an explicit yes before removal.
+The second lists
 rulesets that apply to the branch and may include a `required_status_checks` rule. These
 workflows produce checks named like the job or workflow: `review`, `agent-review`, `interact`,
 `readiness`. Also treat any required context that contains `agent-review` as produced by these
 workflows, since caller job contexts usually look like `<caller job> / <reusable job>`. If any
 required context matches, warn the user which check it is and where it is
 required, and say that removing the workflow would leave that check pending forever and block
-merges until it is removed from the protection or ruleset. If a lookup fails for any reason
-other than a 404, say the check could not be verified rather than assuming it is safe.
+merges until it is removed from the protection or ruleset. If a lookup fails for any other
+reason, say the check could not be verified rather than assuming it is safe.
 
 Then ask the user whether to remove the files, naming each one. Never remove a file without a
 yes. On a yes, run `git rm` on those files; the diff below uses `git diff HEAD` so the staged

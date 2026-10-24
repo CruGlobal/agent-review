@@ -617,11 +617,21 @@ recommendation. Do not skip a question because the recommendation looks obvious.
    - **Local + CI:** CI also reviews labeled PRs, so all four workflows are installed and the
      `ANTHROPIC_API_KEY` secret is needed. Costs API usage on every labeled PR. Write no
      `reviews_run:` key; `local-and-ci` is the default.
-3. **Should the bot approve PRs in this repo?** Recommended: yes. Recommend **no** for PCI-scope
-   repos and for `staff_accounting_app`, which keep human review under team policy; say so when
-   the repo looks like one of those. A yes means `auto_approve: true` on every installed caller,
+3. **Should the bot approve PRs in this repo?** Recommended: yes, but
+   recommend no for repos your team requires human review on, such as payment or financial code;
+   say so when the repo looks like one of those. A yes means `auto_approve: true` on every installed caller,
    a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every caller is `false`
    whatever the answer.
+
+Save the Where-reviews-run and approval answers where later blocks can read them. Each bash
+block is a separate shell, so these go in the same env file as the other cross-stage state. Use
+`local` or `local-and-ci` for `REVIEWS_RUN` and `yes` or `no` for `BOT_APPROVES`; this writes
+only to `/tmp`, not to the repo. Re-run it if the user changes either answer at the 3B gate:
+
+```bash
+. /tmp/agent_review_init.sh 2>/dev/null || true
+echo 'export REVIEWS_RUN="<local|local-and-ci>" BOT_APPROVES="<yes|no>"' >> /tmp/agent_review_init.sh
+```
 
 Draft a development evaluation suite in memory: at least five realistic seeded defects drawn from
 different mined categories plus two behavior-preserving clean controls. Each case needs a minimal
@@ -708,14 +718,13 @@ printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/evals/results/.gitkeep
 ```
 
-Then the CI workflows. The copies run only when the `reviews_run` just written to `config.yml` is
-`local-and-ci`, or is left out (the default, which `config get` prints as `undefined`); anything
-else, including an empty read, copies nothing:
+Then the CI workflows. The copies run only when the `REVIEWS_RUN` answer saved in 3A is
+`local-and-ci`; anything else, including an empty value, copies nothing. Do not read it back
+from `config.yml`: the config can reference files that are written later in this step, so it
+may not load yet.
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
-REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null)   # from the config written above
-[ "$REVIEWS_RUN" = "undefined" ] && REVIEWS_RUN=local-and-ci   # a missing key is the default
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
   cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
@@ -730,11 +739,15 @@ fi
   mode also set `rollout_mode: shadow` on the review caller.
 
 ```bash
-# only when approval is off; touches only the workflow files that were installed
-for f in agent-review-approve agent-review-interact agent-review; do
-  [ -f ".github/workflows/$f.yml" ] && sed -i.bak 's/auto_approve: true/auto_approve: false/' ".github/workflows/$f.yml"
-done
-rm -f .github/workflows/*.bak
+. /tmp/agent_review_init.sh 2>/dev/null || true
+# only when the answer was no (also run it for rollout.mode: shadow); touches only installed files
+if [ "$BOT_APPROVES" = "no" ]; then
+  for f in agent-review-approve agent-review-interact agent-review; do
+    w=".github/workflows/$f.yml"
+    [ -f "$w" ] || continue
+    tmp=$(mktemp) && sed 's/auto_approve: true/auto_approve: false/' "$w" > "$tmp" && mv "$tmp" "$w"
+  done
+fi
 ```
 
 - Write the approved repo-specific evaluation suite and patches. If structural analysis or
@@ -784,9 +797,8 @@ The cache regenerates on demand, so leave it out of the commit unless the team w
 ### 3E — Commit
 
 ```bash
+. /tmp/agent_review_init.sh 2>/dev/null || true
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
-REVIEWS_RUN=$(agent-review config get reviews_run 2>/dev/null)   # from the config written above
-[ "$REVIEWS_RUN" = "undefined" ] && REVIEWS_RUN=local-and-ci   # a missing key is the default
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

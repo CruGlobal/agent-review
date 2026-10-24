@@ -35,7 +35,8 @@ re-reviews cheap.
 
 2. **Review** — invoke `agent-review:review` with the argument `auto` (or the user's
    mode), plus the user's `engine=` and `effort=` tokens, if any. It posts the report and prints
-   the findings.
+   the findings. If the review fails before posting (a config error, an invalid `engine=` or
+   `effort=` token), stop and show its error; never run address against an older report.
 
 3. **Fix blockers** — read the posted ledger:
 
