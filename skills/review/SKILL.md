@@ -172,8 +172,15 @@ echo ""
 # this run.
 rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
 rm -f /tmp/agent_findings/*.json 2>/dev/null || true
-# A stale /code-review result would pass Stage 2's proof check for a lane that never ran it.
-rm -f /tmp/code_review_raw.txt /tmp/code_review_dropped.json /tmp/code_review_proof.json
+# No earlier run's /code-review files or armed capture may carry into this run. Under zsh a glob
+# with no match fails its whole command and prints an error, so each glob gets its own quiet line.
+{ rm -f /tmp/code_review_raw.*.json; } 2>/dev/null || true
+{ rm -f /tmp/code_review_findings.*.json; } 2>/dev/null || true
+{ rm -f /tmp/code_review_dropped.*.json; } 2>/dev/null || true
+rm -f /tmp/code_review_proof.json /tmp/code_review_diff.txt
+if [ "$ENGINE" = "code-review" ]; then
+  agent-review capture disarm
+fi
 # A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
 # run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a
 # launched-subset plan this run never wrote.
@@ -473,7 +480,7 @@ The plan JSON has this shape:
 }
 ```
 
-When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", and follow it.
+When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", part "The plan", and follow it.
 
 ---
 
@@ -721,7 +728,7 @@ Show the user the start-up lines (`agent-review · engine: …`, `reviewers: …
 lines) exactly as printed. Under the `agent-review` engine the `reviewers:` line lists the plan's
 lanes; Stage 0B still decides the final launch list, and a `note:` line says when quick or deep
 changes it. On a real skip the `reviewers:` line reads `none (no-risk diff skipped)`.
-When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", and follow it.
+When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", part "The start-up line", and follow it.
 
 If auto resolved to `skip`: in CI, run the **[CI Mode posting step](#post-the-report-to-the-pr-create-or-update)**
 with the skip note as the report, then go straight to Stage 8 cleanup — launch no agents. Locally
@@ -790,7 +797,7 @@ plan's `agents[]` has:
 
 **Mode semantics** — build the launch list as follows:
 
-- When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", and follow it. The bullets below apply only when `ENGINE` is `agent-review`.
+- When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", part "The launch list", and follow it. The bullets below apply only when `ENGINE` is `agent-review`.
 - **standard** → the plan's `agents[]`, exactly. Do not add, drop, or reorder.
 - **deep** → every agent with `enabled: true` in config (`agent-review config get agents`), even
   ones whose triggers did not fire. For agents also present in the plan, use the plan's entry (its
@@ -816,7 +823,7 @@ Announce the selection, including each agent's `matchedBy` reason, e.g.:
 ✅ data-integrity — content:createClient
 ```
 
-When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", and follow it.
+When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", part "The agent list", and follow it.
 
 ### Smoke-Test Tier Routing
 
@@ -825,13 +832,13 @@ The launch table (Stage 1) selects a subagent type per agent's tier (`agent-revi
 before committing every later launch to them — a stale or partially-installed plugin might not
 expose them yet. Run this only once a review is actually about to launch agents (the resolved
 mode reached this point instead of exiting at a Stage 0 skip) — that keeps a score-0 auto skip at
-$0. Launch exactly one Task:
+$0. Launch this probe as one Task, not one per tier:
 
 - **description**: `"routing smoke test"`
 - **subagent_type**: `"agent-review:reviewer-haiku"`
 - **prompt**: `"Reply with exactly: OK"`
 
-When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", and follow it. Both Tasks must pass.
+When $ENGINE is code-review, read code-review-engine.md, section "Stage 0", part "The smoke test", and follow it.
 
 If the Task tool errors (unknown subagent type) or the reply is not exactly `OK`, degrade
 rather than fail the review — set `ROUTING="degraded"` below; every later launch table then falls
@@ -885,6 +892,7 @@ if [ "${ENGINE:-}" = "code-review" ]; then
     CODE_REVIEW_TARGET="$RANGE"
   fi
   echo "code-review target: $CODE_REVIEW_TARGET"
+  echo "export CODE_REVIEW_TARGET=\"$CODE_REVIEW_TARGET\"" >> /tmp/review_env.sh
 fi
 
 # --- Approved learnings (learning layer) ---

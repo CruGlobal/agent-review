@@ -105,7 +105,9 @@ test('every agent-review subcommand used in skill bash blocks exists in the CLI'
     'usage-line parse picked up an argument alternation as a subcommand — keep argument alternations unspaced ("show|validate|get")',
   );
 
-  for (const { name, path } of SKILLS) {
+  const engineDocFile = { path: join(ROOT, 'skills/review/code-review-engine.md') };
+  for (const { path } of [...SKILLS, engineDocFile]) {
+    const shown = path.slice(ROOT.length + 1);
     const used = new Set(
       [...bashBlocks(readFileSync(path, 'utf8')).matchAll(
         /(?:^\s*|\$\(|(?:^|[;&|])\s*|\b(?:if|then|do)\s+)agent-review\s+([a-z][a-z-]*)/gm,
@@ -113,12 +115,12 @@ test('every agent-review subcommand used in skill bash blocks exists in the CLI'
     );
     assert.ok(
       used.size > 0,
-      `no agent-review invocations found in skills/${name}/SKILL.md bash blocks`,
+      `no agent-review invocations found in ${shown} bash blocks`,
     );
     for (const sub of used) {
       assert.ok(
         known.has(sub),
-        `skills/${name}/SKILL.md calls "agent-review ${sub}" but the CLI has no such command`,
+        `${shown} calls "agent-review ${sub}" but the CLI has no such command`,
       );
     }
   }
@@ -549,6 +551,8 @@ const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
 const LANE_FILES = ['raw', 'findings', 'dropped'].map((kind) => `/tmp/code_review_${kind}.{{ATTEMPT}}.json`);
 const LANE_PROOF_COMMAND =
   'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}';
+const STAGE2_PROOF_COMMAND =
+  'agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" > /tmp/code_review_proof.json';
 
 function laneText() {
   return readFileSync(CODE_REVIEW_LANE, 'utf8');
@@ -628,22 +632,38 @@ test('lane template placeholders are exactly the twelve listed', () => {
 
 test('the skill says how to fill the capture, attempt, retry, diff, and profile placeholders', () => {
   const { rows } = lanePlaceholderRows();
-  assert.strictEqual(rows.get('RUN_ID'), '`$REVIEW_ID`');
+  assert.strictEqual(rows.get('RUN_ID'), '`$REVIEW_ID`, the `<id>` in the `armed <id>: <args>` line');
   assert.strictEqual(rows.get('ATTEMPT'), '`$REVIEW_ID-1`, or `$REVIEW_ID-2` on a relaunch');
-  assert.strictEqual(rows.get('RETRY_NOTE'), 'Empty on the first launch');
+  assert.strictEqual(
+    rows.get('RETRY_NOTE'),
+    'Empty on the first launch and on a relaunch with a new capture; the note from Stage 2 on a relaunch with the same capture',
+  );
   assert.strictEqual(
     rows.get('DIFF_PATH'),
-    '`/tmp/code_review_diff.txt` (`git diff "$BASE_SHA...$HEAD_SHA"`, the merge base) for a full PR review; `/tmp/pr_diff.txt` for incremental and range reviews',
+    'The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$BASE_REF...$HEAD_REF"`, the merge base) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews',
   );
   const profile = rows.get('PROFILE_INSTRUCTION');
   assert.ok(
     profile.includes(
-      'For `chill`: "This repository uses the chill profile, so the report hides findings below 7. Score every finding honestly anyway; never drop or lower one for the profile."',
+      'For `chill`: "This repository uses the chill profile, so the report hides findings below 4 that no other lane backs up. Score every finding honestly anyway; never drop or lower one for the profile."',
     ),
     profile,
   );
+  assert.ok(!profile.includes('below 7'), 'chill hides only findings below 4, so "below 7" would tell the scorer the wrong cutoff');
   assert.ok(profile.includes('For `standard` and `assertive`: "Score every finding honestly."'), profile);
   assert.ok(!/Report only high-confidence/.test(profile), 'the lane never gets the suppress-nits instruction');
+});
+
+test('the chill profile instruction states the cutoff consensus applies', () => {
+  const { consensusFrom } = require('./consensus.cjs');
+  const lone = (severity, file) => ({
+    agent: 'testing', category: 'testing', severity, file, line: 1, message: `a severity ${severity} finding`,
+    confidence: 'High', evidence: 'e', recommendation: 'r',
+  });
+  const findingsByAgent = { testing: { findings: [lone(3, 'a.js'), lone(4, 'b.js')] } };
+  const kept = consensusFrom({ findingsByAgent, profile: 'chill' }).findings.map((f) => f.severity);
+  assert.deepStrictEqual(kept, [4], 'chill hides a lone finding below 4 and keeps one at 4');
+  assert.ok(lanePlaceholderRows().rows.get('PROFILE_INSTRUCTION').includes('hides findings below 4 that no other lane backs up'));
 });
 
 test('with no PR, /code-review gets the same range the lanes review', () => {
@@ -1856,9 +1876,7 @@ test('review skill wires the code-review engine', () => {
 
   const stage2 = engineSection('Stage 2: checking the code-review lane');
   assert.ok(
-    stage2.includes(
-      'agent-review code-review-proof --raw /tmp/code_review_raw.txt --findings /tmp/agent_findings/code-review.json --dropped /tmp/code_review_dropped.json > /tmp/code_review_proof.json',
-    ),
+    bashBlocks(stage2).includes(STAGE2_PROOF_COMMAND),
     'Stage 2 proves /code-review ran and that every raw finding was scored or dropped',
   );
   assert.ok(stage2.includes('`reason`'), 'a second proof failure prints the proof reason');
@@ -2010,7 +2028,7 @@ test('report skeleton covers the code-review engine', () => {
   const notes = report.indexOf('[IF any options notes');
   assert.ok(engEnd > engStart && notes > engEnd, 'the notes directive must sit outside the engine block');
   assert.ok(/under any engine/.test(report.slice(notes, notes + 200)));
-  for (const f of ['/tmp/review_options.json', '/tmp/code_review_proof.json', '/tmp/code_review_dropped.json', 'reviews_run']) {
+  for (const f of ['/tmp/review_options.json', '/tmp/code_review_proof.json', '/tmp/agent_findings/code-review.json', 'reviews_run']) {
     assert.ok(
       (skill.slice(skill.indexOf('### Write the report')) + stage6Engine).includes(f),
       `Stage 6 must name ${f}`,
@@ -2507,27 +2525,34 @@ test('hooks.json registers both capture hooks', () => {
 });
 
 const REVIEW_SKILL = join(ROOT, 'skills/review/SKILL.md');
-const ENGINE_POINTER = (name) => `When $ENGINE is code-review, read code-review-engine.md, section "${name}", and follow it.`;
+const ENGINE_POINTER = (name, part) =>
+  `When $ENGINE is code-review, read code-review-engine.md, section "${name}"${part ? `, part "${part}"` : ''}, and follow it.`;
+// The Stage 0 parts, in the order SKILL.md points at them.
+const STAGE0_PARTS = ['The plan', 'The start-up line', 'The launch list', 'The agent list', 'The smoke test'];
 
 test('SKILL.md has no code-review-engine-only prose outside one-line pointers', () => {
   const skill = readFileSync(REVIEW_SKILL, 'utf8');
   const doc = engineDoc();
   for (const name of ['Stage 0', 'Stage 1: the code-review lane', 'Stage 2: checking the code-review lane', 'Stage 6: the engine block']) {
     assert.ok(doc.includes(`\n## ${name}\n`), `code-review-engine.md has the section "${name}"`);
-    assert.ok(skill.includes(ENGINE_POINTER(name)), `SKILL.md points at "${name}"`);
+    if (name !== 'Stage 0') assert.ok(skill.includes(ENGINE_POINTER(name)), `SKILL.md points at "${name}"`);
   }
   const moved = [
     'fill its twelve placeholders:',
     '| `{{SCORING_RULES}}`',
     'launch a second Task',
     'agent-review code-review-proof --raw',
-    '/code-review did not run',
+    '/code-review did not finish',
+    'Both must pass.',
     'Fill the `[IF engine is code-review]` block whenever',
     'Code Review (/code-review <effort>)',
   ];
   for (const phrase of moved) {
     assert.ok(!skill.includes(phrase), `SKILL.md must not carry: ${phrase}`);
     assert.ok(doc.includes(phrase), `code-review-engine.md must carry: ${phrase}`);
+  }
+  for (const gone of ['/code-review did not run', 'Both Tasks must pass']) {
+    assert.ok(!skill.includes(gone) && !doc.includes(gone), `neither file may carry: ${gone}`);
   }
   const lines = skill.split('\n');
   for (const [i, line] of lines.entries()) {
@@ -2638,6 +2663,340 @@ test('the code-review smoke test passes model haiku', () => {
   );
   const skill = readFileSync(REVIEW_SKILL, 'utf8');
   const smoke = stageSlice(skill, '### Smoke-Test Tier Routing', '## Stage 1 — Launch Specialized Review Agents');
-  assert.ok(smoke.includes(ENGINE_POINTER('Stage 0')), 'the smoke test points at the second probe');
-  assert.ok(smoke.includes('Launch exactly one Task:'), 'the default engine still launches one probe');
+  assert.ok(smoke.includes(ENGINE_POINTER('Stage 0', 'The smoke test')), 'the smoke test points at the second probe');
+  const flatSmoke = smoke.replace(/\s+/g, ' ');
+  assert.ok(flatSmoke.includes('Launch this probe as one Task, not one per tier:'), 'the default engine still launches one probe');
+  assert.ok(!flatSmoke.includes('Launch exactly one Task'), 'the code-review engine launches two, so "exactly one" is false there');
+  assert.ok(!flatSmoke.includes('Both Tasks must pass'), 'the two-probe rule lives in the engine doc');
+  assert.ok(stage0.includes('Both must pass.'), 'the engine doc says both probes must pass');
+});
+
+test('Stage 0 pointers name the part of the engine doc they mean', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const stage0 = engineSection('Stage 0');
+  assert.ok(!skill.includes(ENGINE_POINTER('Stage 0')), 'a bare "Stage 0" pointer does not say which part applies');
+  let at = -1;
+  for (const part of STAGE0_PARTS) {
+    const pointer = ENGINE_POINTER('Stage 0', part);
+    assert.strictEqual(skill.split(pointer).length - 1, 1, `SKILL.md points at "${part}" once`);
+    assert.ok(skill.indexOf(pointer) > at, `the "${part}" pointer follows the one before it`);
+    at = skill.indexOf(pointer);
+    assert.ok(stage0.includes(`**${part}.**`), `the engine doc's Stage 0 has the part "${part}"`);
+  }
+  const at1 = (header) => skill.indexOf(header);
+  const where = (part) => skill.indexOf(ENGINE_POINTER('Stage 0', part));
+  assert.ok(where('The plan') < at1('## CI Mode'), 'the plan pointer sits with the plan shape');
+  assert.ok(where('The start-up line') > at1('### Start-up Line') && where('The start-up line') < at1('### Risk Assessment'));
+  assert.ok(where('The launch list') > at1('**Mode semantics**') && where('The launch list') < at1('- **standard** →'));
+  assert.ok(where('The agent list') > at1('Announce the selection') && where('The agent list') < at1('### Smoke-Test Tier Routing'));
+  assert.ok(where('The smoke test') > at1('### Smoke-Test Tier Routing') && where('The smoke test') < at1('## Stage 1 — Launch Specialized Review Agents'));
+});
+
+// Each ```bash block in `text`, as its own string.
+function bashBlockList(text) {
+  return [...text.matchAll(/^```bash\n([\s\S]*?)\n```$/gm)].map((m) => m[1]);
+}
+
+function armBlock() {
+  const blocks = bashBlockList(engineSection('Stage 1: the code-review lane')).filter((b) => b.includes('agent-review capture arm'));
+  assert.strictEqual(blocks.length, 1, 'Stage 1 has one block that arms the capture');
+  return blocks[0];
+}
+
+// Runs Stage 1's arm block with stub agent-review and git commands, its /tmp files moved to a
+// private directory, and returns what it called and wrote.
+function runArmBlock(shell, env, plan) {
+  const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
+  const { dirname } = require('node:path');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-arm-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'agent-review'),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\n[ "$1 $2" = "capture arm" ] && echo "armed $4: $6"\nexit 0\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/git.args"\necho "merge-base diff"\n`, {
+      mode: 0o755,
+    });
+    writeFileSync(join(dir, 'review_env.sh'), Object.entries(env).map(([k, v]) => `export ${k}="${v}"`).join('\n') + '\n');
+    writeFileSync(join(dir, 'review_plan.json'), JSON.stringify(plan));
+    writeFileSync(join(dir, 'pr_diff.txt'), 'two-dot diff\n');
+    const script = armBlock().replaceAll('/tmp/', `${dir}/`);
+    let stdout = '';
+    let status = 0;
+    try {
+      stdout = execFileSync(shell, ['-c', script], {
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, HOME: process.env.HOME },
+      });
+    } catch (e) {
+      status = e.status;
+      stdout = String(e.stdout || '');
+    }
+    const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null);
+    return {
+      dir,
+      status,
+      stdout,
+      agentReview: read('agent-review.args'),
+      git: read('git.args'),
+      env: read('review_env.sh'),
+      diff: read('code_review_diff.txt'),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function availableShells(t) {
+  const shells = ['bash', 'zsh'].filter((sh) => {
+    try {
+      execFileSync(sh, ['-c', 'true']);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  if (!shells.includes('zsh')) t.diagnostic('zsh not installed; only bash was exercised');
+  return shells;
+}
+
+const FULL_PR_ENV = {
+  EFFORT: 'xhigh',
+  REVIEW_ID: '33-20261023-120000',
+  PR_NUMBER: '33',
+  INCREMENTAL: '',
+  LAST_REVIEWED: '',
+  BASE_REF: 'aaa111',
+  HEAD_REF: 'bbb222',
+  RANGE: 'aaa111..bbb222',
+  CODE_REVIEW_TARGET: '33',
+};
+
+test('code-review-engine.md arms capture with the composed args and fills SKILL_ARGS from it', (t) => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  assert.ok(
+    bashBlocks(skill).includes('  echo "code-review target: $CODE_REVIEW_TARGET"\n  echo "export CODE_REVIEW_TARGET=\\"$CODE_REVIEW_TARGET\\"" >> /tmp/review_env.sh\nfi'),
+    'the target block keeps the target for the arm block',
+  );
+  const block = armBlock();
+  assert.ok(block.startsWith('. /tmp/review_env.sh 2>/dev/null || true\nset -e\n'), block);
+  for (const line of [
+    'MAX_FINDINGS_FLAG=" --max-findings ${MAX_FINDINGS:-default}"',
+    'CODE_REVIEW_ARGS="$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"',
+    'agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"',
+  ]) {
+    assert.ok(block.split('\n').includes(line), `the arm block runs: ${line}`);
+  }
+  const stage1 = engineSection('Stage 1: the code-review lane');
+  assert.ok(stage1.indexOf('agent-review capture arm') < stage1.indexOf('Launch the lane with the Task tool'), 'capture is armed before the lane launches');
+  assert.ok(
+    flatText(stage1).includes('If this block fails, stop the review and show its error.'),
+    'a lane with no armed capture cannot be checked',
+  );
+  const row = lanePlaceholderRows().rows.get('SKILL_ARGS');
+  assert.ok(row.includes('Copy them exactly from the `armed <id>: <args>` line the block prints.'), row);
+
+  const cases = [
+    [FULL_PR_ENV, { engine: { maxFindings: null } }, 'xhigh 33 --max-findings default'],
+    [
+      { ...FULL_PR_ENV, EFFORT: 'high', INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
+      { engine: { maxFindings: 5 } },
+      'high ccc333..bbb222 --max-findings 5',
+    ],
+    [
+      { ...FULL_PR_ENV, EFFORT: 'low', PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { engine: { maxFindings: 'all' } },
+      'low ddd444..HEAD --max-findings all',
+    ],
+  ];
+  for (const shell of availableShells(t)) {
+    for (const [env, plan, args] of cases) {
+      const run = runArmBlock(shell, env, plan);
+      assert.strictEqual(run.status, 0, `${shell}: ${run.stdout}`);
+      assert.strictEqual(run.agentReview, `capture\narm\n--run\n${env.REVIEW_ID}\n--args\n${args}\n`, `${shell}: arm call`);
+      assert.ok(run.stdout.includes(`armed ${env.REVIEW_ID}: ${args}\n`), `${shell}: the printed args are the armed args`);
+      assert.ok(run.env.includes(`export CODE_REVIEW_ARGS="${args}"`), `${shell}: a relaunch re-arms with the same args`);
+    }
+    const missing = runArmBlock(shell, { ...FULL_PR_ENV, CODE_REVIEW_TARGET: '' }, { engine: { maxFindings: null } });
+    assert.notStrictEqual(missing.status, 0, `${shell}: no target, no arm`);
+    assert.strictEqual(missing.agentReview, null, `${shell}: capture is never armed without a target`);
+  }
+});
+
+test('full PR reviews give the lane a merge-base diff', (t) => {
+  assert.ok(armBlock().includes('  git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt\n'));
+  for (const shell of availableShells(t)) {
+    const full = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } });
+    assert.strictEqual(full.git, 'diff\naaa111...bbb222\n', `${shell}: three dots diff against the merge base`);
+    assert.strictEqual(full.diff, 'merge-base diff\n', `${shell}: the merge-base diff is written`);
+    assert.ok(full.stdout.includes(`code-review diff: ${full.dir}/code_review_diff.txt\n`), `${shell}: ${full.stdout}`);
+    assert.ok(full.env.includes(`CODE_REVIEW_DIFF="${full.dir}/code_review_diff.txt"`), `${shell}: the diff path is kept`);
+
+    const incremental = runArmBlock(
+      shell,
+      { ...FULL_PR_ENV, INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
+      { engine: {} },
+    );
+    assert.strictEqual(incremental.git, null, `${shell}: an incremental review keeps the reviewed range`);
+    assert.ok(incremental.stdout.includes(`code-review diff: ${incremental.dir}/pr_diff.txt\n`), `${shell}: ${incremental.stdout}`);
+
+    const noPr = runArmBlock(
+      shell,
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { engine: {} },
+    );
+    assert.strictEqual(noPr.git, null, `${shell}: a range review keeps the reviewed range`);
+    assert.ok(noPr.stdout.includes(`code-review diff: ${noPr.dir}/pr_diff.txt\n`), `${shell}: ${noPr.stdout}`);
+  }
+});
+
+test("Stage 2 waits for the lane's next final line after an early handback", () => {
+  const stage2 = engineSection('Stage 2: checking the code-review lane');
+  const flat = flatText(stage2);
+  assert.ok(
+    bashBlocks(stage2).includes('agent-review capture-wait --run "$REVIEW_ID" --effort "$EFFORT"'),
+    'Stage 2 waits on the capture itself',
+  );
+  for (const needle of [
+    'Any other reply is an early handback',
+    'run this with a Bash timeout of 600000',
+    'run it again each time it exits 3',
+    'Once it exits 0 or 1, keep collecting the same lane (TaskOutput) for up to 10 more minutes, and judge its next final line.',
+    '`/code-review did not finish`',
+    '`/code-review returned no usable result`',
+  ]) {
+    assert.ok(flat.includes(needle), `Stage 2 must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(
+    flat.indexOf('early handback') < flat.indexOf('2. Judge the reply.'),
+    'the wait comes before any judging or relaunch',
+  );
+});
+
+test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on stage capture', () => {
+  const stage2 = engineSection('Stage 2: checking the code-review lane');
+  const flat = flatText(stage2);
+  assert.strictEqual(
+    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}'),
+    `${LANE_PROOF_COMMAND} > /tmp/code_review_proof.json`,
+    "Stage 2 runs the lane's own check on the same attempt's files",
+  );
+  assert.ok(bashBlocks(stage2).includes(STAGE2_PROOF_COMMAND));
+  for (const needle of [
+    'cross-check the lane, then run the proof',
+    '`/tmp/code_review_findings.<attempt>.json` parses and its `findings.length` equals `<N>`',
+    '`stage` is `"lane"`: relaunch with the same capture (step 3), with the proof\'s `reason`.',
+    '`stage` is `"capture"`: relaunch with a new capture (step 3).',
+    '`/code-review did not finish` or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
+    '`stage` is `"config"`: the review\'s config cannot be read, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
+    '**With the same capture.** Do not re-arm',
+    '**With a new capture.** Re-arm with this block first, which clears the old result',
+  ]) {
+    assert.ok(flat.includes(needle), `Stage 2 must say ${JSON.stringify(needle)}`);
+  }
+  const same = flat.slice(flat.indexOf('**With the same capture.**'), flat.indexOf('**With a new capture.**'));
+  const note = /`(In STEP 1, skip the Skill call: [^`]*)`/.exec(same);
+  assert.ok(note, 'the same-capture relaunch gives the lane a retry note');
+  assert.ok(note[1].includes('skip the Skill call') && laneText().includes('If it says to skip the Skill call'), 'the note uses the phrase the lane acts on');
+  assert.ok(note[1].endsWith('The earlier attempt failed the review\'s check with this reason: "<reason>"'), note[1]);
+  assert.ok(!same.includes('capture arm'), 'the same-capture relaunch never re-arms, which would delete the saved result');
+  const fresh = stage2.slice(stage2.indexOf('**With a new capture.**'), stage2.indexOf('**4. Pass.**'));
+  assert.ok(
+    bashBlocks(fresh).includes('agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"'),
+    'a new capture re-arms with the args Stage 1 armed',
+  );
+  assert.ok(flatText(fresh).includes('relaunch with an empty `{{RETRY_NOTE}}`'));
+  assert.ok(flat.includes('`{{ATTEMPT}}` is `$REVIEW_ID-2`'), 'the relaunch writes its own files');
+  assert.ok(!stage2.includes('code_review_raw.txt') && !stage2.includes('/code-review did not run'));
+});
+
+test('Stage 2 disarms capture after judging the lane', () => {
+  const stage2 = engineSection('Stage 2: checking the code-review lane');
+  const pass = stage2.slice(stage2.indexOf('**4. Pass.**'), stage2.indexOf('**5. Fail.**'));
+  assert.ok(
+    bashBlocks(pass).includes(
+      'cp "/tmp/code_review_findings.$ATTEMPT.json" /tmp/agent_findings/code-review.json\nagent-review capture disarm',
+    ),
+    'a pass copies the attempt for consensus, then disarms',
+  );
+  const fail = flatText(stage2.slice(stage2.indexOf('**5. Fail.**')));
+  assert.ok(
+    fail.includes('When the lane fails twice, or fails once at `stage: "config"`, first run `agent-review capture disarm`.'),
+    fail,
+  );
+  assert.ok(fail.includes('❌ review incomplete: the code-review lane could not be checked, so no report was posted'), fail);
+  assert.ok(fail.includes("print the proof's `reason` from `/tmp/code_review_proof.json`"), fail);
+  const judging = stage2.slice(0, stage2.indexOf('**4. Pass.**'));
+  assert.ok(!judging.includes('capture disarm'), 'capture stays armed until the lane is judged, so a relaunch can reuse it');
+});
+
+test("Stage 6 renders drops from the proof's dropped list", () => {
+  const stage6 = flatText(engineSection('Stage 6: the engine block'));
+  for (const needle of [
+    '`[N]` is `count` from `/tmp/code_review_proof.json`',
+    '`[M]` is `findings.length` in `/tmp/agent_findings/code-review.json`',
+    "`[K]` is the length of the proof's `dropped` list",
+    'as `<file>:<line> <summary>: <why>`',
+  ]) {
+    assert.ok(stage6.includes(needle), `Stage 6 must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!stage6.includes('code_review_dropped'), 'the lane files are never read for the report');
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(report.includes('[FOR EACH dropped finding] - [file]:[line] [summary]: [why]'), 'the skeleton renders the proof fields');
+  assert.ok(!report.includes('[quoted proof]'));
+  const { checkLaneOutput } = require('./codeReviewProof.cjs');
+  const result = checkLaneOutput({
+    rawEntries: [{ n: 1, file: 'dist/app.js', line: 3, summary: 'bundle bug' }],
+    scoredText: JSON.stringify({ findings: [] }),
+    droppedText: JSON.stringify([{ raw: 1, reason: 'excluded', glob: 'dist/**' }]),
+    excludedPaths: ['dist/**'],
+    root: ROOT,
+  });
+  assert.deepStrictEqual(result.dropped, [{ file: 'dist/app.js', line: 3, summary: 'bundle bug', why: 'excluded path: dist/**' }]);
+});
+
+test('Stage 0 no longer mentions /tmp/code_review_raw.txt', (t) => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const init = stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest');
+  assert.ok(!init.includes('/tmp/code_review_raw.txt'));
+  assert.ok(!skill.includes('code_review_raw.txt') && !engineDoc().includes('code_review_raw.txt'));
+  const bash = bashBlocks(init);
+  const removals = [
+    '{ rm -f /tmp/code_review_raw.*.json; } 2>/dev/null || true',
+    '{ rm -f /tmp/code_review_findings.*.json; } 2>/dev/null || true',
+    '{ rm -f /tmp/code_review_dropped.*.json; } 2>/dev/null || true',
+    'rm -f /tmp/code_review_proof.json /tmp/code_review_diff.txt',
+  ];
+  for (const line of removals) assert.ok(bash.split('\n').includes(line), `Initialize runs: ${line}`);
+  assert.ok(
+    bash.includes('if [ "$ENGINE" = "code-review" ]; then\n  agent-review capture disarm\nfi'),
+    'Initialize disarms capture, and only under the code-review engine',
+  );
+
+  const { writeFileSync, existsSync } = require('node:fs');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-init-'));
+    try {
+      writeFileSync(join(dir, 'code_review_raw.old-1.json'), '[]');
+      writeFileSync(join(dir, 'code_review_proof.json'), '{}');
+      const script = `set -e\n${removals.join('\n')}\necho survived`.replaceAll('/tmp/', `${dir}/`);
+      const run = require('node:child_process').spawnSync(shell, ['-c', script], { encoding: 'utf8' });
+      assert.strictEqual(run.stdout, 'survived\n', `${shell}: a glob with no match never stops Initialize`);
+      assert.strictEqual(run.stderr, '', `${shell}: a glob with no match prints nothing`);
+      assert.ok(!existsSync(join(dir, 'code_review_raw.old-1.json')) && !existsSync(join(dir, 'code_review_proof.json')));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('the review skill never names the capture file, and the proof takes no --capture', () => {
+  for (const [name, text] of [['SKILL.md', readFileSync(REVIEW_SKILL, 'utf8')], ['code-review-engine.md', engineDoc()]]) {
+    assert.ok(!text.includes('code_review_capture'), `${name} must not name a capture path; the capture lives in a private directory`);
+    assert.ok(!text.includes('--capture'), `${name} must not pass --capture; the proof finds the capture itself`);
+  }
 });

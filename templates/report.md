@@ -115,7 +115,7 @@ breaking changes as reported by the agents]
 **/code-review findings**: found [N] · scored [M] · dropped [K] (scored findings under the
 profile's cutoff may not appear in the lists above)
 
-[FOR EACH dropped finding] - `[file:line]` · [summary] · proof: "[quoted proof]"
+[FOR EACH dropped finding] - [file]:[line] [summary]: [why]
 
 [END IF engine is code-review]
 
