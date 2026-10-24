@@ -92,7 +92,7 @@ function cleanPrevious(raw) {
 }
 
 const LOCATION_WINDOW = 5;
-const LOCATION_WORDING = 0.3;
+const LOCATION_WORDING = 0.5;
 
 function sameCategory(a, b) {
   return a.trim().toLowerCase() === b.trim().toLowerCase();

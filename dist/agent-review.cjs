@@ -18406,26 +18406,24 @@ var require_consensus = __commonJS({
     var CLEANUP_SET = new Set(CLEANUP_CATEGORIES);
     var CODE_REVIEW_CAP = 6;
     var DOUBTED_CAP = 4;
-    var OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
-    var DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
-    function codeReviewCap(f) {
-      const evidence = String(f.evidence || "").trimStart();
-      if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
-      const cleanup = CLEANUP_SET.has(String(f.category).trim().toLowerCase());
-      if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
+    function normalizedName(value) {
+      return String(value == null ? "" : value).trim().toLowerCase();
+    }
+    function codeReviewCap(f, raw) {
+      if (raw.doubted === true) return DOUBTED_CAP;
+      if (raw.outside_range === true) return CODE_REVIEW_CAP;
+      if (CLEANUP_SET.has(normalizedName(f.category))) return CODE_REVIEW_CAP;
+      const from = normalizedName(raw.recategorized_from);
+      if (from) {
+        const kept = CLEANUP_SET.has(from) && ["correctness", "security"].includes(normalizedName(f.category));
+        if (!kept) return CODE_REVIEW_CAP;
+      }
       if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
       return null;
     }
-    function isNumericSeverity(value) {
-      if (typeof value === "number") return Number.isFinite(value);
-      return typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value));
-    }
-    function capCodeReviewFinding(input, rawSeverity) {
-      if (!isNumericSeverity(rawSeverity)) return { ...input, severity: 0 };
-      const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
-      const f = severity === input.severity ? input : { ...input, severity };
-      const cap = codeReviewCap(f);
-      return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
+    function capCodeReviewFinding(finding, raw) {
+      const cap = codeReviewCap(finding, raw || {});
+      return cap !== null && finding.severity > cap ? { ...finding, severity: cap } : finding;
     }
     function canonicalOrder(a, b) {
       return a.agent.localeCompare(b.agent) || a.file.localeCompare(b.file) || (a.line == null ? -1 : a.line) - (b.line == null ? -1 : b.line) || a.message.localeCompare(b.message);
@@ -18458,11 +18456,6 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
-    function provenBlockerOf(m, codeReviewEngine) {
-      if (!codeReviewEngine) return null;
-      if (m._provenBlocker !== void 0) return m._provenBlocker;
-      return m.severity >= 7 && !blockerBarFailure(m) ? m : null;
-    }
     function combineMembers(members, codeReviewEngine) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
@@ -18480,6 +18473,7 @@ var require_consensus = __commonJS({
         (best, m) => confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
         ordered[0]
       );
+      const longestTrimmed = (field) => ordered.map((m) => String(m[field] || "").trim()).reduce((best, v) => v.length > best.length ? v : best, "");
       const longestField = (field) => ordered.reduce(
         (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
         ordered[0]
@@ -18499,30 +18493,24 @@ var require_consensus = __commonJS({
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const blocker = ordered.reduce((best, m) => {
-        const candidate = provenBlockerOf(m, codeReviewEngine);
-        return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
-      }, null);
-      const raised = blocker !== null && blocker.severity > meanSeverity;
-      const lead = raised ? blocker : primary;
+      const evidence = String(primary.evidence || "").trim() ? primary.evidence : longestTrimmed("evidence");
       return {
-        agent: lead.agent,
+        agent: primary.agent,
         agents: agents.join(","),
-        category: lead.category,
-        severity: raised ? blocker.severity : meanSeverity,
-        file: lead.file,
-        line: lead.line,
-        message: lead.message,
+        category: primary.category,
+        severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+        file: primary.file,
+        line: primary.line,
+        message: primary.message,
         confidence: bestConfidence.confidence,
-        evidence: longestField("evidence"),
+        evidence,
         recommendation: longestField("recommendation"),
-        fix: lead.fix,
+        fix: primary.fix,
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,
         _maxSeverity: maxSeverity,
-        _meanSeverity: meanSeverity,
-        _provenBlocker: blocker
+        _meanSeverity: meanSeverity
       };
     }
     function unionFind(n) {
@@ -18600,7 +18588,7 @@ var require_consensus = __commonJS({
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, _provenBlocker, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
       return rest;
     }
     function consensusFrom({
@@ -18633,7 +18621,7 @@ var require_consensus = __commonJS({
       for (const laneId of laneIds) {
         for (const raw of perLane[laneId]) {
           const normalized = normalizeFinding(raw, laneId);
-          const finding = codeReviewEngine && laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw.severity) : normalized;
+          const finding = codeReviewEngine && laneId === CODE_REVIEW_LANE ? capCodeReviewFinding(normalized, raw) : normalized;
           const reason = validateFinding(finding);
           if (reason) {
             const messageSlice = String(finding.message || "").slice(0, 200);
@@ -18748,7 +18736,7 @@ var require_reportState = __commonJS({
       });
     }
     var LOCATION_WINDOW = 5;
-    var LOCATION_WORDING = 0.3;
+    var LOCATION_WORDING = 0.5;
     function sameCategory(a, b) {
       return a.trim().toLowerCase() === b.trim().toLowerCase();
     }

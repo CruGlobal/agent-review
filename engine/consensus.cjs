@@ -137,40 +137,35 @@ function validateFinding(f) {
 const CLEANUP_SET = new Set(CLEANUP_CATEGORIES);
 const CODE_REVIEW_CAP = 6;
 const DOUBTED_CAP = 4;
-// The lane template's evidence prefixes, in order: Outside, Recategorized, Doubted.
-const OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
-// Recategorized's free-text reason ends at no fixed marker, so Doubted counts at
-// the start, at a line start, or right after a prior prefix or sentence ends.
-const DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
 
-function codeReviewCap(f) {
-  const evidence = String(f.evidence || '').trimStart();
-  if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
-  const cleanup = CLEANUP_SET.has(String(f.category).trim().toLowerCase());
-  if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
+function normalizedName(value) {
+  return String(value == null ? '' : value).trim().toLowerCase();
+}
+
+// The first cap that applies, or null. A recategorization out of a cleanup
+// category only keeps its severity when it lands on correctness or security.
+function codeReviewCap(f, raw) {
+  if (raw.doubted === true) return DOUBTED_CAP;
+  if (raw.outside_range === true) return CODE_REVIEW_CAP;
+  if (CLEANUP_SET.has(normalizedName(f.category))) return CODE_REVIEW_CAP;
+  const from = normalizedName(raw.recategorized_from);
+  if (from) {
+    const kept = CLEANUP_SET.has(from) && ['correctness', 'security'].includes(normalizedName(f.category));
+    if (!kept) return CODE_REVIEW_CAP;
+  }
   if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
   return null;
 }
 
-function isNumericSeverity(value) {
-  if (typeof value === 'number') return Number.isFinite(value);
-  return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value));
-}
-
 // Applies only to the code-review lane under the code-review engine, before
-// validateFinding: cleanups, out-of-range and doubted findings never block, and
-// a 7+ that misses the blocker bar is kept as a suggestion at the cap instead of
-// being dropped by validateFinding. Flooring and clamping must come first: the
-// cap and the bar judge the whole 1 to 10 severity, and a half point never makes
-// a blocker.
-// The raw severity decides whether to clamp: one that is not a number or a
-// numeric string becomes 0, which validateFinding must drop.
-function capCodeReviewFinding(input, rawSeverity) {
-  if (!isNumericSeverity(rawSeverity)) return { ...input, severity: 0 };
-  const severity = Math.min(10, Math.max(1, Math.floor(input.severity)));
-  const f = severity === input.severity ? input : { ...input, severity };
-  const cap = codeReviewCap(f);
-  return cap !== null && f.severity > cap ? { ...f, severity: cap } : f;
+// validateFinding: `raw` is the lane's own entry, whose structured fields
+// (outside_range, doubted, recategorized_from) normalizeFinding does not keep.
+// Doubted, out-of-range and cleanup findings never block, and a 7+ that misses
+// the blocker bar is kept as a suggestion at the cap instead of being dropped by
+// validateFinding.
+function capCodeReviewFinding(finding, raw) {
+  const cap = codeReviewCap(finding, raw || {});
+  return cap !== null && finding.severity > cap ? { ...finding, severity: cap } : finding;
 }
 
 // Canonical order for deterministic clique construction: agent id, then file,
@@ -225,24 +220,15 @@ function toEntry(m) {
   };
 }
 
-// A combined entry's agent and severity come from an earlier merge, so only its
-// tracked `_provenBlocker` counts; raw and singleton members are tested directly.
-function provenBlockerOf(m, codeReviewEngine) {
-  if (!codeReviewEngine) return null;
-  if (m._provenBlocker !== undefined) return m._provenBlocker;
-  return m.severity >= 7 && !blockerBarFailure(m) ? m : null;
-}
-
 // Combines >=2 members (raw findings on first grouping, or already-combined
 // entries on a decisions merge) into one output entry per the group rules:
 // agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
-// highest member's, evidence/recommendation = longest member's (independently
-// per field), line/category/message/fix = the highest-severity member's,
+// highest member's, recommendation = longest member's, evidence = the primary's when it is
+// non-blank, else the longest, line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
-// Exception, under the code-review engine only: a member of any lane at 7+ that
-// passes the blocker bar keeps its severity when the mean would be lower, and is
-// then the primary.
+// Exception, under the code-review engine only: when any member is 7+ (every
+// surviving 7+ already passed the blocker bar) the group keeps that maximum.
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
@@ -276,6 +262,10 @@ function combineMembers(members, codeReviewEngine) {
       confidenceRank(m.confidence) > confidenceRank(best.confidence) ? m : best,
     ordered[0],
   );
+  const longestTrimmed = (field) =>
+    ordered
+      .map((m) => String(m[field] || '').trim())
+      .reduce((best, v) => (v.length > best.length ? v : best), '');
   const longestField = (field) =>
     ordered.reduce(
       (best, m) =>
@@ -297,37 +287,34 @@ function combineMembers(members, codeReviewEngine) {
   // Weighted by each member's own corroboration count (default 1 for a raw/singleton
   // member) — otherwise re-merging an already-corroborated group with a singleton via
   // `decisions` silently discounts the group's weight down to a single vote.
-  // A raised group is weighted at its own mean, so the raise is never counted twice.
+  // A group that kept its maximum is weighted at its own mean, so the maximum is
+  // never counted twice.
   const weightedSum = ordered.reduce(
     (sum, m) =>
       sum + (m._meanSeverity !== undefined ? m._meanSeverity : m.severity) * (m.corroboration || 1),
     0,
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
-  const blocker = ordered.reduce((best, m) => {
-    const candidate = provenBlockerOf(m, codeReviewEngine);
-    return candidate && (!best || candidate.severity > best.severity) ? candidate : best;
-  }, null);
-  const raised = blocker !== null && blocker.severity > meanSeverity;
-  const lead = raised ? blocker : primary;
+  const evidence = String(primary.evidence || '').trim()
+    ? primary.evidence
+    : longestTrimmed('evidence');
   return {
-    agent: lead.agent,
+    agent: primary.agent,
     agents: agents.join(','),
-    category: lead.category,
-    severity: raised ? blocker.severity : meanSeverity,
-    file: lead.file,
-    line: lead.line,
-    message: lead.message,
+    category: primary.category,
+    severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+    file: primary.file,
+    line: primary.line,
+    message: primary.message,
     confidence: bestConfidence.confidence,
-    evidence: longestField('evidence'),
+    evidence,
     recommendation: longestField('recommendation'),
-    fix: lead.fix,
+    fix: primary.fix,
     corroboration,
     needsHumanReview: maxSeverity - minSeverity >= 4,
     _minSeverity: minSeverity,
     _maxSeverity: maxSeverity,
     _meanSeverity: meanSeverity,
-    _provenBlocker: blocker,
   };
 }
 
@@ -434,7 +421,7 @@ function applyDecisions(entries, decisions, codeReviewEngine) {
 }
 
 function stripInternal(entry) {
-  const { _minSeverity, _maxSeverity, _meanSeverity, _provenBlocker, ...rest } = entry;
+  const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
   return rest;
 }
 
@@ -475,7 +462,7 @@ function consensusFrom({
       const normalized = normalizeFinding(raw, laneId);
       const finding =
         codeReviewEngine && laneId === CODE_REVIEW_LANE
-          ? capCodeReviewFinding(normalized, raw.severity)
+          ? capCodeReviewFinding(normalized, raw)
           : normalized;
       const reason = validateFinding(finding);
       if (reason) {

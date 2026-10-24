@@ -656,68 +656,6 @@ test('other lanes are unchanged', () => {
   assert.equal(dropped.stats.droppedInvalid.length, 1);
 });
 
-test('a fractional code-review severity is floored before the cap and the bar', () => {
-  const { findings, stats } = runCr([
-    crFinding({ file: 'bar.rb', severity: 7.5 }),
-    crFinding({ file: 'nobar.rb', severity: 7.5, confidence: 'Medium', message: 'medium confidence here' }),
-    crFinding({ file: 'low.rb', severity: 5.4, message: 'a small gap in error handling' }),
-    crFinding({ file: 'half.rb', severity: 6.5, message: 'a half point never makes a blocker' }),
-  ]);
-  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'bar.rb': 7, 'nobar.rb': 6, 'low.rb': 5, 'half.rb': 6 });
-  assert.deepEqual(stats.droppedInvalid, []);
-});
-
-test('a code-review severity outside 1 to 10 is clamped, not dropped', () => {
-  const { findings, stats } = runCr([
-    crFinding({ file: 'high.rb', severity: 11 }),
-    crFinding({ file: 'zero.rb', severity: 0, message: 'scored zero by mistake' }),
-    crFinding({ file: 'neg.rb', severity: -2, message: 'scored below zero by mistake' }),
-    crFinding({ file: 'capped.rb', severity: 11, category: 'conventions', message: 'naming drift' }),
-  ]);
-  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'high.rb': 10, 'zero.rb': 1, 'neg.rb': 1, 'capped.rb': 6 });
-  assert.deepEqual(stats.droppedInvalid, []);
-});
-
-test('a code-review severity that is not a number is dropped, never clamped to 1', () => {
-  const { findings, stats } = runCr([
-    crFinding({ file: 'kept.rb', severity: 8 }),
-    crFinding({ file: 'ratio.rb', severity: '8/10', message: 'a ratio is not a score' }),
-    crFinding({ file: 'missing.rb', severity: undefined, message: 'no score at all' }),
-    crFinding({ file: 'null.rb', severity: null, message: 'a null score' }),
-    crFinding({ file: 'blank.rb', severity: '', message: 'a blank score' }),
-  ]);
-  assert.deepEqual(findings.map((f) => [f.file, f.severity]), [['kept.rb', 8]]);
-  assert.deepEqual(
-    stats.droppedInvalid.map((d) => [d.lane, d.message]),
-    [
-      ['code-review', 'a ratio is not a score'],
-      ['code-review', 'no score at all'],
-      ['code-review', 'a null score'],
-      ['code-review', 'a blank score'],
-    ],
-  );
-  assert.ok(stats.droppedInvalid.every((d) => /^invalid severity: /.test(d.reason)));
-});
-
-test('a code-review severity of another type is dropped, never read as a number', () => {
-  const { findings, stats } = runCr([
-    crFinding({ file: 'array.rb', severity: [9], category: 'reuse', message: 'an array is not a score' }),
-    crFinding({ file: 'bool.rb', severity: true, message: 'a boolean is not a score' }),
-    crFinding({ file: 'object.rb', severity: { value: 9 }, message: 'an object is not a score' }),
-  ]);
-  assert.deepEqual(findings, []);
-  assert.deepEqual(
-    stats.droppedInvalid.map((d) => [d.message, d.reason]),
-    [
-      ['an array is not a score', 'invalid severity: 0'],
-      ['a boolean is not a score', 'invalid severity: 0'],
-      ['an object is not a score', 'invalid severity: 0'],
-    ],
-  );
-});
-
 test('a default-engine lane named code-review is an ordinary lane', () => {
   const plan = { agents: [{ id: 'code-review' }, { id: 'security' }] };
   for (const p of [plan, undefined]) {
@@ -737,15 +675,6 @@ test('a default-engine lane named code-review is an ordinary lane', () => {
     assert.deepEqual(by, { 'c.rb': 8, merged: 6 }, 'no cap, and the merge keeps the rounded mean of 8 and 4');
     assert.deepEqual(stats.droppedInvalid.map((d) => d.reason), ['invalid severity: 0'], 'a 0 is dropped, not clamped');
   }
-});
-
-test('a numeric-string code-review severity is still floored and capped', () => {
-  const { findings } = runCr([
-    crFinding({ file: 'str.rb', severity: '8' }),
-    crFinding({ file: 'clean.rb', severity: '9', category: 'reuse', message: 'reuse the helper' }),
-  ]);
-  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'str.rb': 8, 'clean.rb': 6 });
 });
 
 test('severities outside 1 to 10 from another lane are still dropped', () => {
@@ -771,6 +700,111 @@ test('a fractional severity from another lane is still dropped', () => {
   assert.match(stats.droppedInvalid[0].reason, /invalid severity: 7\.5/);
 });
 
+test('outside_range caps a code-review 9 at 6', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'o.rb', severity: 9, outside_range: true }),
+    crFinding({ file: 'l.rb', severity: 5, outside_range: true, message: 'already low enough' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'o.rb': 6, 'l.rb': 5 });
+});
+
+test('doubted caps at 4', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'a.rb', severity: 8, doubted: true }),
+    crFinding({ file: 'b.rb', severity: 6, outside_range: true, doubted: true, message: 'doubted wins over outside' }),
+    crFinding({ file: 'c.rb', severity: 3, doubted: true, message: 'already low enough' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'a.rb': 4, 'b.rb': 4, 'c.rb': 3 });
+});
+
+test('a cleanup category caps at 6', () => {
+  const { findings } = runCr([crFinding({ category: ' Conventions ', severity: 9 })]);
+  assert.equal(findings[0].severity, 6);
+});
+
+test('recategorized_from conventions to security keeps 8', () => {
+  const { findings } = runCr([
+    crFinding({ file: 's.rb', category: 'security', recategorized_from: 'conventions' }),
+    crFinding({ file: 'c.rb', category: 'correctness', recategorized_from: 'reuse', message: 'recategorized to correctness' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 's.rb': 8, 'c.rb': 8 });
+});
+
+test('recategorized_from conventions to testing caps at 6', () => {
+  const { findings } = runCr([
+    crFinding({ file: 't.rb', category: 'testing', recategorized_from: 'conventions' }),
+    crFinding({ file: 'x.rb', category: 'security', recategorized_from: 'not-a-cleanup', message: 'unknown source category' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 't.rb': 6, 'x.rb': 6 });
+});
+
+test('evidence wording no longer caps', () => {
+  const { findings } = runCr([
+    crFinding({ file: 'o.rb', outside_range: false, evidence: 'Outside the reviewed range: old_helper drops the last row.' }),
+    crFinding({ file: 'd.rb', doubted: false, evidence: 'Doubted: depends on a caller I could not see.', message: 'doubted wording only' }),
+  ]);
+  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
+  assert.deepEqual(by, { 'o.rb': 8, 'd.rb': 8 });
+});
+
+test('missing structured fields read as false and null', () => {
+  const { findings } = runCr([crFinding({ severity: 8 })]);
+  assert.equal(findings[0].severity, 8);
+});
+
+test('structured fields on another lane do not cap', () => {
+  const { findings } = runCr([crFinding({ outside_range: true, doubted: true })], 'correctness');
+  assert.equal(findings[0].severity, 8);
+});
+
+test('under the engine a merged 8 and 3 keep 8; on the default engine they average to 6', () => {
+  const eight = crFinding({ severity: 8, message: 'refund rounds before fees are subtracted' });
+  const three = crFinding({ severity: 3, line: 11, confidence: 'Low', evidence: '', message: 'refund rounds before fees are subtracted' });
+  const engine = consensusFrom({
+    plan: crEnginePlan(['code-review', 'financial']),
+    findingsByAgent: { 'code-review': [eight], financial: [three] },
+    profile: 'standard',
+  }).findings;
+  assert.equal(engine.length, 1);
+  assert.equal(engine[0].severity, 8);
+  assert.equal(engine[0].line, 10, 'the highest-severity member leads');
+
+  const plain = consensusFrom({
+    plan: { agents: [{ id: 'code-review' }, { id: 'financial' }] },
+    findingsByAgent: { 'code-review': [eight], financial: [three] },
+    profile: 'standard',
+  }).findings;
+  assert.equal(plain.length, 1);
+  assert.equal(plain[0].severity, 6, 'Math.round(5.5)');
+});
+
+test('a merged 7+ never carries whitespace-only evidence', () => {
+  const eight = crFinding({ severity: 8, evidence: 'short but real', message: 'refund rounds before fees are subtracted' });
+  const blank = crFinding({ severity: 2, line: 11, evidence: ' '.repeat(200), message: 'refund rounds before fees are subtracted' });
+  const { findings } = consensusFrom({
+    plan: crEnginePlan(['code-review', 'financial']),
+    findingsByAgent: { 'code-review': [eight], financial: [blank] },
+    profile: 'standard',
+  });
+  assert.equal(findings[0].evidence, 'short but real');
+  assert.doesNotThrow(() => mergeLedger([], findings));
+});
+
+test('a blank primary evidence falls back to the longest trimmed evidence', () => {
+  const lead = crFinding({ severity: 5, evidence: '   ', message: 'refund rounds before fees are subtracted' });
+  const other = crFinding({ severity: 4, line: 11, evidence: '  the real trace  ', message: 'refund rounds before fees are subtracted' });
+  const { findings } = consensusFrom({
+    plan: { agents: [{ id: 'correctness' }, { id: 'financial' }] },
+    findingsByAgent: { correctness: [lead], financial: [other] },
+    profile: 'standard',
+  });
+  assert.equal(findings[0].evidence, 'the real trace');
+});
+
 test('the code-review engine fails closed when the code-review lane was not launched', () => {
   const findingsByAgent = { security: [], 'code-review': [] };
   const plan = (ids) => ({ engine: { name: 'code-review' }, agents: ids.map((id) => ({ id })) });
@@ -783,54 +817,6 @@ test('the code-review engine fails closed when the code-review lane was not laun
     () => consensusFrom({ plan: { agents: [{ id: 'security' }] }, findingsByAgent: { security: [] } }),
     'a plan with no engine block keeps the lanes it launched',
   );
-});
-
-test('code-review findings outside the reviewed range cap at 6', () => {
-  const { findings } = runCr([
-    crFinding({ file: 'o.rb', evidence: 'Outside the reviewed range: old_helper drops the last row.' }),
-    crFinding({ file: 'l.rb', severity: 5, evidence: 'Outside the reviewed range: low already.' }),
-    crFinding({ file: 'i.rb', evidence: 'new code calls Outside the reviewed range: as a phrase mid-text' }),
-  ]);
-  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'o.rb': 6, 'l.rb': 5, 'i.rb': 8 });
-});
-
-test('doubted code-review findings cap at 4 at any prefix boundary', () => {
-  const { findings } = runCr([
-    crFinding({ file: 'a.rb', evidence: 'Doubted: depends on a caller I could not see.' }),
-    crFinding({ file: 'b.rb', severity: 6, category: 'conventions', evidence: 'Doubted: may be intended.' }),
-    crFinding({ file: 'c.rb', severity: 6, evidence: 'Outside the reviewed range: Doubted: the old path may be dead.' }),
-    crFinding({
-      file: 'd.rb',
-      category: 'security',
-      evidence: 'Recategorized from conventions: line 14 commits a key. Doubted: it may be a test fixture.',
-    }),
-    crFinding({ file: 'e.rb', evidence: 'Recategorized from reuse: drops writes\nDoubted: the queue may retry.' }),
-    crFinding({ file: 'f.rb', severity: 3, evidence: 'Doubted: minor.' }),
-    crFinding({ file: 'g.rb', evidence: 'input x reaches line 10; nobody doubted: the guard is gone' }),
-  ]);
-  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'a.rb': 4, 'b.rb': 4, 'c.rb': 4, 'd.rb': 4, 'e.rb': 4, 'f.rb': 3, 'g.rb': 8 });
-});
-
-test('outside and doubted prefixes match in any case', () => {
-  const { findings } = runCr([
-    crFinding({ file: 'o.rb', evidence: 'outside the reviewed range: old_helper drops the last row.' }),
-    crFinding({ file: 'u.rb', evidence: 'OUTSIDE THE REVIEWED RANGE: old_helper drops the last row.' }),
-    crFinding({ file: 'd.rb', evidence: 'doubted: depends on a caller I could not see.' }),
-    crFinding({ file: 'r.rb', evidence: 'Recategorized from reuse: drops writes. DOUBTED: the queue may retry.' }),
-    crFinding({ file: 'm.rb', evidence: 'new code calls outside the reviewed range: as a phrase mid-text' }),
-  ]);
-  const by = Object.fromEntries(findings.map((f) => [f.file, f.severity]));
-  assert.deepEqual(by, { 'o.rb': 6, 'u.rb': 6, 'd.rb': 4, 'r.rb': 4, 'm.rb': 8 });
-});
-
-test('outside and doubted prefixes leave other lanes alone', () => {
-  const { findings } = runCr(
-    [crFinding({ evidence: 'Outside the reviewed range: Doubted: still a real bug in this lane.' })],
-    'correctness',
-  );
-  assert.equal(findings[0].severity, 8);
 });
 
 // --- a proven code-review blocker keeps its severity through a merge ---
@@ -1055,7 +1041,7 @@ const securityBlocker = (over) =>
     ...over,
   });
 const doubtedCr = (over) =>
-  crBlocker({ severity: 4, confidence: 'Low', evidence: 'Doubted: the caller may round first.', ...over });
+  crBlocker({ severity: 4, confidence: 'Low', doubted: true, ...over });
 
 test('(proven blocker) a doubted code-review 4 cannot pull a proven security 8 below the bar', () => {
   const { findings } = consensusFrom({

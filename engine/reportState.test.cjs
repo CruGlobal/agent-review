@@ -154,7 +154,7 @@ function reworded(over = {}) {
     category: ' correctness ',
     severity: 4,
     line: 44,
-    message: 'a write never clears the cache, so the next read returns stale data',
+    message: 'the cache is never invalidated after a write, so reads return stale data',
     ...over,
   });
 }
@@ -235,12 +235,14 @@ test('location mode appends an unrelated suggestion near an entry of the same la
   assert.deepEqual(ledger.map((entry) => [entry.n, entry.signature]), [[3, 'old-sig'], [4, 'new-sig']]);
 });
 
-test('location mode needs a token Jaccard of at least 0.3 between the messages', () => {
+test('location matching needs wording Jaccard of 0.5', () => {
   const previous = [oldEntry({ message: 'alpha bravo charlie delta echo foxtrot golf' })];
-  const atBar = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie hotel india juliet' })], BY_LOCATION);
-  assert.equal(atBar.length, 1, '3 shared of 10 tokens is exactly 0.3, a match');
-  const below = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie hotel india juliet kilo' })], BY_LOCATION);
-  assert.equal(below.length, 2, '3 shared of 11 tokens is below 0.3');
+  const below = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie delta hotel india juliet' })], BY_LOCATION);
+  assert.equal(below.length, 2, '4 shared of 10 tokens is 0.4, appended');
+  const above = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie delta echo hotel' })], BY_LOCATION);
+  assert.equal(above.length, 1, '5 shared of 8 tokens is 0.625, matched');
+  const atBar = mergeLedger(previous, [reworded({ message: 'alpha bravo charlie delta' })], BY_LOCATION);
+  assert.equal(atBar.length, 1, '4 shared of 7 tokens is 0.57, matched');
 });
 
 test('the default ledger merge ignores location, with or without an options object', () => {

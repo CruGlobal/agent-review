@@ -825,11 +825,11 @@ test('ledger --match-suggestions-by-location skips reworded suggestions; without
   try {
     const previous = [{
       n: 1, signature: 'old-sig', agent: 'code-review', category: 'correctness',
-      severity: 5, file: 'a.rb', line: 10, message: 'old words', status: 'open',
+      severity: 5, file: 'a.rb', line: 10, message: 'old words here', status: 'open',
     }];
     const findings = { kept: [{
       signature: 'new-sig', agent: 'code-review', category: 'correctness',
-      severity: 4, file: 'a.rb', line: 12, message: 'new words',
+      severity: 4, file: 'a.rb', line: 12, message: 'new words here',
     }] };
     const prevPath = join(dir, 'previous.json');
     const findingsPath = join(dir, 'findings.json');
