@@ -83,11 +83,13 @@ jobs:
           fi
       - name: Read the trusted review engine
         id: engine
+        if: inputs.auto_approve
         uses: CruGlobal/agent-review/.github/actions/read-engine@main
         with:
           base_sha: ${{ github.event.pull_request.base.sha }}
           runtime_dir: ${{ runner.temp }}/agent-review-runtime
           trusted_dir: ${{ runner.temp }}/agent-review-engine-trusted
+          extracted_review_dir: ${{ runner.temp }}/agent-review-trusted/.claude/review
       - name: Load the previous trusted report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

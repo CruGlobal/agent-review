@@ -205,6 +205,19 @@ test('startup: default engine in deep mode says skipped lanes run too', () => {
   assert.ok(!lines.includes(QUICK_NOTE));
 });
 
+test('deep-mode note skips lanes with no matching hunks', () => {
+  const input = defaultEngineInput('deep');
+  input.configAgents = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }, { id: 'architecture' }];
+  input.plan.agents = input.plan.agents.filter((a) => a.id !== 'architecture');
+  input.sliceManifest = { testing: { mode: 'empty', files: [], hunks: 0 } };
+  const withTrigger = formatStartup(input).split('\n');
+  assert.ok(withTrigger.includes(DEEP_NOTE), 'a lane skipped for no trigger still runs in deep');
+  input.configAgents = [{ id: 'security' }, { id: 'testing' }, { id: 'standards' }];
+  const onlyEmpty = formatStartup(input);
+  assert.match(onlyEmpty, /testing \[skipped: no matching hunks\]/);
+  assert.ok(!onlyEmpty.includes(DEEP_NOTE), 'a lane with no matching hunks never runs, in any mode');
+});
+
 test('startup: default engine in standard mode adds no mode note', () => {
   const lines = formatStartup(defaultEngineInput('standard')).split('\n');
   assert.ok(!lines.includes(QUICK_NOTE));
@@ -221,21 +234,12 @@ test('startup: code-review engine never adds the quick or deep note', () => {
   }
 });
 
-const maxFindingsNote = (n) =>
-  `note: --max-findings ${n} is passed to /code-review on every run and may change your own remembered /code-review limit.`;
-
-test('startup: code-review engine warns when max_findings is set', () => {
-  for (const value of [15, 'all']) {
+test('start-up line has no --max-findings note', () => {
+  for (const maxFindings of [null, undefined, { value: 15, source: 'config' }, { value: 'all', source: 'config' }]) {
     const input = startupInput();
-    input.options.maxFindings = { value, source: 'config' };
-    assert.ok(formatStartup(input).split('\n').includes(maxFindingsNote(value)), `note for ${value}`);
+    input.options.maxFindings = maxFindings;
+    assert.ok(!formatStartup(input).includes('--max-findings'), String(maxFindings && maxFindings.value));
   }
-  const unset = startupInput();
-  unset.options.maxFindings = null;
-  assert.ok(!formatStartup(unset).includes('is passed to /code-review on every run'));
-  const other = defaultEngineInput('standard');
-  other.options.maxFindings = { value: 15, source: 'config' };
-  assert.ok(!formatStartup(other).includes('--max-findings'), 'the agent-review engine never passes the flag');
 });
 
 test('startup: empty-slice lanes', () => {
@@ -256,29 +260,9 @@ test('startup: coverage lanes', () => {
 
 test('startup: notes', () => {
   const input = startupInput();
-  input.options.maxFindings = { value: 15, source: 'config' };
   input.options.notes = ['first', 'second'];
   const lines = formatStartup(input).split('\n');
-  assert.deepEqual(lines.slice(3), ['note: first', 'note: second']);
-});
-
-const RESET_NOTE =
-  'note: this run passes --max-findings default, which resets any /code-review limit you set earlier in this Claude Code session.';
-
-test('startup: code-review engine says when it resets the remembered --max-findings limit', () => {
-  for (const maxFindings of [null, undefined]) {
-    const input = startupInput();
-    input.options.maxFindings = maxFindings;
-    const lines = formatStartup(input).split('\n');
-    assert.ok(lines.includes(RESET_NOTE), String(maxFindings));
-    assert.ok(!lines.some((l) => l.startsWith('note: --max-findings ')), String(maxFindings));
-  }
-  const set = startupInput();
-  set.options.maxFindings = { value: 15, source: 'config' };
-  const lines = formatStartup(set).split('\n');
-  assert.ok(lines.includes(maxFindingsNote(15)));
-  assert.ok(!lines.includes(RESET_NOTE), 'a set limit keeps the existing note only');
-  assert.ok(!formatStartup(defaultEngineInput('standard')).includes('--max-findings'), 'the agent-review engine never passes the flag');
+  assert.deepEqual(lines.slice(2), ['note: first', 'note: second']);
 });
 
 test('startup: the final mode replaces the plan\'s resolved mode', () => {

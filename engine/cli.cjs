@@ -116,6 +116,22 @@ function flag(argv, name) {
   return v === undefined || v.startsWith('--') ? undefined : v;
 }
 
+// The review arguments are free text that may start with `--`, so they are read by position.
+// Only the `--ci` flag sets ci; a `--ci` inside the argument text is an unknown token.
+function optionsInput(argv) {
+  let args = '';
+  let ci = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--ci') ci = true;
+    else if (a === '--args') args = argv[++i] || '';
+    else if (a.startsWith('--args=')) args = a.slice('--args='.length);
+    else if (a === '--args-file') args = readFileSync(argv[++i], 'utf8').replace(/\r?\n$/, '');
+    else if (a === '--root' || a === '--review-dir') i++;
+  }
+  return { args, ci };
+}
+
 // Global flags (parsed before dispatch): --root, --review-dir.
 function ctx(argv) {
   const opts = { root: flag(argv, '--root'), reviewDir: flag(argv, '--review-dir') };
@@ -445,7 +461,7 @@ const USAGE = `usage: agent-review <command>
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
-  options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
+  options (--args "<raw>" | --args=<raw> | --args-file <f>) [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
   startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
@@ -544,11 +560,8 @@ function main(rawArgv) {
     case 'options': {
       try {
         const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-        const resolved = resolveOptions({
-          args: flag(rest, '--args') || '',
-          config: cfg,
-          ci: rest.includes('--ci'),
-        });
+        const { args, ci } = optionsInput(rest);
+        const resolved = resolveOptions({ args, config: cfg, ci });
         out(JSON.stringify(resolved, null, 2));
         return 0;
       } catch (e) {

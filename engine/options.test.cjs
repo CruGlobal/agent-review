@@ -128,12 +128,12 @@ test('resolve: missing or disabled always lane throws', () => {
   const missing = { agents: lanes(['security', 'standards']) };
   assert.throws(
     () => resolveOptions({ args: 'engine=code-review', config: missing }),
-    (e) => e.message.includes('"testing"') && e.message.includes('engine.code_review.always'),
+    { message: 'engine.code_review.always references unknown agent: testing' },
   );
   const disabled = { agents: [...lanes(['security', 'standards']), { id: 'testing', enabled: false }] };
   assert.throws(
     () => resolveOptions({ args: 'engine=code-review', config: disabled }),
-    /"testing"/,
+    { message: 'engine.code_review.always references disabled agent: testing' },
   );
   assert.doesNotThrow(() => resolveOptions({ args: 'engine=agent-review', config: missing }));
 });
@@ -260,4 +260,40 @@ test('resolve: error messages name every vocabulary entry', () => {
   };
   for (const e of ENGINES) assert.ok(msg('engine=lanes').includes(e), e);
   for (const e of EFFORTS) assert.ok(msg('effort=extreme').includes(e), e);
+});
+
+test('resolveOptions lists every engine problem', () => {
+  const config = {
+    agents: [{ id: 'security' }, { id: 'testing', enabled: false }, { id: 'standards' }, { id: 'code-review' }],
+    engine: { name: 'code-review' },
+  };
+  const expected = codeReviewEngineProblems(config);
+  assert.equal(expected.length, 2);
+  assert.throws(() => resolveOptions({ args: '', config }), { message: expected.join('; ') });
+  assert.ok(expected.includes('engine.code_review.always references disabled agent: testing'));
+  assert.ok(expected.includes(RESERVED));
+
+  const ghost = {
+    agents: FULL,
+    engine: { name: 'code-review', code_review: { always: ['ghost', 'security'], replaces: ['security'] } },
+  };
+  assert.throws(() => resolveOptions({ args: '', config: ghost }), {
+    message: 'engine.code_review.always references unknown agent: ghost; engine.code_review lists security in both always and replaces',
+  });
+});
+
+test('resolveOptions leaves a repo with no engine key, or on the agent-review engine, alone', () => {
+  const bad = { agents: [{ id: 'code-review' }], engine: { code_review: { always: ['ghost'] } } };
+  assert.equal(resolveOptions({ args: '', config: { agents: bad.agents } }).engine.value, 'agent-review');
+  assert.equal(resolveOptions({ args: 'engine=agent-review', config: bad }).engine.value, 'agent-review');
+});
+
+test('two mode words name both words', () => {
+  assert.throws(() => parseReviewArgs('auto quick'), {
+    message: 'two mode words given: "auto" and "quick"; pass only one',
+  });
+  assert.throws(() => resolveOptions({ args: 'deep run a quick pass', config: { agents: FULL } }), {
+    message: 'two mode words given: "deep" and "quick"; pass only one',
+  });
+  assert.equal(parseReviewArgs('quick quick').mode, 'quick', 'the same word twice is one word');
 });

@@ -69,7 +69,11 @@ const CI_NOTE =
 
 function setOnce(state, key, value) {
   if (state[key] != null && state[key] !== value) {
-    throw new Error(`conflicting ${key}= values ("${state[key]}" and "${value}")`);
+    throw new Error(
+      key === 'mode'
+        ? `two mode words given: "${state[key]}" and "${value}"; pass only one`
+        : `conflicting ${key}= values ("${state[key]}" and "${value}")`,
+    );
   }
   state[key] = value;
 }
@@ -147,16 +151,8 @@ function resolveOptions({ args, config, ci }) {
     const lanes = codeReviewLanes(crCfg);
     replaces = lanes.replaces.slice();
     always = lanes.always.slice();
-    if (hasReservedId(cfg.agents)) throw new Error(RESERVED_ID_MESSAGE);
-    const [problem] = alwaysLaneProblems(crCfg, cfg.agents);
-    if (problem && problem.kind === 'overlap') {
-      throw new Error(`${laneOverlapMessage(problem.id, crCfg)}; a lane cannot both run and be replaced`);
-    }
-    if (problem) {
-      throw new Error(
-        `engine.code_review.always lists "${problem.id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`,
-      );
-    }
+    const problems = codeReviewEngineProblems(cfg);
+    if (problems.length) throw new Error(problems.join('; '));
     // A note, not an error: a repo may list a lane it lacks.
     const known = new Set((cfg.agents || []).map((a) => a.id));
     for (const id of crCfg.replaces || []) {

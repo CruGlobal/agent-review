@@ -1850,8 +1850,8 @@ function readEngineRun() {
 test('the engine read is one composite action', () => {
   const { action, step } = readEngineRun();
   assert.equal(action.runs.using, 'composite');
-  assert.deepEqual(Object.keys(action.inputs).sort(), ['base_sha', 'runtime_dir', 'trusted_dir']);
-  for (const input of Object.values(action.inputs)) assert.equal(input.required, true);
+  assert.deepEqual(Object.keys(action.inputs).sort(), ['base_sha', 'extracted_review_dir', 'runtime_dir', 'trusted_dir']);
+  for (const [name, input] of Object.entries(action.inputs)) assert.equal(input.required, name !== 'extracted_review_dir', name);
   assert.deepEqual(Object.keys(action.outputs), ['name']);
   assert.equal(action.outputs.name.value, '${{ steps.read.outputs.name }}');
   assert.equal(action.runs.steps.length, 1);
@@ -1861,6 +1861,7 @@ test('the engine read is one composite action', () => {
     BASE_SHA: '${{ inputs.base_sha }}',
     RUNTIME_DIR: '${{ inputs.runtime_dir }}',
     TRUSTED_DIR: '${{ inputs.trusted_dir }}',
+    EXTRACTED_REVIEW_DIR: '${{ inputs.extracted_review_dir }}',
   });
   assert.ok(!step.run.includes('${{'), 'the run block must not contain expressions');
   const run = step.run;
@@ -1954,10 +1955,97 @@ test('review.yml reads the engine through the shared action and approves only on
     base_sha: '${{ github.event.pull_request.base.sha }}',
     runtime_dir: '${{ runner.temp }}/agent-review-runtime',
     trusted_dir: '${{ runner.temp }}/agent-review-engine-trusted',
+    extracted_review_dir: '${{ runner.temp }}/agent-review-trusted/.claude/review',
   });
   const steps = wf.jobs.review.steps;
   const isolate = steps.findIndex((s) => s.name === 'Isolate trusted base configuration and runtime');
   assert.ok(isolate >= 0 && isolate < steps.indexOf(step), 'the runtime is in place before the engine read');
+});
+
+test('review.yml runs read-engine only under inputs.auto_approve and passes extracted_review_dir', () => {
+  const { parse } = require('yaml');
+  const wf = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
+  const steps = wf.jobs.review.steps;
+  const step = steps.find((s) => s.id === 'engine');
+  assert.equal(step.if, 'inputs.auto_approve');
+  assert.equal(step.with.extracted_review_dir, '${{ runner.temp }}/agent-review-trusted/.claude/review');
+  const isolate = steps.find((s) => s.name === 'Isolate trusted base configuration and runtime');
+  assert.equal(isolate.env.TRUSTED_DIR, '${{ runner.temp }}/agent-review-trusted');
+  assert.ok(isolate.run.includes('git archive "$BASE_SHA" .claude/review | tar -x -C "$TRUSTED_DIR"'));
+});
+
+test('read-engine reads extracted_review_dir without git archive', () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs');
+  const os = require('node:os');
+  const { step } = readEngineRun();
+  const repo = mkdtempSync(join(os.tmpdir(), 'ar-read-engine-x-'));
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+  const config = (extra) => [
+    'version: 2', 'profile: standard',
+    'risk:', '  patterns: []',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, null], level: LOW, reviewer: entry }]',
+    'agents:', '  - id: standards', '    always: true',
+    'excluded_paths: []', extra,
+  ].join('\n');
+  const read = (baseSha, extracted) => {
+    const scratch = mkdtempSync(join(os.tmpdir(), 'ar-read-engine-x-out-'));
+    const output = join(scratch, 'output.txt');
+    writeFileSync(output, '');
+    try {
+      execFileSync('bash', ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+        cwd: repo,
+        env: {
+          ...process.env,
+          BASE_SHA: baseSha,
+          RUNTIME_DIR: ROOT,
+          TRUSTED_DIR: join(scratch, 'base'),
+          EXTRACTED_REVIEW_DIR: extracted,
+          GITHUB_WORKSPACE: repo,
+          GITHUB_OUTPUT: output,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { out: readFileSync(output, 'utf8'), archived: require('node:fs').existsSync(join(scratch, 'base')) };
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
+  };
+  try {
+    git('init', '-q');
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '--allow-empty', '-m', 'bare');
+    const bare = git('rev-parse', 'HEAD');
+    mkdirSync(join(repo, '.claude/review'), { recursive: true });
+    writeFileSync(join(repo, '.claude/review/config.yml'), config(''));
+    git('add', '-A');
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '-m', 'with config');
+    const withConfig = git('rev-parse', 'HEAD');
+
+    // The extracted tree says code-review while the base commit's own config says nothing, so
+    // the value can only have come from the extracted directory.
+    const extracted = mkdtempSync(join(os.tmpdir(), 'ar-extracted-'));
+    writeFileSync(join(extracted, 'config.yml'), config('engine:\n  name: code-review\n'));
+    const unset = mkdtempSync(join(os.tmpdir(), 'ar-extracted-'));
+    writeFileSync(join(unset, 'config.yml'), config(''));
+    const broken = mkdtempSync(join(os.tmpdir(), 'ar-extracted-'));
+    writeFileSync(join(broken, 'config.yml'), 'version: [');
+    try {
+      const fromDir = read(withConfig, extracted);
+      assert.equal(fromDir.out, 'name=code-review\n');
+      assert.equal(fromDir.archived, false, 'no second git archive');
+      assert.equal(read(withConfig, unset).out, 'name=agent-review\n', 'an extracted config with no engine');
+      assert.equal(read(withConfig, broken).out, 'name=unknown\n', 'an unreadable extracted config');
+      assert.equal(read(bare, extracted).out, 'name=agent-review\n', 'a base commit with no config is agent-review');
+      assert.equal(read('', extracted).out, 'name=unknown\n', 'the base commit is still required');
+      assert.equal(read('0123456789abcdef0123456789abcdef01234567', extracted).out, 'name=unknown\n');
+    } finally {
+      for (const d of [extracted, unset, broken]) rmSync(d, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test('interact.yml reads the engine through the shared action and approves only on an exact agent-review', () => {
@@ -2109,15 +2197,9 @@ test('README names the self-written proof file as a known limitation', () => {
   assert.ok(!bullet.includes('—'), 'new prose uses no em dashes');
 });
 
-test('README says an unset max_findings resets a limit set earlier in the session', () => {
-  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
-  const section = readme
-    .slice(readme.indexOf('## Use /code-review as the engine'), readme.indexOf('## Questions people ask'))
-    .replace(/\s+/g, ' ');
-  assert.ok(
-    section.includes('When `max_findings` is not set, the lane passes `--max-findings default`, which resets any limit you set earlier in the same Claude Code session.'),
-    'the README states the reset in one plain sentence',
-  );
+test('README makes no claim about resetting a remembered /code-review limit', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(!readme.includes('resets any limit'), 'the reset claim is gone');
 });
 
 test('the spec records the fixes made after the PR\'s /code-review run', () => {

@@ -597,6 +597,48 @@ test('options reports errors', () => {
   assert.match(s, /^error: /);
 });
 
+test('options --args-file keeps a leading --flag token', () => {
+  const root = optionsRoot();
+  try {
+    const file = join(root, 'args.txt');
+    writeFileSync(file, '--foo engine=agent-review deep\n');
+    const { code, s } = run(['options', '--args-file', file, '--root', root, '--review-dir', 'rd']);
+    assert.equal(code, 0, s);
+    const r = JSON.parse(s);
+    assert.equal(r.mode.value, 'deep');
+    assert.equal(r.engine.source, 'argument');
+    assert.deepEqual(r.notes, ['ignored unknown argument(s): --foo']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('options --args=<value> keeps a leading --flag token', () => {
+  const root = optionsRoot();
+  try {
+    const { code, s } = run(['options', '--args=--comment deep', '--root', root, '--review-dir', 'rd']);
+    assert.equal(code, 0, s);
+    assert.equal(JSON.parse(s).mode.value, 'deep');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a --ci token inside the args file does not set ci', () => {
+  const root = optionsRoot();
+  try {
+    const file = join(root, 'args.txt');
+    writeFileSync(file, '--ci');
+    const at = ['--root', root, '--review-dir', 'rd'];
+    assert.equal(JSON.parse(run(['options', '--args-file', file, ...at]).s).ci, false);
+    assert.equal(JSON.parse(run(['options', '--args', '--ci', ...at]).s).ci, false);
+    assert.equal(JSON.parse(run(['options', '--args', '', '--ci', ...at]).s).ci, true);
+    assert.equal(JSON.parse(run(['options', '--args-file', file, '--ci', ...at]).s).ci, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a code-review config with a disabled default lane fails only config validate and the code-review engine', () => {
   const root = optionsRoot();
   const configPath = join(root, 'rd', 'config.yml');
@@ -630,7 +672,10 @@ test('a code-review config with a disabled default lane fails only config valida
 
     const engine = run(['options', '--args', '', ...at]);
     assert.equal(engine.code, 1);
-    assert.match(engine.s, /^error: engine\.code_review\.always lists "security"/);
+    assert.equal(
+      engine.s,
+      'error: engine.code_review.always references disabled agent: security; engine.code_review.always references unknown agent: testing\n',
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

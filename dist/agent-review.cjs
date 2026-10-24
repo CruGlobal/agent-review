@@ -16879,7 +16879,9 @@ var require_options = __commonJS({
     var CI_NOTE = "The code-review engine runs locally only; CI ran agent-review's own reviewers, and only the local review can approve.";
     function setOnce(state, key, value) {
       if (state[key] != null && state[key] !== value) {
-        throw new Error(`conflicting ${key}= values ("${state[key]}" and "${value}")`);
+        throw new Error(
+          key === "mode" ? `two mode words given: "${state[key]}" and "${value}"; pass only one` : `conflicting ${key}= values ("${state[key]}" and "${value}")`
+        );
       }
       state[key] = value;
     }
@@ -16946,16 +16948,8 @@ var require_options = __commonJS({
         const lanes = codeReviewLanes(crCfg);
         replaces = lanes.replaces.slice();
         always = lanes.always.slice();
-        if (hasReservedId(cfg.agents)) throw new Error(RESERVED_ID_MESSAGE);
-        const [problem] = alwaysLaneProblems(crCfg, cfg.agents);
-        if (problem && problem.kind === "overlap") {
-          throw new Error(`${laneOverlapMessage(problem.id, crCfg)}; a lane cannot both run and be replaced`);
-        }
-        if (problem) {
-          throw new Error(
-            `engine.code_review.always lists "${problem.id}", but no enabled agent has that id (add it to agents or change engine.code_review.always)`
-          );
-        }
+        const problems = codeReviewEngineProblems(cfg);
+        if (problems.length) throw new Error(problems.join("; "));
         const known = new Set((cfg.agents || []).map((a) => a.id));
         for (const id of crCfg.replaces || []) {
           if (!known.has(id)) notes.push(`engine.code_review.replaces lists an unknown lane: ${id}`);
@@ -20375,16 +20369,19 @@ var require_cliCommands = __commonJS({
       if (by === "unmatched-coverage") return "coverage";
       return "trigger";
     }
-    var MAX_FINDINGS_RESET_NOTE = "this run passes --max-findings default, which resets any /code-review limit you set earlier in this Claude Code session.";
+    function unplannedLanes({ plan, configAgents }) {
+      const planned = new Set(plan.agents.map((a) => a.id));
+      const replaced = new Set(plan.engine && plan.engine.replaces || []);
+      return (configAgents || []).filter(
+        (a) => a.enabled !== false && !planned.has(a.id) && !replaced.has(a.id)
+      );
+    }
     function reviewerList({ plan, sliceManifest, configAgents, model }) {
       const manifest = sliceManifest || {};
       const reviewers = plan.agents.map(
         (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`
       );
-      const planned = new Set(plan.agents.map((a) => a.id));
-      const replaced = new Set(plan.engine && plan.engine.replaces || []);
-      for (const a of configAgents || []) {
-        if (a.enabled === false || planned.has(a.id) || replaced.has(a.id)) continue;
+      for (const a of unplannedLanes({ plan, configAgents })) {
         reviewers.push(`${a.id} [skipped: no trigger matched]`);
       }
       return reviewers.join(", ");
@@ -20408,12 +20405,8 @@ var require_cliCommands = __commonJS({
       const model = options.model && options.model.value;
       const reviewers = resolved === "skip" ? "none (no-risk diff skipped)" : reviewerList({ plan, sliceManifest, configAgents, model });
       const lines = [head.join(" \xB7 "), `reviewers: ${reviewers}`];
-      if (options.engine.value === ENGINE_DEFAULT && DEFAULT_ENGINE_MODE_NOTES[resolved])
-        lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
-      if (options.engine.value === ENGINE_CODE_REVIEW)
-        lines.push(
-          options.maxFindings ? `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.` : `note: ${MAX_FINDINGS_RESET_NOTE}`
-        );
+      const modeNote = resolved === "deep" && !unplannedLanes({ plan, configAgents }).length ? null : DEFAULT_ENGINE_MODE_NOTES[resolved];
+      if (options.engine.value === ENGINE_DEFAULT && modeNote) lines.push(`note: ${modeNote}`);
       for (const n of options.notes || []) lines.push(`note: ${n}`);
       if (options.reviewsRun.value === "local" && ciFilesPresent)
         lines.push(`note: ${LEFTOVER_CI_NOTE}`);
@@ -20539,6 +20532,19 @@ var require_cli = __commonJS({
       if (i < 0) return void 0;
       const v = argv[i + 1];
       return v === void 0 || v.startsWith("--") ? void 0 : v;
+    }
+    function optionsInput(argv) {
+      let args = "";
+      let ci = false;
+      for (let i = 0; i < argv.length; i++) {
+        const a = argv[i];
+        if (a === "--ci") ci = true;
+        else if (a === "--args") args = argv[++i] || "";
+        else if (a.startsWith("--args=")) args = a.slice("--args=".length);
+        else if (a === "--args-file") args = readFileSync(argv[++i], "utf8").replace(/\r?\n$/, "");
+        else if (a === "--root" || a === "--review-dir") i++;
+      }
+      return { args, ci };
     }
     function ctx(argv) {
       const opts = { root: flag(argv, "--root"), reviewDir: flag(argv, "--review-dir") };
@@ -20826,7 +20832,7 @@ var require_cli = __commonJS({
   index                          rebuild the import-graph cache
   impact [--base <ref>]          cross-file blast radius for the current diff
   plan --files <f> --diff <f> --stat <f> [--scope <s>] [--mode <auto|quick|standard|deep>] [--options <f>]   compute a review plan (JSON)
-  options --args "<raw>" [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
+  options (--args "<raw>" | --args=<raw> | --args-file <f>) [--ci]   resolve review mode, engine, and effort from arguments and config (JSON)
   startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
@@ -20918,11 +20924,8 @@ var require_cli = __commonJS({
         case "options": {
           try {
             const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-            const resolved = resolveOptions({
-              args: flag(rest, "--args") || "",
-              config: cfg,
-              ci: rest.includes("--ci")
-            });
+            const { args, ci } = optionsInput(rest);
+            const resolved = resolveOptions({ args, config: cfg, ci });
             out(JSON.stringify(resolved, null, 2));
             return 0;
           } catch (e) {

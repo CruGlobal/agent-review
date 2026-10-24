@@ -71,18 +71,20 @@ function reviewerTag(agent, slice, model) {
   return 'trigger';
 }
 
-const MAX_FINDINGS_RESET_NOTE =
-  'this run passes --max-findings default, which resets any /code-review limit you set earlier in this Claude Code session.';
+function unplannedLanes({ plan, configAgents }) {
+  const planned = new Set(plan.agents.map((a) => a.id));
+  const replaced = new Set((plan.engine && plan.engine.replaces) || []);
+  return (configAgents || []).filter(
+    (a) => a.enabled !== false && !planned.has(a.id) && !replaced.has(a.id),
+  );
+}
 
 function reviewerList({ plan, sliceManifest, configAgents, model }) {
   const manifest = sliceManifest || {};
   const reviewers = plan.agents.map(
     (a) => `${a.id} [${reviewerTag(a, manifest[a.id], model)}]`,
   );
-  const planned = new Set(plan.agents.map((a) => a.id));
-  const replaced = new Set((plan.engine && plan.engine.replaces) || []);
-  for (const a of configAgents || []) {
-    if (a.enabled === false || planned.has(a.id) || replaced.has(a.id)) continue;
+  for (const a of unplannedLanes({ plan, configAgents })) {
     reviewers.push(`${a.id} [skipped: no trigger matched]`);
   }
   return reviewers.join(', ');
@@ -113,14 +115,12 @@ function formatStartup({
       : reviewerList({ plan, sliceManifest, configAgents, model });
 
   const lines = [head.join(' \u00b7 '), `reviewers: ${reviewers}`];
-  if (options.engine.value === ENGINE_DEFAULT && DEFAULT_ENGINE_MODE_NOTES[resolved])
-    lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
-  if (options.engine.value === ENGINE_CODE_REVIEW)
-    lines.push(
-      options.maxFindings
-        ? `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`
-        : `note: ${MAX_FINDINGS_RESET_NOTE}`,
-    );
+  // Deep mode runs only the lanes skipped for no trigger; a lane with no matching hunks never runs.
+  const modeNote =
+    resolved === 'deep' && !unplannedLanes({ plan, configAgents }).length
+      ? null
+      : DEFAULT_ENGINE_MODE_NOTES[resolved];
+  if (options.engine.value === ENGINE_DEFAULT && modeNote) lines.push(`note: ${modeNote}`);
   for (const n of options.notes || []) lines.push(`note: ${n}`);
   if (options.reviewsRun.value === 'local' && ciFilesPresent)
     lines.push(`note: ${LEFTOVER_CI_NOTE}`);
