@@ -154,7 +154,8 @@ It prints one JSON line, `{ ok, stage, reason, count, mode, dropped }`, and exit
 
 - `ok` is `true` and the cross-check passed: the lane passed (step 4).
 - `stage` is `"config"`: the review's config cannot be read, the reviewed head is not a commit
-  here, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).
+  here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch
+  cannot fix that. Fail the run now, with no relaunch (step 5).
 - `stage` is `"capture"`: relaunch with a new capture (step 3).
 - `stage` is `"lane"`: relaunch with the same capture (step 3), with the proof's `reason`.
 - `ok` is `true` but the cross-check failed: relaunch with the same capture (step 3), with one

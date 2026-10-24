@@ -1199,7 +1199,7 @@ function proofRepo(files) {
   return { parent, root, git };
 }
 
-test('code-review-proof reads root-level file names from git ls-files under --root', () => {
+test('code-review-proof reads root-level file names from the committed tree under --root', () => {
   const { parent, root } = proofRepo({ Gemfile: 'gem "rack"\n', 'lib/cart.rb': 'x = 1\n' });
   try {
     writeFileSync(join(root, 'untracked.rb'), 'y = 2\n');
@@ -1227,6 +1227,70 @@ test('code-review-proof reads root-level file names from git ls-files under --ro
     assert.match(lost.reason, /\(Gemfile:12\) is a finding line that no raw entry claims/);
   } finally {
     rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof reads root-level file names at --head, not from the local index', () => {
+  const { parent, root, git } = proofRepo({ 'lib/cart.rb': 'x = 1\n' });
+  try {
+    const before = git('rev-parse', 'HEAD');
+    writeFileSync(join(root, 'setup.py'), 'setup()\n');
+    git('add', 'setup.py');
+    git('commit', '-q', '-m', 'add setup.py');
+    const reviewed = git('rev-parse', 'HEAD');
+    const result = '- lib/cart.rb:1 skips the guard\n- setup.py:12 pins an old version\n';
+    const cart = { n: 1, file: 'lib/cart.rb', line: 1, summary: 's' };
+    const setup = { n: 2, file: 'setup.py', line: 12, summary: 's' };
+    const scoredFor = (raw) => raw.map((entry) => ({ ...PROOF_SCORED[0], raw: entry.n, file: entry.file, line: entry.line }));
+    const f = proofFiles(parent, { raw: [cart], scored: scoredFor([cart]), dropped: [], result });
+    const proofWith = (raw, extra) => {
+      writeFileSync(f.raw, JSON.stringify(raw));
+      writeFileSync(f.findings, JSON.stringify(scoredFor(raw)));
+      return withCaptureDir(f.capDir, () => JSON.parse(run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere', ...extra])).s));
+    };
+    const assertNeedsClaim = (extra, label) => {
+      const lost = proofWith([cart], extra);
+      assert.equal(lost.ok, false, label);
+      assert.equal(lost.stage, 'lane', label);
+      assert.match(lost.reason, /\(setup\.py:12\) is a finding line that no raw entry claims/, label);
+      const listed = proofWith([cart, setup], extra);
+      assert.equal(listed.ok, true, `${label}: ${listed.reason}`);
+    };
+
+    git('checkout', '-q', before);
+    assertNeedsClaim(['--head', reviewed], 'a checkout behind the reviewed head');
+    assert.equal(proofWith([cart], []).ok, true, 'with no --head the names come from HEAD, which has no setup.py');
+
+    git('checkout', '-q', reviewed);
+    git('rm', '-q', 'setup.py');
+    assertNeedsClaim([], 'setup.py deleted from the index but present at HEAD');
+    assertNeedsClaim(['--head', reviewed], 'the same, with --head');
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof refuses at stage config when it cannot list the reviewed commit\'s files', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-nogit-'));
+  try {
+    const raw = [{ n: 1, file: 'lib/cart.rb', line: 1, summary: 's' }];
+    const f = proofFiles(dir, {
+      raw,
+      scored: [{ ...PROOF_SCORED[0], raw: 1, file: 'lib/cart.rb', line: 1 }],
+      dropped: [],
+      result: '- lib/cart.rb:1 skips the guard, and setup.py:12 pins an old version\n',
+    });
+    const r = withCaptureDir(f.capDir, () => run(proofArgs(f, ['--root', dir, '--review-dir', 'nowhere'])));
+    assert.equal(r.code, 1);
+    const parsed = JSON.parse(r.s);
+    assert.equal(parsed.ok, false);
+    assert.equal(parsed.stage, 'config');
+    assert.match(parsed.reason, /could not list the files of commit HEAD in /);
+    writeFileSync(f.capture, JSON.stringify({ source: 'agent-review-capture-hook', run_id: 'r1', result: '- lib/cart.rb:1 skips the guard\n' }));
+    const slashOnly = withCaptureDir(f.capDir, () => JSON.parse(run(proofArgs(f, ['--root', dir, '--review-dir', 'nowhere'])).s));
+    assert.equal(slashOnly.ok, true, `a result with no path lacking a / needs no file list: ${slashOnly.reason}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

@@ -119,8 +119,8 @@ Find the entries this way:
    whole number above 0 gives `null`.
 2. Finding lines. Otherwise, every line of the result that cites a location is one raw finding.
    A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or
-   has no `/` and is a file the repository tracks, by its whole path or by its file name, as in
-   `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the repository has `lib/cart.rb`. So a
+   has no `/` and is a file in the reviewed commit, by its whole path or by its file name, as in
+   `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the commit has `lib/cart.rb`. So a
    host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not
    locations. For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.
    `path:0` is a location with no line: its raw `line` is `null`. A web address such as

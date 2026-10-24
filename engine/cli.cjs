@@ -483,14 +483,18 @@ function gitIn(root, args) {
   return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], maxBuffer: GIT_MAX_BUFFER });
 }
 
-// A git failure gives an empty list, and then no path without a "/" counts as a location.
-function trackedFiles(root) {
+// null, never [], when the files cannot be listed: an empty list would let a finding line whose
+// path has no "/" go unclaimed.
+function filesAt(root, commit) {
+  if (!commit) return null;
   try {
-    return gitIn(root, ['ls-files', '-z']).split('\0').filter(Boolean);
+    return gitIn(root, ['ls-tree', '-r', '--name-only', '-z', commit]).split('\0').filter(Boolean);
   } catch {
-    return [];
+    return null;
   }
 }
+
+class FileListError extends Error {}
 
 function commitIn(root, ref) {
   if (!validRef(ref)) return null;
@@ -1055,32 +1059,47 @@ function main(rawArgv) {
       const dirError = captureDirError(dir);
       if (dirError) return refuse('capture', dirError);
       const capturePath = join(dir, CAPTURE_FILES.capture);
+      const atCommit = () => {
+        if (commit === undefined) commit = commitIn(C.ROOT, 'HEAD');
+        return commit;
+      };
       const blobs = new Map();
       const readLines = (p) => {
-        if (!blobs.has(p)) {
-          if (commit === undefined) commit = commitIn(C.ROOT, 'HEAD');
-          blobs.set(p, blobLines(C.ROOT, commit, p));
-        }
+        if (!blobs.has(p)) blobs.set(p, blobLines(C.ROOT, atCommit(), p));
         return blobs.get(p);
       };
       const fileExists = (p) => readLines(p) !== null;
       let lookup = null;
       const tracked = (name) => {
-        lookup ??= trackedLookup(trackedFiles(C.ROOT));
+        if (!lookup) {
+          const files = filesAt(C.ROOT, atCommit());
+          if (!files) {
+            throw new FileListError(
+              `could not list the files of commit ${headArg ?? 'HEAD'} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`,
+            );
+          }
+          lookup = trackedLookup(files);
+        }
         return lookup(name);
       };
-      const r = checkCodeReviewRun({
-        captureText: readIfPresent(capturePath),
-        runId,
-        rawText: readIfPresent(rawPath),
-        scoredText: scoredBytes?.toString('utf8') ?? null,
-        droppedText: readIfPresent(droppedPath),
-        excludedPaths,
-        tracked,
-        fileExists,
-        readLines,
-        root: C.ROOT,
-      });
+      let r;
+      try {
+        r = checkCodeReviewRun({
+          captureText: readIfPresent(capturePath),
+          runId,
+          rawText: readIfPresent(rawPath),
+          scoredText: scoredBytes?.toString('utf8') ?? null,
+          droppedText: readIfPresent(droppedPath),
+          excludedPaths,
+          tracked,
+          fileExists,
+          readLines,
+          root: C.ROOT,
+        });
+      } catch (e) {
+        if (e instanceof FileListError) return refuse('config', e.message);
+        throw e;
+      }
       return finish(r);
     }
     case 'capture': {

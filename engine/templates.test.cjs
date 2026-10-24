@@ -861,7 +861,7 @@ test('lane template lists raw findings the way the check grounds them', () => {
     'For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.',
     'When none of these fits, or the result cannot be used, write `[]` as the raw list anyway,',
     'A web address such as `https://example.com:443` is not a location.',
-    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and is a file the repository tracks, by its whole path or by its file name, as in `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the repository has `lib/cart.rb`.',
+    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and is a file in the reviewed commit, by its whole path or by its file name, as in `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the commit has `lib/cart.rb`.',
     'So a host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not locations.',
     '`path:0` is a location with no line: its raw `line` is `null`.',
     'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
@@ -2532,7 +2532,8 @@ test('the capture spec records the fresh-review changes to the hooks in section 
 
 const SECTION4_FRESH_NEEDLES = [
   'parses to an object with a `findings` key, parses to an array that is empty or holds at least one plain object, or does not parse and contains `"file"`',
-  'A mention path with no `/` counts only when the repository tracks a file with that exact path or with that file name (`git ls-files` under `--root`, read once per run)',
+  'A mention path with no `/` counts only when the reviewed commit has a file with that exact path or with that file name (`git ls-tree -r --name-only -z` of the same commit the disproof checks read, `--head` or `HEAD`, once per run)',
+  'If that listing fails, the proof fails with `stage: config`.',
   'A `path:0` mention names its file with no line, and a raw entry with `line: null` claims it.',
   'A `disproved` proof must quote the whole cited line: the cited line, with whitespace removed, has at least 6 characters and appears in the quote with whitespace removed.',
   'This replaces "at least 3 non-space characters, that appears within 2 lines of it" above.',
@@ -3138,7 +3139,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     '`stage` is `"capture"`: relaunch with a new capture (step 3).',
     'A reply that starts with `/code-review did not finish` is that failure, whatever follows it.',
     '`/code-review did not finish: <reason>`, or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
-    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head is not a commit here, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
+    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head is not a commit here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
     '**With the same capture.** Do not re-arm',
     '**With a new capture.** Re-arm with this block first, which clears the old result',
   ]) {
