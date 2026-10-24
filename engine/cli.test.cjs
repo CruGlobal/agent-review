@@ -261,6 +261,100 @@ test('slice subcommand refuses an agent id that would escape --out-dir', () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+function diffBlock(path, added, oldPath = path) {
+  return [
+    `diff --git a/${oldPath} b/${path}`,
+    'index 1111111..2222222 100644',
+    `--- a/${oldPath}`,
+    `+++ b/${path}`,
+    '@@ -1,1 +1,2 @@',
+    ' keep',
+    `+${added}`,
+    '',
+  ].join('\n');
+}
+
+function rawEntry(n, file) {
+  return { n, file, line: 2, summary: 'a finding' };
+}
+
+test("diff-for prints only the raw files' blocks, and nothing for []", () => {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-diff-for-'));
+  const a = diffBlock('lib/a.rb', 'a = 1');
+  const docs = diffBlock('docs/b.md', 'b');
+  const renamed = diffBlock('lib/c.rb', 'c = 3', 'lib/old_c.rb');
+  const d = diffBlock('app/d.js', 'd');
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, `preamble line\n${a}${docs}${renamed}${d}`);
+  const rawPath = join(root, 'raw.json');
+  const diffFor = (raw) => {
+    writeFileSync(rawPath, JSON.stringify(raw));
+    return run(['diff-for', '--diff', diffPath, '--raw', rawPath, '--root', root]);
+  };
+
+  const picked = diffFor([
+    rawEntry(1, 'app/d.js'),
+    rawEntry(2, `${root}/lib/a.rb`),
+    rawEntry(3, './lib/old_c.rb'),
+    rawEntry(4, 'lib/a.rb'),
+    rawEntry(5, 'lib/not_in_diff.rb'),
+  ]);
+  assert.equal(picked.code, 0);
+  assert.equal(picked.s, a + renamed + d, 'blocks come in diff order, once each, matched repo-relative by new or old path');
+
+  const empty = diffFor([]);
+  assert.equal(empty.code, 0);
+  assert.equal(empty.s, '');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('diff-for keeps a block whose paths it cannot read whenever the raw list names a file', () => {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-diff-for-quoted-'));
+  const a = diffBlock('lib/a.rb', 'a = 1');
+  const quoted = 'diff --git "a/my file.rb" "b/my file.rb"\n--- "a/my file.rb"\n+++ "b/my file.rb"\n@@ -1 +1 @@\n-x\n+y\n';
+  const other = diffBlock('lib/other.rb', 'o');
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, a + quoted + other);
+  const rawPath = join(root, 'raw.json');
+  writeFileSync(rawPath, JSON.stringify([rawEntry(1, 'lib/a.rb')]));
+  const { code, s } = run(['diff-for', '--diff', diffPath, '--raw', rawPath, '--root', root]);
+  assert.equal(code, 0);
+  assert.equal(s, a + quoted);
+  writeFileSync(rawPath, '[]');
+  assert.equal(run(['diff-for', '--diff', diffPath, '--raw', rawPath, '--root', root]).s, '');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('diff-for checks its arguments and its raw list', () => {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-diff-for-args-'));
+  const diffPath = join(root, 'diff.txt');
+  writeFileSync(diffPath, diffBlock('lib/a.rb', 'a = 1'));
+  const rawPath = join(root, 'raw.json');
+
+  for (const args of [['diff-for'], ['diff-for', '--diff', diffPath], ['diff-for', '--raw', rawPath]]) {
+    const r = run(args);
+    assert.equal(r.code, 1, args.join(' '));
+    assert.match(r.s, /usage: agent-review diff-for --diff <f> --raw <f>/);
+  }
+
+  const failsWith = (rawText, pattern, diff = diffPath) => {
+    writeFileSync(rawPath, rawText);
+    const r = run(['diff-for', '--diff', diff, '--raw', rawPath, '--root', root]);
+    assert.equal(r.code, 1, rawText);
+    assert.match(r.s, pattern);
+  };
+  failsWith('{"findings": []}', /is not a JSON array/);
+  failsWith('[{"n": 1, "line": 3}]', /raw entry 1 needs a non-empty string file/);
+  failsWith('not json', /could not read the raw findings list/);
+  failsWith('[]', /could not read the diff/, join(root, 'missing.txt'));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('usage lists diff-for', () => {
+  const { s } = run(['help']);
+  assert.ok(s.includes('  diff-for --diff <f> --raw <f>   '), s);
+});
+
 test('address subcommands prepare, validate, emit feedback, and finalize through the CLI', () => {
   const { mkdirSync, readFileSync } = require('node:fs');
   const root = mkdtempSync(join(os.tmpdir(), 'ar-address-'));

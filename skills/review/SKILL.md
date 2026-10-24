@@ -966,15 +966,18 @@ lanes — they already have the whole diff.
 **The `code-review` lane's prompt.** Only when `ENGINE` is `code-review`. The `code-review` lane
 (`agents[0]`, `matchedBy: "engine"`) does not use the archetype. Read the plugin's
 `templates/code-review-lane.md` (`../../templates/code-review-lane.md` from this skill file) and
-fill its nine placeholders:
+fill its twelve placeholders:
 
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{RUN_ID}}`              | `$REVIEW_ID` |
+| `{{ATTEMPT}}`             | `$REVIEW_ID-1`, or `$REVIEW_ID-2` on a relaunch |
 | `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `/tmp/review_env.sh`.                                                                                                                        |
-| `{{TARGET}}`              | The `code-review target:` value printed by the block above: `$LAST_REVIEWED..$HEAD_REF` for an incremental review, `$PR_NUMBER` for a full review, or `$RANGE`, the same range the lanes' diff uses, when no PR resolves. |
-| `{{MAX_FINDINGS_FLAG}}`   | ` --max-findings <n>`, with its leading space, when `plan.engine.maxFindings` is set (`<n>` is that value). ` --max-findings default`, with its leading space, when it is `null`: /code-review remembers a developer's last `--max-findings` choice, and leaving the flag out would let that choice cap this lane. |
+| `{{SKILL_ARGS}}`          | The args printed by `agent-review capture arm`, composed as `"$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"`. `MAX_FINDINGS_FLAG` is ` --max-findings <n>` when `plan.engine.maxFindings` is set, else ` --max-findings default`. |
+| `{{RETRY_NOTE}}`          | Empty on the first launch |
+| `{{PROFILE_INSTRUCTION}}` | For `chill`: "This repository uses the chill profile, so the report hides findings below 7. Score every finding honestly anyway; never drop or lower one for the profile." For `standard` and `assertive`: "Score every finding honestly." |
 | `{{RISK_CONTEXT}}`        | The same bullet block as the archetype's `{{RISK_CONTEXT}}`, for this lane (`Selected because: engine`, `Model tier: <its tier>`).                                                               |
-| `{{DIFF_PATH}}`           | `/tmp/pr_diff.txt`. This lane is `always: true`, so it always gets the whole diff, never a slice.                                                                                                |
+| `{{DIFF_PATH}}`           | `/tmp/code_review_diff.txt` (`git diff "$BASE_SHA...$HEAD_SHA"`, the merge base) for a full PR review; `/tmp/pr_diff.txt` for incremental and range reviews |
 | `{{SCORING_RULES}}`       | The lane's `rules[]` (the `path_rules` this diff matches, then each enabled replaced lane's rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.       |
 | `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** above), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |

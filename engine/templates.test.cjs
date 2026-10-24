@@ -2,8 +2,9 @@
 // Contract tests between the shipped templates/skills and the CLI surface.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { readFileSync } = require('node:fs');
+const { readFileSync, mkdtempSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
+const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
 
@@ -531,9 +532,12 @@ test('the plugin ships one thin reviewer agent per model tier', () => {
 const CODE_REVIEW_AGENT = join(ROOT, 'agents/reviewer-code-review.md');
 const CODE_REVIEW_LANE = join(ROOT, 'templates/code-review-lane.md');
 const CODE_REVIEW_LANE_PLACEHOLDERS = [
+  'RUN_ID',
+  'ATTEMPT',
   'EFFORT',
-  'TARGET',
-  'MAX_FINDINGS_FLAG',
+  'SKILL_ARGS',
+  'RETRY_NOTE',
+  'PROFILE_INSTRUCTION',
   'RISK_CONTEXT',
   'DIFF_PATH',
   'SCORING_RULES',
@@ -542,6 +546,45 @@ const CODE_REVIEW_LANE_PLACEHOLDERS = [
   'EXCLUDED_PATHS',
 ];
 const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
+const LANE_FILES = ['raw', 'findings', 'dropped'].map((kind) => `/tmp/code_review_${kind}.{{ATTEMPT}}.json`);
+const LANE_PROOF_COMMAND =
+  'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}';
+
+function laneText() {
+  return readFileSync(CODE_REVIEW_LANE, 'utf8');
+}
+
+function flatText(text) {
+  return text.replace(/\s+/g, ' ');
+}
+
+// Sections start at a heading on its own line; prose such as "Go to STEP 2." never ends one.
+function laneStep(text, from, to) {
+  const start = text.indexOf(`\n${from}`);
+  const end = to ? text.indexOf(`\n${to}`, start + 1) : text.length;
+  assert.ok(start >= 0 && end > start, `the lane template has a section from ${from} to ${to}`);
+  return text.slice(start + 1, end);
+}
+
+function laneHeredocs(text) {
+  return [...text.matchAll(/^node - <<'EOF'\n([\s\S]*?)\nEOF$/gm)].map((m) => m[1]);
+}
+
+// The rows of the review skill's code-review lane table, keyed by placeholder name. The archetype
+// table above it fills placeholders of the same names, so rows are read only from this section.
+function lanePlaceholderRows() {
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const start = skill.indexOf("**The `code-review` lane's prompt.**");
+  const end = skill.indexOf('The launched-lane set', start);
+  assert.ok(start >= 0 && end > start, 'the skill has the code-review lane placeholder table');
+  const section = skill.slice(start, end);
+  const rows = new Map();
+  for (const line of section.split('\n')) {
+    const m = /^\| `\{\{([A-Z_]+)\}\}`\s*\|(.*)\|\s*$/.exec(line);
+    if (m) rows.set(m[1], m[2].trim());
+  }
+  return { section, rows };
+}
 
 test('reviewer-code-review pins opus and no effort', () => {
   const body = readFileSync(CODE_REVIEW_AGENT, 'utf8');
@@ -554,16 +597,40 @@ test('reviewer-code-review pins opus and no effort', () => {
   assert.ok(!body.includes('—'), 'new prose uses no em dashes');
 });
 
-test('code-review-lane.md uses exactly the documented placeholders', () => {
-  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
-  const found = new Set(
-    [...text.matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]),
-  );
+test('lane template placeholders are exactly the twelve listed', () => {
+  const found = new Set([...laneText().matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]));
   assert.deepStrictEqual(
     [...found].sort(),
     [...CODE_REVIEW_LANE_PLACEHOLDERS].sort(),
     'code-review lane placeholder vocabulary drifted from the documented set',
   );
+  const { section, rows } = lanePlaceholderRows();
+  assert.ok(section.includes('fill its twelve placeholders:'), 'the skill counts the twelve placeholders');
+  assert.deepStrictEqual(
+    [...rows.keys()].sort(),
+    [...CODE_REVIEW_LANE_PLACEHOLDERS].sort(),
+    "the skill's table documents exactly the template's placeholders",
+  );
+});
+
+test('the skill says how to fill the capture, attempt, retry, diff, and profile placeholders', () => {
+  const { rows } = lanePlaceholderRows();
+  assert.strictEqual(rows.get('RUN_ID'), '`$REVIEW_ID`');
+  assert.strictEqual(rows.get('ATTEMPT'), '`$REVIEW_ID-1`, or `$REVIEW_ID-2` on a relaunch');
+  assert.strictEqual(rows.get('RETRY_NOTE'), 'Empty on the first launch');
+  assert.strictEqual(
+    rows.get('DIFF_PATH'),
+    '`/tmp/code_review_diff.txt` (`git diff "$BASE_SHA...$HEAD_SHA"`, the merge base) for a full PR review; `/tmp/pr_diff.txt` for incremental and range reviews',
+  );
+  const profile = rows.get('PROFILE_INSTRUCTION');
+  assert.ok(
+    profile.includes(
+      'For `chill`: "This repository uses the chill profile, so the report hides findings below 7. Score every finding honestly anyway; never drop or lower one for the profile."',
+    ),
+    profile,
+  );
+  assert.ok(profile.includes('For `standard` and `assertive`: "Score every finding honestly."'), profile);
+  assert.ok(!/Report only high-confidence/.test(profile), 'the lane never gets the suppress-nits instruction');
 });
 
 test('with no PR, /code-review gets the same range the lanes review', () => {
@@ -574,42 +641,39 @@ test('with no PR, /code-review gets the same range the lanes review', () => {
     'the no-PR target is $RANGE',
   );
   assert.ok(!bash.includes('git branch --show-current'), 'a branch name lets /code-review pick its own base');
-  const row = skill.split('\n').find((line) => line.startsWith('| `{{TARGET}}`'));
-  assert.ok(row, 'the skill documents {{TARGET}}');
-  assert.ok(row.includes("`$RANGE`, the same range the lanes' diff uses, when no PR resolves"), row);
+  const row = lanePlaceholderRows().rows.get('SKILL_ARGS');
+  assert.ok(row, 'the skill documents {{SKILL_ARGS}}');
+  assert.ok(row.includes('`"$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"`'), row);
   assert.ok(!row.includes('branch name'), row);
 });
 
 test('the lane always passes --max-findings, so a remembered /code-review limit never caps it', () => {
-  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const row = skill.split('\n').find((line) => line.startsWith('| `{{MAX_FINDINGS_FLAG}}`'));
-  assert.ok(row, 'the skill documents {{MAX_FINDINGS_FLAG}}');
-  const flat = row.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('` --max-findings <n>`, with its leading space, when `plan.engine.maxFindings` is set'), row);
-  assert.ok(flat.includes('` --max-findings default`, with its leading space, when it is `null`'), row);
+  const row = lanePlaceholderRows().rows.get('SKILL_ARGS');
+  assert.ok(row, 'the skill documents {{SKILL_ARGS}}');
+  assert.ok(row.startsWith('The args printed by `agent-review capture arm`, composed as '), row);
+  assert.ok(
+    row.includes('`MAX_FINDINGS_FLAG` is ` --max-findings <n>` when `plan.engine.maxFindings` is set, else ` --max-findings default`.'),
+    row,
+  );
   assert.ok(!/Empty string/i.test(row), 'the flag is never left out');
 });
 
 test('code-review-lane.md carries the contracts', () => {
-  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
+  const text = laneText();
   for (const needle of [
     'skill: "code-review"',
-    '/tmp/code_review_raw.txt',
-    '/tmp/code_review_dropped.json',
-    '/tmp/agent_findings/code-review.json',
+    'args: "{{SKILL_ARGS}}"',
+    ...LANE_FILES,
     FINAL_LINE_CONTRACT,
-    'Recategorized from ',
-    'Outside the reviewed range: ',
-    'Doubted: ',
-    'REFUTED by the /code-review verifier',
-    'args: "{{EFFORT}} {{TARGET}}{{MAX_FINDINGS_FLAG}}"',
+    '`/code-review did not finish`',
+    '`/code-review returned no usable result`',
+    "If the Bash tool cuts a command's output short",
   ]) {
     assert.ok(text.includes(needle), `code-review lane must contain ${JSON.stringify(needle)}`);
   }
-  assert.ok(
-    !text.includes("REFUTED by /code-review's verifier"),
-    'the REFUTED proof string is copied into a single-quoted node -e script, so it must hold no apostrophe',
-  );
+  assert.ok(!text.includes('/code-review did not run'), 'the lane waits for the capture, so "did not run" is gone');
+  const headings = ['BEFORE YOU START:', 'STEP 1.', 'STEP 2.', 'STEP 3.', 'STEP 4.', 'STEP 5.'].map((h) => text.indexOf(h));
+  assert.ok(headings.every((at, i) => at >= 0 && (i === 0 || at > headings[i - 1])), 'the steps appear once, in order');
   for (const category of ['simplification', 'efficiency', 'reuse', 'altitude', 'conventions']) {
     assert.ok(text.includes(`\`${category}\``), `cleanup category ${category} missing`);
   }
@@ -627,65 +691,159 @@ test('code-review-lane.md carries the contracts', () => {
   );
 });
 
-test('code-review-lane.md finds the findings list the way the proof does', () => {
-  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
-  const step2 = text.slice(text.indexOf('STEP 2.'), text.indexOf('STEP 3.'));
-  const flat = step2.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('array of objects'), 'a findings array holds only objects');
-  assert.ok(flat.includes('every object has a non-empty string `file`'), 'a qualifying list names a file in every entry');
+test('lane template never writes the capture file or /tmp/agent_findings/code-review.json', () => {
+  const text = laneText();
+  assert.ok(!text.includes('code_review_capture'), 'the template never names a capture file');
+  assert.ok(!text.includes('/tmp/agent-review'), 'the template never names the private capture dir');
+  assert.ok(!text.includes('/tmp/agent_findings'), 'the skill copies the checked findings for consensus, not the lane');
+  assert.ok(!/agent-review capture (?:arm|disarm)/.test(text), 'only the review skill arms and disarms capture');
   assert.ok(
-    flat.includes('A list block is a fenced block labeled `json`, or one with no label, that holds a findings list or starts like one: it parses as a JSON array or as a JSON object with a `findings` key, or it does not parse and its first non-blank character is `[`, or `{` with `"findings"` somewhere in the block.'),
-    'a json or unlabeled block is a list block only when it is list-like',
+    text.includes('```bash\nagent-review capture show --run {{RUN_ID}}\n```'),
+    'the lane reads the result through the CLI',
   );
+  const removals = text.split('\n').filter((line) => /^\s*rm\b/.test(line));
+  assert.deepStrictEqual(removals, [`rm -f ${LANE_FILES.join(' ')}`], "the lane removes only this attempt's three files");
+  const writes = [...text.matchAll(/writeFileSync\("([^"]+)"/g)].map((m) => m[1]);
+  assert.deepStrictEqual(writes.sort(), [...LANE_FILES].sort(), "the lane writes only this attempt's three files");
+  assert.ok(!/>\s*\/tmp\//.test(text), 'no shell redirect writes another /tmp file');
+});
+
+test('lane template has no node -e write recipe and uses a quoted node heredoc', () => {
+  const text = laneText();
+  assert.ok(!text.includes('node -e'), 'a single-quoted node -e script breaks on quoted code');
+  const scripts = laneHeredocs(text);
+  assert.strictEqual(scripts.length, 2, 'one heredoc writes the raw list, one the scored and dropped lists');
+  for (const script of scripts) assert.ok(script.includes('JSON.stringify'), script);
+  assert.strictEqual(text.split('node - <<').length - 1, 2, "every node heredoc is the quoted 'EOF' form");
   assert.ok(
-    flat.includes('If any list block is not usable, such as a list cut off partway, one with a `null` or missing `file`, or a quote of some file\'s contents shaped like a list, the findings list did not come through whole, and none of the shapes below applies, even when another list block is usable.'),
-    'one unusable list block fails closed beside a usable one',
+    flatText(text).includes(
+      'inside a JS string, write a backslash as `\\\\` and a double quote as `\\"`, and a line break as `\\n`.',
+    ),
+    'the lane is told how to escape quoted code inside a JS string',
   );
+});
+
+test('the lane heredoc examples run, and their files pass the lane check', () => {
+  const { checkLaneOutput } = require('./codeReviewProof.cjs');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-lane-'));
+  try {
+    for (const script of laneHeredocs(laneText())) {
+      execFileSync(process.execPath, ['-'], {
+        input: script.replaceAll('/tmp/', `${dir}/`).replaceAll('{{ATTEMPT}}', 'r-1'),
+      });
+    }
+    const read = (kind) => readFileSync(join(dir, `code_review_${kind}.r-1.json`), 'utf8');
+    const result = checkLaneOutput({
+      rawEntries: JSON.parse(read('raw')),
+      scoredText: read('findings'),
+      droppedText: read('dropped'),
+      excludedPaths: ['dist/**'],
+      root: dir,
+    });
+    assert.deepStrictEqual({ ok: result.ok, reason: result.reason }, { ok: true, reason: 'ok' });
+    const proofs = JSON.parse(read('dropped')).map((entry) => entry.proof).filter(Boolean);
+    assert.ok(proofs.some((p) => p.includes('if (!/^\\d+$/.test(s))')), 'a doubled backslash reaches the file as one');
+    const evidence = JSON.parse(read('findings')).findings.map((f) => f.evidence);
+    assert.ok(evidence.some((e) => e.includes('{ name: "Ann" }')), 'an escaped double quote reaches the file as one');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('lane template calls capture-wait with --run {{RUN_ID}} --effort {{EFFORT}} and loops on exit 3', () => {
+  const text = laneText();
+  const step1 = laneStep(text, 'STEP 1.', 'STEP 2.');
   assert.ok(
-    flat.includes('A later `[]`, such as one quoted in a fix, never replaces a real list.'),
-    'an empty list counts only when no list block holds a finding',
+    step1.includes('```bash\nagent-review capture-wait --run {{RUN_ID}} --effort {{EFFORT}}\n```'),
+    step1,
   );
+  const flat = flatText(step1);
+  for (const needle of [
+    'Call the Skill tool once, with exactly these inputs: - skill: "code-review" - args: "{{SKILL_ARGS}}"',
+    "Ignore the Skill tool's reply.",
+    'either way, never read findings from it.',
+    'give that Bash call a timeout of 600000',
+    '- 0: /code-review finished. Go to STEP 2.',
+    '- 3: /code-review is still running. Run the same command again, with the same timeout.',
+    '- 1: /code-review did not finish, or its result cannot be waited for. Stop here and write no files. Reply with the one line `/code-review did not finish` and nothing else.',
+  ]) {
+    assert.ok(flat.includes(needle), `STEP 1 must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(flat.indexOf('Call the Skill tool once') < flat.indexOf('agent-review capture-wait'), 'the wait follows the Skill call');
+  const retry = flatText(laneStep(text, 'RETRY NOTE', 'STEP 1.'));
+  assert.ok(retry.includes('{{RETRY_NOTE}}'), retry);
   assert.ok(
-    flat.includes('the raw findings are the finding lines item 2 describes, or zero when there are none. An empty list never cancels a finding line.'),
-    'an empty list never erases finding lines',
+    retry.includes('If it says to skip the Skill call, skip only that call: still run `capture-wait` in STEP 1, and do every later step.'),
+    retry,
   );
-  const json = flat.indexOf('The last list block that holds at least one object.');
-  const lines = flat.indexOf('One-line findings in the text after `Result:`');
-  const none = flat.indexOf('A line after `Result:` that reads exactly `No findings.` or `(none)`, but only when item 2 found no finding lines');
-  assert.ok(json >= 0 && lines >= 0 && none >= 0, 'all three shapes are listed');
-  assert.ok(json < lines && lines < none, 'JSON list first, then finding lines, then the no-findings line');
-  assert.ok(flat.includes('With no `Result:` line, neither item 2 nor item 3 applies.'), 'no Result: line, no text list');
+});
+
+test('lane template lists raw findings the way the check grounds them', () => {
+  const step2 = flatText(laneStep(laneText(), 'STEP 2.', 'STEP 3.'));
+  for (const needle of [
+    'It prints the saved result exactly, and that text is the only source of raw findings.',
+    '`n` counts 1, 2, 3, ... in list order;',
+    '`file` is the path the result gives, made repo-relative: drop any leading path to the repository root and any leading `./`;',
+    'the last such list is the only source: copy it one to one, in the same order, with the same `file` and the same `line`, and ignore every other line of the result.',
+    'A `line` written as a string uses the number it starts with (`"42-45"` gives 42).',
+    'Otherwise, every line of the result that cites a location is one raw finding.',
+    'A web address such as `https://example.com:443` is not a location.',
+    'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
+    'List each such line once, using the first location on it, even when two lines cite the same location and even when a line seems to give only context.',
+    'A list that is `[]` never cancels a finding line.',
+    'The raw list is `[]` when no line cites a location and the result either has findings lists that are all `[]` or has a line that reads exactly `(none)` or `No findings.`.',
+  ]) {
+    assert.ok(step2.includes(needle), `STEP 2 must say ${JSON.stringify(needle)}`);
+  }
+  for (const label of ['text', 'txt', 'md', 'markdown', 'plain']) {
+    assert.ok(step2.includes(`\`${label}\``), `a fence labeled ${label} holds prose the check reads`);
+  }
+  const json = step2.indexOf('1. JSON list.');
+  const lines = step2.indexOf('2. Finding lines.');
+  const none = step2.indexOf('3. Nothing.');
+  assert.ok(json >= 0 && json < lines && lines < none, 'JSON list first, then finding lines, then nothing');
+  assert.ok(!step2.includes('Result:'), 'the captured text has no Result: header to look for');
+  assert.ok(!/\b[Ss]teps? [1-5]\b/.test(step2), 'list items never read as "step N" beside the STEP headings');
+});
+
+test('lane template scores from the diff-for blocks, not the whole diff', () => {
+  const step3 = laneStep(laneText(), 'STEP 3.', 'SCORING CONTEXT:');
   assert.ok(
-    flat.includes('If the result has a fenced block that never closes, of any label, the output was cut short'),
-    'an unclosed fence fails closed',
+    step3.includes('```bash\nagent-review diff-for --diff {{DIFF_PATH}} --raw /tmp/code_review_raw.{{ATTEMPT}}.json\n```'),
+    step3,
   );
-  assert.ok(
-    flat.includes('three or more backticks or tildes, indented at most three spaces'),
-    'fences follow CommonMark',
-  );
-  assert.ok(
-    flat.includes("Items 2 and 3 read only the text outside fenced blocks, and only when the result has no list block, except that item 1 uses item 2's finding lines when every list block is empty."),
-    'a broken JSON list fails closed instead of falling back to text',
-  );
-  assert.ok(
-    flat.includes('Any other fenced block is not a list: skip it. That covers a block labeled `js` or `ruby`, an unlabeled block of code, and a `json` or unlabeled block that is not a list block, such as a quoted config object like `{"version": "1.1.0"}`.'),
-    'code examples and quoted config neither qualify nor stop the text parse',
-  );
-  assert.ok(
-    flat.includes('Without backticks, `file` must hold a letter and a `/` or a `.`, or name a file that exists in the repository, so `localhost:3000 - ...` and `127.0.0.1:3000 - ...` are not findings, but `Makefile:12 - ...` is when the repository has a `Makefile`.'),
-    'a bare location must look like a path or name an existing file',
-  );
-  assert.ok(flat.includes('the line may start with `-`, `*`, or `N.` followed by a space.'), 'a numbered marker needs a space');
-  assert.ok(
-    flat.includes('A range written right after the line number with `-`, an en dash, or an em dash and no spaces, as in `src/a.js:12-15`, is part of `file:line`, not the summary.'),
-    'a line range is part of the location',
-  );
-  assert.ok(!/\b[Ss]teps? [1-3]\b/.test(flat), 'list items are "item N", never "step N", beside the STEP headings');
-  assert.ok(step2.includes('Failure scenario:') && step2.includes('may have no `failure_scenario`'));
+  const flat = flatText(step3);
+  assert.ok(flat.includes('When the raw list is empty, skip to STEP 4.'), flat);
+  assert.ok(flat.includes('Read that output, not the whole diff.'), flat);
+  assert.ok(flat.indexOf('skip to STEP 4') < flat.indexOf('agent-review diff-for'), 'an empty raw list never reads the diff');
+  assert.ok(flat.includes("either way its entry's `raw` is the raw finding's `n`."), flat);
+});
+
+test('lane template sets the structured fields instead of evidence prefixes', () => {
+  const text = laneText();
+  for (const prefix of ['Outside the reviewed range: ', 'Doubted: ', 'Recategorized from ']) {
+    assert.ok(!text.includes(prefix), `the lane no longer writes the ${JSON.stringify(prefix)} evidence prefix`);
+  }
+  const flat = flatText(text);
+  for (const needle of [
+    'A finding that is truly outside the reviewed range scores 6 at most, keeps its original category, and has `outside_range` set to `true`. Every other finding has `outside_range` set to `false`.',
+    'set `confidence` to `Low` and `doubted` to `true`, score it 4 at most (even where the 7+ bar would allow 6), and say why in `evidence`. Every other finding has `doubted` set to `false`.',
+    'set `recategorized_from` to the cleanup name you moved it out of',
+    '- `raw`: the `n` of its raw entry',
+    '- `outside_range`: `true` or `false`, from SEVERITY',
+    '- `doubted`: `true` or `false`, from DROPPING A FINDING',
+    '- `recategorized_from`: a cleanup name or `null`, from CATEGORY',
+  ]) {
+    assert.ok(flat.includes(needle), `the lane must say ${JSON.stringify(needle)}`);
+  }
+  const scored = laneHeredocs(text)[1];
+  for (const field of ['raw: 1,', 'outside_range: false', 'doubted: false', 'recategorized_from: null']) {
+    assert.ok(scored.includes(field), `the scored example carries ${field}`);
+  }
 });
 
 test('code-review-lane.md limits category to the names the engine knows', () => {
-  const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
+  const flat = flatText(laneText());
   const categories = flat.slice(flat.indexOf('CATEGORY:'), flat.indexOf('CONFIDENCE:'));
   assert.ok(
     categories.includes(
@@ -699,67 +857,73 @@ test('code-review-lane.md limits category to the names the engine knows', () => 
   );
   assert.ok(flat.includes('every `category` is one of the nine names'), 'the self-check repeats the rule');
   assert.ok(
-    categories.includes('When that category is not one of the nine names, map it to the closest one. This mapping is normal scoring and needs no note in `evidence`.'),
+    categories.includes('When that category is not one of the nine names, map it to the closest one. This mapping is normal scoring and leaves `recategorized_from` set to `null`.'),
     'mapping a raw category is ordinary scoring',
   );
   assert.ok(
-    categories.includes('`Recategorized from <original>: <why>`, where `<original>` is the cleanup name you moved it out of'),
-    'the prefix names the cleanup category the finding left',
-  );
-  assert.ok(
-    categories.includes('Use this prefix only for that move, never for mapping a raw category to one of the nine names.'),
-    'the prefix is not for mapping',
+    categories.includes('Set `recategorized_from` only for that move, never for mapping a raw category to one of the nine names.'),
+    'the field is not for mapping',
   );
 });
 
-test('code-review-lane.md says how the proof matches each drop to its raw finding', () => {
-  const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
+test('lane template shows the profile and never lets it drop or lower a finding', () => {
+  const profile = flatText(laneStep(laneText(), 'PROFILE:', 'DROPPING A FINDING:'));
+  assert.ok(profile.includes('{{PROFILE_INSTRUCTION}}'), profile);
+  assert.ok(profile.includes('The profile never justifies dropping a finding or lowering its score.'), profile);
+});
+
+test('lane template has no REFUTED drop and names both drop reasons', () => {
+  const text = laneText();
+  assert.ok(!text.includes('REFUTED'), '/code-review already leaves refuted findings out of its result');
+  const dropping = flatText(laneStep(text, 'DROPPING A FINDING:', 'STEP 4.'));
   for (const needle of [
-    '`file` exactly as the raw finding gives it',
-    '`line` as the number the raw finding\'s `line` starts with (for `42-45`, use 42), or `null` when it does not start with a number',
-    'The review matches each dropped entry to its own raw finding by `file` and `line`',
+    'Drop a raw finding in only two cases:',
+    '1. Excluded path. Its `file` matches one of the excluded paths below. Drop it with `reason: "excluded"` and `glob` set to that glob, copied exactly as listed, for example `dist/**`.',
+    '2. Disproved.',
+    'Drop it with `reason: "disproved"` and a `proof` that names which of those it is and quotes the exact line or lines that show it, with `path:line`',
+    'EXCLUDED PATHS (one glob per line, or `none`): {{EXCLUDED_PATHS}}',
   ]) {
-    assert.ok(flat.includes(needle), `code-review lane must say ${JSON.stringify(needle)}`);
+    assert.ok(dropping.includes(needle), `DROPPING A FINDING must say ${JSON.stringify(needle)}`);
   }
-});
+  const flat = flatText(text);
+  for (const needle of [
+    'Each dropped finding becomes one entry: `{ raw, reason: "excluded", glob }` or `{ raw, reason: "disproved", proof }`.',
+    'every raw finding whose `file` matches an excluded path is dropped with `reason: "excluded"`;',
+    'every `severity` is a whole number from 1 to 10;',
+  ]) {
+    assert.ok(flat.includes(needle), `the lane must say ${JSON.stringify(needle)}`);
+  }
+  const scored = laneHeredocs(text)[1];
+  assert.ok(scored.includes('{ raw: 2, reason: "excluded", glob: "dist/**" }'), scored);
+  assert.ok(scored.includes('{ raw: 3, reason: "disproved", proof: '), scored);
 
-test('code-review-lane.md drops findings on excluded paths with a checkable proof', () => {
-  const flat = readFileSync(CODE_REVIEW_LANE, 'utf8').replace(/\s+/g, ' ');
-  const dropping = flat.slice(flat.indexOf('DROPPING A FINDING:'), flat.indexOf('STEP 4.'));
-  assert.ok(dropping.includes('Drop a raw finding in only three cases:'), dropping);
-  assert.ok(
-    dropping.includes('3. Its `file` matches one of the excluded paths below. Its proof is exactly `excluded path: <glob>`, with the glob copied exactly as listed, for example `excluded path: dist/**`.'),
-    'an excluded-path drop names its glob',
-  );
-  assert.ok(
-    dropping.includes('EXCLUDED PATHS (one glob per line, or `none`): {{EXCLUDED_PATHS}}'),
-    'the lane sees the excluded globs',
-  );
-  assert.ok(
-    flat.includes('every raw finding whose `file` matches an excluded path is dropped with `excluded path: <glob>`;'),
-    'the self-check covers excluded paths',
-  );
-  assert.ok(flat.includes('every `severity` is a whole number from 1 to 10;'), 'the self-check covers severity');
-
-  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  assert.ok(skill.includes('fill its nine placeholders:'), 'the skill counts the new placeholder');
-  const row = skill.split('\n').find((line) => line.startsWith('| `{{EXCLUDED_PATHS}}`'));
+  const row = lanePlaceholderRows().rows.get('EXCLUDED_PATHS');
   assert.ok(row, 'the skill documents {{EXCLUDED_PATHS}}');
   assert.ok(
-    row.replace(/\s+/g, ' ').includes('The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.'),
+    row.includes('The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.'),
     row,
   );
 });
 
-test('code-review-lane.md node -e example keeps its quote escapes', () => {
-  const text = readFileSync(CODE_REVIEW_LANE, 'utf8');
-  const script = text.match(/^node -e '\n([\s\S]*?)\n'\n```/m);
-  assert.ok(script, 'the lane must show a node -e example whose script closes on its own line');
+test('lane template runs code-review-proof before its final line', () => {
+  const text = laneText();
+  assert.ok(text.includes('```bash\n' + LANE_PROOF_COMMAND + '\n```'), 'STEP 5 runs the proof on this attempt\'s files');
+  assert.ok(!text.includes('--capture'), 'the proof always reads the hook capture itself');
+  const step5 = flatText(laneStep(text, 'STEP 5.'));
   assert.ok(
-    !script[1].includes("'"),
-    "a bare ' inside the single-quoted node -e script ends the shell string early",
+    step5.indexOf('agent-review code-review-proof') < step5.indexOf('your final message must be exactly one line'),
+    'the check runs before the final line',
   );
-  assert.ok(script[1].includes('\\u0027'), 'the example must show the \\u0027 escape for a quote');
+  for (const needle of [
+    '- `ok` is `true`: give the final line below.',
+    '- `stage` is `"lane"`: your files have the problem that `reason` names',
+    'Never call the Skill tool again. Fix at most twice; if the check still fails, give the final line anyway.',
+    "- `stage` is `\"capture\"`: /code-review's result cannot be used. Reply with the one line `/code-review returned no usable result` and nothing else.",
+    '- `stage` is `"config"`: the review\'s config could not be read, and you cannot fix that. Give the final line below.',
+    'where `<N>` is `findings.length` in `/tmp/code_review_findings.{{ATTEMPT}}.json`',
+  ]) {
+    assert.ok(step5.includes(needle), `STEP 5 must say ${JSON.stringify(needle)}`);
+  }
 });
 
 test('the review skill routes agents by plan tier and degrades safely', () => {

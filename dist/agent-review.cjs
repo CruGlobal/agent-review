@@ -20168,7 +20168,12 @@ var require_slice = __commonJS({
       const diff = parts.join("");
       return { mode: diff ? "sliced" : "empty", diff, files, hunks };
     }
-    module2.exports = { sliceForAgent, parseDiff };
+    function blocksForFiles(diffText, files) {
+      const wanted = new Set(files);
+      if (wanted.size === 0) return "";
+      return parseDiff(diffText).filter((block) => block.unparseable || wanted.has(block.file) || wanted.has(block.oldFile)).map((block) => block.header + block.hunks.join("")).join("");
+    }
+    module2.exports = { sliceForAgent, parseDiff, blocksForFiles };
   }
 });
 
@@ -20470,7 +20475,8 @@ var require_cli = __commonJS({
     var {
       CAPTURE_LIMIT_MINUTES,
       checkCodeReviewRun,
-      looksFinished
+      looksFinished,
+      repoRelative
     } = require_codeReviewProof();
     var {
       MAX_RESULT_BYTES,
@@ -20490,7 +20496,7 @@ var require_cli = __commonJS({
     } = require_evalSuite();
     var { buildEvidence, verifyEvidenceLedger } = require_evidence();
     var { consensusFrom } = require_consensus();
-    var { sliceForAgent } = require_slice();
+    var { sliceForAgent, blocksForFiles } = require_slice();
     var { validateContextManifest, contextInventory, packContext } = require_contextPack();
     var { readTelemetry, summarizeTelemetry, rolloutReadiness } = require_telemetry();
     var {
@@ -20827,6 +20833,34 @@ var require_cli = __commonJS({
       }
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>";
+    var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
+    function diffFor(diffPath, rawPath, root) {
+      let raw;
+      try {
+        raw = JSON.parse(readFileSync(rawPath, "utf8"));
+      } catch (e) {
+        out(`error: could not read the raw findings list ${rawPath}: ${e.message}`);
+        return 1;
+      }
+      if (!Array.isArray(raw)) {
+        out(`error: the raw findings list ${rawPath} is not a JSON array`);
+        return 1;
+      }
+      const bad = raw.findIndex((entry) => typeof entry?.file !== "string" || entry.file.trim() === "");
+      if (bad >= 0) {
+        out(`error: raw entry ${bad + 1} needs a non-empty string file`);
+        return 1;
+      }
+      let diffText;
+      try {
+        diffText = readFileSync(diffPath, "utf8");
+      } catch (e) {
+        out(`error: could not read the diff ${diffPath}: ${e.message}`);
+        return 1;
+      }
+      writeStdoutSync(blocksForFiles(diffText, raw.map((entry) => repoRelative(entry.file, root))));
+      return 0;
+    }
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -20836,6 +20870,7 @@ var require_cli = __commonJS({
   startup --options <f> --plan <f> [--slices <f>] [--scope <label>] [--mode <skip|quick|standard|deep>]   print the one-line engine, effort, and reviewers summary (--mode is the final mode after auto resolution)
   consensus --plan <f> --dir <d> [--profile <p>] [--decisions <f>]   deterministic cross-agent finding consensus
   slice --plan <f> --diff <f> --out-dir <d>   write per-agent diff slices from path/content triggers (JSON manifest)
+  diff-for --diff <f> --raw <f>   print the diff blocks of the files a raw findings list names, in diff order (nothing for an empty list)
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
@@ -21036,6 +21071,15 @@ var require_cli = __commonJS({
           }
           out(JSON.stringify(manifest, null, 2));
           return 0;
+        }
+        case "diff-for": {
+          const diffPath = flag(rest, "--diff");
+          const rawPath = flag(rest, "--raw");
+          if (!diffPath || !rawPath) {
+            out(DIFF_FOR_USAGE);
+            return 1;
+          }
+          return diffFor(diffPath, rawPath, C.ROOT);
         }
         case "emit": {
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
