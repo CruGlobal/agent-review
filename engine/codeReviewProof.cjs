@@ -163,16 +163,15 @@ function explicitEmpty(text) {
   });
 }
 
-// An underscore between two word characters is part of a name such as user_account.rb; any other
-// underscore, and every * and backtick, is Markdown emphasis or code marking.
+// Underscores are never removed: they belong to paths such as pkg/__init__.py and _form.html.erb.
 function normalizeLine(line) {
-  return line.replace(/[`*]/g, '').replace(/(?<![\p{L}\p{N}_])_|_(?![\p{L}\p{N}_])/gu, '');
+  return line.replace(/[`*]/g, '');
 }
 
 // Paths are cut at whitespace and at ":", never by a regex that backtracks over a long run, so a
 // line of any length is read in linear time. Brackets stay inside a path, as in app/[id]/page.tsx.
 const PATH_LEAD = /^[(\[{<"'\u201c\u2018|]+/;
-const LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}_])/u;
+const LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}])/u;
 
 function mentionPath(path, fileExists) {
   if (!/\p{L}/u.test(path) || path.startsWith('//')) return false;
@@ -208,9 +207,9 @@ function findingLines(text, fileExists) {
 }
 
 function jsonLine(value) {
-  if (Number.isInteger(value)) return value;
   const m = /^\s*(\d+)/.exec(typeof value === 'string' ? value : '');
-  return m ? Number(m[1]) : null;
+  const line = Number.isInteger(value) ? value : m ? Number(m[1]) : null;
+  return line > 0 ? line : null;
 }
 
 function repoRelative(file, root) {

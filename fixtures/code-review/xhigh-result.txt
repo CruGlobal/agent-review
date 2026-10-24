@@ -1,4 +1,4 @@
-I reviewed `7cef894..16910c5`. The range has one commit (`16910c5`, "displayName: prefer profile nickname") that touches only `/private/tmp/claude-502/-Users-justinsabelko-Work-rails/9b54ead0-8b00-4792-b25a-024db73347e0/scratchpad/cr-spike/repo/app.js`.
+I reviewed `7cef894..16910c5`. The range has one commit (`16910c5`, "displayName: prefer profile nickname") that touches only `app.js`.
 
 - **Main problem:** The commit message says "prefer" the nickname, but the code only reads `user.profile.nickname` and never falls back to `user.name`. Any user without a profile or nickname now throws an error, and a blank nickname gives an empty name.
 - **Older bug:** `firstN` has an off-by-one bug. It came from the base commit, so it is outside this range. I listed it lower down so it doesn't get lost.

@@ -19186,10 +19186,10 @@ var require_codeReviewProof = __commonJS({
       });
     }
     function normalizeLine(line) {
-      return line.replace(/[`*]/g, "").replace(/(?<![\p{L}\p{N}_])_|_(?![\p{L}\p{N}_])/gu, "");
+      return line.replace(/[`*]/g, "");
     }
     var PATH_LEAD = /^[(\[{<"'\u201c\u2018|]+/;
-    var LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}_])/u;
+    var LINE_PART = /^(\d+)(?:[-\u2013\u2014]\d+)?(?![\p{L}\p{N}])/u;
     function mentionPath(path, fileExists) {
       if (!new RegExp("\\p{L}", "u").test(path) || path.startsWith("//")) return false;
       if (path.includes("/") || path.includes(".")) return true;
@@ -19220,9 +19220,9 @@ var require_codeReviewProof = __commonJS({
       return textLines(text, fileExists).filter((line) => line.mentions.length > 0);
     }
     function jsonLine(value) {
-      if (Number.isInteger(value)) return value;
       const m = /^\s*(\d+)/.exec(typeof value === "string" ? value : "");
-      return m ? Number(m[1]) : null;
+      const line = Number.isInteger(value) ? value : m ? Number(m[1]) : null;
+      return line > 0 ? line : null;
     }
     function repoRelative(file, root) {
       let path = String(file);

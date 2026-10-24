@@ -809,6 +809,8 @@ test('the capture limits per effort cover every effort', () => {
 });
 
 test('xhigh spike result grounds a matching raw list', () => {
+  assert.doesNotMatch(XHIGH_RESULT, /\/(?:private|tmp|Users|home)\//, 'the public fixture holds no local absolute path');
+  assert.match(XHIGH_RESULT, /touches only `app\.js`/);
   const { list, problem } = jsonFindings(XHIGH_RESULT);
   assert.equal(problem, null);
   assert.deepEqual(list.map((f) => [f.file, f.line]), XHIGH_SPOTS);
@@ -859,6 +861,21 @@ test('json line "42-45" grounds raw line 42, and "L42" grounds null', () => {
   assert.equal(jsonLine(null), null);
   assert.equal(jsonLine(undefined), null);
   assert.equal(jsonLine([42]), null);
+});
+
+test('jsonLine returns null for 0 or a negative number', () => {
+  for (const value of [0, -0, -1, -42, '0', '00', ' 0', '-3', '-3-5']) {
+    assert.equal(jsonLine(value), null, J(value));
+  }
+  assert.equal(jsonLine(1), 1);
+  assert.equal(jsonLine('01'), 1);
+  const result = fenced('json', J([
+    { file: 'a.rb', line: 0, summary: 'a file-level finding' },
+    { file: 'b.rb', line: -2, summary: 'x' },
+    { file: 'c.rb', line: '0', summary: 'y' },
+  ]));
+  assertGrounded(ground(result, raws(['a.rb', null], ['b.rb', null], ['c.rb', null])), 'json');
+  assertFails(ground(result, raws(['a.rb', 0], ['b.rb', null], ['c.rb', null])), 'lane', 'a raw line of 0 is still a shape error');
 });
 
 test('a quoted [] after a real list never replaces it', () => {
@@ -1005,10 +1022,23 @@ test('localhost:3000 and https://example.com:443/x are not mentions', () => {
 });
 
 test('snake_case paths survive normalization', () => {
-  const result = '- *app/user_account.rb:7*: _the_ balance is __never__ checked in `user_account.rb`\n';
-  assert.deepEqual(findingLines(result)[0].mentions, [{ file: 'app/user_account.rb', line: 7 }]);
-  assertGrounded(ground(result, raws(['app/user_account.rb', 7])), 'text');
-  assertFails(ground(result, raws(['app/useraccount.rb', 7])), 'lane', 'the underscore is kept, not dropped');
+  for (const [line, file, at] of [
+    ['- *app/user_account.rb:7*: the balance is never checked in `user_account.rb`', 'app/user_account.rb', 7],
+    ['- pkg/__init__.py:3 imports the package twice', 'pkg/__init__.py', 3],
+    ['- `pkg/__init__.py:3`: imports the package twice', 'pkg/__init__.py', 3],
+    ['- **app/views/users/_form.html.erb:3**: the field is not escaped', 'app/views/users/_form.html.erb', 3],
+    ['- _lib/a_b.rb:9_ is still a finding line, underscores and all', '_lib/a_b.rb', 9],
+  ]) {
+    assert.deepEqual(findingLines(line)[0].mentions, [{ file, line: at }], line);
+    assertGrounded(ground(line, raws([file, at])), 'text', line);
+  }
+  assertFails(ground('- app/user_account.rb:7: x', raws(['app/useraccount.rb', 7])), 'lane', 'the underscore is kept');
+  assertFails(ground('- pkg/__init__.py:3: x', raws(['pkg/_init_.py', 3])), 'lane', 'no underscore is dropped');
+  assertGrounded(
+    ground('- pkg/__init__.py imports the package twice\n- a.rb:3: bug\n', raws(['pkg/__init__.py', null], ['a.rb', 3])),
+    'text',
+    'a no-line entry names a dunder path',
+  );
 });
 
 test('matching is not greedy', () => {
