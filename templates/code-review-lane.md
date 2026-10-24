@@ -345,7 +345,7 @@ Keep every finding tight:
 Before you write, check your work:
 
 - every raw `n` is the `raw` of exactly one entry across the findings and the dropped list;
-- every raw finding whose `file` matches an excluded path is dropped with `reason: "excluded"`;
+- every raw finding whose result line cites only excluded locations is dropped with `reason: "excluded"`;
 - every `severity` is a whole number from 1 to 10;
 - every `category` is one of the nine names in CATEGORY;
 - no finding in a cleanup category scores above 6;

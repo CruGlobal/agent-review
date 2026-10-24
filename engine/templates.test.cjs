@@ -1000,7 +1000,7 @@ test('lane template has no REFUTED drop and names both drop reasons', () => {
   const flat = flatText(text);
   for (const needle of [
     'Each dropped finding becomes one entry: `{ raw, reason: "excluded", glob }` or `{ raw, reason: "disproved", proof }`.',
-    'every raw finding whose `file` matches an excluded path is dropped with `reason: "excluded"`;',
+    'every raw finding whose result line cites only excluded locations is dropped with `reason: "excluded"`;',
     'every `severity` is a whole number from 1 to 10;',
   ]) {
     assert.ok(flat.includes(needle), `the lane must say ${JSON.stringify(needle)}`);
