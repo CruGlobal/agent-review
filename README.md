@@ -184,7 +184,8 @@ directory until the review disarms. The lane reads the capture with `agent-revie
 capture-wait`, up to a limit that depends on the effort: `low` 10 minutes, `medium` 15, `high`
 20, `xhigh` 40, `max` 120. If the limit passes first, the review fails closed and posts no
 report. If the hooks never run, for example because Claude Code was not restarted after the
-plugin was installed, the wait fails within a minute and says so.
+plugin was installed, the wait fails within a minute and gives the reason, and the lane's reply, which the
+review prints when it fails, carries it as `/code-review did not finish: <reason>`.
 
 **How findings are scored.** The lane lists the findings it read from the captured text, and then
 agent-review reads each finding, looks at the code, and scores it on its own 1 to 10 scale. A 7 means the

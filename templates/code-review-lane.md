@@ -83,7 +83,8 @@ It prints one JSON line. Act on its exit code:
 - 3: /code-review is still running. Run the same command again, with the same timeout. Keep
   running it until the exit code is 0 or 1; the command itself stops at this effort's time limit.
 - 1: /code-review did not finish, or its result cannot be waited for. Stop here and write no
-  files. Reply with the one line `/code-review did not finish` and nothing else.
+  files. Reply with the one line `/code-review did not finish: <reason>` and nothing else, where
+  `<reason>` is the `reason` from the JSON line `capture-wait` printed.
 
 STEP 2. LIST THE RAW FINDINGS
 
@@ -415,5 +416,5 @@ When you are done, your final message must be exactly one line:
 where `<N>` is `findings.length` in `/tmp/code_review_findings.{{ATTEMPT}}.json` and `<X>` is the
 highest `severity` among them (0 if `findings` is empty). Dropped findings do not count. Write
 nothing else in that final message: no summary, no markdown, no restated findings. The only other
-final lines are `/code-review did not finish` (STEP 1) and `/code-review returned no usable result`
+final lines are `/code-review did not finish: <reason>` (STEP 1) and `/code-review returned no usable result`
 (STEP 2 or STEP 5).

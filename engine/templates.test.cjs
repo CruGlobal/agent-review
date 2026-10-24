@@ -833,7 +833,7 @@ test('lane template calls capture-wait with --run {{RUN_ID}} --effort {{EFFORT}}
     'give that Bash call a timeout of 600000',
     '- 0: /code-review finished. Go to STEP 2.',
     '- 3: /code-review is still running. Run the same command again, with the same timeout.',
-    '- 1: /code-review did not finish, or its result cannot be waited for. Stop here and write no files. Reply with the one line `/code-review did not finish` and nothing else.',
+    '- 1: /code-review did not finish, or its result cannot be waited for. Stop here and write no files. Reply with the one line `/code-review did not finish: <reason>` and nothing else, where `<reason>` is the `reason` from the JSON line `capture-wait` printed.',
   ]) {
     assert.ok(flat.includes(needle), `STEP 1 must say ${JSON.stringify(needle)}`);
   }
@@ -2508,7 +2508,7 @@ test('README states how the capture, the wait, and the proof behave, and what th
     'The hooks act only while a review has armed capture, and an arm expires after 3 hours.',
     'They never touch a `/code-review` you run yourself in the main conversation.',
     "While a review is armed, though, a `/code-review` run in another subagent of yours writes a mismatch record and fails that review's wait, and the hooks keep the final message of every subagent that stops in your sessions (the newest 50) in that directory until the review disarms.",
-    'If the hooks never run, for example because Claude Code was not restarted after the plugin was installed, the wait fails within a minute and says so.',
+    'If the hooks never run, for example because Claude Code was not restarted after the plugin was installed, the wait fails within a minute and gives the reason, and the lane\'s reply, which the review prints when it fails, carries it as `/code-review did not finish: <reason>`.',
     "When the result holds a JSON findings list, the lane's list must match it one to one. `xhigh` and `max` results usually hold one.",
     "Otherwise the lane's list must match the result's finding lines, one entry per line.",
     "That text mode has a cost, and it is usual at `low`, `medium`, and `high`: a line that cites a location only as context still counts as a finding. The lane must list it and score or drop it, and a line it leaves out fails the run.",
@@ -3035,6 +3035,9 @@ test("Stage 2 waits for the lane's next final line after an early handback", () 
   for (const needle of [
     'Any other reply is an early handback: the lane called the Skill tool and stopped',
     'A Task tool error, or a reply that shows the lane ended before it called the Skill tool, counts as `/code-review did not finish`',
+    '`/code-review did not finish: <reason>`',
+    'A reply that starts with `/code-review did not finish` is that failure, whatever follows it.',
+    "print the proof's `reason` from `/tmp/code_review_proof.json`, or the lane's whole reply, reason included, when no proof ran for the last attempt",
     'run this with a Bash timeout of 600000',
     'run it again each time it exits 3',
     'Once it exits 0 or 1, keep collecting the same lane (TaskOutput) for up to 10 more minutes, and judge its next final line.',
@@ -3065,7 +3068,8 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     '`/tmp/code_review_findings.<attempt>.json` parses and its `findings.length` equals `<N>`',
     '`stage` is `"lane"`: relaunch with the same capture (step 3), with the proof\'s `reason`.',
     '`stage` is `"capture"`: relaunch with a new capture (step 3).',
-    '`/code-review did not finish` or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
+    'A reply that starts with `/code-review did not finish` is that failure, whatever follows it.',
+    '`/code-review did not finish: <reason>`, or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
     '`stage` is `"config"`: the review\'s config cannot be read, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
     '**With the same capture.** Do not re-arm',
     '**With a new capture.** Re-arm with this block first, which clears the old result',

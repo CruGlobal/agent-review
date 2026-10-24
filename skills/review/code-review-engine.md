@@ -110,7 +110,7 @@ lane was launched with, saved as `CODE_REVIEW_ATTEMPT` in `/tmp/review_env.sh`: 
 `$REVIEW_ID-2` after a relaunch.
 
 **1. Wait for the final line.** The lane's final line is one of three:
-`done — <N> findings, max severity <X>` (the `done` line), `/code-review did not finish`, or
+`done — <N> findings, max severity <X>` (the `done` line), `/code-review did not finish: <reason>`, or
 `/code-review returned no usable result`. A Task tool error, or a reply that shows the lane ended
 before it called the Skill tool, counts as `/code-review did not finish`: no /code-review is
 running, so there is nothing to wait for. Any other reply is an early handback: the lane called
@@ -128,7 +128,8 @@ judge its next final line. If none arrives by then, judge the lane on what it ha
 
 **2. Judge the reply.**
 
-- `/code-review did not finish` or `/code-review returned no usable result`: /code-review's result
+- A reply that starts with `/code-review did not finish` is that failure, whatever follows it.
+- `/code-review did not finish: <reason>`, or `/code-review returned no usable result`: /code-review's result
   is missing or unusable. Relaunch with a new capture (step 3).
 - Anything else, including no final line after the wait in step 1: cross-check the lane, then run
   the proof below. The cross-check passes when the reply is the `done` line, and
@@ -210,7 +211,7 @@ Then stop the way `SKILL.md`'s Stage 2 says to for a lane that fails twice. At `
 the loud line is instead
 `❌ review incomplete: the code-review lane could not be checked, so no report was posted`, and
 when the re-arm failed, it is the line the re-arm block printed. Right after the loud line, print
-the proof's `reason` from `/tmp/code_review_proof.json`, or the lane's reply when no proof ran for
+the proof's `reason` from `/tmp/code_review_proof.json`, or the lane's whole reply, reason included, when no proof ran for
 the last attempt; it names the fix or the mismatch.
 
 Run the same disarm block whenever the run stops after Stage 1 armed the capture and before this
