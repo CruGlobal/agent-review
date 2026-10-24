@@ -398,7 +398,7 @@ function scoredEntryProblem(entry, i, rawByN, root) {
   return null;
 }
 
-const QUOTE_LEAD = /^[\s:;,\-–—]+/;
+const QUOTE_LEAD = /^[\s:;,\-\u2013\u2014]+/;
 const MIN_QUOTE_CHARS = 3;
 const QUOTE_WINDOW = 2;
 

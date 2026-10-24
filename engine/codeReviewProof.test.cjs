@@ -789,6 +789,8 @@ test('a disproved proof that quotes the code near the cited line passes', () => 
     'already handled: lib/cart.rb:17-19 if (!items) return [];',
     'lib/cart.rb:18: if(!items)\n  return [];',
     'misreads the code: `lib/cart.rb:18` - `if (!items) return [];`',
+    'lib/cart.rb:18 — if (!items) return [];',
+    'lib/cart.rb:18 – if (!items) return [];',
     'lib/cart.rb:18 return',
     'Makefile:12 test: build lint',
     './lib/cart.rb:18 if (!items) return [];',

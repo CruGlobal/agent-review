@@ -19388,7 +19388,7 @@ var require_codeReviewProof = __commonJS({
       }
       return null;
     }
-    var QUOTE_LEAD = /^[\s:;,\-–—]+/;
+    var QUOTE_LEAD = /^[\s:;,\-\u2013\u2014]+/;
     var MIN_QUOTE_CHARS = 3;
     var QUOTE_WINDOW = 2;
     function squeezed(text) {
