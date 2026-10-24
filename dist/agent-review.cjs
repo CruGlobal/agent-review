@@ -18450,7 +18450,7 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
-    function combineMembers(members, codeReviewEngine) {
+    function combineMembers(members) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
         (best, m) => m.severity > best.severity ? m : best,
@@ -18483,16 +18483,16 @@ var require_consensus = __commonJS({
         ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
       const weightedSum = ordered.reduce(
-        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+        (sum, m) => sum + m.severity * (m.corroboration || 1),
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const evidence = codeReviewEngine ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestField("evidence");
+      const evidence = String(primary.evidence || "").trim() || longestTrimmed("evidence");
       return {
         agent: primary.agent,
         agents: agents.join(","),
         category: primary.category,
-        severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+        severity: maxSeverity >= 7 ? maxSeverity : meanSeverity,
         file: primary.file,
         line: primary.line,
         message: primary.message,
@@ -18503,8 +18503,7 @@ var require_consensus = __commonJS({
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity,
-        _meanSeverity: meanSeverity
+        _maxSeverity: maxSeverity
       };
     }
     function unionFind(n) {
@@ -18552,7 +18551,7 @@ var require_consensus = __commonJS({
       }
       return candidates;
     }
-    function applyDecisions(entries, decisions, codeReviewEngine) {
+    function applyDecisions(entries, decisions) {
       if (!Array.isArray(decisions)) {
         throw new Error("consensus: decisions must be an array");
       }
@@ -18578,11 +18577,11 @@ var require_consensus = __commonJS({
         groupsByRoot.get(root).push(entries[i]);
       }
       return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine)
+        (members) => members.length === 1 ? members[0] : combineMembers(members)
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, ...rest } = entry;
       return rest;
     }
     function consensusFrom({
@@ -18629,14 +18628,14 @@ var require_consensus = __commonJS({
         }
       }
       let entries = buildCliques(all).map(
-        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
       );
       const beforeCutoff = entries.length;
       entries = applyProfileCutoff(entries, profile);
       const droppedByProfile = beforeCutoff - entries.length;
       entries = sortEntries(entries);
       if (decisions !== void 0) {
-        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
+        entries = sortEntries(applyDecisions(entries, decisions));
       }
       const candidates = buildCandidates(entries);
       const findings = entries.map(stripInternal);

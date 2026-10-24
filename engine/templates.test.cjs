@@ -2617,7 +2617,7 @@ test('README and the spec record the third /code-review round', () => {
     'location matching applies to every review and needs similar wording',
   );
   assert.ok(
-    readme.includes('- If another reviewer flags the same spot with a lower score, a proven 7 or more from any reviewer keeps its score through the merge instead of being averaged down.'),
+    readme.includes('- As on every engine, if another reviewer flags the same spot with a lower score, a proven 7 or more from any reviewer keeps its score through the merge instead of being averaged down.'),
     'any lane\'s proven 7+ keeps its score',
   );
   assert.ok(!readme.includes('On a re-review, a reworded suggestion'), 'the re-review-only wording is gone');

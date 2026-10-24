@@ -222,13 +222,15 @@ function toEntry(m) {
 
 // Combines >=2 members (raw findings on first grouping, or already-combined
 // entries on a decisions merge) into one output entry per the group rules:
-// agent = comma-joined sorted lane ids, severity = rounded mean, confidence =
-// highest member's, recommendation = longest member's, under the code-review engine evidence = the primary's when it is
-// non-blank, else the longest, line/category/message/fix = the highest-severity member's,
+// agent = the lead's (highest-severity member's) lane, agents = comma-joined
+// sorted lane ids, severity = rounded mean, confidence = highest member's,
+// recommendation = longest member's, evidence = the primary's trimmed when it
+// is non-blank, else the longest trimmed,
+// line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
-// Exception, under the code-review engine only: when any member is 7+ (every
-// surviving 7+ already passed the blocker bar) the group keeps that maximum.
+// Exception: when any member is 7+ (every surviving 7+ already passed the
+// blocker bar) the group keeps that maximum.
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
@@ -236,7 +238,7 @@ function toEntry(m) {
 // wins. reduce() with a strict `>` comparison always keeps the first member it
 // saw on a tie, so sorting a local copy of `members` by agent id ascending
 // first is sufficient to make every tie-break deterministic.
-function combineMembers(members, codeReviewEngine) {
+function combineMembers(members) {
   const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
   const primary = ordered.reduce(
     (best, m) => (m.severity > best.severity ? m : best),
@@ -287,22 +289,18 @@ function combineMembers(members, codeReviewEngine) {
   // Weighted by each member's own corroboration count (default 1 for a raw/singleton
   // member) — otherwise re-merging an already-corroborated group with a singleton via
   // `decisions` silently discounts the group's weight down to a single vote.
-  // A group that kept its maximum is weighted at its own mean, so the maximum is
-  // never counted twice.
   const weightedSum = ordered.reduce(
-    (sum, m) =>
-      sum + (m._meanSeverity !== undefined ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+    (sum, m) => sum + m.severity * (m.corroboration || 1),
     0,
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
-  const evidence = codeReviewEngine
-    ? String(primary.evidence || '').trim() || longestTrimmed('evidence')
-    : longestField('evidence');
+  const evidence =
+    String(primary.evidence || '').trim() || longestTrimmed('evidence');
   return {
     agent: primary.agent,
     agents: agents.join(','),
     category: primary.category,
-    severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+    severity: maxSeverity >= 7 ? maxSeverity : meanSeverity,
     file: primary.file,
     line: primary.line,
     message: primary.message,
@@ -314,7 +312,6 @@ function combineMembers(members, codeReviewEngine) {
     needsHumanReview: maxSeverity - minSeverity >= 4,
     _minSeverity: minSeverity,
     _maxSeverity: maxSeverity,
-    _meanSeverity: meanSeverity,
   };
 }
 
@@ -383,7 +380,7 @@ function buildCandidates(entries) {
 // they stay union-find: a `merge` decision is a deliberate instruction to
 // combine those two entries (and, transitively, anything else a decision also
 // merges them with), unlike the clique-restricted automatic pass above.
-function applyDecisions(entries, decisions, codeReviewEngine) {
+function applyDecisions(entries, decisions) {
   if (!Array.isArray(decisions)) {
     throw new Error('consensus: decisions must be an array');
   }
@@ -416,12 +413,12 @@ function applyDecisions(entries, decisions, codeReviewEngine) {
     groupsByRoot.get(root).push(entries[i]);
   }
   return [...groupsByRoot.values()].map((members) =>
-    members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine),
+    members.length === 1 ? members[0] : combineMembers(members),
   );
 }
 
 function stripInternal(entry) {
-  const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+  const { _minSeverity, _maxSeverity, ...rest } = entry;
   return rest;
 }
 
@@ -482,7 +479,7 @@ function consensusFrom({
   // order findings were flattened in (laneIds order, dict key order, etc.)
   // because buildCliques re-sorts canonically before assigning.
   let entries = buildCliques(all).map((members) =>
-    members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine),
+    members.length === 1 ? toEntry(members[0]) : combineMembers(members),
   );
 
   const beforeCutoff = entries.length;
@@ -491,7 +488,7 @@ function consensusFrom({
   entries = sortEntries(entries);
 
   if (decisions !== undefined) {
-    entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
+    entries = sortEntries(applyDecisions(entries, decisions));
   }
 
   const candidates = buildCandidates(entries);
