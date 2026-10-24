@@ -2527,7 +2527,7 @@ test('the capture spec records the fresh-review changes to the hooks in section 
   ]) {
     assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
   }
-  assert.ok(!amendment.includes('—'), 'new prose uses no em dashes');
+  assert.ok(!amendment.includes('\u2014'), 'new prose uses no em dashes');
 });
 
 const SECTION4_FRESH_NEEDLES = [
