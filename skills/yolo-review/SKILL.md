@@ -33,7 +33,7 @@ re-reviews cheap.
    echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > /tmp/yolo_env.sh
    ```
 
-2. **Review** — right before the review call, take a fresh timestamp:
+2. **Review**. Right before the review call, take a fresh timestamp:
 
    ```bash
    REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -62,6 +62,7 @@ re-reviews cheap.
    fi
    OPEN=$(node -e 'const l=require("/tmp/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
    echo "open blockers: $OPEN"
+   echo "export FIX_FROM=\"$(git rev-parse HEAD)\"" >> /tmp/yolo_env.sh
    ```
 
    The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`,
@@ -74,15 +75,24 @@ re-reviews cheap.
    Never dismiss — not with any code, not for any reason; a finding that cannot
    be fixed stays open and is reported at the end. If `OPEN` is 0, skip to step 6.
 
-4. **Re-review** — right before the re-review call, take a fresh timestamp:
+4. **Re-review**. First check that address committed something, and take a fresh timestamp
+   right before the re-review call:
 
    ```bash
-   REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   echo "export REVIEW_TS=\"$REVIEW_TS\"" >> /tmp/yolo_env.sh
+   . /tmp/yolo_env.sh
+   if [ "$(git rev-parse HEAD)" = "$FIX_FROM" ]; then
+     echo "no new commit: address changed nothing, so there is nothing to re-review"
+   else
+     REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+     echo "export REVIEW_TS=\"$REVIEW_TS\"" >> /tmp/yolo_env.sh
+   fi
    ```
 
-   Then invoke `agent-review:review` with the arguments `auto incremental`, plus the
-   user's `engine=` and `effort=` tokens, if any.
+   If it prints `no new commit`, do not re-review: go to step 7 and report the open blockers as
+   blockers that remain. Otherwise invoke `agent-review:review` with the arguments `auto incremental`, plus the
+   user's `engine=` and `effort=` tokens, if any. If that re-review stops with `already reviewed`
+   or `No net changes`, it posted nothing: go to step 7 the same way. Only a re-review that ran
+   goes on to step 5, whose guard then checks its report.
 
 5. **Bounded loop** — recompute `OPEN` as in step 3. If it is greater than 0 and any open
    blocker is one this run has not yet tried to fix, repeat steps 3-4, at most two more times

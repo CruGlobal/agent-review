@@ -3487,6 +3487,16 @@ const REVIEW_TS_BLOCK = [
   'echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
 ].join('\n');
 
+const REREVIEW_BLOCK = [
+  '. /tmp/yolo_env.sh',
+  'if [ "$(git rev-parse HEAD)" = "$FIX_FROM" ]; then',
+  '  echo "no new commit: address changed nothing, so there is nothing to re-review"',
+  'else',
+  '  REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
+  '  echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
+  'fi',
+].join('\n');
+
 function yoloStep(text, from, to) {
   return text.slice(text.indexOf(from), to ? text.indexOf(to) : undefined);
 }
@@ -3500,15 +3510,27 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
   const step2 = yoloStep(yolo, '2. **Review**', '3. **Fix blockers**');
   const step3 = yoloStep(yolo, '3. **Fix blockers**', '4. **Re-review**');
   const step4 = yoloStep(yolo, '4. **Re-review**', '5. **Bounded loop**');
-  for (const [label, step, call] of [
-    ['step 2', step2, 'invoke `agent-review:review` with the argument `auto`'],
-    ['step 4', step4, 'invoke `agent-review:review` with the arguments `auto incremental`'],
+  for (const [label, step, block, call] of [
+    ['step 2', step2, REVIEW_TS_BLOCK, 'invoke `agent-review:review` with the argument `auto`'],
+    ['step 4', step4, REREVIEW_BLOCK, 'invoke `agent-review:review` with the arguments `auto incremental`'],
   ]) {
-    assert.deepStrictEqual(indentedBashBlocks(step), [REVIEW_TS_BLOCK], `${label} has the timestamp block`);
+    assert.deepStrictEqual(indentedBashBlocks(step), [block], `${label} has the timestamp block`);
     assert.ok(step.indexOf('REVIEW_TS=') < step.indexOf(call), `${label} takes the timestamp before the review call`);
+    assert.ok(!step.split('\n')[0].includes('\u2014'), `${label}'s title line has no em dash`);
   }
+  const flat4 = flatText(step4);
+  for (const needle of [
+    'If it prints `no new commit`, do not re-review: go to step 7 and report the open blockers as blockers that remain.',
+    'If that re-review stops with `already reviewed` or `No net changes`, it posted nothing: go to step 7 the same way.',
+    'Only a re-review that ran goes on to step 5, whose guard then checks its report.',
+  ]) {
+    assert.ok(flat4.includes(needle), `step 4 must say ${JSON.stringify(needle)}`);
+  }
+  const reviewSkill = skillText('review');
+  assert.ok(reviewSkill.includes('already reviewed') && reviewSkill.includes('No net changes'), 'the review skill prints the phrases step 4 names');
   const guard = indentedBashBlocks(step3);
   assert.strictEqual(guard.length, 1);
+  assert.ok(guard[0].endsWith('echo "export FIX_FROM=\\"$(git rev-parse HEAD)\\"" >> /tmp/yolo_env.sh'), 'step 3 records the head address starts from');
   assert.ok(guard[0].includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'the guard compares against the per-call timestamp');
   assert.ok(!guard[0].includes('START_TS'), 'the run start never stands in for the latest review call');
   assert.ok(flatText(step3).includes('The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`'), step3);
@@ -3521,6 +3543,9 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
       const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
       mkdirSync(join(dir, 'bin'));
       writeFileSync(join(dir, 'yolo_env.sh'), 'export PR_NUMBER="7" START_TS="2000-01-01T00:00:00Z"\n');
+      writeFileSync(join(dir, 'head'), 'aaa111\n');
+      writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && cat "${dir}/head"\n`, { mode: 0o755 });
+      const stamps = () => (readFileSync(join(dir, 'yolo_env.sh'), 'utf8').match(/REVIEW_TS=/g) || []).length;
       const stubGh = (updated) =>
         writeFileSync(
           join(dir, 'bin', 'gh'),
@@ -3541,6 +3566,17 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
       const fresh = sh(guard[0]);
       assert.strictEqual(fresh.status, 0, `${shell}: ${fresh.stdout}${fresh.stderr}`);
       assert.match(fresh.stdout, /open blockers: 0/);
+
+      assert.strictEqual(stamps(), 1, shell);
+      const unchanged = sh(REREVIEW_BLOCK);
+      assert.strictEqual(unchanged.status, 0, shell);
+      assert.match(unchanged.stdout, /^no new commit: /, `${shell}: address committed nothing`);
+      assert.strictEqual(stamps(), 1, `${shell}: no re-review, so no new timestamp`);
+      writeFileSync(join(dir, 'head'), 'bbb222\n');
+      const fixed = sh(REREVIEW_BLOCK);
+      assert.strictEqual(fixed.status, 0, shell);
+      assert.strictEqual(fixed.stdout, '', shell);
+      assert.strictEqual(stamps(), 2, `${shell}: a new commit gets a fresh timestamp before the re-review`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
