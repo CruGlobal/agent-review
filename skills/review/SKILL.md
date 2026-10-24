@@ -178,8 +178,9 @@ rm -f /tmp/agent_findings/*.json 2>/dev/null || true
 { rm -f /tmp/code_review_findings.*.json; } 2>/dev/null || true
 { rm -f /tmp/code_review_dropped.*.json; } 2>/dev/null || true
 rm -f /tmp/code_review_proof.json /tmp/code_review_diff.txt
+# disarm exits 1 when the capture dir does not exist yet, the normal state on a fresh machine.
 if [ "$ENGINE" = "code-review" ]; then
-  agent-review capture disarm
+  agent-review capture disarm >/dev/null 2>&1 || true
 fi
 # A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
 # run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a

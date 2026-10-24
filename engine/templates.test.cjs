@@ -2862,7 +2862,8 @@ test("Stage 2 waits for the lane's next final line after an early handback", () 
     'Stage 2 waits on the capture itself',
   );
   for (const needle of [
-    'Any other reply is an early handback',
+    'Any other reply is an early handback: the lane called the Skill tool and stopped',
+    'A Task tool error, or a reply that shows the lane ended before it called the Skill tool, counts as `/code-review did not finish`',
     'run this with a Bash timeout of 600000',
     'run it again each time it exits 3',
     'Once it exits 0 or 1, keep collecting the same lane (TaskOutput) for up to 10 more minutes, and judge its next final line.',
@@ -2875,9 +2876,11 @@ test("Stage 2 waits for the lane's next final line after an early handback", () 
     flat.indexOf('early handback') < flat.indexOf('2. Judge the reply.'),
     'the wait comes before any judging or relaunch',
   );
+  assert.ok(stage2.includes(`\`${FINAL_LINE_CONTRACT}\``), 'Stage 2 quotes the exact contract line');
+  assert.ok(!engineDoc().split(FINAL_LINE_CONTRACT).join('').includes('—'), 'the contract line is the only em dash in the engine doc');
 });
 
-test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on stage capture', () => {
+test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on stage capture', (t) => {
   const stage2 = engineSection('Stage 2: checking the code-review lane');
   const flat = flatText(stage2);
   assert.strictEqual(
@@ -2909,7 +2912,35 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     bashBlocks(fresh).includes('agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"'),
     'a new capture re-arms with the args Stage 1 armed',
   );
-  assert.ok(flatText(fresh).includes('relaunch with an empty `{{RETRY_NOTE}}`'));
+  assert.ok(flatText(fresh).includes('relaunch with an empty `{{RETRY_NOTE}}`. If the block fails, do not relaunch: the run fails (step 5).'));
+  const rearm = bashBlockList(fresh).filter((b) => b.includes('capture arm'));
+  assert.strictEqual(rearm.length, 1, 'one re-arm block');
+  const { mkdirSync, writeFileSync } = require('node:fs');
+  for (const shell of availableShells(t)) {
+    for (const code of [0, 1]) {
+      const dir = mkdtempSync(join(os.tmpdir(), 'ar-rearm-'));
+      try {
+        mkdirSync(join(dir, 'bin'));
+        writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\necho "error: capture dir is a symlink" >&2\nexit ${code}\n`, { mode: 0o755 });
+        writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r" CODE_REVIEW_ARGS="low 1 --max-findings default"\n');
+        const run = require('node:child_process').spawnSync(shell, ['-c', rearm[0].replaceAll('/tmp/', `${dir}/`)], {
+          encoding: 'utf8',
+          env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
+        });
+        if (code === 0) {
+          assert.strictEqual(run.status, 0, `${shell}: a re-arm that works lets the relaunch go ahead`);
+        } else {
+          assert.notStrictEqual(run.status, 0, `${shell}: a failed re-arm stops the run`);
+          assert.ok(
+            run.stdout.includes('❌ review incomplete: the /code-review capture could not be re-armed, so no report was posted'),
+            `${shell}: ${run.stdout}`,
+          );
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
   assert.ok(flat.includes('`{{ATTEMPT}}` is `$REVIEW_ID-2`'), 'the relaunch writes its own files');
   assert.ok(!stage2.includes('code_review_raw.txt') && !stage2.includes('/code-review did not run'));
 });
@@ -2923,10 +2954,24 @@ test('Stage 2 disarms capture after judging the lane', () => {
     ),
     'a pass copies the attempt for consensus, then disarms',
   );
-  const fail = flatText(stage2.slice(stage2.indexOf('**5. Fail.**')));
+  const failText = stage2.slice(stage2.indexOf('**5. Fail.**'));
+  assert.ok(bashBlockList(failText).includes('agent-review capture disarm'), 'a failed lane disarms in a bash block');
+  const fail = flatText(failText);
   assert.ok(
-    fail.includes('When the lane fails twice, or fails once at `stage: "config"`, first run `agent-review capture disarm`.'),
+    fail.includes('When the lane fails twice, fails once at `stage: "config"`, or cannot be re-armed, first disarm the capture:'),
     fail,
+  );
+  assert.ok(
+    fail.includes(
+      'Run the same disarm block whenever the run stops after Stage 1 armed the capture and before this lane is judged: another lane fails twice, a later block fails, or the run ends for any other reason.',
+    ),
+    fail,
+  );
+  assert.ok(
+    flatText(engineSection('Stage 1: the code-review lane')).includes(
+      'If the run stops before then for any reason, run `agent-review capture disarm` before you stop (Stage 2, step 5).',
+    ),
+    'the rule is in Stage 1 too, since a run can stop before Stage 2 is read',
   );
   assert.ok(fail.includes('❌ review incomplete: the code-review lane could not be checked, so no report was posted'), fail);
   assert.ok(fail.includes("print the proof's `reason` from `/tmp/code_review_proof.json`"), fail);
@@ -2947,6 +2992,10 @@ test("Stage 6 renders drops from the proof's dropped list", () => {
   assert.ok(!stage6.includes('code_review_dropped'), 'the lane files are never read for the report');
   const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
   assert.ok(report.includes('[FOR EACH dropped finding] - [file]:[line] [summary]: [why]'), 'the skeleton renders the proof fields');
+  assert.ok(
+    flatText(report).includes('[FOR EACH dropped finding] - [file]:[line] [summary]: [why] [when line is null, print only [file], with no ":[line]"]'),
+    'the skeleton says what to print for a drop with no line',
+  );
   assert.ok(!report.includes('[quoted proof]'));
   const { checkLaneOutput } = require('./codeReviewProof.cjs');
   const result = checkLaneOutput({
@@ -2973,7 +3022,7 @@ test('Stage 0 no longer mentions /tmp/code_review_raw.txt', (t) => {
   ];
   for (const line of removals) assert.ok(bash.split('\n').includes(line), `Initialize runs: ${line}`);
   assert.ok(
-    bash.includes('if [ "$ENGINE" = "code-review" ]; then\n  agent-review capture disarm\nfi'),
+    bash.includes('if [ "$ENGINE" = "code-review" ]; then\n  agent-review capture disarm >/dev/null 2>&1 || true\nfi'),
     'Initialize disarms capture, and only under the code-review engine',
   );
 
@@ -2996,7 +3045,43 @@ test('Stage 0 no longer mentions /tmp/code_review_raw.txt', (t) => {
 
 test('the review skill never names the capture file, and the proof takes no --capture', () => {
   for (const [name, text] of [['SKILL.md', readFileSync(REVIEW_SKILL, 'utf8')], ['code-review-engine.md', engineDoc()]]) {
-    assert.ok(!text.includes('code_review_capture'), `${name} must not name a capture path; the capture lives in a private directory`);
+    for (const path of ['code_review_capture', 'agent_review_capture', '/tmp/agent-review-']) {
+      assert.ok(!text.includes(path), `${name} must not name ${path}; the capture lives in a private directory`);
+    }
     assert.ok(!text.includes('--capture'), `${name} must not pass --capture; the proof finds the capture itself`);
+  }
+});
+
+test('Initialize keeps going when the capture dir does not exist', (t) => {
+  const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
+  const { dirname } = require('node:path');
+  const init = bashBlocks(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Initialize', '### Gather PR Context & Diff Manifest'));
+  const gated = /^if \[ "\$ENGINE" = "code-review" \]; then\n {2}agent-review capture disarm[^\n]*\nfi$/m.exec(init);
+  assert.ok(gated, 'Initialize has the engine-gated disarm');
+  const PATH = `${join(ROOT, 'bin')}:${dirname(process.execPath)}:${process.env.PATH}`;
+  const run = (shell, engine, captureDir) =>
+    require('node:child_process').spawnSync(shell, ['-c', `set -e\n${gated[0]}\necho survived`], {
+      encoding: 'utf8',
+      env: { PATH, ENGINE: engine, AGENT_REVIEW_CAPTURE_DIR: captureDir },
+    });
+  for (const shell of availableShells(t)) {
+    const parent = mkdtempSync(join(os.tmpdir(), 'ar-init-disarm-'));
+    try {
+      const missing = join(parent, 'missing');
+      const fresh = run(shell, 'code-review', missing);
+      assert.strictEqual(fresh.stdout, 'survived\n', `${shell}: a fresh machine with no capture dir must not stop Initialize (${fresh.stderr})`);
+      assert.strictEqual(fresh.stderr, '', `${shell}: the disarm is quiet`);
+      assert.strictEqual(existsSync(missing), false, `${shell}: disarm never creates the dir`);
+
+      const dir = join(parent, 'capture');
+      mkdirSync(dir, { mode: 0o700 });
+      writeFileSync(join(dir, 'agent_review_capture.json'), '{"armed":true}');
+      assert.strictEqual(run(shell, 'agent-review', dir).stdout, 'survived\n');
+      assert.ok(existsSync(join(dir, 'agent_review_capture.json')), `${shell}: the default engine never touches capture`);
+      assert.strictEqual(run(shell, 'code-review', dir).stdout, 'survived\n');
+      assert.strictEqual(existsSync(join(dir, 'agent_review_capture.json')), false, `${shell}: an old arm is cleared`);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
   }
 });

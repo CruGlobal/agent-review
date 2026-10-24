@@ -66,6 +66,9 @@ echo "code-review diff: $CODE_REVIEW_DIFF"
 If this block fails, stop the review and show its error. Without an armed capture, the lane's
 result cannot be checked, so the review cannot finish.
 
+From here until Stage 2 judges this lane, capture stays armed. If the run stops before then for
+any reason, run `agent-review capture disarm` before you stop (Stage 2, step 5).
+
 Then read the plugin's `templates/code-review-lane.md` (`../../templates/code-review-lane.md` from
 this file) and fill its twelve placeholders:
 
@@ -103,12 +106,14 @@ findings-file cross-check and the unchanged-prompt retry in `SKILL.md`'s Stage 2
 stage still holds: a lane that fails twice fails the run. Below, `<attempt>` is the attempt id the
 lane was launched with: `$REVIEW_ID-1`, or `$REVIEW_ID-2` after a relaunch.
 
-**1. Wait for the final line.** The lane's final line is one of three: the `done` line (`done`,
-then `<N> findings, max severity <X>`), `/code-review did not finish`, or
-`/code-review returned no usable result`. Any other reply is an early handback: the lane stopped
-while /code-review was still running in the background, and the harness resumes the same lane
-when /code-review finishes. After an early handback, run this with a Bash timeout of 600000
-(10 minutes), and run it again each time it exits 3:
+**1. Wait for the final line.** The lane's final line is one of three:
+`done — <N> findings, max severity <X>` (the `done` line), `/code-review did not finish`, or
+`/code-review returned no usable result`. A Task tool error, or a reply that shows the lane ended
+before it called the Skill tool, counts as `/code-review did not finish`: no /code-review is
+running, so there is nothing to wait for. Any other reply is an early handback: the lane called
+the Skill tool and stopped while /code-review was still running in the background, and the
+harness resumes the same lane when /code-review finishes. After an early handback, run this with
+a Bash timeout of 600000 (10 minutes), and run it again each time it exits 3:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
@@ -159,11 +164,15 @@ Stage 1. Then judge it with steps 1 and 2.
   `In STEP 1, skip the Skill call: /code-review already finished for this run, and its saved result is still in place. Run STEP 1's capture-wait command, then do every later step. The earlier attempt failed the review's check with this reason: "<reason>"`
 
 - **With a new capture.** Re-arm with this block first, which clears the old result, then
-  relaunch with an empty `{{RETRY_NOTE}}`.
+  relaunch with an empty `{{RETRY_NOTE}}`. If the block fails, do not relaunch: the run fails
+  (step 5).
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
-agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"
+agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS" || {
+  echo "❌ review incomplete: the /code-review capture could not be re-armed, so no report was posted"
+  exit 1
+}
 ```
 
 **4. Pass.** Copy the passing attempt's findings to the file consensus reads, then disarm the
@@ -176,12 +185,23 @@ cp "/tmp/code_review_findings.$ATTEMPT.json" /tmp/agent_findings/code-review.jso
 agent-review capture disarm
 ```
 
-**5. Fail.** When the lane fails twice, or fails once at `stage: "config"`, first run
-`agent-review capture disarm`. Then stop the way `SKILL.md`'s Stage 2 says to for a lane that
-fails twice. At `stage: "config"`, the loud line is instead
-`❌ review incomplete: the code-review lane could not be checked, so no report was posted`. Right
-after the loud line, print the proof's `reason` from `/tmp/code_review_proof.json`, or the lane's
-reply when no proof ran for the last attempt; it names the fix or the mismatch.
+**5. Fail.** When the lane fails twice, fails once at `stage: "config"`, or cannot be re-armed,
+first disarm the capture:
+
+```bash
+agent-review capture disarm
+```
+
+Then stop the way `SKILL.md`'s Stage 2 says to for a lane that fails twice. At `stage: "config"`,
+the loud line is instead
+`❌ review incomplete: the code-review lane could not be checked, so no report was posted`, and
+when the re-arm failed, it is the line the re-arm block printed. Right after the loud line, print
+the proof's `reason` from `/tmp/code_review_proof.json`, or the lane's reply when no proof ran for
+the last attempt; it names the fix or the mismatch.
+
+Run the same disarm block whenever the run stops after Stage 1 armed the capture and before this
+lane is judged: another lane fails twice, a later block fails, or the run ends for any other
+reason.
 
 Under the `code-review` engine the progress line, like every other place a lane title is shown, titles
 the lane `Code Review (/code-review <effort>)`, since the plan gives it no `title`. Take `<effort>`
