@@ -2203,3 +2203,22 @@ test('docs say location matching uses only the same lane\'s open or dismissed en
   const flatReadme = readFileSync(join(ROOT, 'README.md'), 'utf8').replace(/\s+/g, ' ');
   assert.ok(flatReadme.includes('within 5 lines of an older open or dismissed finding from the same reviewer, in the same file and category'));
 });
+
+test('code-review lane template names the categories in vocabulary order', () => {
+  const { CATEGORIES, CLEANUP_CATEGORIES } = require('./vocabulary.cjs');
+  const text = readFileSync(join(ROOT, 'templates/code-review-lane.md'), 'utf8').replace(
+    /\s+/g,
+    ' ',
+  );
+  const names = (list) => list.map((c) => `\`${c}\``);
+  const nine = names(CATEGORIES);
+  const five = names(CLEANUP_CATEGORIES);
+  assert.ok(
+    text.includes(`one of these nine names: ${nine.slice(0, -1).join(', ')}, or ${nine.at(-1)}.`),
+    'nine-category sentence',
+  );
+  assert.ok(
+    text.includes(`The cleanup categories are ${five.slice(0, -1).join(', ')}, and ${five.at(-1)}:`),
+    'cleanup-category sentence',
+  );
+});

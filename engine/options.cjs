@@ -1,8 +1,13 @@
 'use strict';
 
-const ENGINES = ['agent-review', 'code-review'];
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
-const MODES = ['auto', 'quick', 'standard', 'deep'];
+const {
+  ENGINE_DEFAULT,
+  ENGINE_CODE_REVIEW,
+  CODE_REVIEW_LANE,
+  ENGINES,
+  EFFORTS,
+  MODES,
+} = require('./vocabulary.cjs');
 
 const ENGINE_DEFAULTS = {
   effort: 'xhigh',
@@ -37,7 +42,7 @@ function alwaysLaneProblems(crCfg, agents) {
   return problems;
 }
 
-const RESERVED_ID = 'code-review';
+const RESERVED_ID = CODE_REVIEW_LANE;
 const RESERVED_ID_MESSAGE = `agent id "${RESERVED_ID}" is reserved for the code-review engine`;
 
 function hasReservedId(agents) {
@@ -113,9 +118,9 @@ function resolveOptions({ args, config, ci }) {
   }
 
   const isCi = Boolean(ci) || parsed.ci;
-  let engine = pick(parsed.engine, engineCfg.name, 'agent-review');
-  if (isCi && engine.value === 'code-review') {
-    engine = { value: 'agent-review', source: 'ci' };
+  let engine = pick(parsed.engine, engineCfg.name, ENGINE_DEFAULT);
+  if (isCi && engine.value === ENGINE_CODE_REVIEW) {
+    engine = { value: ENGINE_DEFAULT, source: 'ci' };
     notes.push(CI_NOTE);
   }
 
@@ -130,7 +135,7 @@ function resolveOptions({ args, config, ci }) {
   let maxFindings = null;
   let replaces = [];
   let always = [];
-  if (engine.value === 'code-review') {
+  if (engine.value === ENGINE_CODE_REVIEW) {
     effort = pick(parsed.effort, crCfg.effort, ENGINE_DEFAULTS.effort);
     model = pick(null, crCfg.model, ENGINE_DEFAULTS.model);
     if (crCfg.max_findings != null) maxFindings = { value: crCfg.max_findings, source: 'config' };

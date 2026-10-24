@@ -1,6 +1,7 @@
 'use strict';
 const { join, relative, dirname, resolve, isAbsolute } = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { MODES, FINAL_MODES, ENGINE_CODE_REVIEW } = require('./vocabulary.cjs');
 const {
   readFileSync,
   writeFileSync,
@@ -93,10 +94,6 @@ function ctx(argv) {
     INDEX: join(RD, 'index'),
   };
 }
-// M1 (final review): `plan` and `run` validate the same mode vocabulary —
-// one constant, not two copies that can drift apart.
-const MODES = ['auto', 'quick', 'standard', 'deep'];
-const FINAL_MODES = ['skip', 'quick', 'standard', 'deep'];
 const CI_REVIEW_WORKFLOWS = ['agent-review.yml', 'agent-review-interact.yml', 'agent-review-readiness.yml'];
 
 // learning paths come from config (learning.path, default '.claude/review/learnings')
@@ -255,7 +252,7 @@ function main(rawArgv) {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
       if (rest[0] === 'validate') {
         const engineName = cfg.engine && cfg.engine.name;
-        const problems = engineName === 'code-review' ? codeReviewEngineProblems(cfg) : [];
+        const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
         if (problems.length) {
           out(`Invalid review config (${C.CONFIG}):\n- ${problems.join('\n- ')}`);
           return 1;

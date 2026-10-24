@@ -4,6 +4,43 @@ var __commonJS = (cb, mod) => function __require() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
+// engine/vocabulary.cjs
+var require_vocabulary = __commonJS({
+  "engine/vocabulary.cjs"(exports2, module2) {
+    "use strict";
+    var ENGINE_DEFAULT = "agent-review";
+    var ENGINE_CODE_REVIEW = "code-review";
+    var CODE_REVIEW_LANE = "code-review";
+    var ENGINES = [ENGINE_DEFAULT, ENGINE_CODE_REVIEW];
+    var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+    var MODES = ["auto", "quick", "standard", "deep"];
+    var FINAL_MODES = ["skip", "quick", "standard", "deep"];
+    var CATEGORIES = [
+      "correctness",
+      "security",
+      "data-integrity",
+      "testing",
+      "simplification",
+      "efficiency",
+      "reuse",
+      "altitude",
+      "conventions"
+    ];
+    var CLEANUP_CATEGORIES = ["simplification", "efficiency", "reuse", "altitude", "conventions"];
+    module2.exports = {
+      ENGINE_DEFAULT,
+      ENGINE_CODE_REVIEW,
+      CODE_REVIEW_LANE,
+      ENGINES,
+      EFFORTS,
+      MODES,
+      FINAL_MODES,
+      CATEGORIES,
+      CLEANUP_CATEGORIES
+    };
+  }
+});
+
 // node_modules/yaml/dist/nodes/identity.js
 var require_identity = __commonJS({
   "node_modules/yaml/dist/nodes/identity.js"(exports2) {
@@ -16788,9 +16825,14 @@ var require_loadConfig = __commonJS({
 var require_options = __commonJS({
   "engine/options.cjs"(exports2, module2) {
     "use strict";
-    var ENGINES = ["agent-review", "code-review"];
-    var EFFORTS = ["low", "medium", "high", "xhigh", "max"];
-    var MODES = ["auto", "quick", "standard", "deep"];
+    var {
+      ENGINE_DEFAULT,
+      ENGINE_CODE_REVIEW,
+      CODE_REVIEW_LANE,
+      ENGINES,
+      EFFORTS,
+      MODES
+    } = require_vocabulary();
     var ENGINE_DEFAULTS = {
       effort: "xhigh",
       model: "opus",
@@ -16819,7 +16861,7 @@ var require_options = __commonJS({
       }
       return problems;
     }
-    var RESERVED_ID = "code-review";
+    var RESERVED_ID = CODE_REVIEW_LANE;
     var RESERVED_ID_MESSAGE = `agent id "${RESERVED_ID}" is reserved for the code-review engine`;
     function hasReservedId(agents) {
       return (agents || []).some((a) => a.id === RESERVED_ID);
@@ -16881,9 +16923,9 @@ var require_options = __commonJS({
         throw new Error(`unknown effort "${parsed.effort}" (use low, medium, high, xhigh, or max)`);
       }
       const isCi = Boolean(ci) || parsed.ci;
-      let engine = pick(parsed.engine, engineCfg.name, "agent-review");
-      if (isCi && engine.value === "code-review") {
-        engine = { value: "agent-review", source: "ci" };
+      let engine = pick(parsed.engine, engineCfg.name, ENGINE_DEFAULT);
+      if (isCi && engine.value === ENGINE_CODE_REVIEW) {
+        engine = { value: ENGINE_DEFAULT, source: "ci" };
         notes.push(CI_NOTE);
       }
       const mode = parsed.mode != null ? { value: parsed.mode, source: "argument" } : { value: "standard", source: "default" };
@@ -16893,7 +16935,7 @@ var require_options = __commonJS({
       let maxFindings = null;
       let replaces = [];
       let always = [];
-      if (engine.value === "code-review") {
+      if (engine.value === ENGINE_CODE_REVIEW) {
         effort = pick(parsed.effort, crCfg.effort, ENGINE_DEFAULTS.effort);
         model = pick(null, crCfg.model, ENGINE_DEFAULTS.model);
         if (crCfg.max_findings != null) maxFindings = { value: crCfg.max_findings, source: "config" };
@@ -17059,6 +17101,7 @@ var require_selectAgents = __commonJS({
     "use strict";
     var { minimatch } = require_commonjs3();
     var { matchingPattern } = require_scoreRisk();
+    var { ENGINE_CODE_REVIEW } = require_vocabulary();
     var OPTS = { dot: true };
     function isExcluded(file, config) {
       return (config.excluded_paths || []).some((g) => minimatch(file, g, OPTS));
@@ -17115,7 +17158,7 @@ var require_selectAgents = __commonJS({
       return reviewed.some((f) => !matchingPattern(f, config).matched);
     }
     function selectAgents({ files, diffText, reviewDirRel }, config, engine = null) {
-      const external = engine && engine.name === "code-review";
+      const external = engine && engine.name === ENGINE_CODE_REVIEW;
       const replaced = new Set(external ? engine.replaces || [] : []);
       const forcedIds = new Set(external ? engine.always || [] : []);
       const candidates = config.agents.filter((a) => !replaced.has(a.id));
@@ -17272,6 +17315,7 @@ var require_plan = __commonJS({
     var { resolveRules } = require_resolveRules();
     var { detectSpecial } = require_detectSpecial();
     var { resolveTiers } = require_resolveTiers();
+    var { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE } = require_vocabulary();
     function resolveMode(requested, risk) {
       if (requested !== "auto") return requested;
       if (risk.score === 0) return "skip";
@@ -17283,9 +17327,9 @@ var require_plan = __commonJS({
     function buildPlan({ files, diffText, linesChanged, scope, reviewDirRel, mode = "standard", options }, config) {
       const special = detectSpecial(diffText, files, config);
       const risk = scoreRisk({ files, linesChanged, scope, special }, config);
-      const external = options && options.engine.value === "code-review";
+      const external = options && options.engine.value === ENGINE_CODE_REVIEW;
       const engine = external ? {
-        name: "code-review",
+        name: ENGINE_CODE_REVIEW,
         effort: options.effort.value,
         model: options.model.value,
         maxFindings: options.maxFindings ? options.maxFindings.value : null,
@@ -17313,7 +17357,7 @@ var require_plan = __commonJS({
       }
       const agentById = new Map(config.agents.map((a) => [a.id, a]));
       const sources = [
-        "code-review",
+        CODE_REVIEW_LANE,
         ...engine.replaces.filter((id) => agentById.has(id) && agentById.get(id).enabled !== false)
       ];
       const rules = [];
@@ -17328,7 +17372,7 @@ var require_plan = __commonJS({
         engine,
         agents: [
           {
-            id: "code-review",
+            id: CODE_REVIEW_LANE,
             model: engine.model,
             escalates: false,
             always: true,
@@ -18277,6 +18321,7 @@ var require_consensus = __commonJS({
   "engine/consensus.cjs"(exports2, module2) {
     "use strict";
     var { unwrapFindings } = require_unwrapFindings();
+    var { CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require_vocabulary();
     var CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
     function confidenceRank(c) {
       return CONFIDENCE_RANK[String(c || "").toLowerCase()] || 0;
@@ -18354,14 +18399,7 @@ var require_consensus = __commonJS({
       if (f.severity >= 7) return blockerBarFailure(f);
       return null;
     }
-    var CODE_REVIEW_LANE = "code-review";
-    var CLEANUP_CATEGORIES = /* @__PURE__ */ new Set([
-      "simplification",
-      "efficiency",
-      "reuse",
-      "altitude",
-      "conventions"
-    ]);
+    var CLEANUP_SET = new Set(CLEANUP_CATEGORIES);
     var CODE_REVIEW_CAP = 6;
     var DOUBTED_CAP = 4;
     var OUTSIDE_PREFIX = /^Outside the reviewed range: /i;
@@ -18369,7 +18407,7 @@ var require_consensus = __commonJS({
     function codeReviewCap(f) {
       const evidence = String(f.evidence || "").trimStart();
       if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
-      const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
+      const cleanup = CLEANUP_SET.has(String(f.category).trim().toLowerCase());
       if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
       if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
       return null;
@@ -18845,6 +18883,8 @@ var require_codeReviewProof = __commonJS({
     "use strict";
     var { minimatch } = require_commonjs3();
     var { unwrapFindings } = require_unwrapFindings();
+    var { ENGINE_CODE_REVIEW, CATEGORIES } = require_vocabulary();
+    var SKILL_NAME = ENGINE_CODE_REVIEW;
     var FIX = "update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes";
     function fail(reason) {
       return { ok: false, reason, findings: [] };
@@ -18928,9 +18968,9 @@ var require_codeReviewProof = __commonJS({
       }
       const text = String(rawText);
       const head = text.split("\n").slice(0, 3).join("\n");
-      if (!/^Skill "code-review" completed/m.test(head)) {
+      if (!new RegExp(`^Skill "${SKILL_NAME}" completed`, "m").test(head)) {
         return fail(
-          `/code-review did not run: the output lacks the Skill "code-review" completed header. Fix: ${FIX}.`
+          `/code-review did not run: the output lacks the Skill "${SKILL_NAME}" completed header. Fix: ${FIX}.`
         );
       }
       const noList = fail(
@@ -18966,17 +19006,6 @@ var require_codeReviewProof = __commonJS({
     function isText(value) {
       return typeof value === "string" && value.trim() !== "";
     }
-    var CATEGORIES = [
-      "correctness",
-      "security",
-      "data-integrity",
-      "testing",
-      "simplification",
-      "efficiency",
-      "reuse",
-      "altitude",
-      "conventions"
-    ];
     var EXCLUDED_PROOF = /^\s*excluded[\s_-]*paths?\s*[:-](.*)$/is;
     function spot(file, line) {
       return line == null ? `${file}, no line` : `${file}:${line}`;
@@ -19873,10 +19902,43 @@ var require_telemetry = __commonJS({
   }
 });
 
+// package.json
+var require_package = __commonJS({
+  "package.json"(exports2, module2) {
+    module2.exports = {
+      name: "agent-review",
+      version: "1.1.0",
+      private: true,
+      description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
+      license: "MIT",
+      engines: {
+        node: ">=20"
+      },
+      scripts: {
+        test: "node engine/run-tests.cjs",
+        build: "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review",
+        "check-dist": "npm run build && git diff --exit-code dist/",
+        "stamp-templates": "node engine/stampTemplates.cjs",
+        "test:e2e": "bash test/e2e-review.sh"
+      },
+      dependencies: {
+        ajv: "^8.17.1",
+        minimatch: "^10.0.1",
+        yaml: "^2.6.1"
+      },
+      devDependencies: {
+        esbuild: "^0.25.0"
+      }
+    };
+  }
+});
+
 // engine/cliCommands.cjs
 var require_cliCommands = __commonJS({
   "engine/cliCommands.cjs"(exports2, module2) {
     "use strict";
+    var { ENGINE_DEFAULT, ENGINE_CODE_REVIEW } = require_vocabulary();
+    var TOOL_NAME = require_package().name;
     function setLearningStatus(learnings, id, status) {
       const list = learnings && learnings.learnings || [];
       if (!list.some((l) => l.id === id))
@@ -19956,7 +20018,7 @@ var require_cliCommands = __commonJS({
       mode
     }) {
       const withSource = (o) => `${o.value} (${o.source})`;
-      const head = ["agent-review", `engine: ${withSource(options.engine)}`];
+      const head = [TOOL_NAME, `engine: ${withSource(options.engine)}`];
       if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
       const { requested } = plan.mode;
       const resolved = mode || plan.mode.resolved;
@@ -19965,9 +20027,9 @@ var require_cliCommands = __commonJS({
       const model = options.model && options.model.value;
       const reviewers = resolved === "skip" ? "none (no-risk diff skipped)" : reviewerList({ plan, sliceManifest, configAgents, model });
       const lines = [head.join(" \xB7 "), `reviewers: ${reviewers}`];
-      if (options.engine.value === "agent-review" && DEFAULT_ENGINE_MODE_NOTES[resolved])
+      if (options.engine.value === ENGINE_DEFAULT && DEFAULT_ENGINE_MODE_NOTES[resolved])
         lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
-      if (options.engine.value === "code-review")
+      if (options.engine.value === ENGINE_CODE_REVIEW)
         lines.push(
           options.maxFindings ? `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.` : `note: ${MAX_FINDINGS_RESET_NOTE}`
         );
@@ -19991,6 +20053,7 @@ var require_cli = __commonJS({
     "use strict";
     var { join, relative, dirname, resolve, isAbsolute } = require("node:path");
     var { execFileSync } = require("node:child_process");
+    var { MODES, FINAL_MODES, ENGINE_CODE_REVIEW } = require_vocabulary();
     var {
       readFileSync,
       writeFileSync,
@@ -20077,8 +20140,6 @@ var require_cli = __commonJS({
         INDEX: join(RD, "index")
       };
     }
-    var MODES = ["auto", "quick", "standard", "deep"];
-    var FINAL_MODES = ["skip", "quick", "standard", "deep"];
     var CI_REVIEW_WORKFLOWS = ["agent-review.yml", "agent-review-interact.yml", "agent-review-readiness.yml"];
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
@@ -20214,7 +20275,7 @@ var require_cli = __commonJS({
           const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
           if (rest[0] === "validate") {
             const engineName = cfg.engine && cfg.engine.name;
-            const problems = engineName === "code-review" ? codeReviewEngineProblems(cfg) : [];
+            const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
             if (problems.length) {
               out(`Invalid review config (${C.CONFIG}):
 - ${problems.join("\n- ")}`);

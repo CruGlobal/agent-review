@@ -59,3 +59,10 @@ test('schema rejects bad engine values', () => {
   ];
   for (const cfg of bad) assert.equal(validateWith(cfg), false, JSON.stringify(cfg));
 });
+
+test('engine enums in the schema match the shared vocabulary', () => {
+  const { ENGINES, EFFORTS } = require('./vocabulary.cjs');
+  const props = schema.properties.engine.properties;
+  assert.deepEqual(props.name.enum, ENGINES);
+  assert.deepEqual(props.code_review.properties.effort.enum, EFFORTS);
+});

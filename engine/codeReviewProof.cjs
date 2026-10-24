@@ -2,6 +2,9 @@
 
 const { minimatch } = require('minimatch');
 const { unwrapFindings } = require('./unwrapFindings.cjs');
+const { ENGINE_CODE_REVIEW, CATEGORIES } = require('./vocabulary.cjs');
+
+const SKILL_NAME = ENGINE_CODE_REVIEW;
 
 const FIX =
   'update Claude Code to a version that ships /code-review, or set engine=agent-review to use the built-in lanes';
@@ -105,9 +108,9 @@ function checkCodeReviewProof({ rawText, fileExists }) {
   }
   const text = String(rawText);
   const head = text.split('\n').slice(0, 3).join('\n');
-  if (!/^Skill "code-review" completed/m.test(head)) {
+  if (!new RegExp(`^Skill "${SKILL_NAME}" completed`, 'm').test(head)) {
     return fail(
-      `/code-review did not run: the output lacks the Skill "code-review" completed header. Fix: ${FIX}.`,
+      `/code-review did not run: the output lacks the Skill "${SKILL_NAME}" completed header. Fix: ${FIX}.`,
     );
   }
   const noList = fail(
@@ -153,17 +156,6 @@ function isText(value) {
   return typeof value === 'string' && value.trim() !== '';
 }
 
-const CATEGORIES = [
-  'correctness',
-  'security',
-  'data-integrity',
-  'testing',
-  'simplification',
-  'efficiency',
-  'reuse',
-  'altitude',
-  'conventions',
-];
 // Spelling variants of the prefix are checked too, so none can pass as an ordinary proof.
 const EXCLUDED_PROOF = /^\s*excluded[\s_-]*paths?\s*[:-](.*)$/is;
 

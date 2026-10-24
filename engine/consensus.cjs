@@ -26,6 +26,7 @@
 // input ordering (e.g. which agent's lane file was read first).
 
 const { unwrapFindings } = require('./unwrapFindings.cjs');
+const { CODE_REVIEW_LANE, CLEANUP_CATEGORIES } = require('./vocabulary.cjs');
 
 const CONFIDENCE_RANK = { high: 3, medium: 2, low: 1 };
 
@@ -133,14 +134,7 @@ function validateFinding(f) {
   return null;
 }
 
-const CODE_REVIEW_LANE = 'code-review';
-const CLEANUP_CATEGORIES = new Set([
-  'simplification',
-  'efficiency',
-  'reuse',
-  'altitude',
-  'conventions',
-]);
+const CLEANUP_SET = new Set(CLEANUP_CATEGORIES);
 const CODE_REVIEW_CAP = 6;
 const DOUBTED_CAP = 4;
 // The lane template's evidence prefixes, in order: Outside, Recategorized, Doubted.
@@ -152,7 +146,7 @@ const DOUBTED_PREFIX = /(?:^|[\n.:!?]\s*)Doubted: /i;
 function codeReviewCap(f) {
   const evidence = String(f.evidence || '').trimStart();
   if (DOUBTED_PREFIX.test(evidence)) return DOUBTED_CAP;
-  const cleanup = CLEANUP_CATEGORIES.has(String(f.category).trim().toLowerCase());
+  const cleanup = CLEANUP_SET.has(String(f.category).trim().toLowerCase());
   if (cleanup || OUTSIDE_PREFIX.test(evidence)) return CODE_REVIEW_CAP;
   if (f.severity >= 7 && blockerBarFailure(f)) return CODE_REVIEW_CAP;
   return null;

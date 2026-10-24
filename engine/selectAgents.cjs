@@ -1,6 +1,7 @@
 'use strict';
 const { minimatch } = require('minimatch');
 const { matchingPattern } = require('./scoreRisk.cjs');
+const { ENGINE_CODE_REVIEW } = require('./vocabulary.cjs');
 
 const OPTS = { dot: true };
 
@@ -83,7 +84,7 @@ function hasUnmatchedReviewableFile(reviewed, config) {
 }
 
 function selectAgents({ files, diffText, reviewDirRel }, config, engine = null) {
-  const external = engine && engine.name === 'code-review';
+  const external = engine && engine.name === ENGINE_CODE_REVIEW;
   const replaced = new Set(external ? engine.replaces || [] : []);
   const forcedIds = new Set(external ? engine.always || [] : []);
   const candidates = config.agents.filter((a) => !replaced.has(a.id));

@@ -1,5 +1,9 @@
 'use strict';
 
+const { ENGINE_DEFAULT, ENGINE_CODE_REVIEW } = require('./vocabulary.cjs');
+
+const TOOL_NAME = require('../package.json').name;
+
 function setLearningStatus(learnings, id, status) {
   const list = (learnings && learnings.learnings) || [];
   if (!list.some((l) => l.id === id))
@@ -95,7 +99,7 @@ function formatStartup({
   mode,
 }) {
   const withSource = (o) => `${o.value} (${o.source})`;
-  const head = ['agent-review', `engine: ${withSource(options.engine)}`];
+  const head = [TOOL_NAME, `engine: ${withSource(options.engine)}`];
   if (options.effort) head.push(`effort: ${withSource(options.effort)}`);
   const { requested } = plan.mode;
   const resolved = mode || plan.mode.resolved;
@@ -109,9 +113,9 @@ function formatStartup({
       : reviewerList({ plan, sliceManifest, configAgents, model });
 
   const lines = [head.join(' \u00b7 '), `reviewers: ${reviewers}`];
-  if (options.engine.value === 'agent-review' && DEFAULT_ENGINE_MODE_NOTES[resolved])
+  if (options.engine.value === ENGINE_DEFAULT && DEFAULT_ENGINE_MODE_NOTES[resolved])
     lines.push(`note: ${DEFAULT_ENGINE_MODE_NOTES[resolved]}`);
-  if (options.engine.value === 'code-review')
+  if (options.engine.value === ENGINE_CODE_REVIEW)
     lines.push(
       options.maxFindings
         ? `note: --max-findings ${options.maxFindings.value} is passed to /code-review on every run and may change your own remembered /code-review limit.`

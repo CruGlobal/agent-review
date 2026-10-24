@@ -7,6 +7,7 @@ const { selectAgents } = require('./selectAgents.cjs');
 const { resolveRules } = require('./resolveRules.cjs');
 const { detectSpecial } = require('./detectSpecial.cjs');
 const { resolveTiers } = require('./resolveTiers.cjs');
+const { ENGINE_CODE_REVIEW, CODE_REVIEW_LANE } = require('./vocabulary.cjs');
 
 // requested `auto` resolves from the risk score/level; any other requested
 // value (quick|standard|deep, or a future value) passes straight through.
@@ -25,10 +26,10 @@ function buildPlan(
 ) {
   const special = detectSpecial(diffText, files, config);
   const risk = scoreRisk({ files, linesChanged, scope, special }, config);
-  const external = options && options.engine.value === 'code-review';
+  const external = options && options.engine.value === ENGINE_CODE_REVIEW;
   const engine = external
     ? {
-        name: 'code-review',
+        name: ENGINE_CODE_REVIEW,
         effort: options.effort.value,
         model: options.model.value,
         maxFindings: options.maxFindings ? options.maxFindings.value : null,
@@ -57,7 +58,7 @@ function buildPlan(
   }
   const agentById = new Map(config.agents.map((a) => [a.id, a]));
   const sources = [
-    'code-review',
+    CODE_REVIEW_LANE,
     ...engine.replaces.filter((id) => agentById.has(id) && agentById.get(id).enabled !== false),
   ];
   const rules = [];
@@ -72,7 +73,7 @@ function buildPlan(
     engine,
     agents: [
       {
-        id: 'code-review',
+        id: CODE_REVIEW_LANE,
         model: engine.model,
         escalates: false,
         always: true,
