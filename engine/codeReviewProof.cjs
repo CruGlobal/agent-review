@@ -445,15 +445,15 @@ function disproofProblem(proof, { fileExists, readLines, root }) {
   const tries = [];
   const isBareFile = (path) => path.includes('.') || exists(path);
   for (const token of text.matchAll(/\S+/g)) {
-    const quote = text.slice(token.index + token[0].length).replace(QUOTE_LEAD, '');
-    for (const mention of mentionsIn(token[0], isBareFile)) tries.push({ ...mention, quote });
+    const rest = text.slice(token.index + token[0].length);
+    for (const mention of mentionsIn(token[0], isBareFile)) tries.push({ ...mention, rest });
   }
   if (tries.length === 0) return 'needs a proof that cites a path:line and then quotes the code there';
   let best = null;
   const miss = (rank, problem) => {
     if (!best || rank > best.rank) best = { rank, problem };
   };
-  for (const { file, line, quote } of tries) {
+  for (const { file, line, rest } of tries) {
     const at = mentionSpot({ file, line });
     const path = existingPath(file, root, exists);
     if (!path) {
@@ -474,12 +474,14 @@ function disproofProblem(proof, { fileExists, readLines, root }) {
       miss(2, `has a proof that cites ${at}, a line with fewer than ${MIN_LINE_CHARS} characters besides spaces, which cannot prove anything; cite a longer line and quote all of it`);
       continue;
     }
-    const code = squeezed(quote);
-    if (code === '') {
+    // A lead-in such as ": " or " - " is stripped only to tell an empty quote, since a quoted line
+    // can itself start with "-", ":", ";", or ",".
+    const quote = rest.replace(QUOTE_LEAD, '');
+    if (squeezed(quote) === '') {
       miss(3, `has a proof that quotes no code after ${at}; put that whole line right after it`);
       continue;
     }
-    if (!code.includes(cited)) {
+    if (!squeezed(rest).includes(cited)) {
       const shownQuote = JSON.stringify(oneLine(quote).slice(0, 120));
       miss(3, `has a proof whose quote after ${at} does not hold that whole line of ${path}: ${shownQuote}; quote all of line ${line} right after it`);
       continue;

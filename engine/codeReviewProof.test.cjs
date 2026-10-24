@@ -663,6 +663,11 @@ const LANE_REPO = repoOf({
   Makefile: numbered(14, { 12: 'test: build lint' }),
   'a.rb': numbered(3, { 2: '  guard()' }),
   'lib/a.rb': numbered(5, { 1: 'def total(items)', 2: '  return 0 if items.nil?', 3: 'end', 4: '}' }),
+  '.github/workflows/ci.yml': 'jobs:\n  test:\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm test\n',
+  'app/views/x.html.haml': '%div\n  - if current_user.admin?\n    = render "admin"\n',
+  'db/q.sql': 'SELECT a\n  , b_total_amount\nFROM t\n',
+  'config/x.rb': 'opts = {\n  :timeout => 30,\n}\n',
+  'conf/x.ini': '[server]\n; timeout = 30 seconds\n',
 });
 const lane = (scored, dropped = [], over = {}) =>
   checkLaneOutput({
@@ -896,6 +901,28 @@ test('a disproved proof that quotes the whole cited line passes, alone or with i
   ]) {
     const r = disproved(proof);
     assert.equal(r.ok, true, `${proof}: ${r.reason}`);
+  }
+});
+
+test('an exact quote of a line that starts with -, :, ;, a comma, or a dash disproves', () => {
+  for (const proof of [
+    'already handled: .github/workflows/ci.yml:4 - uses: actions/checkout@v4',
+    'already handled: .github/workflows/ci.yml:4 `- uses: actions/checkout@v4`',
+    'already handled: .github/workflows/ci.yml:4 "- uses: actions/checkout@v4"',
+    'already handled: .github/workflows/ci.yml:3 steps:\n      - uses: actions/checkout@v4',
+    'misreads the code: app/views/x.html.haml:2 - if current_user.admin?',
+    'misreads the code: db/q.sql:2 , b_total_amount',
+    'misreads the code: config/x.rb:2 :timeout => 30,',
+    'misreads the code: conf/x.ini:2 ; timeout = 30 seconds',
+    'misreads the code: config/x.rb:2 \u2014 :timeout => 30,',
+  ]) {
+    const r = disproved(proof);
+    assert.equal(r.ok, true, `${proof}: ${r.reason}`);
+  }
+  for (const proof of ['misreads the code: db/q.sql:2 b_total_amount', 'misreads the code: config/x.rb:2 timeout => 30,']) {
+    const r = disproved(proof);
+    assert.equal(r.ok, false, `${proof}: the quote leaves out the line's own lead character`);
+    assert.match(r.reason, /does not hold that whole line/, proof);
   }
 });
 
