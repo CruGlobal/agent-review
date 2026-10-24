@@ -31,7 +31,7 @@ function scanFences(text) {
     if (open) {
       const close = FENCE_CLOSE.exec(line);
       if (close && close[1][0] === open.fence[0] && close[1].length >= open.fence.length) {
-        blocks.push({ info: open.info, body: open.body.join('\n'), closed: true });
+        blocks.push({ info: open.info, body: open.body.join('\n'), lines: open.body, start: open.start, closed: true });
         open = null;
       } else {
         open.body.push(line);
@@ -40,13 +40,13 @@ function scanFences(text) {
     }
     const start = FENCE_OPEN.exec(line);
     if (start && !(start[1][0] === '`' && start[2].includes('`'))) {
-      open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [] };
+      open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [], start: index };
     } else {
       outside.push(line);
       outsideAt.push(index);
     }
   }
-  if (open) blocks.push({ info: open.info, body: open.body.join('\n'), closed: false });
+  if (open) blocks.push({ info: open.info, body: open.body.join('\n'), lines: open.body, start: open.start, closed: false });
   return { blocks, outside, outsideAt };
 }
 
@@ -194,11 +194,20 @@ function mentionsIn(line, fileExists) {
   return mentions;
 }
 
+// A fence with no language label holds prose, so a finding there must be claimed like one outside.
+const PROSE_FENCES = new Set(['', 'text', 'txt', 'md', 'markdown', 'plain']);
+
 function textLines(text, fileExists) {
-  const { outside, outsideAt } = scanFences(String(text));
-  return outside.map((raw, k) => {
-    const line = normalizeLine(raw);
-    return { index: outsideAt[k], text: line, mentions: mentionsIn(line, fileExists) };
+  const { blocks, outside, outsideAt } = scanFences(String(text));
+  const raw = outside.map((line, k) => ({ index: outsideAt[k], line }));
+  for (const block of blocks) {
+    if (!PROSE_FENCES.has(block.info) || listOf(block)) continue;
+    block.lines.forEach((line, j) => raw.push({ index: block.start + 1 + j, line }));
+  }
+  raw.sort((a, b) => a.index - b.index);
+  return raw.map(({ index, line }) => {
+    const normalized = normalizeLine(line);
+    return { index, text: normalized, mentions: mentionsIn(normalized, fileExists) };
   });
 }
 
@@ -229,17 +238,43 @@ function looksFinished(result, effort) {
   return jsonFindings(result).list !== null || explicitEmpty(result);
 }
 
-// The path must stand alone: lib/cart.rb names cart.rb only when the raw entry says lib/cart.rb.
-function namesPathIn(text, path) {
+const PATH_CHAR = /[\p{L}\p{N}_./-]/u;
+
+function pathStartsAt(text, at, root) {
+  const prefixes = ['', './'];
+  if (typeof root === 'string' && root !== '') prefixes.push(root.endsWith('/') ? root : `${root}/`);
+  return prefixes.some((prefix) => {
+    const from = at - prefix.length;
+    if (from < 0 || text.slice(from, at) !== prefix) return false;
+    return from === 0 || !PATH_CHAR.test(text[from - 1]);
+  });
+}
+
+// A raw path matches only a whole path in the text, so cart.rb does not match lib/cart.rb.
+function namesPathIn(text, path, root) {
   if (path === '') return false;
   for (let at = text.indexOf(path); at >= 0; at = text.indexOf(path, at + 1)) {
-    const before = at > 0 ? text[at - 1] : '';
+    if (!pathStartsAt(text, at, root)) continue;
     const after = text.slice(at + path.length, at + path.length + 2);
-    if (/[\p{L}\p{N}_./-]/u.test(before)) continue;
     if (/^(?:[\p{L}\p{N}_/-]|\.[\p{L}\p{N}_])/u.test(after)) continue;
     return true;
   }
   return false;
+}
+
+const WRAPPERS = new Set(['_', '"', "'", ')', ']', '}', '>']);
+
+// A loop, not a regex: a trailing-run regex backtracks quadratically on a long run of wrappers.
+function trimWrappers(path) {
+  let start = 0;
+  let end = path.length;
+  while (start < end && WRAPPERS.has(path[start])) start++;
+  while (end > start && WRAPPERS.has(path[end - 1])) end--;
+  return path.slice(start, end);
+}
+
+function mentionNames(mentionFile, path, root) {
+  return repoRelative(mentionFile, root) === path || repoRelative(trimWrappers(mentionFile), root) === path;
 }
 
 function captureProblem(capture, runId) {
@@ -312,8 +347,8 @@ function textMismatch(rawEntries, lines, root) {
     const path = repoRelative(entry.file, root);
     const fits =
       entry.line === null
-        ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path)
-        : (l) => l.mentions.some((m) => m.line === entry.line && repoRelative(m.file, root) === path);
+        ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path, root)
+        : (l) => l.mentions.some((m) => m.line === entry.line && mentionNames(m.file, path, root));
     return lines.filter(fits).map((l) => l.index);
   });
   const owner = matchLines(candidates);

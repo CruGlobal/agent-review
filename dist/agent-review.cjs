@@ -19072,7 +19072,7 @@ var require_codeReviewProof = __commonJS({
         if (open) {
           const close = FENCE_CLOSE.exec(line);
           if (close && close[1][0] === open.fence[0] && close[1].length >= open.fence.length) {
-            blocks.push({ info: open.info, body: open.body.join("\n"), closed: true });
+            blocks.push({ info: open.info, body: open.body.join("\n"), lines: open.body, start: open.start, closed: true });
             open = null;
           } else {
             open.body.push(line);
@@ -19081,13 +19081,13 @@ var require_codeReviewProof = __commonJS({
         }
         const start = FENCE_OPEN.exec(line);
         if (start && !(start[1][0] === "`" && start[2].includes("`"))) {
-          open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [] };
+          open = { fence: start[1], info: start[2].trim().split(/\s+/)[0].toLowerCase(), body: [], start: index };
         } else {
           outside.push(line);
           outsideAt.push(index);
         }
       }
-      if (open) blocks.push({ info: open.info, body: open.body.join("\n"), closed: false });
+      if (open) blocks.push({ info: open.info, body: open.body.join("\n"), lines: open.body, start: open.start, closed: false });
       return { blocks, outside, outsideAt };
     }
     function isPlainObject(value) {
@@ -19209,11 +19209,18 @@ var require_codeReviewProof = __commonJS({
       }
       return mentions;
     }
+    var PROSE_FENCES = /* @__PURE__ */ new Set(["", "text", "txt", "md", "markdown", "plain"]);
     function textLines(text, fileExists) {
-      const { outside, outsideAt } = scanFences(String(text));
-      return outside.map((raw, k) => {
-        const line = normalizeLine(raw);
-        return { index: outsideAt[k], text: line, mentions: mentionsIn(line, fileExists) };
+      const { blocks, outside, outsideAt } = scanFences(String(text));
+      const raw = outside.map((line, k) => ({ index: outsideAt[k], line }));
+      for (const block of blocks) {
+        if (!PROSE_FENCES.has(block.info) || listOf(block)) continue;
+        block.lines.forEach((line, j) => raw.push({ index: block.start + 1 + j, line }));
+      }
+      raw.sort((a, b) => a.index - b.index);
+      return raw.map(({ index, line }) => {
+        const normalized = normalizeLine(line);
+        return { index, text: normalized, mentions: mentionsIn(normalized, fileExists) };
       });
     }
     function findingLines(text, fileExists) {
@@ -19238,16 +19245,36 @@ var require_codeReviewProof = __commonJS({
       if (effort !== "max") return true;
       return jsonFindings(result).list !== null || explicitEmpty(result);
     }
-    function namesPathIn(text, path) {
+    var PATH_CHAR = /[\p{L}\p{N}_./-]/u;
+    function pathStartsAt(text, at, root) {
+      const prefixes = ["", "./"];
+      if (typeof root === "string" && root !== "") prefixes.push(root.endsWith("/") ? root : `${root}/`);
+      return prefixes.some((prefix) => {
+        const from = at - prefix.length;
+        if (from < 0 || text.slice(from, at) !== prefix) return false;
+        return from === 0 || !PATH_CHAR.test(text[from - 1]);
+      });
+    }
+    function namesPathIn(text, path, root) {
       if (path === "") return false;
       for (let at = text.indexOf(path); at >= 0; at = text.indexOf(path, at + 1)) {
-        const before = at > 0 ? text[at - 1] : "";
+        if (!pathStartsAt(text, at, root)) continue;
         const after = text.slice(at + path.length, at + path.length + 2);
-        if (/[\p{L}\p{N}_./-]/u.test(before)) continue;
         if (/^(?:[\p{L}\p{N}_/-]|\.[\p{L}\p{N}_])/u.test(after)) continue;
         return true;
       }
       return false;
+    }
+    var WRAPPERS = /* @__PURE__ */ new Set(["_", '"', "'", ")", "]", "}", ">"]);
+    function trimWrappers(path) {
+      let start = 0;
+      let end = path.length;
+      while (start < end && WRAPPERS.has(path[start])) start++;
+      while (end > start && WRAPPERS.has(path[end - 1])) end--;
+      return path.slice(start, end);
+    }
+    function mentionNames(mentionFile, path, root) {
+      return repoRelative(mentionFile, root) === path || repoRelative(trimWrappers(mentionFile), root) === path;
     }
     function captureProblem(capture, runId) {
       if (!isPlainObject(capture)) return "no /code-review capture was found for this run";
@@ -19311,7 +19338,7 @@ var require_codeReviewProof = __commonJS({
     function textMismatch(rawEntries, lines, root) {
       const candidates = rawEntries.map((entry) => {
         const path = repoRelative(entry.file, root);
-        const fits = entry.line === null ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path) : (l) => l.mentions.some((m) => m.line === entry.line && repoRelative(m.file, root) === path);
+        const fits = entry.line === null ? (l) => l.mentions.length === 0 && namesPathIn(l.text, path, root) : (l) => l.mentions.some((m) => m.line === entry.line && mentionNames(m.file, path, root));
         return lines.filter(fits).map((l) => l.index);
       });
       const owner = matchLines(candidates);
@@ -20740,6 +20767,12 @@ var require_cli = __commonJS({
     }
     var CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]`;
     var CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
+    var CAPTURE_WAIT_MAX_SECONDS = 590;
+    function captureWaitTimeout(value) {
+      if (value === void 0) return 540;
+      if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
+      return Math.min(Number(value), CAPTURE_WAIT_MAX_SECONDS);
+    }
     function capturePollMs(env = process.env) {
       const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
       return Number.isInteger(ms) && ms > 0 ? ms : 5e3;
@@ -20768,17 +20801,25 @@ var require_cli = __commonJS({
         if (armed.run_id !== runId) {
           return report("failed", `/code-review capture is armed for run ${armed.run_id}, not run ${runId}`);
         }
-        const mismatch = readJsonOrNull(file("mismatch"));
-        if (mismatch?.run_id === runId) {
+        const armedEffort = armed.args.trim().split(/\s+/)[0];
+        if (armedEffort !== effort) {
           return report(
             "failed",
-            `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; call the Skill tool with exactly the armed args`
+            `capture-wait --effort ${effort} does not match the armed args ${JSON.stringify(armed.args)}, whose effort is ${JSON.stringify(armedEffort)}`
           );
         }
         const found = readJsonOrNull(file("capture"));
         const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
         if (capture && looksFinished(capture.result, effort)) {
           return report("finished", `the /code-review capture for run ${runId} looks finished`, capture);
+        }
+        const mismatch = readJsonOrNull(file("mismatch"));
+        if (mismatch?.run_id === runId) {
+          return report(
+            "failed",
+            `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; the run must be re-armed with capture arm before /code-review is called again`,
+            capture
+          );
         }
         const now = Date.now();
         const limitAt = (armed.created + limitMinutes * 60) * 1e3;
@@ -20819,7 +20860,7 @@ var require_cli = __commonJS({
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
-  capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540) for that run's capture to look finished; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, or the effort's time limit passed)
+  capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, another effort, or the effort's time limit passed)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -21285,12 +21326,12 @@ var require_cli = __commonJS({
         case "capture-wait": {
           const runId = flag(rest, "--run");
           const effort = flag(rest, "--effort");
-          const timeout = flag(rest, "--timeout") ?? "540";
-          if (!runId || !EFFORTS.includes(effort) || !/^\d+(?:\.\d+)?$/.test(timeout)) {
+          const timeoutSeconds = captureWaitTimeout(flag(rest, "--timeout"));
+          if (!runId || !EFFORTS.includes(effort) || timeoutSeconds === null) {
             out(CAPTURE_WAIT_USAGE);
             return 1;
           }
-          return captureWait({ runId, effort, timeoutSeconds: Number(timeout) });
+          return captureWait({ runId, effort, timeoutSeconds });
         }
         case "hook":
           return runHook(rest[0]);
@@ -21569,7 +21610,8 @@ ${USAGE}`);
       changedFiles,
       resolveMinSupport,
       planTmpPath,
-      readTranscript
+      readTranscript,
+      captureWaitTimeout
     };
   }
 });

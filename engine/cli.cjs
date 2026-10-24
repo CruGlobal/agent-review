@@ -357,6 +357,14 @@ function runHook(name) {
 
 const CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]`;
 const CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
+// The Bash tool stops a command at 10 minutes, so one call must return before that.
+const CAPTURE_WAIT_MAX_SECONDS = 590;
+
+function captureWaitTimeout(value) {
+  if (value === undefined) return 540;
+  if (!/^\d+(?:\.\d+)?$/.test(value)) return null;
+  return Math.min(Number(value), CAPTURE_WAIT_MAX_SECONDS);
+}
 
 function capturePollMs(env = process.env) {
   const ms = Number(env.AGENT_REVIEW_CAPTURE_POLL_MS);
@@ -388,18 +396,26 @@ function captureWait({ runId, effort, timeoutSeconds }) {
     if (armed.run_id !== runId) {
       return report('failed', `/code-review capture is armed for run ${armed.run_id}, not run ${runId}`);
     }
-    const mismatch = readJsonOrNull(file('mismatch'));
-    if (mismatch?.run_id === runId) {
+    const armedEffort = armed.args.trim().split(/\s+/)[0];
+    if (armedEffort !== effort) {
       return report(
         'failed',
-        `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ` +
-          `${JSON.stringify(mismatch.expected)}; call the Skill tool with exactly the armed args`,
+        `capture-wait --effort ${effort} does not match the armed args ${JSON.stringify(armed.args)}, whose effort is ${JSON.stringify(armedEffort)}`,
       );
     }
     const found = readJsonOrNull(file('capture'));
     const capture = found?.source === CAPTURE_SOURCE && found.run_id === runId ? found : null;
     if (capture && looksFinished(capture.result, effort)) {
       return report('finished', `the /code-review capture for run ${runId} looks finished`, capture);
+    }
+    const mismatch = readJsonOrNull(file('mismatch'));
+    if (mismatch?.run_id === runId) {
+      return report(
+        'failed',
+        `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ` +
+          `${JSON.stringify(mismatch.expected)}; the run must be re-armed with capture arm before /code-review is called again`,
+        capture,
+      );
     }
     const now = Date.now();
     const limitAt = (armed.created + limitMinutes * 60) * 1000;
@@ -441,7 +457,7 @@ const USAGE = `usage: agent-review <command>
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
-  capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540) for that run's capture to look finished; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, or the effort's time limit passed)
+  capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args mismatch, not armed, another effort, or the effort's time limit passed)
   hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
@@ -937,12 +953,12 @@ function main(rawArgv) {
     case 'capture-wait': {
       const runId = flag(rest, '--run');
       const effort = flag(rest, '--effort');
-      const timeout = flag(rest, '--timeout') ?? '540';
-      if (!runId || !EFFORTS.includes(effort) || !/^\d+(?:\.\d+)?$/.test(timeout)) {
+      const timeoutSeconds = captureWaitTimeout(flag(rest, '--timeout'));
+      if (!runId || !EFFORTS.includes(effort) || timeoutSeconds === null) {
         out(CAPTURE_WAIT_USAGE);
         return 1;
       }
-      return captureWait({ runId, effort, timeoutSeconds: Number(timeout) });
+      return captureWait({ runId, effort, timeoutSeconds });
     }
     case 'hook':
       return runHook(rest[0]);
@@ -1218,4 +1234,5 @@ module.exports = {
   resolveMinSupport,
   planTmpPath,
   readTranscript,
+  captureWaitTimeout,
 };

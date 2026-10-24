@@ -1027,11 +1027,14 @@ test('snake_case paths survive normalization', () => {
     ['- pkg/__init__.py:3 imports the package twice', 'pkg/__init__.py', 3],
     ['- `pkg/__init__.py:3`: imports the package twice', 'pkg/__init__.py', 3],
     ['- **app/views/users/_form.html.erb:3**: the field is not escaped', 'app/views/users/_form.html.erb', 3],
-    ['- _lib/a_b.rb:9_ is still a finding line, underscores and all', '_lib/a_b.rb', 9],
   ]) {
     assert.deepEqual(findingLines(line)[0].mentions, [{ file, line: at }], line);
     assertGrounded(ground(line, raws([file, at])), 'text', line);
   }
+  const italic = '- _lib/a_b.rb:9_ is still a finding line';
+  assert.deepEqual(findingLines(italic)[0].mentions, [{ file: '_lib/a_b.rb', line: 9 }], 'the mention keeps its underscores');
+  assertGrounded(ground(italic, raws(['lib/a_b.rb', 9])), 'text', 'the emphasis underscore is trimmed when matching');
+  assertGrounded(ground(italic, raws(['_lib/a_b.rb', 9])), 'text', 'the path as written still matches');
   assertFails(ground('- app/user_account.rb:7: x', raws(['app/useraccount.rb', 7])), 'lane', 'the underscore is kept');
   assertFails(ground('- pkg/__init__.py:3: x', raws(['pkg/_init_.py', 3])), 'lane', 'no underscore is dropped');
   assertGrounded(
@@ -1054,13 +1057,85 @@ test('an entry with no line takes a line that names its path and has no mention'
   assertFails(ground(result, raws(['cart.rb', null], ['a.rb', 3])), 'lane', 'a path inside a longer path is not its path');
   assertFails(ground(result, raws(['a.rb', null], ['a.rb', 3])), 'lane', 'a line with a mention is not a no-line line');
   assertFails(ground(result, raws(['lib/cart.rb', null], ['lib/cart.rb', null], ['a.rb', 3])), 'lane', 'one line per entry');
-  const fencedOnly = `${fenced('', 'lib/cart.rb')}- a.rb:3: total skips the guard\n`;
-  assertFails(ground(fencedOnly, raws(['lib/cart.rb', null], ['a.rb', 3])), 'lane', 'a fenced line is not text');
+  const inRuby = `${fenced('ruby', 'lib/cart.rb')}- a.rb:3: total skips the guard\n`;
+  assertFails(ground(inRuby, raws(['lib/cart.rb', null], ['a.rb', 3])), 'lane', 'a line in a language fence is not text');
+  const inPlain = `${fenced('', 'lib/cart.rb never freezes its constants')}- a.rb:3: total skips the guard\n`;
+  assertGrounded(ground(inPlain, raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'a line in a plain fence is text');
   for (const longer of ['lib/cart.rbs', 'lib/cart.rb.bak', 'lib/cart.rb/x', 'lib/cart.rb-old']) {
     const r = ground(`- ${longer} declares the cart types\n- a.rb:3: bug\n`, raws(['lib/cart.rb', null], ['a.rb', 3]));
     assertFails(r, 'lane', `${longer} is not lib/cart.rb`);
   }
   assertGrounded(ground('- The constants live in lib/cart.rb.\n- a.rb:3: bug\n', raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'a full stop ends the path');
+});
+
+test('findings inside a plain or prose fence must be claimed (review probes L1, L2)', () => {
+  const l1 = 'Correctness:\n```\n- a.rb:3: total skips the guard\n```\nCleanups:\n(none)\n';
+  const emptyL1 = ground(l1, []);
+  assertFails(emptyL1, 'lane', 'L1');
+  assert.equal(emptyL1.mode, 'text');
+  assert.match(emptyL1.reason, /line 3\b.*a\.rb:3/);
+  assertGrounded(ground(l1, raws(['a.rb', 3])), 'text', 'L1 claimed');
+
+  const l2 = 'Correctness:\n```text\n- a.rb:3: total skips the guard\n- b.rb:9: second bug\n```\n- c.rb:1: third bug\n';
+  const partialL2 = ground(l2, raws(['c.rb', 1]));
+  assertFails(partialL2, 'lane', 'L2');
+  assert.match(partialL2.reason, /line 3\b.*a\.rb:3/);
+  assertGrounded(ground(l2, raws(['a.rb', 3], ['b.rb', 9], ['c.rb', 1])), 'text', 'L2 claimed');
+
+  for (const info of ['', 'text', 'txt', 'md', 'markdown', 'plain', 'TEXT', 'text title="Findings"']) {
+    for (const fence of ['```', '~~~']) {
+      const result = `Correctness:\n${fence}${info}\n- a.rb:3: total skips the guard\n${fence}\n(none)\n`;
+      assert.deepEqual(findingLines(result).map((l) => [l.index, l.mentions]), [[2, [{ file: 'a.rb', line: 3 }]]], `${fence}${info}`);
+      assertFails(ground(result, []), 'lane', `${fence}${info}`);
+      assertGrounded(ground(result, raws(['a.rb', 3])), 'text', `${fence}${info}`);
+    }
+  }
+});
+
+test('a fence labeled with a language citing lib/b.rb:9 still needs no claim', () => {
+  for (const info of ['ruby', 'js', 'python', 'sh', 'console', 'diff', 'json', 'textile']) {
+    const result = `- a.rb:3: total skips the guard. The caller:\n${fenced(info, '# lib/b.rb:9\ntotal(cart) # from lib/b.rb:9:in `checkout`')}`;
+    assert.deepEqual(findingLines(result).map((l) => l.index), [0], info);
+    assertGrounded(ground(result, raws(['a.rb', 3])), 'text', info);
+  }
+  const listLike = `All good.\n${fenced('', '{"findings": [], "note": "see lib/b.rb:9"}')}`;
+  assert.deepEqual(findingLines(listLike), [], 'a list-like plain fence is JSON, not text');
+  assertGrounded(ground(listLike, []), 'empty', 'its quoted location needs no claim');
+});
+
+test('a no-line entry grounds on its path written after the root or ./ (review probes B1, B2, B3)', () => {
+  const tail = '- a.rb:3: bug\n';
+  assertGrounded(ground(`- /repo/lib/cart.rb never freezes its constants\n${tail}`, raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'B1');
+  assertGrounded(ground(`- /repo/lib/cart.rb never freezes its constants\n${tail}`, raws(['/repo/lib/cart.rb', null], ['a.rb', 3])), 'text', 'B2');
+  assertGrounded(ground(`- ./lib/cart.rb never freezes its constants\n${tail}`, raws(['lib/cart.rb', null], ['a.rb', 3])), 'text', 'B3');
+  assertGrounded(
+    ground(`- (/repo/lib/cart.rb) never freezes its constants\n${tail}`, raws(['lib/cart.rb', null], ['a.rb', 3]), { root: '/repo/' }),
+    'text',
+    'a root with a trailing slash',
+  );
+  for (const other of ['/other/lib/cart.rb', '/x/repo/lib/cart.rb', '../lib/cart.rb', 'x./lib/cart.rb', '/repository/lib/cart.rb']) {
+    assertFails(ground(`- ${other} never freezes its constants\n${tail}`, raws(['lib/cart.rb', null], ['a.rb', 3])), 'lane', other);
+  }
+});
+
+test("a mention's path matches with wrapper characters trimmed (review probes C1, C2)", () => {
+  assert.deepEqual(findingLines('- "lib/cart.rb":50 bug').map((l) => l.mentions), [[{ file: 'lib/cart.rb"', line: 50 }]], 'C1 finds one mention as written');
+  assert.deepEqual(findingLines('- _lib/a.rb_:9 bug').map((l) => l.mentions), [[{ file: '_lib/a.rb_', line: 9 }]], 'C2 finds one mention as written');
+  for (const [line, file, at] of [
+    ['- "lib/cart.rb":50 bug', 'lib/cart.rb', 50],
+    ['- _lib/a.rb_:9 bug', 'lib/a.rb', 9],
+    ["- 'lib/a.rb':9 bug", 'lib/a.rb', 9],
+    ['- (lib/a.rb):9 bug', 'lib/a.rb', 9],
+    ['- [lib/a.rb]:9 bug', 'lib/a.rb', 9],
+    ['- {lib/a.rb}:9 bug', 'lib/a.rb', 9],
+    ['- <lib/a.rb>:9 bug', 'lib/a.rb', 9],
+    ['- "/repo/lib/a.rb":9 bug', 'lib/a.rb', 9],
+  ]) {
+    assertGrounded(ground(line, raws([file, at])), 'text', line);
+    assertFails(ground(line, raws([file, at + 1])), 'lane', `${line} at the wrong line`);
+    assertFails(ground(line, []), 'lane', `${line} unclaimed`);
+  }
+  assertFails(ground('- lib/a.rb:9 bug', raws(['_lib/a.rb', 9])), 'lane', 'trimming applies to the mention, not the raw entry');
 });
 
 test('finding lines skip fenced lines and index every line of the result', () => {
@@ -1083,17 +1158,24 @@ test('a 50,000-character whitespace line is read in under 100 ms', () => {
     '_'.repeat(50000),
     '*'.repeat(50000) + ':1',
     `${'1-'.repeat(25000)}`,
+    'a.rb' + ')'.repeat(50000) + ':1',
+    '_'.repeat(50000) + 'a.rb' + '_'.repeat(50000) + ':1',
+    'a.rb '.repeat(10000),
+    './'.repeat(25000) + 'a.rb',
+    '/repo/'.repeat(8000) + 'a.rb',
   ];
   for (const line of lines) {
-    const result = `- a.rb:1: bug\n${line}\n`;
-    const start = process.hrtime.bigint();
-    findingLines(result, () => false);
-    explicitEmpty(result);
-    jsonFindings(result);
-    ground(result, raws(['a.rb', 1], ['a.rb', 1]));
-    looksFinished(result, 'max');
-    const ms = Number(process.hrtime.bigint() - start) / 1e6;
-    assert.ok(ms < 100, `${J(line.slice(0, 12))}... took ${ms.toFixed(1)} ms`);
+    for (const result of [`- a.rb:1: bug\n${line}\n`, `- a.rb:1: bug\n\`\`\`\n${line}\n\`\`\`\n`]) {
+      const start = process.hrtime.bigint();
+      findingLines(result, () => false);
+      explicitEmpty(result);
+      jsonFindings(result);
+      ground(result, raws(['a.rb', 1], ['a.rb', 1]));
+      ground(result, raws(['a.rb', 1], ['a.rb', null]));
+      looksFinished(result, 'max');
+      const ms = Number(process.hrtime.bigint() - start) / 1e6;
+      assert.ok(ms < 100, `${J(result.slice(14, 26))}... took ${ms.toFixed(1)} ms`);
+    }
   }
 });
 
