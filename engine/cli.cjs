@@ -9,6 +9,8 @@ const {
   rmSync,
   mkdirSync,
   statSync,
+  renameSync,
+  appendFileSync,
 } = require('node:fs');
 const os = require('node:os');
 const { createHash } = require('node:crypto');
@@ -63,6 +65,15 @@ const {
   preflightSummary,
   formatStartup,
 } = require('./cliCommands.cjs');
+const {
+  CAPTURE_FILES,
+  STOP_BUFFER_LINES,
+  captureDir,
+  armedState,
+  lastAssistantText,
+  postSkillWrites,
+  subagentStopWrites,
+} = require('./captureHook.cjs');
 
 const { repoRoot, reviewDir } = require('./paths.cjs');
 
@@ -197,6 +208,100 @@ function loadIndex(C, cfg, { force } = {}) {
   });
 }
 
+function nowSeconds() {
+  return Math.floor(Date.now() / 1000);
+}
+
+function writeFileAtomic(path, text) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, text, { mode: 0o600 });
+    renameSync(tmp, path);
+  } finally {
+    rmSync(tmp, { force: true });
+  }
+}
+
+function parseJsonOrNull(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function readJsonOrNull(path) {
+  try {
+    return parseJsonOrNull(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function readStops(path) {
+  let text;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch {
+    return [];
+  }
+  return text.split('\n').filter((line) => line.trim()).map(parseJsonOrNull).filter(Boolean);
+}
+
+function readTranscript(path) {
+  try {
+    return lastAssistantText(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function appendStop(path, stop) {
+  appendFileSync(path, JSON.stringify(stop) + '\n', { mode: 0o600 });
+  const lines = readFileSync(path, 'utf8').split('\n').filter(Boolean);
+  if (lines.length > STOP_BUFFER_LINES) {
+    writeFileAtomic(path, lines.slice(-STOP_BUFFER_LINES).join('\n') + '\n');
+  }
+}
+
+// Hooks run in every session that has the plugin installed, so this never prints, never throws,
+// and returns before reading stdin unless capture is armed.
+function runHook(name) {
+  try {
+    const dir = captureDir();
+    const file = (key) => join(dir, CAPTURE_FILES[key]);
+    const arm = readJsonOrNull(file('arm'));
+    const now = nowSeconds();
+    if (!armedState(arm, now)) return 0;
+    const base = { payload: JSON.parse(readFileSync(0, 'utf8')), arm, now, readTranscript };
+    // Each hook writes its own record before it reads the other's, so when a fork's stop races
+    // post-skill, at least one of the two hooks sees both records and writes the capture.
+    if (name === 'post-skill') {
+      const first = postSkillWrites({ ...base, stops: [] });
+      if (first.mismatch) writeFileAtomic(file('mismatch'), JSON.stringify(first.mismatch));
+      if (first.pending) writeFileAtomic(file('pending'), JSON.stringify(first.pending));
+      if (!first.pending && !first.capture) return 0;
+      const { capture } = postSkillWrites({ ...base, stops: readStops(file('stops')) });
+      if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
+    } else if (name === 'subagent-stop') {
+      const { stop } = subagentStopWrites({ ...base, pending: null, capture: null });
+      if (!stop) return 0;
+      appendStop(file('stops'), stop);
+      const pending = readJsonOrNull(file('pending'));
+      if (!pending) return 0;
+      const { capture } = subagentStopWrites({
+        ...base,
+        pending,
+        capture: readJsonOrNull(file('capture')),
+      });
+      if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
+    }
+  } catch {
+    return 0;
+  }
+  return 0;
+}
+
 const USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -213,6 +318,9 @@ const USAGE = `usage: agent-review <command>
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
+  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
+  capture disarm                 turn off /code-review result capture: delete the arm file
+  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -647,6 +755,39 @@ function main(rawArgv) {
       out(JSON.stringify({ ok, reason, count: r.findings.length }));
       return ok ? 0 : 1;
     }
+    case 'capture': {
+      const dir = captureDir();
+      const file = (key) => join(dir, CAPTURE_FILES[key]);
+      if (rest[0] === 'arm') {
+        const runId = flag(rest, '--run');
+        // Read raw, not through flag(): the args must match the Skill call exactly and may start with "--".
+        const argsAt = rest.indexOf('--args');
+        const args = argsAt < 0 ? undefined : rest[argsAt + 1];
+        if (!runId || !args) {
+          out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm');
+          return 1;
+        }
+        mkdirSync(dir, { recursive: true });
+        for (const key of ['capture', 'pending', 'stops', 'mismatch']) {
+          rmSync(file(key), { force: true });
+        }
+        writeFileAtomic(
+          file('arm'),
+          JSON.stringify({ armed: true, run_id: runId, args, created: nowSeconds() }),
+        );
+        out(`armed ${runId}: ${args}`);
+        return 0;
+      }
+      if (rest[0] === 'disarm') {
+        rmSync(file('arm'), { force: true });
+        out('disarmed');
+        return 0;
+      }
+      out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm');
+      return 1;
+    }
+    case 'hook':
+      return runHook(rest[0]);
     case 'evidence': {
       const verifyComment = flag(rest, '--verify-comment');
       const evidencePath = flag(rest, '--evidence');

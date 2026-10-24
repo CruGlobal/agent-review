@@ -20039,6 +20039,173 @@ var require_cliCommands = __commonJS({
   }
 });
 
+// engine/captureHook.cjs
+var require_captureHook = __commonJS({
+  "engine/captureHook.cjs"(exports2, module2) {
+    "use strict";
+    var { ENGINE_CODE_REVIEW } = require_vocabulary();
+    var CODE_REVIEW_SKILL = ENGINE_CODE_REVIEW;
+    var CAPTURE_FILES = {
+      arm: "agent_review_capture.json",
+      pending: "code_review_capture.pending.json",
+      capture: "code_review_capture.json",
+      stops: "code_review_capture.stops.jsonl",
+      mismatch: "code_review_capture.mismatch.json"
+    };
+    var ARM_MAX_AGE_SECONDS = 10800;
+    var STOP_BUFFER_LINES = 50;
+    var CAPTURE_SOURCE = "agent-review-capture-hook";
+    var SKILL_HEADER = new RegExp(
+      `^\\s*Skill "${CODE_REVIEW_SKILL}" completed[^\\n]*\\n(?:[^\\n]*\\n)*?[ \\t]*Result:[ \\t]*\\r?\\n?`
+    );
+    function isObject(v) {
+      return v !== null && typeof v === "object" && !Array.isArray(v);
+    }
+    function nonEmpty(v) {
+      return typeof v === "string" && v.trim() !== "";
+    }
+    function captureDir(env = process.env) {
+      return env.AGENT_REVIEW_CAPTURE_DIR || "/tmp";
+    }
+    function armedState(arm, nowSeconds) {
+      if (!isObject(arm) || arm.armed !== true) return null;
+      if (!nonEmpty(arm.run_id) || typeof arm.args !== "string") return null;
+      if (!Number.isFinite(arm.created) || nowSeconds - arm.created > ARM_MAX_AGE_SECONDS) return null;
+      return arm;
+    }
+    function stripSkillHeader(text) {
+      return text.replace(SKILL_HEADER, "");
+    }
+    function lastAssistantText(jsonl) {
+      const lines = String(jsonl).split("\n");
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (!lines[i].trim()) continue;
+        let entry;
+        try {
+          entry = JSON.parse(lines[i]);
+        } catch {
+          continue;
+        }
+        if (!isObject(entry) || entry.type !== "assistant" || !isObject(entry.message)) continue;
+        const { content } = entry.message;
+        if (nonEmpty(content)) return content;
+        if (!Array.isArray(content)) continue;
+        for (let j = content.length - 1; j >= 0; j--) {
+          const block = content[j];
+          if (isObject(block) && block.type === "text" && nonEmpty(block.text)) return block.text;
+        }
+      }
+      return null;
+    }
+    function stopResult(stop, readTranscript) {
+      if (nonEmpty(stop.last_assistant_message)) return stop.last_assistant_message;
+      if (!nonEmpty(stop.agent_transcript_path) || typeof readTranscript !== "function") return "";
+      try {
+        const text = readTranscript(stop.agent_transcript_path);
+        return typeof text === "string" ? text : "";
+      } catch {
+        return "";
+      }
+    }
+    function captureRecord({ mode, armed, args, forkId, result, transcript, stopCount, now }) {
+      return {
+        source: CAPTURE_SOURCE,
+        mode,
+        run_id: armed.run_id,
+        args,
+        fork_id: forkId,
+        result,
+        transcript: nonEmpty(transcript) ? transcript : null,
+        stop_count: stopCount,
+        ts: now
+      };
+    }
+    function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
+      const armed = armedState(arm, now);
+      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
+      const input = isObject(payload.tool_input) ? payload.tool_input : {};
+      if (input.skill !== CODE_REVIEW_SKILL) return {};
+      const args = typeof input.args === "string" ? input.args : "";
+      if (args !== armed.args) {
+        return { mismatch: { run_id: armed.run_id, expected: armed.args, got: args, ts: now } };
+      }
+      const response = payload.tool_response;
+      const tr = isObject(response) ? response : {};
+      const forkId = nonEmpty(tr.agentId) ? tr.agentId : null;
+      const forkStops = forkId && Array.isArray(stops) ? stops.filter((s) => isObject(s) && s.agent_id === forkId) : [];
+      const latest = forkStops.at(-1);
+      const record = (mode, result2) => captureRecord({
+        mode,
+        armed,
+        args,
+        forkId,
+        result: result2,
+        transcript: latest && latest.agent_transcript_path,
+        stopCount: forkStops.length,
+        now
+      });
+      if (tr.background === true) {
+        const written = {
+          pending: {
+            fork_id: forkId,
+            args,
+            caller: payload.agent_id,
+            tool_use_id: payload.tool_use_id ?? null,
+            session_id: payload.session_id ?? null,
+            ts: now
+          }
+        };
+        if (latest) written.capture = record("forked", stopResult(latest, readTranscript));
+        return written;
+      }
+      const fromResponse = [tr.result, response].filter((v) => typeof v === "string").map(stripSkillHeader).find(nonEmpty);
+      let result = "";
+      if (fromResponse !== void 0) result = fromResponse;
+      else if (latest) result = stopResult(latest, readTranscript);
+      return { capture: record("foreground", result) };
+    }
+    function subagentStopWrites({ payload, arm, pending, capture, now, readTranscript } = {}) {
+      const armed = armedState(arm, now);
+      if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return { stop: null };
+      const stop = {
+        agent_id: payload.agent_id,
+        last_assistant_message: typeof payload.last_assistant_message === "string" ? payload.last_assistant_message : null,
+        agent_transcript_path: typeof payload.agent_transcript_path === "string" ? payload.agent_transcript_path : null,
+        ts: now
+      };
+      if (!isObject(pending) || !nonEmpty(pending.fork_id) || pending.fork_id !== stop.agent_id) {
+        return { stop };
+      }
+      const previous = isObject(capture) && capture.run_id === armed.run_id && capture.fork_id === pending.fork_id && Number.isInteger(capture.stop_count) ? capture.stop_count : 0;
+      return {
+        stop,
+        capture: captureRecord({
+          mode: "forked",
+          armed,
+          args: typeof pending.args === "string" ? pending.args : armed.args,
+          forkId: pending.fork_id,
+          result: stopResult(stop, readTranscript),
+          transcript: stop.agent_transcript_path,
+          stopCount: previous + 1,
+          now
+        })
+      };
+    }
+    module2.exports = {
+      CAPTURE_FILES,
+      ARM_MAX_AGE_SECONDS,
+      STOP_BUFFER_LINES,
+      CAPTURE_SOURCE,
+      captureDir,
+      armedState,
+      stripSkillHeader,
+      lastAssistantText,
+      postSkillWrites,
+      subagentStopWrites
+    };
+  }
+});
+
 // engine/cli.cjs
 var require_cli = __commonJS({
   "engine/cli.cjs"(exports2, module2) {
@@ -20052,7 +20219,9 @@ var require_cli = __commonJS({
       existsSync,
       rmSync,
       mkdirSync,
-      statSync
+      statSync,
+      renameSync,
+      appendFileSync
     } = require("node:fs");
     var os = require("node:os");
     var { createHash } = require("node:crypto");
@@ -20107,6 +20276,15 @@ var require_cli = __commonJS({
       preflightSummary,
       formatStartup
     } = require_cliCommands();
+    var {
+      CAPTURE_FILES,
+      STOP_BUFFER_LINES,
+      captureDir,
+      armedState,
+      lastAssistantText,
+      postSkillWrites,
+      subagentStopWrites
+    } = require_captureHook();
     var { repoRoot, reviewDir } = require_paths();
     function out(s) {
       process.stdout.write(s + "\n");
@@ -20215,6 +20393,88 @@ var require_cli = __commonJS({
         opts
       });
     }
+    function nowSeconds() {
+      return Math.floor(Date.now() / 1e3);
+    }
+    function writeFileAtomic(path, text) {
+      const tmp = `${path}.${process.pid}.tmp`;
+      try {
+        writeFileSync(tmp, text, { mode: 384 });
+        renameSync(tmp, path);
+      } finally {
+        rmSync(tmp, { force: true });
+      }
+    }
+    function parseJsonOrNull(text) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    }
+    function readJsonOrNull(path) {
+      try {
+        return parseJsonOrNull(readFileSync(path, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+    function readStops(path) {
+      let text;
+      try {
+        text = readFileSync(path, "utf8");
+      } catch {
+        return [];
+      }
+      return text.split("\n").filter((line) => line.trim()).map(parseJsonOrNull).filter(Boolean);
+    }
+    function readTranscript(path) {
+      try {
+        return lastAssistantText(readFileSync(path, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+    function appendStop(path, stop) {
+      appendFileSync(path, JSON.stringify(stop) + "\n", { mode: 384 });
+      const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+      if (lines.length > STOP_BUFFER_LINES) {
+        writeFileAtomic(path, lines.slice(-STOP_BUFFER_LINES).join("\n") + "\n");
+      }
+    }
+    function runHook(name) {
+      try {
+        const dir = captureDir();
+        const file = (key) => join(dir, CAPTURE_FILES[key]);
+        const arm = readJsonOrNull(file("arm"));
+        const now = nowSeconds();
+        if (!armedState(arm, now)) return 0;
+        const base = { payload: JSON.parse(readFileSync(0, "utf8")), arm, now, readTranscript };
+        if (name === "post-skill") {
+          const first = postSkillWrites({ ...base, stops: [] });
+          if (first.mismatch) writeFileAtomic(file("mismatch"), JSON.stringify(first.mismatch));
+          if (first.pending) writeFileAtomic(file("pending"), JSON.stringify(first.pending));
+          if (!first.pending && !first.capture) return 0;
+          const { capture } = postSkillWrites({ ...base, stops: readStops(file("stops")) });
+          if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
+        } else if (name === "subagent-stop") {
+          const { stop } = subagentStopWrites({ ...base, pending: null, capture: null });
+          if (!stop) return 0;
+          appendStop(file("stops"), stop);
+          const pending = readJsonOrNull(file("pending"));
+          if (!pending) return 0;
+          const { capture } = subagentStopWrites({
+            ...base,
+            pending,
+            capture: readJsonOrNull(file("capture"))
+          });
+          if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
+        }
+      } catch {
+        return 0;
+      }
+      return 0;
+    }
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -20231,6 +20491,9 @@ var require_cli = __commonJS({
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> [--findings <f> --dropped <f>]   prove /code-review ran and returned a findings list, and that the lane scored or dropped every raw finding (JSON; exit 1 if not)
+  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
+  capture disarm                 turn off /code-review result capture: delete the arm file
+  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -20640,6 +20903,38 @@ var require_cli = __commonJS({
           out(JSON.stringify({ ok, reason, count: r.findings.length }));
           return ok ? 0 : 1;
         }
+        case "capture": {
+          const dir = captureDir();
+          const file = (key) => join(dir, CAPTURE_FILES[key]);
+          if (rest[0] === "arm") {
+            const runId = flag(rest, "--run");
+            const argsAt = rest.indexOf("--args");
+            const args = argsAt < 0 ? void 0 : rest[argsAt + 1];
+            if (!runId || !args) {
+              out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm');
+              return 1;
+            }
+            mkdirSync(dir, { recursive: true });
+            for (const key of ["capture", "pending", "stops", "mismatch"]) {
+              rmSync(file(key), { force: true });
+            }
+            writeFileAtomic(
+              file("arm"),
+              JSON.stringify({ armed: true, run_id: runId, args, created: nowSeconds() })
+            );
+            out(`armed ${runId}: ${args}`);
+            return 0;
+          }
+          if (rest[0] === "disarm") {
+            rmSync(file("arm"), { force: true });
+            out("disarmed");
+            return 0;
+          }
+          out('usage: agent-review capture arm --run <id> --args "<args>" | capture disarm');
+          return 1;
+        }
+        case "hook":
+          return runHook(rest[0]);
         case "evidence": {
           const verifyComment = flag(rest, "--verify-comment");
           const evidencePath = flag(rest, "--evidence");

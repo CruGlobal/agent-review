@@ -2222,3 +2222,19 @@ test('code-review lane template names the categories in vocabulary order', () =>
     'cleanup-category sentence',
   );
 });
+
+test('hooks.json registers both capture hooks', () => {
+  const config = JSON.parse(readFileSync(join(ROOT, 'hooks/hooks.json'), 'utf8'));
+  assert.deepStrictEqual(Object.keys(config.hooks).sort(), ['PostToolUse', 'SubagentStop']);
+  const command = (name) => `node "\${CLAUDE_PLUGIN_ROOT}/bin/agent-review" hook ${name}`;
+
+  assert.strictEqual(config.hooks.PostToolUse.length, 1);
+  const [post] = config.hooks.PostToolUse;
+  assert.strictEqual(post.matcher, 'Skill');
+  assert.deepStrictEqual(post.hooks, [{ type: 'command', command: command('post-skill'), timeout: 10 }]);
+
+  assert.strictEqual(config.hooks.SubagentStop.length, 1);
+  const [stop] = config.hooks.SubagentStop;
+  assert.ok(!('matcher' in stop), 'SubagentStop has no matcher');
+  assert.deepStrictEqual(stop.hooks, [{ type: 'command', command: command('subagent-stop'), timeout: 10 }]);
+});
