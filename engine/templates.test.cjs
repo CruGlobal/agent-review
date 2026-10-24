@@ -2196,7 +2196,7 @@ test('docs say location matching uses only the same lane\'s open or dismissed en
   const flatSkill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
   assert.ok(flatSkill.includes('within 5 lines of an older open or dismissed entry from the same lane, in the same file and category'));
   assert.ok(
-    flatSkill.includes('and says much the same thing (a token Jaccard of 0.3 or more between the two messages), is treated as that entry'),
+    flatSkill.includes('and says much the same thing (a token Jaccard of 0.5 or more between the two messages), is treated as that entry'),
     'the skill names the wording check',
   );
   assert.ok(!flatSkill.includes('older entry (any status)'));
