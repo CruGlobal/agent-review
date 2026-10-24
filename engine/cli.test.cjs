@@ -1463,6 +1463,87 @@ test('a headless post-skill after the fork stop writes the foreground capture', 
   }
 });
 
+const PLUGIN_ROOT = join(__dirname, '..');
+const HOOK_ENTRY = join(PLUGIN_ROOT, 'bin', 'agent-review-hook');
+const BUNDLE = join(PLUGIN_ROOT, 'dist', 'agent-review.cjs');
+
+test('the light hook entry and captureDir agree on the capture dir and the arm file', () => {
+  const { captureDir, CAPTURE_FILES } = require('./captureHook.cjs');
+  const { hookCaptureDir, ARM_FILE } = require(HOOK_ENTRY);
+  assert.equal(hookCaptureDir({}), captureDir({}));
+  assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }));
+  assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }));
+  assert.equal(ARM_FILE, CAPTURE_FILES.arm);
+});
+
+// Runs the light entry with a preload that records every module loaded, to see whether the bundle was.
+function spawnHookEntry(name, { dir, input }) {
+  const probe = mkdtempSync(join(os.tmpdir(), 'ar-hook-probe-'));
+  try {
+    const preload = join(probe, 'record.cjs');
+    const loaded = join(probe, 'loaded.json');
+    writeFileSync(preload, `process.on('exit', () => require('node:fs').writeFileSync(${JSON.stringify(loaded)}, JSON.stringify(Object.keys(require.cache))));\n`);
+    const r = spawnSync(process.execPath, ['--require', preload, HOOK_ENTRY, name], {
+      input,
+      encoding: 'utf8',
+      env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir },
+    });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr, bundleLoaded: JSON.parse(readFileSync(loaded, 'utf8')).includes(BUNDLE) };
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+}
+
+test('the light hook entry exits 0 silently without loading the bundle when nothing is armed', () => {
+  const parent = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  try {
+    const dir = join(parent, 'cap');
+    mkdirSync(dir, { mode: 0o700 });
+    for (const [name, payload] of [['post-skill', HEADLESS_SKILL], ['subagent-stop', FORK_STOP]]) {
+      for (const at of [dir, join(parent, 'missing')]) {
+        const r = spawnHookEntry(name, { dir: at, input: JSON.stringify(payload) });
+        assert.deepEqual(r, { ...QUIET, bundleLoaded: false }, `${name} in ${at}`);
+      }
+    }
+    assert.deepEqual(readdirSync(dir), [], 'nothing is written while not armed');
+
+    armCapture(dir);
+    const armed = spawnHookEntry('subagent-stop', { dir, input: JSON.stringify(FORK_STOP) });
+    assert.deepEqual(armed, { ...QUIET, bundleLoaded: true }, 'an arm file hands off to the bundle');
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('the hooks.json commands write a capture end to end through the light entry', () => {
+  const config = JSON.parse(readFileSync(join(PLUGIN_ROOT, 'hooks', 'hooks.json'), 'utf8'));
+  const [postSkill] = config.hooks.PostToolUse[0].hooks;
+  const [subagentStop] = config.hooks.SubagentStop[0].hooks;
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
+  const hook = (command, payload) => {
+    const r = spawnSync('/bin/sh', ['-c', command.command], {
+      input: JSON.stringify(payload),
+      encoding: 'utf8',
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, AGENT_REVIEW_CAPTURE_DIR: dir },
+    });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+  try {
+    armCapture(dir);
+    const background = { ...HEADLESS_SKILL, tool_response: { ...HEADLESS_SKILL.tool_response, background: true, result: 'launched' } };
+    assert.deepEqual(hook(postSkill, background), QUIET);
+    assert.equal(readCaptureJson(dir, 'code_review_capture.pending.json').fork_id, 'f1');
+    assert.equal(existsSync(join(dir, 'code_review_capture.json')), false);
+    assert.deepEqual(hook(subagentStop, FORK_STOP), QUIET);
+    const capture = readCaptureJson(dir, 'code_review_capture.json');
+    assert.equal(capture.mode, 'forked');
+    assert.equal(capture.result, '- a.rb:1: bug');
+    assert.equal(capture.stop_count, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('subagent-stop keeps the last 50 stop lines', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
   try {

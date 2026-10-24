@@ -20407,7 +20407,7 @@ var require_package = __commonJS({
       },
       scripts: {
         test: "node engine/run-tests.cjs",
-        build: "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review",
+        build: "esbuild engine/bin-entry.cjs --bundle --platform=node --target=node20 --outfile=dist/agent-review.cjs && chmod +x bin/agent-review bin/agent-review-hook",
         "check-dist": "npm run build && git diff --exit-code dist/",
         "stamp-templates": "node engine/stampTemplates.cjs",
         "test:e2e": "bash test/e2e-review.sh"

@@ -1,0 +1,33 @@
+#!/usr/bin/env node
+'use strict';
+// The plugin hooks run this on every Skill call and every subagent stop in every session, so it
+// must not load the bundle until an arm file exists. The dir rule must stay the same as
+// captureDir() in engine/captureHook.cjs.
+const { existsSync } = require('node:fs');
+const { join } = require('node:path');
+
+const ARM_FILE = 'agent_review_capture.json';
+
+function hookCaptureDir(env = process.env) {
+  return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
+}
+
+function armFileExists() {
+  try {
+    return existsSync(join(hookCaptureDir(), ARM_FILE));
+  } catch {
+    return false;
+  }
+}
+
+if (require.main === module) {
+  if (!armFileExists()) process.exit(0);
+  process.argv.splice(2, 0, 'hook');
+  try {
+    require('../dist/agent-review.cjs');
+  } catch {
+    process.exit(0);
+  }
+}
+
+module.exports = { ARM_FILE, hookCaptureDir };

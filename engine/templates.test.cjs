@@ -2514,6 +2514,8 @@ test('the capture spec records the fresh-review changes to the hooks in section 
     'An arming file older than 6 hours counts as not armed',
     'strips one leading `/` from `tool_input.skill`',
     'a line that is exactly `Result:` follows within the next 3 lines',
+    'Both hooks run `node "${CLAUDE_PLUGIN_ROOT}/bin/agent-review-hook" <name>`',
+    'loads the bundled CLI only when the arm file exists',
   ]) {
     assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
   }
@@ -2668,10 +2670,25 @@ test('code-review lane template names the categories in vocabulary order', () =>
   );
 });
 
+test('README names the light hook entry in the repo layout', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const layout = readme.slice(readme.indexOf('## Repo layout'));
+  assert.ok(
+    layout.includes('| `hooks/` | `hooks.json` - the capture hooks (`PostToolUse` on `Skill`, and `SubagentStop`). They run `bin/agent-review-hook`, which loads the engine only when a review has armed capture |'),
+    'the hooks row names the light entry',
+  );
+  assert.ok(
+    layout.includes('| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file exists, then hands the hook to `dist/agent-review.cjs` |'),
+    'the bin rows list the light entry',
+  );
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  assert.ok(pkg.scripts.build.endsWith('chmod +x bin/agent-review bin/agent-review-hook'), pkg.scripts.build);
+});
+
 test('hooks.json registers both capture hooks', () => {
   const config = JSON.parse(readFileSync(join(ROOT, 'hooks/hooks.json'), 'utf8'));
   assert.deepStrictEqual(Object.keys(config.hooks).sort(), ['PostToolUse', 'SubagentStop']);
-  const command = (name) => `node "\${CLAUDE_PLUGIN_ROOT}/bin/agent-review" hook ${name} 2>/dev/null || true`;
+  const command = (name) => `node "\${CLAUDE_PLUGIN_ROOT}/bin/agent-review-hook" ${name} 2>/dev/null || true`;
 
   assert.strictEqual(config.hooks.PostToolUse.length, 1);
   const [post] = config.hooks.PostToolUse;
