@@ -19344,7 +19344,6 @@ var require_codeReviewProof = __commonJS({
       return value === void 0 ? "none" : JSON.stringify(value);
     }
     var CONFIDENCES = ["High", "Medium", "Low"];
-    var DISPROOF = /\S+:\d+/;
     function isLine(value) {
       return value === null || Number.isInteger(value) && value > 0;
     }
@@ -19355,7 +19354,7 @@ var require_codeReviewProof = __commonJS({
       if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
       const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
       const want = repoRelative(raw.file, root);
-      if (entry.file !== want) return `${where} has file ${shown(entry.file)}, but its raw entry's repo-relative file is ${JSON.stringify(want)}`;
+      if (!isText(entry.file) || entry.file !== want) return `${where} has file ${shown(entry.file)}, but its raw entry's repo-relative file is ${JSON.stringify(want)}`;
       if (!isLine(entry.line)) return `${where} needs a positive integer line, or null, not ${shown(entry.line)}`;
       if (!isText(entry.message)) return `${where} needs a non-empty string message`;
       if (!Number.isInteger(entry.severity) || entry.severity < 1 || entry.severity > 10) {
@@ -19378,31 +19377,36 @@ var require_codeReviewProof = __commonJS({
     }
     function droppedEntryProblem(entry, i, rawByN, excludedPaths, root) {
       const label = `dropped entry ${i + 1}`;
-      if (!isPlainObject(entry)) return `${label} is not an object`;
+      if (!isPlainObject(entry)) return { problem: `${label} is not an object` };
       const raw = rawByN.get(entry.raw);
-      if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
+      if (!raw) return { problem: `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry` };
       const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
       if (entry.reason === "excluded") {
         if (!excludedPaths.includes(entry.glob)) {
-          return `${where} cites glob ${shown(entry.glob)}, which is not in the config's excluded_paths`;
+          return { problem: `${where} cites glob ${shown(entry.glob)}, which is not in the config's excluded_paths` };
         }
         if (!pathMatches(repoRelative(raw.file, root), [entry.glob])) {
-          return `${where} cites glob ${JSON.stringify(entry.glob)}, which ${raw.file} does not match`;
+          return { problem: `${where} cites glob ${JSON.stringify(entry.glob)}, which ${repoRelative(raw.file, root)} does not match` };
         }
         return { why: `excluded path: ${entry.glob}` };
       }
       if (entry.reason === "disproved") {
-        if (!isText(entry.proof) || !DISPROOF.test(entry.proof)) {
-          return `${where} needs a proof that names a file:line`;
+        if (!isText(entry.proof) || mentionsIn(normalizeLine(entry.proof), null).length === 0) {
+          return { problem: `${where} needs a proof that names a file:line` };
         }
         return { why: entry.proof };
       }
-      return `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"`;
+      return { problem: `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"` };
+    }
+    function oneLine(text) {
+      return text.replace(/\s+/g, " ").trim();
     }
     function laneFail(reason) {
       return { ok: false, reason, dropped: [] };
     }
     function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root }) {
+      const shape = rawShapeProblem(rawEntries);
+      if (shape) return laneFail(shape);
       const scoredParsed = scoredText == null ? null : parseJson(scoredText);
       const scored = scoredParsed && unwrapFindings(scoredParsed.value);
       if (!scored) return laneFail("the scored findings file is missing or has no findings list");
@@ -19427,11 +19431,11 @@ var require_codeReviewProof = __commonJS({
       const dropped = [];
       for (const [i, entry] of droppedEntries.entries()) {
         const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root);
-        if (typeof result === "string") return laneFail(result);
+        if (result.problem) return laneFail(result.problem);
         const twice = use(entry.raw, `dropped entry ${i + 1}`);
         if (twice) return laneFail(twice);
         const raw = rawByN.get(entry.raw);
-        dropped.push({ file: repoRelative(raw.file, root), line: raw.line, summary: raw.summary, why: result.why });
+        dropped.push({ file: repoRelative(raw.file, root), line: raw.line, summary: oneLine(raw.summary), why: oneLine(result.why) });
       }
       const lost = rawEntries.find((entry) => !used.has(entry.n));
       if (lost) {
@@ -20816,7 +20820,7 @@ var require_cli = __commonJS({
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Math.min(pollMs, deadline - now, limitAt - now));
       }
     }
-    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--capture <f>]";
+    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>";
     var USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
   index                          rebuild the import-graph cache
@@ -20832,7 +20836,7 @@ var require_cli = __commonJS({
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--capture <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not)
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not)
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -21217,11 +21221,17 @@ var require_cli = __commonJS({
           const findingsPath = flag(rest, "--findings");
           const droppedPath = flag(rest, "--dropped");
           const runId = flag(rest, "--run");
-          if (!rawPath || !findingsPath || !droppedPath || !runId) {
+          if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes("--capture")) {
             out(CODE_REVIEW_PROOF_USAGE);
             return 1;
           }
-          const readIfPresent = (p) => existsSync(p) ? readFileSync(p, "utf8") : null;
+          const readIfPresent = (p) => {
+            try {
+              return readFileSync(p, "utf8");
+            } catch {
+              return null;
+            }
+          };
           const refuse = (stage, reason) => {
             out(JSON.stringify({ ok: false, stage, reason, count: 0, mode: null, dropped: [] }));
             return 1;
@@ -21232,13 +21242,10 @@ var require_cli = __commonJS({
           } catch (e) {
             return refuse("config", `could not read excluded_paths from the review config: ${e.message}`);
           }
-          let capturePath = flag(rest, "--capture");
-          if (!capturePath) {
-            const dir = captureDir();
-            const dirError = captureDirError(dir);
-            if (dirError) return refuse("capture", dirError);
-            capturePath = join(dir, CAPTURE_FILES.capture);
-          }
+          const dir = captureDir();
+          const dirError = captureDirError(dir);
+          if (dirError) return refuse("capture", dirError);
+          const capturePath = join(dir, CAPTURE_FILES.capture);
           const fileExists = (p) => {
             const target = resolve(C.ROOT, p);
             const rel = relative(C.ROOT, target);

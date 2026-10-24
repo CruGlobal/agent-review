@@ -438,7 +438,7 @@ function captureWait({ runId, effort, timeoutSeconds }) {
 }
 
 const CODE_REVIEW_PROOF_USAGE =
-  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--capture <f>]';
+  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>';
 
 const USAGE = `usage: agent-review <command>
   config show|validate|get <k>   show / validate / read a config value
@@ -455,7 +455,7 @@ const USAGE = `usage: agent-review <command>
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--capture <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not)
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id>   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not)
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -864,11 +864,17 @@ function main(rawArgv) {
       const findingsPath = flag(rest, '--findings');
       const droppedPath = flag(rest, '--dropped');
       const runId = flag(rest, '--run');
-      if (!rawPath || !findingsPath || !droppedPath || !runId) {
+      if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes('--capture')) {
         out(CODE_REVIEW_PROOF_USAGE);
         return 1;
       }
-      const readIfPresent = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : null);
+      const readIfPresent = (p) => {
+        try {
+          return readFileSync(p, 'utf8');
+        } catch {
+          return null;
+        }
+      };
       const refuse = (stage, reason) => {
         out(JSON.stringify({ ok: false, stage, reason, count: 0, mode: null, dropped: [] }));
         return 1;
@@ -881,13 +887,10 @@ function main(rawArgv) {
       } catch (e) {
         return refuse('config', `could not read excluded_paths from the review config: ${e.message}`);
       }
-      let capturePath = flag(rest, '--capture');
-      if (!capturePath) {
-        const dir = captureDir();
-        const dirError = captureDirError(dir);
-        if (dirError) return refuse('capture', dirError);
-        capturePath = join(dir, CAPTURE_FILES.capture);
-      }
+      const dir = captureDir();
+      const dirError = captureDirError(dir);
+      if (dirError) return refuse('capture', dirError);
+      const capturePath = join(dir, CAPTURE_FILES.capture);
       const fileExists = (p) => {
         const target = resolve(C.ROOT, p);
         const rel = relative(C.ROOT, target);

@@ -348,7 +348,6 @@ function shown(value) {
 }
 
 const CONFIDENCES = ['High', 'Medium', 'Low'];
-const DISPROOF = /\S+:\d+/;
 
 function isLine(value) {
   return value === null || (Number.isInteger(value) && value > 0);
@@ -361,7 +360,7 @@ function scoredEntryProblem(entry, i, rawByN, root) {
   if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
   const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
   const want = repoRelative(raw.file, root);
-  if (entry.file !== want) return `${where} has file ${shown(entry.file)}, but its raw entry's repo-relative file is ${JSON.stringify(want)}`;
+  if (!isText(entry.file) || entry.file !== want) return `${where} has file ${shown(entry.file)}, but its raw entry's repo-relative file is ${JSON.stringify(want)}`;
   if (!isLine(entry.line)) return `${where} needs a positive integer line, or null, not ${shown(entry.line)}`;
   if (!isText(entry.message)) return `${where} needs a non-empty string message`;
   if (!Number.isInteger(entry.severity) || entry.severity < 1 || entry.severity > 10) {
@@ -383,29 +382,32 @@ function scoredEntryProblem(entry, i, rawByN, root) {
   return null;
 }
 
-// Returns the problem text, or { why } for a valid drop.
 function droppedEntryProblem(entry, i, rawByN, excludedPaths, root) {
   const label = `dropped entry ${i + 1}`;
-  if (!isPlainObject(entry)) return `${label} is not an object`;
+  if (!isPlainObject(entry)) return { problem: `${label} is not an object` };
   const raw = rawByN.get(entry.raw);
-  if (!raw) return `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry`;
+  if (!raw) return { problem: `${label} has raw ${shown(entry.raw)}, which is not the n of any raw entry` };
   const where = `${label} (raw ${entry.raw}, ${spot(raw.file, raw.line)})`;
   if (entry.reason === 'excluded') {
     if (!excludedPaths.includes(entry.glob)) {
-      return `${where} cites glob ${shown(entry.glob)}, which is not in the config's excluded_paths`;
+      return { problem: `${where} cites glob ${shown(entry.glob)}, which is not in the config's excluded_paths` };
     }
     if (!pathMatches(repoRelative(raw.file, root), [entry.glob])) {
-      return `${where} cites glob ${JSON.stringify(entry.glob)}, which ${raw.file} does not match`;
+      return { problem: `${where} cites glob ${JSON.stringify(entry.glob)}, which ${repoRelative(raw.file, root)} does not match` };
     }
     return { why: `excluded path: ${entry.glob}` };
   }
   if (entry.reason === 'disproved') {
-    if (!isText(entry.proof) || !DISPROOF.test(entry.proof)) {
-      return `${where} needs a proof that names a file:line`;
+    if (!isText(entry.proof) || mentionsIn(normalizeLine(entry.proof), null).length === 0) {
+      return { problem: `${where} needs a proof that names a file:line` };
     }
     return { why: entry.proof };
   }
-  return `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"`;
+  return { problem: `${where} has reason ${shown(entry.reason)}; it must be "excluded" or "disproved"` };
+}
+
+function oneLine(text) {
+  return text.replace(/\s+/g, ' ').trim();
 }
 
 function laneFail(reason) {
@@ -413,6 +415,8 @@ function laneFail(reason) {
 }
 
 function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = [], root }) {
+  const shape = rawShapeProblem(rawEntries);
+  if (shape) return laneFail(shape);
   const scoredParsed = scoredText == null ? null : parseJson(scoredText);
   const scored = scoredParsed && unwrapFindings(scoredParsed.value);
   if (!scored) return laneFail('the scored findings file is missing or has no findings list');
@@ -437,11 +441,11 @@ function checkLaneOutput({ rawEntries, scoredText, droppedText, excludedPaths = 
   const dropped = [];
   for (const [i, entry] of droppedEntries.entries()) {
     const result = droppedEntryProblem(entry, i, rawByN, excludedPaths, root);
-    if (typeof result === 'string') return laneFail(result);
+    if (result.problem) return laneFail(result.problem);
     const twice = use(entry.raw, `dropped entry ${i + 1}`);
     if (twice) return laneFail(twice);
     const raw = rawByN.get(entry.raw);
-    dropped.push({ file: repoRelative(raw.file, root), line: raw.line, summary: raw.summary, why: result.why });
+    dropped.push({ file: repoRelative(raw.file, root), line: raw.line, summary: oneLine(raw.summary), why: oneLine(result.why) });
   }
   const lost = rawEntries.find((entry) => !used.has(entry.n));
   if (lost) {

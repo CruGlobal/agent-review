@@ -683,11 +683,81 @@ test('a drop with reason "refuted" fails', () => {
 test('a disproved drop needs a file:line in its proof', () => {
   const disproved = (proof) => lane([scoredFor(1), scoredFor(2)], [{ raw: 3, reason: 'disproved', proof }]);
   assert.equal(disproved('dist/app.js:2 return;').ok, true);
-  for (const proof of ['it is fine', '', '   ', undefined, 'see file: 12']) {
+  assert.equal(disproved('lib/cart.rb:18 if (!items) return [];').ok, true);
+  for (const proof of ['it is fine', '', '   ', undefined, 'see file: 12', 'discussed at 12:30', 'localhost:3000']) {
     const r = disproved(proof);
     assert.equal(r.ok, false, String(proof));
     assert.match(r.reason, /names a file:line/);
   }
+});
+
+test('dropped output keeps each drop on one line', () => {
+  const raw = [{ n: 1, file: 'a.rb', line: 3, summary: 'two\nlines  of text' }];
+  const r = checkLaneOutput({
+    rawEntries: raw,
+    scoredText: '[]',
+    droppedText: J([{ raw: 1, reason: 'disproved', proof: 'a.rb:2\n  guard()\r\n' }]),
+    excludedPaths: [],
+    root: '/repo',
+  });
+  assert.equal(r.ok, true, r.reason);
+  assert.deepEqual(r.dropped, [{ file: 'a.rb', line: 3, summary: 'two lines of text', why: 'a.rb:2 guard()' }]);
+});
+
+test('checkLaneOutput checks the raw list shape itself, and a scored file must be non-empty text', () => {
+  const dup = [
+    { n: 1, file: 'a.rb', line: 1, summary: 's' },
+    { n: 1, file: 'b.rb', line: 1, summary: 's' },
+  ];
+  const r = checkLaneOutput({ rawEntries: dup, scoredText: '[]', droppedText: '[]', excludedPaths: [], root: '/repo' });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /n must count 1, 2, 3/);
+  const blank = [{ n: 1, file: '', line: 1, summary: 's' }];
+  const empty = checkLaneOutput({
+    rawEntries: blank,
+    scoredText: J([{ ...scoredFor(1), file: '' }]),
+    droppedText: '[]',
+    excludedPaths: [],
+    root: '/repo',
+  });
+  assert.equal(empty.ok, false);
+  const root = checkLaneOutput({
+    rawEntries: [{ n: 1, file: './', line: 1, summary: 's' }],
+    scoredText: J([{ ...scoredFor(1), file: '' }]),
+    droppedText: '[]',
+    excludedPaths: [],
+    root: '/repo',
+  });
+  assert.equal(root.ok, false, 'a raw path that reduces to nothing cannot be scored');
+});
+
+test('an excluded-glob mismatch names the repo-relative path', () => {
+  const r = checkLaneOutput({
+    rawEntries: [{ n: 1, file: '/repo/app/x.js', line: 1, summary: 's' }],
+    scoredText: '[]',
+    droppedText: J([{ raw: 1, reason: 'excluded', glob: 'dist/**' }]),
+    excludedPaths: ['dist/**'],
+    root: '/repo',
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /which app\/x\.js does not match/);
+});
+
+test('fence closing rules: same character, at least as long, up to 3 spaces of indent', () => {
+  const list = [{ file: 'a.rb', line: 3, summary: 's' }];
+  const body = J(list);
+  const results = (fence, closer, indent = '') => `Result:\n${indent}${fence}json\n${body}\n${indent}${closer}\n`;
+  const lists = (text) => jsonFindings(text).list;
+  assert.equal(jsonFindings(results('~~~', '```')).problem !== null, true, 'a tilde fence is not closed by backticks');
+  assert.equal(jsonFindings(results('```', '~~~')).problem !== null, true, 'a backtick fence is not closed by tildes');
+  assert.equal(jsonFindings(results('````', '```')).problem !== null, true, 'four backticks are not closed by three');
+  assert.deepEqual(lists(results('~~~', '~~~')), list);
+  assert.deepEqual(lists(results('```', '```', '   ')), list, 'a fence indented 3 spaces still counts');
+  assert.deepEqual(lists(results('```', '`````')), list, 'a longer closer closes');
+  assert.equal(lists(results('```', '```', '    ')), null, 'four spaces of indent is code, not a fence');
+  const unclosed = ground(`Result:\n(none)\n\`\`\`json\n${body}\n`, raws(['a.rb', 3]));
+  assertFails(unclosed, 'capture', 'an unclosed fence');
+  assertFails(ground(`Result:\n(none)\n~~~json\n[{"file":"a.rb",\n~~~\n`, []), 'capture', 'a truncated tilde block');
 });
 
 test('dropped output renders "excluded path: dist/**" and the proof text', () => {
