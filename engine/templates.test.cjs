@@ -570,14 +570,27 @@ function laneHeredocs(text) {
   return [...text.matchAll(/^node - <<'EOF'\n([\s\S]*?)\nEOF$/gm)].map((m) => m[1]);
 }
 
+// The code-review engine text the review skill points at, and one of its `## ` sections by name.
+const ENGINE_DOC = join(ROOT, 'skills/review/code-review-engine.md');
+function engineDoc() {
+  return readFileSync(ENGINE_DOC, 'utf8');
+}
+function engineSection(name) {
+  const doc = engineDoc();
+  const start = doc.indexOf(`\n## ${name}\n`);
+  assert.ok(start !== -1, `code-review-engine.md has no section "${name}"`);
+  const next = doc.indexOf('\n## ', start + 1);
+  return doc.slice(start + 1, next === -1 ? doc.length : next);
+}
+
 // The rows of the review skill's code-review lane table, keyed by placeholder name. The archetype
 // table above it fills placeholders of the same names, so rows are read only from this section.
 function lanePlaceholderRows() {
-  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const start = skill.indexOf("**The `code-review` lane's prompt.**");
-  const end = skill.indexOf('The launched-lane set', start);
-  assert.ok(start >= 0 && end > start, 'the skill has the code-review lane placeholder table');
-  const section = skill.slice(start, end);
+  const doc = engineDoc();
+  const start = doc.indexOf('## Stage 1: the code-review lane');
+  const end = doc.indexOf('Launch the lane with the Task tool', start);
+  assert.ok(start >= 0 && end > start, 'code-review-engine.md has the code-review lane placeholder table');
+  const section = doc.slice(start, end);
   const rows = new Map();
   for (const line of section.split('\n')) {
     const m = /^\| `\{\{([A-Z_]+)\}\}`\s*\|(.*)\|\s*$/.exec(line);
@@ -605,7 +618,7 @@ test('lane template placeholders are exactly the twelve listed', () => {
     'code-review lane placeholder vocabulary drifted from the documented set',
   );
   const { section, rows } = lanePlaceholderRows();
-  assert.ok(section.includes('fill its twelve placeholders:'), 'the skill counts the twelve placeholders');
+  assert.ok(section.includes('fill its twelve placeholders:'), 'the engine doc counts the twelve placeholders');
   assert.deepStrictEqual(
     [...rows.keys()].sort(),
     [...CODE_REVIEW_LANE_PLACEHOLDERS].sort(),
@@ -1753,11 +1766,11 @@ test('review skill wires the code-review engine', () => {
 
   const init = stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest');
   assert.ok(
-    bashBlocks(init).includes('agent-review options --args "$REVIEW_ARGS" ${CI_MODE:+--ci} > /tmp/review_options.json'),
+    bashBlocks(init).includes('agent-review options --args-file /tmp/review_args.txt ${CI_MODE:+--ci} > /tmp/review_options.json'),
     'Initialize resolves options from the raw arguments, forcing the default engine in CI',
   );
   const ciDetect = init.indexOf('CI_MODE="true"');
-  const optionsCall = init.indexOf('agent-review options --args');
+  const optionsCall = init.indexOf('agent-review options --args-file');
   assert.notStrictEqual(ciDetect, -1, 'Initialize must detect CI');
   assert.notStrictEqual(optionsCall, -1, 'Initialize must resolve options');
   assert.ok(ciDetect < optionsCall, 'CI is detected before options are resolved, so --ci reaches the resolver');
@@ -1820,24 +1833,28 @@ test('review skill wires the code-review engine', () => {
     autoOnly.replace(/\s+/g, ' ').includes('The start-up line comes next, in every mode; act on the result only after it prints.'),
   );
 
-  const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '### Smoke-Test Tier Routing').replace(/\s+/g, ' ');
+  const stage0 = engineSection('Stage 0').replace(/\s+/g, ' ');
   assert.match(
-    stage0b,
-    /\*\*`ENGINE` is `code-review`\*\*.*?the plan's `agents\[\]`, exactly, in every mode/,
+    stage0,
+    /Under the `code-review` engine, with `ENGINE` read from `\/tmp\/review_env.sh`, the launch list is the plan's `agents\[\]`, exactly, in every mode/,
     'under code-review the launch list is the plan, in every mode',
   );
+  const stage0b = stageSlice(skill, '## Stage 0B — Agent Selection', '### Smoke-Test Tier Routing').replace(/\s+/g, ' ');
+  assert.ok(
+    stage0b.includes('The bullets below apply only when `ENGINE` is `agent-review`.'),
+    'the standard, quick, and deep bullets stay gated on the default engine',
+  );
 
-  const smoke = stageSlice(skill, '### Smoke-Test Tier Routing', '## Stage 1 — Launch Specialized Review Agents');
-  assert.ok(smoke.includes('agent-review:reviewer-code-review'), 'the smoke test must confirm the code-review agent type resolves');
+  assert.ok(stage0.includes('agent-review:reviewer-code-review'), 'the smoke test must confirm the code-review agent type resolves');
 
-  const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
+  const stage1 = engineSection('Stage 1: the code-review lane');
   assert.ok(stage1.includes('templates/code-review-lane.md'), 'the code-review lane fills its own template');
   assert.ok(stage1.includes('`"agent-review:reviewer-code-review"`'), 'the code-review lane launches on its own agent type');
   for (const name of CODE_REVIEW_LANE_PLACEHOLDERS) {
     assert.ok(stage1.includes(`\`{{${name}}}\``), `Stage 1 must say how to fill {{${name}}} for the code-review lane`);
   }
 
-  const stage2 = stageSlice(skill, '## Stage 2 — Collect Agent Reports', '## Stage 2B');
+  const stage2 = engineSection('Stage 2: checking the code-review lane');
   assert.ok(
     stage2.includes(
       'agent-review code-review-proof --raw /tmp/code_review_raw.txt --findings /tmp/agent_findings/code-review.json --dropped /tmp/code_review_dropped.json > /tmp/code_review_proof.json',
@@ -1846,7 +1863,7 @@ test('review skill wires the code-review engine', () => {
   );
   assert.ok(stage2.includes('`reason`'), 'a second proof failure prints the proof reason');
   assert.ok(
-    stage2.replace(/\s+/g, ' ').includes('**Under the `code-review` engine, the `code-review` lane** must also prove `/code-review` ran'),
+    stage2.replace(/\s+/g, ' ').includes('Under the `code-review` engine, the `code-review` lane must also prove `/code-review` ran'),
     'a default-engine repo\'s own code-review lane is an ordinary lane',
   );
 
@@ -1974,7 +1991,8 @@ test('report skeleton covers the code-review engine', () => {
     report.includes('**Engine**: code-review (from [engine source]) · effort [requested effort] (from [effort source]) · model [model] (from [model source])'),
     'the engine line names where the engine setting came from',
   );
-  assert.ok(skill.includes('`engine.source`'), 'Stage 6 fills the engine source from options.engine.source');
+  const stage6Engine = engineSection('Stage 6: the engine block');
+  assert.ok(stage6Engine.includes('`engine.source`'), 'Stage 6 fills the engine source from options.engine.source');
   assert.ok(report.includes('found [N] · scored [M] · dropped [K]'));
   assert.ok(report.includes('[FOR EACH dropped finding]'));
   assert.ok(report.includes('[IF any options notes]'));
@@ -1993,9 +2011,12 @@ test('report skeleton covers the code-review engine', () => {
   assert.ok(engEnd > engStart && notes > engEnd, 'the notes directive must sit outside the engine block');
   assert.ok(/under any engine/.test(report.slice(notes, notes + 200)));
   for (const f of ['/tmp/review_options.json', '/tmp/code_review_proof.json', '/tmp/code_review_dropped.json', 'reviews_run']) {
-    assert.ok(skill.slice(skill.indexOf('### Write the report')).includes(f), `Stage 6 must name ${f}`);
+    assert.ok(
+      (skill.slice(skill.indexOf('### Write the report')) + stage6Engine).includes(f),
+      `Stage 6 must name ${f}`,
+    );
   }
-  assert.ok(skill.includes('Code Review (/code-review <effort>)'));
+  assert.ok(stage6Engine.includes('Code Review (/code-review <effort>)'));
   assert.ok(!/omit both of those blocks/.test(skill), 'notes must not be tied to the engine block');
   assert.ok(/follows the\s+`notes` field alone, under any engine/.test(skill), 'notes block follows `notes` alone');
 });
@@ -2483,4 +2504,140 @@ test('hooks.json registers both capture hooks', () => {
   const [stop] = config.hooks.SubagentStop;
   assert.ok(!('matcher' in stop), 'SubagentStop has no matcher');
   assert.deepStrictEqual(stop.hooks, [{ type: 'command', command: command('subagent-stop'), timeout: 10 }]);
+});
+
+const REVIEW_SKILL = join(ROOT, 'skills/review/SKILL.md');
+const ENGINE_POINTER = (name) => `When $ENGINE is code-review, read code-review-engine.md, section "${name}", and follow it.`;
+
+test('SKILL.md has no code-review-engine-only prose outside one-line pointers', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const doc = engineDoc();
+  for (const name of ['Stage 0', 'Stage 1: the code-review lane', 'Stage 2: checking the code-review lane', 'Stage 6: the engine block']) {
+    assert.ok(doc.includes(`\n## ${name}\n`), `code-review-engine.md has the section "${name}"`);
+    assert.ok(skill.includes(ENGINE_POINTER(name)), `SKILL.md points at "${name}"`);
+  }
+  const moved = [
+    'fill its twelve placeholders:',
+    '| `{{SCORING_RULES}}`',
+    'launch a second Task',
+    'agent-review code-review-proof --raw',
+    '/code-review did not run',
+    'Fill the `[IF engine is code-review]` block whenever',
+    'Code Review (/code-review <effort>)',
+  ];
+  for (const phrase of moved) {
+    assert.ok(!skill.includes(phrase), `SKILL.md must not carry: ${phrase}`);
+    assert.ok(doc.includes(phrase), `code-review-engine.md must carry: ${phrase}`);
+  }
+  const lines = skill.split('\n');
+  for (const [i, line] of lines.entries()) {
+    if (/^When \$ENGINE is code-review, read /.test(line.replace(/^- /, ''))) {
+      assert.ok(/, and follow it\./.test(line) && line.length < 200, `pointer on line ${i + 1} is one short line`);
+    }
+  }
+});
+
+test('every SKILL.md line that mentions the code-review lane is gated on $ENGINE', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const blocks = skill.split(/\n\s*\n|\n(?=- |\d+\. )/);
+  const mentions = blocks.filter((b) => /code-review`?\s+lane|`code-review`\s+lane/.test(b.replace(/\s+/g, ' ')));
+  assert.ok(mentions.length > 0, 'the skill still names the lane somewhere');
+  for (const b of mentions) {
+    assert.ok(
+      /ENGINE|code-review`? engine/.test(b),
+      `an ungated mention of the code-review lane, which a repo's own lane with that id would trip:\n${b}`,
+    );
+  }
+  const doc = engineDoc();
+  for (const name of ['Stage 2: checking the code-review lane', 'Stage 6: the engine block']) {
+    const flat = engineSection(name).replace(/\s+/g, ' ');
+    assert.ok(/Under the `code-review` engine/.test(flat), `${name} gates its title rule`);
+  }
+  assert.ok(doc.includes('a repo\'s own lane that happens to have the id `code-review` is an ordinary lane'));
+});
+
+test('Stage 6 fills the engine block whenever $ENGINE is code-review', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const stage6 = engineSection('Stage 6: the engine block').replace(/\s+/g, ' ');
+  assert.ok(
+    stage6.includes('Fill the `[IF engine is code-review]` block whenever `$ENGINE` is `code-review`, whether the engine came from the config or from an `engine=code-review` argument in a repo with no `engine` key.'),
+    stage6,
+  );
+  assert.ok(!/only when `\$ENGINE` is `code-review`/.test(stage6));
+  const flat = skill.replace(/\s+/g, ' ');
+  assert.ok(!flat.includes('when the config has no `engine` key'), 'the no-engine-key omission rule is gone');
+  assert.ok(
+    flat.includes('When `$ENGINE` is `agent-review`, omit the `[IF engine is code-review]` block.'),
+    'the block is omitted on the agent-review engine alone',
+  );
+});
+
+test('CI auto-skip report carries the options notes, and an incremental skip keeps the earlier notes', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const auto = bashBlocks(stageSlice(skill, '### Auto Mode Resolution', '### Start-up Line'));
+  assert.ok(auto.includes('skip_notes "${AGENT_REVIEW_PREVIOUS_COMMENT:-}"'), 'the CI skip report writes the notes');
+  assert.ok(auto.includes('skip_notes /tmp/previous_agent_review_comment.md'), 'the local incremental skip keeps the earlier notes');
+  assert.strictEqual(auto.split('skip_notes() {').length - 1, 1, 'one definition');
+  assert.strictEqual(auto.split('skip_notes ').length - 1, 2, 'two calls');
+  const start = auto.indexOf('skip_notes() {');
+  const end = auto.indexOf('\n  }\n', start) + 5;
+  assert.ok(start !== -1 && end > start);
+  const fn = auto.slice(start, end);
+
+  const { execFileSync } = require('node:child_process');
+  const { mkdtempSync, writeFileSync, copyFileSync, existsSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'skip-notes-'));
+  // The function reads /tmp/review_options.json; stand a private copy in by rewriting the path.
+  const optionsPath = join(dir, 'options.json');
+  const previous = join(dir, 'previous.md');
+  writeFileSync(optionsPath, JSON.stringify({ notes: ['CI note', 'shared'] }));
+  writeFileSync(previous, '<!-- agent-review -->\r\nbody\r\n\r\n**Notes**:\r\n- earlier note\r\n- shared\r\n\r\n**Debate summary**\r\n- not a note\r\n');
+  const run = (prev, opts) =>
+    execFileSync('bash', ['-c', `${fn.split('/tmp/review_options.json').join(opts)}\nskip_notes ${prev ? `"${prev}"` : ''}`], {
+      encoding: 'utf8',
+    });
+  assert.equal(run(previous, optionsPath), '\n**Notes**:\n- CI note\n- shared\n- earlier note\n', 'options notes first, earlier notes kept, no repeats');
+  assert.equal(run('', optionsPath), '\n**Notes**:\n- CI note\n- shared\n');
+  writeFileSync(optionsPath, JSON.stringify({ notes: [] }));
+  assert.equal(run('', optionsPath), '', 'no notes, no Notes line');
+  assert.equal(run(previous, optionsPath), '\n**Notes**:\n- earlier note\n- shared\n');
+  assert.ok(!existsSync(join(dir, 'unused')) && copyFileSync);
+});
+
+test('REVIEW_ARGS is written with a quoted heredoc to /tmp/review_args.txt and read with options --args-file', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const init = stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest');
+  const bash = bashBlocks(init);
+  assert.ok(bash.includes("cat > /tmp/review_args.txt <<'REVIEW_ARGS_END_7f3a'\n"), 'a quoted heredoc writes the file');
+  assert.ok(bash.includes('\nREVIEW_ARGS_END_7f3a\n'), 'the heredoc is closed by its marker');
+  assert.ok(bash.includes('agent-review options --args-file /tmp/review_args.txt ${CI_MODE:+--ci} > /tmp/review_options.json'));
+  assert.ok(!/--args "\$REVIEW_ARGS"/.test(skill), 'the raw string never goes through a double-quoted assignment');
+  assert.ok(!/^REVIEW_ARGS=/m.test(bash), 'no shell assignment of the raw arguments');
+  assert.ok(
+    bash.indexOf("cat > /tmp/review_args.txt") < bash.indexOf('agent-review options'),
+    'the file is written before options reads it',
+  );
+
+  const { execFileSync } = require('node:child_process');
+  const { mkdtempSync, readFileSync: read } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'review-args-'));
+  const nasty = 'deep "focus on auth" $(touch pwned) `id` \\n';
+  const script = `cat > args.txt <<'REVIEW_ARGS_END_7f3a'\n${nasty}\nREVIEW_ARGS_END_7f3a\n`;
+  execFileSync('bash', ['-c', script], { cwd: dir });
+  assert.equal(read(join(dir, 'args.txt'), 'utf8'), `${nasty}\n`, 'quotes, $(...), and backticks stay literal');
+  assert.ok(!require('node:fs').existsSync(join(dir, 'pwned')), 'nothing in the arguments ran');
+});
+
+test('the code-review smoke test passes model haiku', () => {
+  const stage0 = engineSection('Stage 0').replace(/\s+/g, ' ');
+  assert.ok(
+    stage0.includes('identical except for **subagent_type** `"agent-review:reviewer-code-review"` and **model** `"haiku"`'),
+    stage0,
+  );
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const smoke = stageSlice(skill, '### Smoke-Test Tier Routing', '## Stage 1 — Launch Specialized Review Agents');
+  assert.ok(smoke.includes(ENGINE_POINTER('Stage 0')), 'the smoke test points at the second probe');
+  assert.ok(smoke.includes('Launch exactly one Task:'), 'the default engine still launches one probe');
 });
