@@ -1392,8 +1392,9 @@ named pairs. Write the decisions to `/tmp/consensus_decisions.json`:
 
 `merge` combines the pair into one entry per the engine's documented merge rules (severity =
 rounded mean, or the highest member's when any member is 7+; line/message/fix = the
-higher-severity member's, evidence = the primary member's, trimmed, else the longest trimmed,
-recommendation = whichever is longer); `keep` is a no-op kept for auditability. Skip writing
+higher-severity member's, evidence = for a 7+ entry the primary member's, trimmed, else the
+longest trimmed, and below 7 the longest trimmed, recommendation = the longest trimmed); `keep` is
+a no-op kept for auditability. Skip writing
 `/tmp/consensus_decisions.json` entirely when `candidates` was empty — the first invocation's
 output is already final. Either way, this block re-runs the command when decisions exist and then
 extracts the plain findings array Stage 6 expects:

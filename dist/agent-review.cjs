@@ -18468,10 +18468,6 @@ var require_consensus = __commonJS({
         ordered[0]
       );
       const longestTrimmed = (field) => ordered.map((m) => String(m[field] || "").trim()).reduce((best, v) => v.length > best.length ? v : best, "");
-      const longestField = (field) => ordered.reduce(
-        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
-        ordered[0]
-      )[field];
       const corroboration = ordered.reduce(
         (sum, m) => sum + (m.corroboration || 1),
         0
@@ -18487,18 +18483,19 @@ var require_consensus = __commonJS({
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const evidence = String(primary.evidence || "").trim() || longestTrimmed("evidence");
+      const severity = maxSeverity >= 7 ? maxSeverity : meanSeverity;
+      const evidence = severity >= 7 ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestTrimmed("evidence");
       return {
         agent: primary.agent,
         agents: agents.join(","),
         category: primary.category,
-        severity: maxSeverity >= 7 ? maxSeverity : meanSeverity,
+        severity,
         file: primary.file,
         line: primary.line,
         message: primary.message,
         confidence: bestConfidence.confidence,
         evidence,
-        recommendation: longestField("recommendation"),
+        recommendation: longestTrimmed("recommendation"),
         fix: primary.fix,
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,

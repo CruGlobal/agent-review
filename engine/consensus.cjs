@@ -224,8 +224,9 @@ function toEntry(m) {
 // entries on a decisions merge) into one output entry per the group rules:
 // agent = the lead's (highest-severity member's) lane, agents = comma-joined
 // sorted lane ids, severity = rounded mean, confidence = highest member's,
-// recommendation = longest member's, evidence = the primary's trimmed when it
-// is non-blank, else the longest trimmed,
+// recommendation = longest trimmed, evidence = for a 7+ group the primary's
+// trimmed when it is non-blank, else the longest trimmed, and for a group below
+// 7 the longest trimmed,
 // line/category/message/fix = the highest-severity member's,
 // corroboration = summed member count, needsHumanReview = true when the
 // severity spread across every underlying original finding is >= 4.
@@ -234,7 +235,7 @@ function toEntry(m) {
 //
 // Deterministic tie-break: when two members tie on the selection criterion
 // (severity for `primary`, confidence rank for `bestConfidence`, string length
-// for `longestField`), the member with the alphabetically earlier `agent`
+// for `longestTrimmed`), the member with the alphabetically earlier `agent`
 // wins. reduce() with a strict `>` comparison always keeps the first member it
 // saw on a tie, so sorting a local copy of `members` by agent id ascending
 // first is sufficient to make every tie-break deterministic.
@@ -268,14 +269,6 @@ function combineMembers(members) {
     ordered
       .map((m) => String(m[field] || '').trim())
       .reduce((best, v) => (v.length > best.length ? v : best), '');
-  const longestField = (field) =>
-    ordered.reduce(
-      (best, m) =>
-        String(m[field] || '').length > String(best[field] || '').length
-          ? m
-          : best,
-      ordered[0],
-    )[field];
   const corroboration = ordered.reduce(
     (sum, m) => sum + (m.corroboration || 1),
     0,
@@ -294,19 +287,22 @@ function combineMembers(members) {
     0,
   );
   const meanSeverity = Math.round(weightedSum / corroboration);
+  const severity = maxSeverity >= 7 ? maxSeverity : meanSeverity;
   const evidence =
-    String(primary.evidence || '').trim() || longestTrimmed('evidence');
+    severity >= 7
+      ? String(primary.evidence || '').trim() || longestTrimmed('evidence')
+      : longestTrimmed('evidence');
   return {
     agent: primary.agent,
     agents: agents.join(','),
     category: primary.category,
-    severity: maxSeverity >= 7 ? maxSeverity : meanSeverity,
+    severity,
     file: primary.file,
     line: primary.line,
     message: primary.message,
     confidence: bestConfidence.confidence,
     evidence,
-    recommendation: longestField('recommendation'),
+    recommendation: longestTrimmed('recommendation'),
     fix: primary.fix,
     corroboration,
     needsHumanReview: maxSeverity - minSeverity >= 4,

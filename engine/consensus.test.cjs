@@ -783,49 +783,74 @@ test('a merged 8 and 3 keep 8 with the 8 as lead, on either engine', () => {
   assert.equal(plain[0].line, 10, 'the highest-severity member leads');
 });
 
-test('a merged 7+ never carries whitespace-only evidence', () => {
-  const eight = crFinding({ severity: 8, evidence: 'short but real', message: 'refund rounds before fees are subtracted' });
-  const blank = crFinding({ severity: 2, line: 11, evidence: ' '.repeat(200), message: 'refund rounds before fees are subtracted' });
-  const { findings } = consensusFrom({
-    plan: crEnginePlan(['code-review', 'financial']),
-    findingsByAgent: { 'code-review': [eight], financial: [blank] },
-    profile: 'standard',
+// Each entry is [plan, lead lane]: the default engine, then the code-review engine.
+const EITHER_ENGINE = [
+  [{ agents: [{ id: 'correctness' }, { id: 'standards' }] }, 'correctness'],
+  [crEnginePlan(['code-review', 'standards']), 'code-review'],
+];
+const SAME_SPOT = 'refund rounds before fees are subtracted';
+const mergeOnEither = (lead, other) =>
+  EITHER_ENGINE.map(([plan, lane]) => {
+    const { findings } = consensusFrom({
+      plan,
+      findingsByAgent: {
+        [lane]: [crFinding({ message: SAME_SPOT, ...lead })],
+        standards: [crFinding({ line: 11, category: 'standards', message: SAME_SPOT, ...other })],
+      },
+      profile: 'standard',
+    });
+    assert.equal(findings.length, 1, `one group under ${lane}`);
+    return { lane, merged: findings[0], findings };
   });
-  assert.equal(findings[0].evidence, 'short but real');
-  assert.doesNotThrow(() => mergeLedger([], findings));
+
+test('a merged 7+ never carries whitespace-only evidence, on either engine', () => {
+  for (const { lane, merged, findings } of mergeOnEither(
+    { severity: 9, category: 'security', evidence: 'short but real' },
+    { severity: 6, evidence: ' '.repeat(200) },
+  )) {
+    assert.equal(merged.severity, 9, `a proven 9 keeps its score under ${lane}`);
+    assert.equal(merged.evidence, 'short but real', `a merged 7+ keeps the primary's non-blank evidence under ${lane}`);
+    assert.doesNotThrow(() => mergeLedger([], findings));
+  }
 });
 
-test('under the engine a blank primary evidence falls back to the longest trimmed evidence', () => {
-  const lead = crFinding({ severity: 5, evidence: '   ', message: 'refund rounds before fees are subtracted' });
-  const other = crFinding({ severity: 4, line: 11, evidence: '  the real trace  ', message: 'refund rounds before fees are subtracted' });
-  const { findings } = consensusFrom({
-    plan: crEnginePlan(['code-review', 'financial']),
-    findingsByAgent: { 'code-review': [lead], financial: [other] },
-    profile: 'standard',
-  });
-  assert.equal(findings[0].evidence, 'the real trace');
+test('a 7+ group keeps the primary\'s trimmed evidence over a longer one, on either engine', () => {
+  for (const { lane, merged } of mergeOnEither(
+    { severity: 8, evidence: '  short  ' },
+    { severity: 6, evidence: 'a much longer trace of the failure' },
+  )) {
+    assert.equal(merged.severity, 8, lane);
+    assert.equal(merged.evidence, 'short', lane);
+  }
 });
 
-test('under the engine the primary evidence is returned trimmed', () => {
-  const eight = crFinding({ severity: 8, evidence: '  real trace  ', message: 'refund rounds before fees are subtracted' });
-  const { findings } = consensusFrom({
-    plan: crEnginePlan(['code-review']),
-    findingsByAgent: { 'code-review': [eight, { ...eight, line: 11, severity: 2, evidence: 'x' }] },
-    profile: 'standard',
-  });
-  assert.equal(findings[0].evidence, 'real trace');
+test('a group below 7 takes the longest trimmed evidence, on either engine', () => {
+  const trace = 'refund() rounds 10.005 to 10.01 on line 10,\nthen fees() subtracts 0.30 from the rounded total,\nso the payout is a cent high';
+  for (const { lane, merged } of mergeOnEither(
+    { severity: 6, evidence: 'see L10' },
+    { severity: 5, evidence: `  ${trace}  ` },
+  )) {
+    assert.equal(merged.severity, 6, lane);
+    assert.equal(merged.evidence, trace, `a group below 7 keeps the full trace under ${lane}`);
+  }
 });
 
-test('on the default engine a non-blank primary evidence wins over a longer one', () => {
-  const eight = crFinding({ severity: 8, evidence: 'short', message: 'refund rounds before fees are subtracted' });
-  const six = crFinding({ severity: 6, line: 11, evidence: 'a much longer trace of the failure', message: 'refund rounds before fees are subtracted' });
-  const { findings } = consensusFrom({
-    plan: { agents: [{ id: 'correctness' }, { id: 'financial' }] },
-    findingsByAgent: { correctness: [eight], financial: [six] },
-    profile: 'standard',
-  });
-  assert.equal(findings[0].severity, 8);
-  assert.equal(findings[0].evidence, 'short');
+test('a blank lead evidence never wins over a real one, on either engine', () => {
+  for (const { lane, merged } of mergeOnEither(
+    { severity: 5, evidence: '   ' },
+    { severity: 4, evidence: '  the real trace  ' },
+  )) {
+    assert.equal(merged.evidence, 'the real trace', lane);
+  }
+});
+
+test('a whitespace-only recommendation never beats a real one, on either engine', () => {
+  for (const { lane, merged } of mergeOnEither(
+    { severity: 8, category: 'security', recommendation: 'use bind params' },
+    { severity: 4, recommendation: ' '.repeat(50) },
+  )) {
+    assert.equal(merged.recommendation, 'use bind params', lane);
+  }
 });
 
 test('the code-review engine fails closed when the code-review lane was not launched', () => {
@@ -1209,33 +1234,6 @@ test('(default engine) a proven security 8 grouped with a standards 4 still bloc
   assert.deepEqual([findings[0].agent, findings[0].line], ['security', 42]);
   const ledger = mergeLedger([], findings);
   assert.equal(ledger.filter((e) => e.status === 'open' && e.severity >= 7).length, 1);
-});
-
-test('(default engine) a merged 7+ never carries whitespace-only evidence', () => {
-  const { findings } = consensusFrom({
-    plan: { agents: [{ id: 'security' }, { id: 'standards' }] },
-    findingsByAgent: {
-      security: [crFinding({ severity: 9, category: 'security', evidence: 'short but real', message: 'refund rounds before fees are subtracted' })],
-      standards: [crFinding({ severity: 6, line: 11, category: 'standards', evidence: ' '.repeat(200), message: 'refund rounds before fees are subtracted' })],
-    },
-    profile: 'standard',
-  });
-  assert.equal(findings.length, 1);
-  assert.equal(findings[0].severity, 9, 'the mean is 8, the old code carried the blank evidence and threw');
-  assert.equal(findings[0].evidence, 'short but real');
-  assert.doesNotThrow(() => mergeLedger([], findings));
-});
-
-test('(default engine) a blank primary evidence falls back to the longest trimmed evidence', () => {
-  const { findings } = consensusFrom({
-    plan: { agents: [{ id: 'correctness' }, { id: 'standards' }] },
-    findingsByAgent: {
-      correctness: [crFinding({ severity: 5, evidence: '   ', message: 'refund rounds before fees are subtracted' })],
-      standards: [crFinding({ severity: 4, line: 11, category: 'standards', evidence: '  the real trace  ', message: 'refund rounds before fees are subtracted' })],
-    },
-    profile: 'standard',
-  });
-  assert.equal(findings[0].evidence, 'the real trace');
 });
 
 test('a group with no 7+ member still averages, on either engine', () => {
