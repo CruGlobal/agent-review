@@ -3722,3 +3722,34 @@ test('no skill or template passes a flag and its value through one ${X:+...} exp
     });
   }
 });
+
+const pr33Amendment = (heading, nextHeading) => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const section = spec.slice(spec.indexOf(heading), spec.indexOf(nextHeading));
+  const start = section.indexOf('**Amendment, 2026-10-27 (PR #33 review).**');
+  assert.notStrictEqual(start, -1, `${heading} has a PR #33 review amendment`);
+  return section.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+};
+
+test('the capture spec records the PR #33 review changes to the hooks and the check', () => {
+  const hooks = pr33Amendment('### 1. Capture hooks', '### 2.');
+  for (const needle of [
+    'The light hook entry parses the arm file and loads the bundled CLI only when `armed` is `true` and `created` is within the 6-hour limit',
+    'A `Result:` line within 3 lines of the Skill header may carry text after the label; that text starts the result',
+  ]) {
+    assert.ok(hooks.includes(needle), `the section 1 amendment must say ${JSON.stringify(needle)}`);
+  }
+  const check = pr33Amendment('### 4. The check', '### 5.');
+  for (const needle of [
+    'A `json` or unlabeled fenced block that does not parse is list-like only when its trimmed body starts with `[` or `{` and contains `"file"`.',
+    'A mention path with no `/` and a `.` counts when a tracked file has that file name at any depth; one with no `.` counts only when that exact root-level path is tracked.',
+    '`code-review-proof` takes an optional `--base <sha>`, and the tracked files are those at `--head` plus those at `--base`',
+    'A `--base` that is not a commit, or whose files cannot be listed, fails with `stage: config`.',
+    'The text after `path:line:` inside the same token is part of the quote',
+    'The disproof checks read each file with one `git cat-file blob <commit>:./<path>`',
+    'The lane\'s own check in STEP 5 passes the same `--head` and `--base` as Stage 2',
+  ]) {
+    assert.ok(check.includes(needle), `the section 4 amendment must say ${JSON.stringify(needle)}`);
+  }
+  for (const text of [hooks, check]) assert.ok(!text.includes('\u2014'), 'new prose uses no em dashes');
+});
