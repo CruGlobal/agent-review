@@ -93,14 +93,17 @@ function cleanPrevious(raw) {
 
 const LOCATION_WINDOW = 5;
 const LOCATION_WORDING = 0.5;
+const CANDIDATE_WINDOW = 10;
+
+class MatchesRejected extends Error {}
 
 function sameCategory(a, b) {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
-function nearLine(a, b) {
+function nearLine(a, b, window) {
   if (a === null && b === null) return true;
-  return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+  return a !== null && b !== null && Math.abs(a - b) <= window;
 }
 
 function similarWording(a, b) {
@@ -125,16 +128,17 @@ function matchesEarlierSpot(finding, previous) {
         entry.agent === finding.agent &&
         entry.file === finding.file &&
         sameCategory(entry.category, finding.category) &&
-        nearLine(entry.line, finding.line) &&
+        nearLine(entry.line, finding.line, LOCATION_WINDOW) &&
         similarWording(entry.message, finding.message),
     )
   );
 }
 
-function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
+// Everything mergeLedger does before it appends. ledgerCandidates reads the same result, so the
+// pairs a matcher answers always name exactly the findings the merge would append.
+function mergeSteps(previousInput, findingsInput, matchSuggestionsByLocation) {
   const previous = cleanPrevious(previousInput || []);
   const bySignature = new Map(previous.map((entry, i) => [entry.signature, i]));
-  let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
   const additions = findingList(findingsInput)
     .map((finding) =>
       cleanFinding(finding, { requireBlockerEvidence: true }),
@@ -160,11 +164,99 @@ function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation 
     }
   }
   // Location matching runs after every raise, against the moved entries.
-  const earlier = [...merged];
+  const seen = new Set(bySignature.keys());
+  const fresh = [];
   for (const finding of unmatched) {
-    if (bySignature.has(finding.signature)) continue;
-    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, earlier)) continue;
-    bySignature.set(finding.signature, merged.length);
+    if (seen.has(finding.signature)) continue;
+    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, merged)) continue;
+    seen.add(finding.signature);
+    fresh.push(finding);
+  }
+  return { earlier: merged, fresh };
+}
+
+// Same exclusions as matchesEarlierSpot, a wider window, and no category or wording bar: the
+// matcher judges sameness. Each fresh finding has its own signature, so pair ids are unique.
+function candidatePairs(earlier, fresh) {
+  const pairs = [];
+  for (const finding of fresh) {
+    if (finding.severity >= 7 || isStaticFinding(finding)) continue;
+    const near = earlier
+      .filter(
+        (entry) =>
+          entry.status !== 'fixed' &&
+          entry.agent === finding.agent &&
+          entry.file === finding.file &&
+          nearLine(entry.line, finding.line, CANDIDATE_WINDOW),
+      )
+      .sort((a, b) => a.n - b.n);
+    for (const entry of near) pairs.push({ id: `${finding.signature}#${entry.n}`, finding, entry });
+  }
+  return pairs;
+}
+
+// The matcher must never see how either side was scored or handled: no severity, status, agent,
+// or confidence leaves this function.
+function problemFields(finding) {
+  return {
+    line: finding.line,
+    category: finding.category,
+    message: finding.message,
+    evidence: finding.evidence || '',
+    recommendation: finding.recommendation || '',
+  };
+}
+
+function ledgerCandidates(previousInput, findingsInput) {
+  const { earlier, fresh } = mergeSteps(previousInput, findingsInput, true);
+  return candidatePairs(earlier, fresh).map(({ id, finding, entry }) => ({
+    id,
+    file: finding.file,
+    earlier: problemFields(entry),
+    finding: problemFields(finding),
+  }));
+}
+
+function matchedSignatures(matches, pairs) {
+  if (!Array.isArray(matches)) throw new MatchesRejected('matches must be an array');
+  const signatureOf = new Map(pairs.map((pair) => [pair.id, pair.finding.signature]));
+  const answered = new Set();
+  const matched = new Set();
+  matches.forEach((item, i) => {
+    const wellFormed =
+      item !== null &&
+      typeof item === 'object' &&
+      !Array.isArray(item) &&
+      Object.keys(item).length === 2 &&
+      Object.hasOwn(item, 'id') &&
+      Object.hasOwn(item, 'same') &&
+      typeof item.id === 'string' &&
+      typeof item.same === 'boolean';
+    if (!wellFormed) {
+      throw new MatchesRejected(`item ${i} must be an object with exactly "id" (a string) and "same" (a boolean)`);
+    }
+    if (!signatureOf.has(item.id)) {
+      throw new MatchesRejected(`${JSON.stringify(item.id)} is not a candidate pair for these findings`);
+    }
+    if (answered.has(item.id)) throw new MatchesRejected(`${JSON.stringify(item.id)} is answered twice`);
+    answered.add(item.id);
+    if (item.same) matched.add(signatureOf.get(item.id));
+  });
+  return matched;
+}
+
+// A match only keeps the new finding out. The earlier entry is never raised or rewritten, so a
+// wrong match can hide only the new wording, never the issue the ledger already holds.
+function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false, matches } = {}) {
+  if (matches !== undefined && !matchSuggestionsByLocation) {
+    throw new MatchesRejected('matches need location matching (--match-suggestions-by-location)');
+  }
+  const { earlier, fresh } = mergeSteps(previousInput, findingsInput, matchSuggestionsByLocation);
+  const matched = matches === undefined ? new Set() : matchedSignatures(matches, candidatePairs(earlier, fresh));
+  const merged = [...earlier];
+  let next = earlier.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
+  for (const finding of fresh) {
+    if (matched.has(finding.signature)) continue;
     merged.push({ n: next++, ...finding, status: 'open' });
   }
   return merged;
@@ -203,4 +295,4 @@ function buildStatus({ ledger, head, plan, safety, evidence }) {
   };
 }
 
-module.exports = { findingList, cleanPrevious, mergeLedger, buildStatus };
+module.exports = { findingList, cleanPrevious, mergeLedger, ledgerCandidates, MatchesRejected, buildStatus };

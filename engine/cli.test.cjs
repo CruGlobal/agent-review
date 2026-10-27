@@ -1541,7 +1541,7 @@ test('ledger --match-suggestions-by-location skips reworded suggestions; without
     assert.deepEqual(JSON.parse(byLocation.s).map((entry) => entry.n), [1]);
 
     const help = run(['help']);
-    assert.match(help.s, /^ {2}ledger --findings <f> \[--previous <f>\] \[--match-suggestions-by-location\] {3}/m);
+    assert.match(help.s, /^ {2}ledger --findings <f> \[--previous <f>\] \[--match-suggestions-by-location\] \[--matches <f>\] {3}/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2445,6 +2445,127 @@ test('capture disarm removes the arm and every capture file, and nothing else', 
     assert.deepEqual(readdirSync(dir), ['unrelated.json']);
     assert.equal(spawnCli(['capture', 'show', '--run', 'r1'], { dir }).code, 1, 'nothing can read the capture after disarm');
     assert.match(run(['help']).s, /^ {2}capture disarm {2,}.*every capture file/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function ledgerMatchFiles(dir) {
+  const previous = [{
+    n: 3, signature: 'old-sig', agent: 'code-review', category: 'correctness', severity: 3,
+    file: 'a.rb', line: 40, message: 'the cache is never invalidated after a write',
+    confidence: 'Medium', evidence: 'save() never calls expire', status: 'dismissed', by: 'dev', reason: 'intentional',
+  }];
+  const findings = { kept: [{
+    signature: 'new-sig', agent: 'code-review', category: 'Correctness', severity: 6,
+    file: 'a.rb', line: 47, message: 'Writes leave stale rows behind in the lookup store.',
+    confidence: 'Low', recommendation: 'expire the key after save',
+  }] };
+  const paths = {
+    previous: join(dir, 'previous.json'),
+    findings: join(dir, 'findings.json'),
+    matches: join(dir, 'matches.json'),
+  };
+  writeFileSync(paths.previous, JSON.stringify(previous));
+  writeFileSync(paths.findings, JSON.stringify(findings));
+  return { previous, paths };
+}
+
+test('ledger-candidates prints the pairs with no score, status, lane, or confidence in them', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-'));
+  try {
+    const { paths } = ledgerMatchFiles(dir);
+    const r = spawnCli(['ledger-candidates', '--findings', paths.findings, '--previous', paths.previous], { dir });
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), {
+      count: 1,
+      pairs: [{
+        id: 'new-sig#3',
+        file: 'a.rb',
+        earlier: { line: 40, category: 'correctness', message: 'the cache is never invalidated after a write', evidence: 'save() never calls expire', recommendation: '' },
+        finding: { line: 47, category: 'Correctness', message: 'Writes leave stale rows behind in the lookup store.', evidence: '', recommendation: 'expire the key after save' },
+      }],
+    });
+    for (const hidden of ['severity', 'status', 'agent', 'confidence', 'dismissed', 'intentional', 'Medium', 'Low', 'code-review']) {
+      assert.ok(!r.stdout.includes(hidden), `the candidates must not carry ${hidden}`);
+    }
+
+    const none = spawnCli(['ledger-candidates', '--findings', paths.findings], { dir });
+    assert.equal(none.code, 0, none.stderr);
+    assert.deepEqual(JSON.parse(none.stdout), { count: 0, pairs: [] }, 'no previous ledger, no pairs');
+
+    const usage = run(['ledger-candidates', '--previous', paths.previous]);
+    assert.equal(usage.code, 1);
+    assert.equal(usage.s, 'usage: agent-review ledger-candidates --findings <file> [--previous <file>]\n');
+
+    const help = run(['help']);
+    assert.match(help.s, /^ {2}ledger-candidates --findings <f> \[--previous <f>\] {3}/m);
+    assert.match(help.s, /^ {2}ledger --findings <f> \[--previous <f>\] \[--match-suggestions-by-location\] \[--matches <f>\] {3}/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger --matches hides a finding judged the same and leaves the earlier entry as it was', () => {
+  const { mergeLedger } = require('./reportState.cjs');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-'));
+  try {
+    const { previous, paths } = ledgerMatchFiles(dir);
+    const base = ['ledger', '--findings', paths.findings, '--previous', paths.previous, '--match-suggestions-by-location'];
+    writeFileSync(paths.matches, JSON.stringify([{ id: 'new-sig#3', same: true }]));
+    const same = spawnCli([...base, '--matches', paths.matches], { dir });
+    assert.deepEqual(same, { code: 0, stdout: JSON.stringify(mergeLedger(previous, []), null, 2) + '\n', stderr: '' });
+
+    writeFileSync(paths.matches, JSON.stringify([{ id: 'new-sig#3', same: false }]));
+    const notSame = spawnCli([...base, '--matches', paths.matches], { dir });
+    assert.equal(notSame.code, 0, notSame.stderr);
+    assert.deepEqual(JSON.parse(notSame.stdout).map((entry) => entry.n), [3, 4]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger --matches refuses a bad matches file on stderr, exits 1, and prints nothing to stdout', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-'));
+  try {
+    const { paths } = ledgerMatchFiles(dir);
+    const base = ['ledger', '--findings', paths.findings, '--previous', paths.previous, '--match-suggestions-by-location', '--matches', paths.matches];
+    const cases = {
+      'not an array': ['{"id":"new-sig#3","same":true}', /must be an array/],
+      'an unknown id': ['[{"id":"new-sig#9","same":true}]', /"new-sig#9" is not a candidate pair/],
+      'an extra key': ['[{"id":"new-sig#3","same":true,"severity":2}]', /exactly "id" \(a string\) and "same" \(a boolean\)/],
+      'a repeated id': ['[{"id":"new-sig#3","same":true},{"id":"new-sig#3","same":true}]', /answered twice/],
+      'not JSON': ['[{"id":', /could not read/],
+    };
+    for (const [label, [text, reason]] of Object.entries(cases)) {
+      writeFileSync(paths.matches, text);
+      const r = spawnCli(base, { dir });
+      assert.equal(r.code, 1, label);
+      assert.equal(r.stdout, '', label);
+      assert.match(r.stderr, /^ledger: matches rejected: /, label);
+      assert.match(r.stderr, reason, label);
+    }
+    rmSync(paths.matches);
+    const missing = spawnCli(base, { dir });
+    assert.deepEqual([missing.code, missing.stdout], [1, '']);
+    assert.match(missing.stderr, /^ledger: matches rejected: could not read /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ledger refuses --matches without --match-suggestions-by-location, and --matches with no file', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-'));
+  try {
+    const { paths } = ledgerMatchFiles(dir);
+    writeFileSync(paths.matches, JSON.stringify([{ id: 'new-sig#3', same: true }]));
+    const r = spawnCli(['ledger', '--findings', paths.findings, '--previous', paths.previous, '--matches', paths.matches], { dir });
+    assert.deepEqual([r.code, r.stdout], [1, '']);
+    assert.match(r.stderr, /^ledger: matches rejected: matches need location matching \(--match-suggestions-by-location\)\n$/);
+
+    const noFile = run(['ledger', '--findings', paths.findings, '--match-suggestions-by-location', '--matches']);
+    assert.equal(noFile.code, 1);
+    assert.match(noFile.s, /^usage: agent-review ledger --findings <file>/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -39,7 +39,7 @@ const {
   emitFindings,
 } = require('./learningsStore.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
-const { mergeLedger, buildStatus } = require('./reportState.cjs');
+const { mergeLedger, ledgerCandidates, MatchesRejected, buildStatus } = require('./reportState.cjs');
 const { evaluateApproval } = require('./approval.cjs');
 const {
   CAPTURE_LIMIT_MINUTES,
@@ -578,7 +578,8 @@ const USAGE = `usage: agent-review <command>
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location] [--matches <f>]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording; --matches needs that flag and leaves out each new suggestion that a ledger-candidates pair answers "same": true for, changing no earlier entry; a bad matches file prints "ledger: matches rejected: <reason>" to stderr and exits 1)
+  ledger-candidates --findings <f> [--previous <f>]   print the pairs a matcher judges: each new suggestion the ledger would add, with every older open or dismissed entry from the same lane and file within 10 lines (JSON {count, pairs}; no severity, status, agent, or confidence)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
@@ -943,8 +944,9 @@ function main(rawArgv) {
     }
     case 'ledger': {
       const findingsPath = flag(rest, '--findings');
-      if (!findingsPath) {
-        out('usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location]');
+      const matchesPath = flag(rest, '--matches');
+      if (!findingsPath || (rest.includes('--matches') && !matchesPath)) {
+        out('usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location] [--matches <file>]');
         return 1;
       }
       const previousPath = flag(rest, '--previous');
@@ -953,7 +955,41 @@ function main(rawArgv) {
         : [];
       const findings = JSON.parse(readFileSync(findingsPath, 'utf8'));
       const matchSuggestionsByLocation = rest.includes('--match-suggestions-by-location');
-      out(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation }), null, 2));
+      // The review falls back to a plain merge on exit 1, so a refusal must leave stdout empty.
+      const rejectMatches = (reason) => {
+        process.stderr.write(`ledger: matches rejected: ${reason}\n`);
+        return 1;
+      };
+      const options = { matchSuggestionsByLocation };
+      if (matchesPath) {
+        try {
+          options.matches = JSON.parse(readFileSync(matchesPath, 'utf8'));
+        } catch (e) {
+          return rejectMatches(`could not read ${matchesPath}: ${e.message}`);
+        }
+      }
+      let ledger;
+      try {
+        ledger = mergeLedger(previous, findings, options);
+      } catch (e) {
+        if (e instanceof MatchesRejected) return rejectMatches(e.message);
+        throw e;
+      }
+      out(JSON.stringify(ledger, null, 2));
+      return 0;
+    }
+    case 'ledger-candidates': {
+      const findingsPath = flag(rest, '--findings');
+      if (!findingsPath) {
+        out('usage: agent-review ledger-candidates --findings <file> [--previous <file>]');
+        return 1;
+      }
+      const previousPath = flag(rest, '--previous');
+      const previous = previousPath
+        ? JSON.parse(readFileSync(previousPath, 'utf8'))
+        : [];
+      const pairs = ledgerCandidates(previous, JSON.parse(readFileSync(findingsPath, 'utf8')));
+      out(JSON.stringify({ count: pairs.length, pairs }, null, 2));
       return 0;
     }
     case 'status': {
