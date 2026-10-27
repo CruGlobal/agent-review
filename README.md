@@ -81,6 +81,17 @@ approval has to come from an account the branch rules trust. So:
 The same rules apply when the review ran in CI instead of your terminal, and when you fix or
 dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]: reason`).
 
+When reviewers flag the same spot, their findings are combined into one and the scores are
+averaged, with two exceptions. A 7 or more keeps its score when it is combined with lower scores,
+on every engine. This only counts for a score that is still 7 or more after its reviewer's caps
+and the blocker bar: a line, High confidence, and evidence. When two findings of 7 or more are
+combined, the group takes the higher score.
+
+A later review can raise an earlier finding. If the same finding comes back with a higher score
+and the earlier one is still open, the new finding replaces it and keeps only its number. The
+score, file, line, message, evidence, and everything else come from the new finding. A dismissed
+or fixed finding never changes.
+
 ## Set up a repo (once)
 
 Do these in order. Steps 5 and 6 are the ones people miss.
@@ -206,8 +217,8 @@ same thing whichever engine found it. The rules:
 - On every review, not only re-reviews, a reworded suggestion within 5 lines of an older open or
   dismissed finding from the same reviewer, in the same file and category, that says much the
   same thing is not added again, so the PR comment stops growing.
-- If another reviewer flags the same spot with a lower score, a proven 7 or more from any
-  reviewer keeps its score through the merge instead of being averaged down.
+- As on every engine, if another reviewer flags the same spot with a lower score, a proven 7 or
+  more from any reviewer keeps its score through the merge instead of being averaged down.
 
 **It stops if `/code-review` did not really run.** The check `agent-review code-review-proof`
 compares the lane's list with the text the hook captured. When the result holds a JSON findings

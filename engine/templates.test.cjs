@@ -2624,7 +2624,7 @@ test('README and the spec record the third /code-review round', () => {
     'location matching applies to every review and needs similar wording',
   );
   assert.ok(
-    readme.includes('- If another reviewer flags the same spot with a lower score, a proven 7 or more from any reviewer keeps its score through the merge instead of being averaged down.'),
+    readme.includes('- As on every engine, if another reviewer flags the same spot with a lower score, a proven 7 or more from any reviewer keeps its score through the merge instead of being averaged down.'),
     'any lane\'s proven 7+ keeps its score',
   );
   assert.ok(!readme.includes('On a re-review, a reworded suggestion'), 'the re-review-only wording is gone');
@@ -2635,6 +2635,55 @@ test('README and the spec record the third /code-review round', () => {
   const flat = round3.replace(/\s+/g, ' ');
   for (const part of ['A:', 'B:', 'C:', 'D:', 'E:', 'F:']) assert.ok(flat.includes(` ${part} `), `round 3 covers ${part}`);
   assert.ok(!round3.includes('\u2014'), 'new prose uses no em dashes');
+});
+
+test('README states the merge scoring rule after the approval rules it follows', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.ok(
+    readme.includes('- the `agent-review-approve.yml` workflow is not on the default branch yet\n\nThe same rules apply when the review ran in CI'),
+    '"The same rules" follows the approval-conditions list it refers to',
+  );
+  const section = readme.slice(readme.indexOf('The same rules apply when the review ran in CI'), readme.indexOf('## Set up a repo (once)'));
+  const flat = section.replace(/\s+/g, ' ');
+  for (const needle of [
+    'A 7 or more keeps its score when it is combined with lower scores, on every engine.',
+    "This only counts for a score that is still 7 or more after its reviewer's caps and the blocker bar: a line, High confidence, and evidence.",
+    'When two findings of 7 or more are combined, the group takes the higher score.',
+    'If the same finding comes back with a higher score and the earlier one is still open, the new finding replaces it and keeps only its number.',
+    'The score, file, line, message, evidence, and everything else come from the new finding.',
+    'A dismissed or fixed finding never changes.',
+  ]) {
+    assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
+  }
+  const all = readme.replace(/\s+/g, ' ');
+  for (const stale of [
+    'a 7 or more from any reviewer keeps its score, on every engine',
+    'Every 7 or more has already shown concrete evidence',
+    'moves up to the new score',
+  ]) {
+    assert.ok(!all.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
+  }
+  assert.ok(!section.includes('\u2014'), 'new prose uses no em dashes');
+});
+
+test('the capture spec records that PR #35 closes the default-engine averaging follow-up', () => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const followUps = spec.slice(spec.indexOf('## Follow-ups'), spec.indexOf('## Calls made after the builder check'));
+  const start = followUps.indexOf('**Amendment, 2026-10-27 (PR #35).**');
+  assert.notStrictEqual(start, -1, 'the Follow-ups section has a dated PR #35 amendment');
+  const amendment = followUps.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+  for (const needle of [
+    'PR #35 does the default-engine blocker averaging follow-up',
+    'the Non-goals line that keeps the averaging unchanged and the Follow-ups entry for it are done',
+    'a 7+ that survives its lane\'s caps and the blocker bar keeps its score',
+    'two 7+ findings group at the higher score',
+    'a group below 7 takes the longest trimmed evidence',
+    'the entry becomes the new finding, cleaned like any new finding, and keeps only its number and its open status',
+    'Dismissed and fixed entries never change.',
+  ]) {
+    assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('\u2014'), 'new prose uses no em dashes');
 });
 
 test('the review skill matches ledger suggestions by location only under the code-review engine', () => {

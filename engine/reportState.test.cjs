@@ -42,6 +42,79 @@ test('incremental ledger preserves prior state and appends only new signatures',
   assert.equal(ledger[1].signature, 'sig-2');
 });
 
+const averaged = (over = {}) => ({
+  ...finding({
+    id: 'old-id',
+    severity: 6,
+    line: 12,
+    confidence: 'Medium',
+    evidence: 'averaged with a standards 4',
+    recommendation: 'the averaged group\'s advice',
+    fix: 'the averaged group\'s fix',
+    agents: 'security,standards',
+    needsHumanReview: true,
+    ...over,
+  }),
+  status: 'open',
+});
+
+test('a finding that comes back higher raises its open entry, which then blocks', () => {
+  const previous = [{ n: 1, ...averaged() }];
+  const next = finding({ id: 'new-id', severity: 8, line: 14, evidence: 'request reaches line 14 unchecked', recommendation: 'authorize the record' });
+  const ledger = mergeLedger(previous, [next]);
+  assert.equal(ledger.length, 1);
+  assert.deepEqual(ledger, [{ ...mergeLedger([], [next])[0], n: 1 }], 'the raised entry is the new finding under the old number');
+  const status = buildStatus({ ledger, plan: { risk: { level: 'LOW' } }, safety: { irreversible: false, reasons: [] } });
+  assert.equal(status.openBlockers, 1);
+  assert.equal(status.pass, false);
+});
+
+test('a raised entry takes the new finding\'s file, line, message and evidence across files', () => {
+  const { signature } = require('./findingSignature.cjs');
+  const a = { agent: 'security', category: 'sql', file: 'app/models/a.rb', message: 'raw SQL built from `posts` input' };
+  const b = { agent: 'security', category: 'sql', file: 'app/models/b.rb', message: 'raw SQL built from `users` input' };
+  assert.equal(signature(a), signature(b), 'the premise: both share one signature');
+  const previous = [
+    { n: 3, ...finding({ ...a, signature: signature(a), severity: 4, line: 10, confidence: 'Low', evidence: 'a.rb line 10' }), status: 'open' },
+  ];
+  const ledger = mergeLedger(previous, [finding({ ...b, signature: undefined, line: 20, evidence: 'b.rb line 20 runs it' })]);
+  assert.equal(ledger.length, 1);
+  assert.deepEqual(
+    [ledger[0].n, ledger[0].severity, ledger[0].file, ledger[0].line, ledger[0].message, ledger[0].evidence, ledger[0].agent, ledger[0].category],
+    [3, 8, 'app/models/b.rb', 20, 'raw SQL built from `users` input', 'b.rb line 20 runs it', 'security', 'sql'],
+  );
+});
+
+test('a raised entry keeps nothing from the old entry but its number', () => {
+  const previous = [{ n: 2, ...averaged({ severity: 3, line: 5 }) }];
+  const ledger = mergeLedger(previous, [finding({ id: undefined, severity: 6, line: null, confidence: undefined, evidence: undefined })]);
+  assert.equal(ledger.length, 1);
+  assert.deepEqual([ledger[0].n, ledger[0].status, ledger[0].severity, ledger[0].line, ledger[0].id], [2, 'open', 6, null, '']);
+  for (const field of ['confidence', 'evidence', 'recommendation', 'fix', 'agents', 'needsHumanReview']) {
+    assert.equal(field in ledger[0], false, `${field} comes only from the new finding`);
+  }
+});
+
+test('dismissed and fixed entries never change when their finding comes back higher', () => {
+  const previous = [
+    { n: 1, ...finding({ severity: 6 }), status: 'dismissed', by: 'dev', reason: 'intentional' },
+    { n: 2, ...finding({ signature: 'sig-2', severity: 5 }), status: 'fixed', sha: 'abc1234' },
+  ];
+  const ledger = mergeLedger(previous, [
+    finding({ severity: 9, line: 30, evidence: 'new trace' }),
+    finding({ signature: 'sig-2', severity: 8, line: 31, evidence: 'new trace' }),
+  ]);
+  assert.deepEqual(ledger, previous);
+});
+
+test('a finding that comes back lower or equal leaves its open entry as it was', () => {
+  const previous = [{ n: 1, ...finding({ severity: 8, evidence: 'the original trace' }), status: 'open' }];
+  for (const severity of [8, 6]) {
+    const ledger = mergeLedger(previous, [finding({ severity, line: 40, evidence: 'a later trace' })]);
+    assert.deepEqual(ledger, previous, `severity ${severity}`);
+  }
+});
+
 test('ledger carries bounded evidence needed to address findings after re-review', () => {
   const ledger = mergeLedger([], [
     finding({ evidence: 'request reaches the action without authorize()', recommendation: 'add authorize(record)' }),
@@ -269,4 +342,25 @@ test('location mode never skips a static finding, so every static signature reac
     const ledger = mergeLedger(previous, [next], BY_LOCATION);
     assert.deepEqual(ledger.map((entry) => [entry.n, entry.signature]), [[3, 'static-old'], [4, 'static-new']], next.agent);
   }
+});
+
+test('location mode matches against the ledger after this merge\'s raises', () => {
+  const { signature } = require('./findingSignature.cjs');
+  const base = { agent: 'code-review', category: 'correctness', file: 'app/models/a.rb' };
+  const old = { ...base, line: 10, severity: 4, message: 'refund rounds before fees in `a`', confidence: 'Medium', evidence: 'x' };
+  const previous = [{ n: 1, ...old, signature: signature(old), status: 'open' }];
+  const raise = { ...base, line: 60, severity: 8, message: 'refund rounds before fees in `b`', confidence: 'High', evidence: 'trace' };
+  const reworded = (line) => ({ ...base, line, severity: 5, message: 'refund rounds before fees in the `a` path', confidence: 'Medium', evidence: 'y' });
+  assert.equal(signature(raise), previous[0].signature, 'the premise: the 8 raises entry 1');
+  assert.notEqual(signature(reworded(11)), previous[0].signature, 'the premise: the 5 is matched only by location');
+
+  const awayFromMoved = mergeLedger(previous, [raise, reworded(11)], BY_LOCATION);
+  assert.deepEqual(
+    awayFromMoved.map((entry) => [entry.n, entry.severity, entry.line]),
+    [[1, 8, 60], [2, 5, 11]],
+    'a suggestion near the raised entry\'s old spot gets its own entry',
+  );
+
+  const nearMoved = mergeLedger(previous, [raise, reworded(61)], BY_LOCATION);
+  assert.deepEqual(nearMoved.map((entry) => [entry.n, entry.severity, entry.line]), [[1, 8, 60]], 'a suggestion near the raised entry\'s new spot matches it');
 });

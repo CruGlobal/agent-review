@@ -18450,7 +18450,7 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
-    function combineMembers(members, codeReviewEngine) {
+    function combineMembers(members) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
         (best, m) => m.severity > best.severity ? m : best,
@@ -18468,10 +18468,6 @@ var require_consensus = __commonJS({
         ordered[0]
       );
       const longestTrimmed = (field) => ordered.map((m) => String(m[field] || "").trim()).reduce((best, v) => v.length > best.length ? v : best, "");
-      const longestField = (field) => ordered.reduce(
-        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
-        ordered[0]
-      )[field];
       const corroboration = ordered.reduce(
         (sum, m) => sum + (m.corroboration || 1),
         0
@@ -18483,28 +18479,28 @@ var require_consensus = __commonJS({
         ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
       const weightedSum = ordered.reduce(
-        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+        (sum, m) => sum + m.severity * (m.corroboration || 1),
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const evidence = codeReviewEngine ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestField("evidence");
+      const severity = maxSeverity >= 7 ? maxSeverity : meanSeverity;
+      const evidence = severity >= 7 ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestTrimmed("evidence");
       return {
         agent: primary.agent,
         agents: agents.join(","),
         category: primary.category,
-        severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+        severity,
         file: primary.file,
         line: primary.line,
         message: primary.message,
         confidence: bestConfidence.confidence,
         evidence,
-        recommendation: longestField("recommendation"),
+        recommendation: longestTrimmed("recommendation"),
         fix: primary.fix,
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity,
-        _meanSeverity: meanSeverity
+        _maxSeverity: maxSeverity
       };
     }
     function unionFind(n) {
@@ -18552,7 +18548,7 @@ var require_consensus = __commonJS({
       }
       return candidates;
     }
-    function applyDecisions(entries, decisions, codeReviewEngine) {
+    function applyDecisions(entries, decisions) {
       if (!Array.isArray(decisions)) {
         throw new Error("consensus: decisions must be an array");
       }
@@ -18578,11 +18574,11 @@ var require_consensus = __commonJS({
         groupsByRoot.get(root).push(entries[i]);
       }
       return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine)
+        (members) => members.length === 1 ? members[0] : combineMembers(members)
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, ...rest } = entry;
       return rest;
     }
     function consensusFrom({
@@ -18629,14 +18625,14 @@ var require_consensus = __commonJS({
         }
       }
       let entries = buildCliques(all).map(
-        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
       );
       const beforeCutoff = entries.length;
       entries = applyProfileCutoff(entries, profile);
       const droppedByProfile = beforeCutoff - entries.length;
       entries = sortEntries(entries);
       if (decisions !== void 0) {
-        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
+        entries = sortEntries(applyDecisions(entries, decisions));
       }
       const candidates = buildCandidates(entries);
       const findings = entries.map(stripInternal);
@@ -18751,7 +18747,7 @@ var require_reportState = __commonJS({
     }
     function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
       const previous = cleanPrevious(previousInput || []);
-      const seen = new Set(previous.map((entry) => entry.signature));
+      const bySignature = new Map(previous.map((entry, i) => [entry.signature, i]));
       let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
       const additions = findingList(findingsInput).map(
         (finding) => cleanFinding(finding, { requireBlockerEvidence: true })
@@ -18759,10 +18755,22 @@ var require_reportState = __commonJS({
         (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
       );
       const merged = [...previous];
+      const unmatched = [];
       for (const finding of additions) {
-        if (seen.has(finding.signature)) continue;
-        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
-        seen.add(finding.signature);
+        const at = bySignature.get(finding.signature);
+        if (at === void 0) {
+          unmatched.push(finding);
+          continue;
+        }
+        if (merged[at].status === "open" && finding.severity > merged[at].severity) {
+          merged[at] = { n: merged[at].n, ...finding, status: "open" };
+        }
+      }
+      const earlier = [...merged];
+      for (const finding of unmatched) {
+        if (bySignature.has(finding.signature)) continue;
+        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, earlier)) continue;
+        bySignature.set(finding.signature, merged.length);
         merged.push({ n: next++, ...finding, status: "open" });
       }
       return merged;

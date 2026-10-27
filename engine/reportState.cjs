@@ -133,7 +133,7 @@ function matchesEarlierSpot(finding, previous) {
 
 function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
   const previous = cleanPrevious(previousInput || []);
-  const seen = new Set(previous.map((entry) => entry.signature));
+  const bySignature = new Map(previous.map((entry, i) => [entry.signature, i]));
   let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
   const additions = findingList(findingsInput)
     .map((finding) =>
@@ -147,10 +147,24 @@ function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation 
         a.message.localeCompare(b.message),
     );
   const merged = [...previous];
+  const unmatched = [];
   for (const finding of additions) {
-    if (seen.has(finding.signature)) continue;
-    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
-    seen.add(finding.signature);
+    const at = bySignature.get(finding.signature);
+    if (at === undefined) {
+      unmatched.push(finding);
+      continue;
+    }
+    // A raise never lowers an entry and never changes a dismissed or fixed one.
+    if (merged[at].status === 'open' && finding.severity > merged[at].severity) {
+      merged[at] = { n: merged[at].n, ...finding, status: 'open' };
+    }
+  }
+  // Location matching runs after every raise, against the moved entries.
+  const earlier = [...merged];
+  for (const finding of unmatched) {
+    if (bySignature.has(finding.signature)) continue;
+    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, earlier)) continue;
+    bySignature.set(finding.signature, merged.length);
     merged.push({ n: next++, ...finding, status: 'open' });
   }
   return merged;

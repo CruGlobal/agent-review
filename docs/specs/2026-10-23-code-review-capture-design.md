@@ -339,6 +339,8 @@ If any of these differs from section 1, adjust section 1 before building.
 - **archetype.md write recipe** (final review #18's note). Other lanes have the same backslash-escaping bug in their `node -e` example.
 - The four pre-existing main bugs already listed in PR #33's description.
 
+**Amendment, 2026-10-27 (PR #35).** PR #35 does the default-engine blocker averaging follow-up, so the Non-goals line that keeps the averaging unchanged and the Follow-ups entry for it are done. On every engine, a 7+ that survives its lane's caps and the blocker bar keeps its score when it groups with lower findings, and two 7+ findings group at the higher score. A 7+ group takes the primary's trimmed evidence, else the longest trimmed; a group below 7 takes the longest trimmed evidence; the recommendation is the longest trimmed. When a later review brings back an open ledger entry's signature at a higher severity, the entry becomes the new finding, cleaned like any new finding, and keeps only its number and its open status. Nothing else of the old averaged entry survives. Dismissed and fixed entries never change.
+
 ## Calls made after the builder check (Claude's, for Justin to check)
 
 1. **JSON comes back for `xhigh` and `max`.** Their recipes ask for a JSON array, so the check reads that array and ignores the prose around it. The text rules apply only to `low`, `medium`, and `high`.
