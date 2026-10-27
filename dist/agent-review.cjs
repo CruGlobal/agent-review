@@ -18914,7 +18914,8 @@ var require_captureHook = __commonJS({
       const last = Math.min(header + RESULT_LINE_WITHIN, lines.length - 1);
       for (let i = header + 1; i <= last; i++) {
         const line = lines[i].trim();
-        if (!line.startsWith(RESULT_LABEL)) continue;
+        if (line === "") continue;
+        if (!line.startsWith(RESULT_LABEL)) return text;
         const first = line.slice(RESULT_LABEL.length).trim();
         const rest = lines.slice(i + 1);
         return (first === "" ? rest : [first, ...rest]).join("\n");
@@ -19182,7 +19183,7 @@ var require_codeReviewProof = __commonJS({
         names.add(text.slice(slash + 1));
         if (slash < 0) rootPaths.add(text);
       }
-      return (name) => name.includes(".") ? names.has(name) : rootPaths.has(name);
+      return (name) => name.includes(".") || new RegExp("\\p{Lu}", "u").test(name) ? names.has(name) : rootPaths.has(name);
     }
     var PROSE_FENCES = /* @__PURE__ */ new Set(["", "text", "txt", "md", "markdown", "plain"]);
     function textLines(text, tracked) {

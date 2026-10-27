@@ -864,8 +864,8 @@ test('lane template lists raw findings the way the check grounds them', () => {
     'When none of these fits, or the result cannot be used, write `[]` as the raw list anyway,',
     'A web address such as `https://example.com:443` is not a location.',
     'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and names a file in the reviewed commit, `{{REVIEWED_HEAD}}`, or in the review\'s base commit, `{{REVIEWED_BASE}}`.',
-    'A name with a `.` may be that file\'s name at any depth; a name with no `.` must be the file\'s whole path, at the repository root.',
-    'So `lib/cart.rb:51`, `Makefile:12` when the root has `Makefile`, and `cart.rb:51` when a commit has `lib/cart.rb` are locations, and so is a file the change deletes.',
+    'A name with a `.` or a capital letter may be that file\'s name at any depth; an all-lowercase name with no `.` must be the file\'s whole path, at the repository root.',
+    'So `lib/cart.rb:51`, `Dockerfile:3` when a commit has `docker/Dockerfile`, and `cart.rb:51` when a commit has `lib/cart.rb` are locations, and so is a file the change deletes.',
     'A host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` or `node:20` are not locations.',
     '`path:0` is a location with no line: its raw `line` is `null`.',
     'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
@@ -903,6 +903,7 @@ test('lane template scores from the diff-for blocks, not the whole diff', () => 
     'It skips files on an excluded path, and for any other file it has no block for, it prints a line `no diff block for <file>`.',
     'A missing block never proves that a file is unchanged: the diff can spell a path another way, such as a quoted name or a rename.',
     'Before you set `outside_range` to `true` for a finding on such a file, run `grep -n "^diff --git" {{DIFF_PATH}}`, look for the file under any spelling, and read its block if it is there.',
+    'When scoring, read the code you judge at the reviewed commit (`git show {{REVIEWED_HEAD}}:./<path>`), not the working copy.',
   ]) {
     assert.ok(flat.includes(needle), `STEP 3 must say ${JSON.stringify(needle)}`);
   }
@@ -3736,13 +3737,16 @@ test('the capture spec records the PR #33 review changes to the hooks and the ch
   for (const needle of [
     'The light hook entry parses the arm file and loads the bundled CLI only when `armed` is `true` and `created` is within the 6-hour limit',
     'A `Result:` line within 3 lines of the Skill header may carry text after the label; that text starts the result',
+    'The header is stripped only when every line between it and that `Result:` line is blank; otherwise the text is kept whole, findings above it included.',
   ]) {
     assert.ok(hooks.includes(needle), `the section 1 amendment must say ${JSON.stringify(needle)}`);
   }
   const check = pr33Amendment('### 4. The check', '### 5.');
   for (const needle of [
     'A `json` or unlabeled fenced block that does not parse is list-like only when its trimmed body starts with `[` or `{` and contains `"file"`.',
-    'A mention path with no `/` and a `.` counts when a tracked file has that file name at any depth; one with no `.` counts only when that exact root-level path is tracked.',
+    'A mention path with no `/` that has a `.` or a capital letter counts when a tracked file has that file name at any depth; an all-lowercase one with no `.` counts only when that exact root-level path is tracked.',
+    'while `Dockerfile:3` (a tracked `docker/Dockerfile`) and `cart.rb:12` (a tracked `lib/cart.rb`) are.',
+    'the lane reads the code it quotes and the code it scores with `git show <head>:./<path>`',
     '`code-review-proof` takes an optional `--base <sha>`, and the tracked files are those at `--head` plus those at `--base`',
     'A `--base` that is not a commit, or whose files cannot be listed, fails with `stage: config`.',
     'The text after `path:line:` inside the same token is part of the quote',

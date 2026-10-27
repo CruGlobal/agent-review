@@ -142,8 +142,9 @@ function mentionSpot(mention) {
   return `${mention.file}:${mention.line ?? 0}`;
 }
 
-// A name with no "/" and a "." matches a tracked file name at any depth; one with no "." matches
-// only a tracked root-level path.
+// A name with no "/" and a "." or a capital letter matches a tracked file name at any depth; an
+// all-lowercase name with no "." matches only a tracked root-level path, so a lowercase image tag
+// such as node:20 never matches bin/node.
 function trackedLookup(paths) {
   const names = new Set();
   const rootPaths = new Set();
@@ -153,7 +154,7 @@ function trackedLookup(paths) {
     names.add(text.slice(slash + 1));
     if (slash < 0) rootPaths.add(text);
   }
-  return (name) => (name.includes('.') ? names.has(name) : rootPaths.has(name));
+  return (name) => (name.includes('.') || /\p{Lu}/u.test(name) ? names.has(name) : rootPaths.has(name));
 }
 
 // A fence with no language label holds prose, so a finding there must be claimed like one outside.

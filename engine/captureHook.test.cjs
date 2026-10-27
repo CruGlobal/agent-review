@@ -510,11 +510,15 @@ test('stripSkillHeader leaves text without the header unchanged', () => {
     'Skill "code-review" completed (forked execution).\n\n\n\nResult:\n- a.rb:1: x',
     'Skill "code-review" completed (forked execution).\n\n\n\nResult: (none)',
     'Skill "code-review" completed (forked execution).\nResults: (none)',
+    'Skill "code-review" completed (forked execution).\n- a.rb:1: bug\nResult: 1 finding',
+    'Skill "code-review" completed (forked execution).\n- a.rb:1: bug\nResult:\n- b.rb:2: y',
+    'Skill "code-review" completed\nsummary line\nResult: the cart is wrong\nmore',
+    'Skill "code-review" completed (forked execution).\n\n- a.rb:1: bug\nResult: (none)',
   ]) {
-    assert.equal(stripSkillHeader(text), text, JSON.stringify(text));
+    assert.equal(stripSkillHeader(text), text, `${JSON.stringify(text)}: a non-blank line above Result: keeps the text whole`);
   }
   assert.equal(stripSkillHeader('Skill "code-review" completed (forked execution).\nResult: (none)'), '(none)', 'text on the Result: line starts the result');
-  assert.equal(stripSkillHeader('Skill "code-review" completed\nsummary line\nResult: the cart is wrong\nmore'), 'the cart is wrong\nmore');
+  assert.equal(stripSkillHeader('Skill "code-review" completed (forked execution).\n \t\n\nResult: 1 finding\n- a.rb:1: bug'), '1 finding\n- a.rb:1: bug', 'only blank lines between');
   assert.equal(stripSkillHeader('Skill "code-review" completed (forked execution).\r\n  Result:   - a.rb:1: x  \r\n- b.rb:2: y'), '- a.rb:1: x\n- b.rb:2: y');
   assert.equal(
     stripSkillHeader('Skill "code-review" completed (forked execution).\n\nResult:\n- a.rb:1: x\nResult: kept'),

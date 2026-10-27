@@ -120,10 +120,11 @@ Find the entries this way:
 2. Finding lines. Otherwise, every line of the result that cites a location is one raw finding.
    A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or
    has no `/` and names a file in the reviewed commit, `{{REVIEWED_HEAD}}`, or in the review's
-   base commit, `{{REVIEWED_BASE}}`. A name with a `.` may be that file's name at any depth; a
-   name with no `.` must be the file's whole path, at the repository root. So `lib/cart.rb:51`,
-   `Makefile:12` when the root has `Makefile`, and `cart.rb:51` when a commit has `lib/cart.rb`
-   are locations, and so is a file the change deletes. A host and port such as
+   base commit, `{{REVIEWED_BASE}}`. A name with a `.` or a capital letter may be that file's
+   name at any depth; an all-lowercase name with no `.` must be the file's whole path, at the
+   repository root. So `lib/cart.rb:51`, `Dockerfile:3` when a commit has `docker/Dockerfile`,
+   and `cart.rb:51` when a commit has `lib/cart.rb` are locations, and so is a file the change
+   deletes. A host and port such as
    `api.example.com:443` and an image tag such as `ruby:3.3` or `node:20` are not locations.
    For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.
    `path:0` is a location with no line: its raw `line` is `null`. A web address such as
@@ -179,7 +180,9 @@ it is there.
 In a block, a line this change adds or changes starts with `+` (not `+++`), and each hunk header
 `@@ -a,b +c,d @@` gives the new file's line numbers, starting at c. Then take the raw findings
 one at a time. Read the lines each one names, plus enough of the code around them to follow its
-failure scenario. Open other files only when the scenario runs through them. To see whether this
+failure scenario. When scoring, read the code you judge at the reviewed commit
+(`git show {{REVIEWED_HEAD}}:./<path>`), not the working copy. Open other files only when the
+scenario runs through them. To see whether this
 change touched one of those files, search {{DIFF_PATH}} for its `diff --git` line; never read the
 whole diff. A finding may have no failure scenario: score it from what the result says about it
 and from the code.

@@ -344,14 +344,15 @@ test('localhost:3000 and https://example.com:443/x are not mentions', () => {
   assert.deepEqual(findingLines('2026:10 and a.rb:x are not mentions', () => true), []);
 });
 
-test('a path with no / is a mention only when the repository tracks that root path, or that file name when it has a dot', () => {
-  const tracked = trackedLookup(['Gemfile', 'lib/cart.rb', 'docker/Dockerfile', 'Dockerfile.dev']);
+test('a path with no / is a mention when the repository tracks that root path, or that file name when it has a dot or a capital', () => {
+  const tracked = trackedLookup(['Gemfile', 'lib/cart.rb', 'docker/Dockerfile', 'Dockerfile.dev', 'bin/node']);
   const mentions = (line) => findingLines(line, tracked).map((l) => l.mentions);
   assert.deepEqual(mentions('calls to api.stripe.com:443 time out'), [], 'a host and port');
   assert.deepEqual(mentions('the base image ruby:3.3 is old'), [], 'an image tag');
   assert.deepEqual(mentions('Gemfile:12 pins an old rack'), [[{ file: 'Gemfile', line: 12 }]], 'a tracked path');
   assert.deepEqual(mentions('cart.rb:12 skips the guard'), [[{ file: 'cart.rb', line: 12 }]], 'a tracked file name');
-  assert.deepEqual(mentions('Dockerfile:3 pins ruby:3.3'), [], 'a dotless name is not matched below the root');
+  assert.deepEqual(mentions('Dockerfile:3 pins ruby:3.3'), [[{ file: 'Dockerfile', line: 3 }]], 'a dotless name with a capital matches below the root');
+  assert.deepEqual(mentions('node:20 is pinned'), [], 'an all-lowercase dotless name stays root-only');
   assert.deepEqual(mentions('Dockerfile.dev:3 pins ruby:3.3'), [[{ file: 'Dockerfile.dev', line: 3 }]]);
   assert.deepEqual(mentions('- "Gemfile":12 pins rack'), [[{ file: 'Gemfile"', line: 12 }]], 'wrappers are trimmed before the lookup');
   assert.deepEqual(mentions('car.rb:12 and rb:3 and lib:4'), [], 'no partial names');
@@ -379,6 +380,20 @@ test('an image tag is not a location when a file of that name is tracked below t
   assertFails(ground('- Makefile:12 skips lint\n', [], { tracked }), 'lane', 'a root-level Makefile must be claimed');
   assert.deepEqual(mentions('- cart.rb:12 skips the guard'), [[{ file: 'cart.rb', line: 12 }]], 'cart.rb with lib/cart.rb tracked');
   assertFails(ground('- cart.rb:12 skips the guard\n', [], { tracked }), 'lane', 'a dotted file name below the root must be claimed');
+});
+
+test('a dotless name with a capital, such as Dockerfile, is a mention when that file is tracked below the root', () => {
+  const tracked = trackedLookup(['bin/node', 'docker/Dockerfile', 'app/Procfile', 'ci/Jenkinsfile', 'sub/Makefile', 'gems/Gemfile']);
+  const mentions = (line) => findingLines(line, tracked).map((l) => l.mentions);
+  for (const name of ['Dockerfile', 'Procfile', 'Jenkinsfile', 'Makefile', 'Gemfile']) {
+    const line = `- ${name}:3 runs as root`;
+    assert.deepEqual(mentions(line), [[{ file: name, line: 3 }]], name);
+    assertFails(ground(`${line}\n`, [], { tracked }), 'lane', `${name} must be claimed`);
+    assertGrounded(ground(`${line}\n`, raws([name, 3]), { tracked }), 'text', `${name} claimed`);
+  }
+  assert.deepEqual(mentions('The Dockerfile pins node:20, which is fine.'), [], 'node:20 with bin/node tracked');
+  assertGrounded(ground('(none)\n\nThe Dockerfile pins node:20, which is fine.', [], { tracked }), 'empty');
+  assert.deepEqual(mentions('- Rakefile:3 is wrong'), [], 'an untracked name is still not a mention');
 });
 
 test('a path:0 mention is a mention of the file with no line, which a null-line entry claims', () => {
