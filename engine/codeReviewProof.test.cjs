@@ -217,6 +217,25 @@ test('a cut-off findings list in a closed fence still fails closed', () => {
   }
 });
 
+test('an unparsable fence is list-like only when it starts with [ or { and names "file"', () => {
+  const finding = '- app/upload.py:12: upload is never size-checked\n\n';
+  for (const code of ['f = request.files["file"]', 'upload.single("file")', 'formData.append("file", b)']) {
+    for (const info of ['', 'json']) {
+      const result = `${finding}${fenced(info, code)}`;
+      assert.deepEqual(jsonFindings(result), { list: null, problem: null }, result);
+      assertGrounded(ground(result, raws(['app/upload.py', 12])), 'text', result);
+      assertFails(ground(result, []), 'lane', `${result}: the text finding still needs its claim`);
+    }
+  }
+  for (const info of ['', 'json']) {
+    for (const cut of ['[{"file": "a.rb", "line":', '  {"findings": [{"file": "a.rb"', '{"file": "b.rb", "line": 9']) {
+      const result = `${finding}${fenced(info, cut)}`;
+      assert.match(jsonFindings(result).problem, /fenced block 1 looks like a findings list/, result);
+      assertFails(ground(result, raws(['app/upload.py', 12])), 'capture', result);
+    }
+  }
+});
+
 test('a list padded with a no-break space or BOM is usable', () => {
   for (const pad of ['\u00a0', '\ufeff', '  ']) {
     const result = fenced('json', `${pad}${J([{ file: 'a.rb', line: 3 }])}${pad}`);
@@ -325,14 +344,15 @@ test('localhost:3000 and https://example.com:443/x are not mentions', () => {
   assert.deepEqual(findingLines('2026:10 and a.rb:x are not mentions', () => true), []);
 });
 
-test('a path with no / is a mention only when the repository tracks that path or that file name', () => {
-  const tracked = trackedLookup(['Gemfile', 'lib/cart.rb', 'docker/Dockerfile']);
+test('a path with no / is a mention only when the repository tracks that root path, or that file name when it has a dot', () => {
+  const tracked = trackedLookup(['Gemfile', 'lib/cart.rb', 'docker/Dockerfile', 'Dockerfile.dev']);
   const mentions = (line) => findingLines(line, tracked).map((l) => l.mentions);
   assert.deepEqual(mentions('calls to api.stripe.com:443 time out'), [], 'a host and port');
   assert.deepEqual(mentions('the base image ruby:3.3 is old'), [], 'an image tag');
   assert.deepEqual(mentions('Gemfile:12 pins an old rack'), [[{ file: 'Gemfile', line: 12 }]], 'a tracked path');
   assert.deepEqual(mentions('cart.rb:12 skips the guard'), [[{ file: 'cart.rb', line: 12 }]], 'a tracked file name');
-  assert.deepEqual(mentions('Dockerfile:3 pins ruby:3.3'), [[{ file: 'Dockerfile', line: 3 }]]);
+  assert.deepEqual(mentions('Dockerfile:3 pins ruby:3.3'), [], 'a dotless name is not matched below the root');
+  assert.deepEqual(mentions('Dockerfile.dev:3 pins ruby:3.3'), [[{ file: 'Dockerfile.dev', line: 3 }]]);
   assert.deepEqual(mentions('- "Gemfile":12 pins rack'), [[{ file: 'Gemfile"', line: 12 }]], 'wrappers are trimmed before the lookup');
   assert.deepEqual(mentions('car.rb:12 and rb:3 and lib:4'), [], 'no partial names');
   assert.deepEqual(
@@ -348,6 +368,17 @@ test('a path with no / is a mention only when the repository tracks that path or
   assertGrounded(ground('- Gemfile:12 pins an old rack\n', raws(['Gemfile', 12]), { tracked }), 'text');
   assertGrounded(ground('- cart.rb:12 skips the guard\n', raws(['cart.rb', 12]), { tracked }), 'text');
   assertFails(ground('- cart.rb:12 skips the guard\n', [], { tracked }), 'lane', 'a tracked file name must be claimed');
+});
+
+test('an image tag is not a location when a file of that name is tracked below the root', () => {
+  const tracked = trackedLookup(['bin/node', 'docker/nginx', 'Makefile', 'lib/cart.rb']);
+  const mentions = (line) => findingLines(line, tracked).map((l) => l.mentions);
+  assert.deepEqual(mentions('The Dockerfile pins node:20 and nginx:1.25, which is fine.'), [], 'node:20 with bin/node tracked');
+  assertGrounded(ground('(none)\n\nThe Dockerfile pins node:20 and nginx:1.25, which is fine.', [], { tracked }), 'empty');
+  assert.deepEqual(mentions('- Makefile:12 skips lint'), [[{ file: 'Makefile', line: 12 }]], 'a root-level Makefile');
+  assertFails(ground('- Makefile:12 skips lint\n', [], { tracked }), 'lane', 'a root-level Makefile must be claimed');
+  assert.deepEqual(mentions('- cart.rb:12 skips the guard'), [[{ file: 'cart.rb', line: 12 }]], 'cart.rb with lib/cart.rb tracked');
+  assertFails(ground('- cart.rb:12 skips the guard\n', [], { tracked }), 'lane', 'a dotted file name below the root must be claimed');
 });
 
 test('a path:0 mention is a mention of the file with no line, which a null-line entry claims', () => {
@@ -924,6 +955,30 @@ test('an exact quote of a line that starts with -, :, ;, a comma, or a dash disp
     assert.equal(r.ok, false, `${proof}: the quote leaves out the line's own lead character`);
     assert.match(r.reason, /does not hold that whole line/, proof);
   }
+});
+
+test('a grep -n style disproof quotes the code that runs on from path:line:', () => {
+  const repo = repoOf({
+    Makefile: numbered(5, { 3: 'test: build lint' }),
+    'lib/cart.rb': numbered(20, { 18: '  if (!items) return [];' }),
+  });
+  for (const proof of [
+    'already handled: Makefile:3:test: build lint',
+    'Makefile:3:test:build lint',
+    'already handled: lib/cart.rb:18:  if (!items) return [];',
+    'already handled: lib/cart.rb:18:if (!items) return [];',
+  ]) {
+    const r = disproved(proof, repo);
+    assert.equal(r.ok, true, `${proof}: ${r.reason}`);
+  }
+  for (const proof of ['already handled: Makefile:3:test: build', 'already handled: Makefile:3:tes', 'already handled: Makefile:3:build lint']) {
+    const r = disproved(proof, repo);
+    assert.equal(r.ok, false, proof);
+    assert.match(r.reason, /quote after Makefile:3 does not hold that whole line of Makefile/, proof);
+  }
+  const empty = disproved('already handled: Makefile:3:', repo);
+  assert.equal(empty.ok, false);
+  assert.match(empty.reason, /quotes no code after Makefile:3/);
 });
 
 test('a disproved drop fails closed when the repository cannot be read', () => {

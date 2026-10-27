@@ -510,17 +510,15 @@ function commitIn(root, ref) {
 function blobLines(root, commit, path) {
   const rel = relative(root, resolve(root, path));
   if (!commit || rel === '' || rel.startsWith('..') || isAbsolute(rel)) return null;
-  const spec = `${commit}:./${rel}`;
   try {
-    if (gitIn(root, ['cat-file', '-t', spec]).trim() !== 'blob') return null;
-    return gitIn(root, ['show', spec]).replace(/\r?\n$/, '').split(/\r?\n/);
+    return gitIn(root, ['cat-file', 'blob', `${commit}:./${rel}`]).replace(/\r?\n$/, '').split(/\r?\n/);
   } catch {
     return null;
   }
 }
 
 const CODE_REVIEW_PROOF_USAGE =
-  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]';
+  'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]';
 const DIFF_FOR_USAGE = 'usage: agent-review diff-for --diff <f> --raw <f>';
 
 function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -583,7 +581,7 @@ const USAGE = `usage: agent-review <command>
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -1000,6 +998,7 @@ function main(rawArgv) {
       const runId = flag(rest, '--run');
       const promotePath = flag(rest, '--promote');
       const headArg = flag(rest, '--head');
+      const baseArg = flag(rest, '--base');
       if (
         !rawPath ||
         !findingsPath ||
@@ -1007,7 +1006,8 @@ function main(rawArgv) {
         !runId ||
         rest.includes('--capture') ||
         (rest.includes('--promote') && !promotePath) ||
-        (rest.includes('--head') && headArg === undefined)
+        (rest.includes('--head') && headArg === undefined) ||
+        (rest.includes('--base') && baseArg === undefined)
       ) {
         out(CODE_REVIEW_PROOF_USAGE);
         return 1;
@@ -1055,6 +1055,11 @@ function main(rawArgv) {
         commit = commitIn(C.ROOT, headArg);
         if (!commit) return refuse('config', `--head ${JSON.stringify(headArg)} is not a commit in ${C.ROOT}`);
       }
+      let base = null;
+      if (baseArg !== undefined) {
+        base = commitIn(C.ROOT, baseArg);
+        if (!base) return refuse('config', `--base ${JSON.stringify(baseArg)} is not a commit in ${C.ROOT}`);
+      }
       const dir = captureDir();
       const dirError = captureDirError(dir);
       if (dirError) return refuse('capture', dirError);
@@ -1078,7 +1083,13 @@ function main(rawArgv) {
               `could not list the files of commit ${headArg ?? 'HEAD'} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`,
             );
           }
-          lookup = trackedLookup(files);
+          const baseFiles = base ? filesAt(C.ROOT, base) : [];
+          if (!baseFiles) {
+            throw new FileListError(
+              `could not list the files of base commit ${baseArg} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`,
+            );
+          }
+          lookup = trackedLookup([...files, ...baseFiles]);
         }
         return lookup(name);
       };

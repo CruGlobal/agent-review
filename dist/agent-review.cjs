@@ -19103,7 +19103,7 @@ var require_codeReviewProof = __commonJS({
       if (block.info !== "json" && block.info !== "") return null;
       const body = block.body.trim();
       const parsed = parseJson(body);
-      if (!parsed) return body.includes('"file"') ? { list: null } : null;
+      if (!parsed) return /^[[{]/.test(body) && body.includes('"file"') ? { list: null } : null;
       const { value } = parsed;
       const listLike = Array.isArray(value) ? value.length === 0 || value.some(isPlainObject) : isPlainObject(value) && Object.hasOwn(value, "findings");
       if (!listLike) return null;
@@ -19147,28 +19147,37 @@ var require_codeReviewProof = __commonJS({
       if (path.includes("/")) return true;
       return typeof isBareFile === "function" && Boolean(isBareFile(path) || isBareFile(trimWrappers(path)));
     }
-    function mentionsIn(line, isBareFile) {
+    function tokenMentions(token, isBareFile) {
       const mentions = [];
-      for (const token of line.split(/\s+/)) {
-        if (!token.includes(":")) continue;
-        const parts = token.split(":");
-        for (let i = 0; i + 1 < parts.length; i++) {
-          const at = LINE_PART.exec(parts[i + 1]);
-          if (!at) continue;
-          const file = parts[i].replace(PATH_LEAD, "");
-          const number = Number(at[1]);
-          if (mentionPath(file, isBareFile)) mentions.push({ file, line: number > 0 ? number : null });
-        }
+      if (!token.includes(":")) return mentions;
+      const parts = token.split(":");
+      for (let i = 0; i + 1 < parts.length; i++) {
+        const at = LINE_PART.exec(parts[i + 1]);
+        if (!at) continue;
+        const file = parts[i].replace(PATH_LEAD, "");
+        const number = Number(at[1]);
+        if (!mentionPath(file, isBareFile)) continue;
+        const tail = [parts[i + 1].slice(at[0].length), ...parts.slice(i + 2)].join(":");
+        mentions.push({ file, line: number > 0 ? number : null, tail });
       }
       return mentions;
+    }
+    function mentionsIn(line, isBareFile) {
+      return line.split(/\s+/).flatMap((token) => tokenMentions(token, isBareFile).map(({ file, line: at }) => ({ file, line: at })));
     }
     function mentionSpot(mention) {
       return `${mention.file}:${mention.line ?? 0}`;
     }
     function trackedLookup(paths) {
       const names = /* @__PURE__ */ new Set();
-      for (const path of paths) names.add(String(path).slice(String(path).lastIndexOf("/") + 1));
-      return (name) => names.has(name);
+      const rootPaths = /* @__PURE__ */ new Set();
+      for (const path of paths) {
+        const text = String(path);
+        const slash = text.lastIndexOf("/");
+        names.add(text.slice(slash + 1));
+        if (slash < 0) rootPaths.add(text);
+      }
+      return (name) => name.includes(".") ? names.has(name) : rootPaths.has(name);
     }
     var PROSE_FENCES = /* @__PURE__ */ new Set(["", "text", "txt", "md", "markdown", "plain"]);
     function textLines(text, tracked) {
@@ -19422,8 +19431,8 @@ var require_codeReviewProof = __commonJS({
       const tries = [];
       const isBareFile = (path) => path.includes(".") || exists(path);
       for (const token of text.matchAll(/\S+/g)) {
-        const rest = text.slice(token.index + token[0].length);
-        for (const mention of mentionsIn(token[0], isBareFile)) tries.push({ ...mention, rest });
+        const after = text.slice(token.index + token[0].length);
+        for (const { file, line, tail } of tokenMentions(token[0], isBareFile)) tries.push({ file, line, rest: tail + after });
       }
       if (tries.length === 0) return "needs a proof that cites a path:line and then quotes the code there";
       let best = null;
@@ -21000,15 +21009,13 @@ var require_cli = __commonJS({
     function blobLines(root, commit, path) {
       const rel = relative(root, resolve(root, path));
       if (!commit || rel === "" || rel.startsWith("..") || isAbsolute(rel)) return null;
-      const spec = `${commit}:./${rel}`;
       try {
-        if (gitIn(root, ["cat-file", "-t", spec]).trim() !== "blob") return null;
-        return gitIn(root, ["show", spec]).replace(/\r?\n$/, "").split(/\r?\n/);
+        return gitIn(root, ["cat-file", "blob", `${commit}:./${rel}`]).replace(/\r?\n$/, "").split(/\r?\n/);
       } catch {
         return null;
       }
     }
-    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]";
+    var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
     function diffFor(diffPath, rawPath, root, excludedPaths) {
       let raw;
@@ -21068,7 +21075,7 @@ var require_cli = __commonJS({
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
   status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
-  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
+  code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -21461,7 +21468,8 @@ var require_cli = __commonJS({
           const runId = flag(rest, "--run");
           const promotePath = flag(rest, "--promote");
           const headArg = flag(rest, "--head");
-          if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes("--capture") || rest.includes("--promote") && !promotePath || rest.includes("--head") && headArg === void 0) {
+          const baseArg = flag(rest, "--base");
+          if (!rawPath || !findingsPath || !droppedPath || !runId || rest.includes("--capture") || rest.includes("--promote") && !promotePath || rest.includes("--head") && headArg === void 0 || rest.includes("--base") && baseArg === void 0) {
             out(CODE_REVIEW_PROOF_USAGE);
             return 1;
           }
@@ -21504,6 +21512,11 @@ var require_cli = __commonJS({
             commit = commitIn(C.ROOT, headArg);
             if (!commit) return refuse("config", `--head ${JSON.stringify(headArg)} is not a commit in ${C.ROOT}`);
           }
+          let base = null;
+          if (baseArg !== void 0) {
+            base = commitIn(C.ROOT, baseArg);
+            if (!base) return refuse("config", `--base ${JSON.stringify(baseArg)} is not a commit in ${C.ROOT}`);
+          }
           const dir = captureDir();
           const dirError = captureDirError(dir);
           if (dirError) return refuse("capture", dirError);
@@ -21527,7 +21540,13 @@ var require_cli = __commonJS({
                   `could not list the files of commit ${headArg ?? "HEAD"} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`
                 );
               }
-              lookup = trackedLookup(files);
+              const baseFiles = base ? filesAt(C.ROOT, base) : [];
+              if (!baseFiles) {
+                throw new FileListError(
+                  `could not list the files of base commit ${baseArg} in ${C.ROOT}, so a location whose path has no "/" cannot be checked`
+                );
+              }
+              lookup = trackedLookup([...files, ...baseFiles]);
             }
             return lookup(name);
           };
