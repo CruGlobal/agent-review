@@ -33,14 +33,7 @@ re-reviews cheap.
    echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > /tmp/yolo_env.sh
    ```
 
-2. **Review**. Right before the review call, take a fresh timestamp:
-
-   ```bash
-   REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   echo "export REVIEW_TS=\"$REVIEW_TS\"" >> /tmp/yolo_env.sh
-   ```
-
-   Then invoke `agent-review:review` with the argument `auto` (or the user's
+2. **Review**. Invoke `agent-review:review` with the argument `auto` (or the user's
    mode), plus the user's `engine=` and `effort=` tokens, if any. It posts the report and prints
    the findings. If the review fails before posting (a config error, an invalid `engine=` or
    `effort=` token), stop and show its error; never run address against an older report.
@@ -53,38 +46,35 @@ re-reviews cheap.
    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
    ME=$(gh api user --jq .login 2>/dev/null || echo "")
    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" | tr -d '\r' \
-     | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 > /tmp/yolo_ledger.json
-   UPDATED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .updated_at // empty" | head -1)
-   if [ -z "$UPDATED" ] || [[ "$UPDATED" < "$REVIEW_TS" ]]; then
-     echo "❌ No report newer than the latest review call: that review failed before posting. Show its error and stop."; exit 1
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" \
+     | tr -d '\r' > /tmp/yolo_report.md
+   sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/yolo_report.md | head -1 > /tmp/yolo_ledger.json
+   REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' /tmp/yolo_report.md | head -1)
+   if [ -z "$REPORTED_HEAD" ] || [ "$REPORTED_HEAD" != "$(git rev-parse HEAD)" ]; then
+     echo "❌ No report for the current head: the latest review or re-review failed before posting. Show its error and stop."; exit 1
    fi
    OPEN=$(node -e 'const l=require("/tmp/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
    echo "open blockers: $OPEN"
    echo "export FIX_FROM=\"$(git rev-parse HEAD)\"" >> /tmp/yolo_env.sh
    ```
 
-   The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`,
-   the time taken right before the latest review or re-review call. Address also edits the
-   comment, so an older time would let a failed re-review pass. Otherwise stop and show the
-   review's error; never run address against an older report.
+   The guard in that block uses the report only if its `<!-- agent-review-head: <sha> -->` marker
+   names the current `HEAD`, the commit the latest review or re-review covered. Address edits the
+   comment but never that marker, so a re-review that failed before posting leaves an older head
+   there, and no clock is compared. Otherwise stop and show the review's error; never run address
+   against an older report.
 
    If `OPEN` is greater than 0, invoke the
    `agent-review:address` with the argument `fix blockers`.
    Never dismiss — not with any code, not for any reason; a finding that cannot
    be fixed stays open and is reported at the end. If `OPEN` is 0, skip to step 6.
 
-4. **Re-review**. First check that address committed something, and take a fresh timestamp
-   right before the re-review call:
+4. **Re-review**. First check that address committed something:
 
    ```bash
    . /tmp/yolo_env.sh
    if [ "$(git rev-parse HEAD)" = "$FIX_FROM" ]; then
      echo "no new commit: address changed nothing, so there is nothing to re-review"
-   else
-     REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-     echo "export REVIEW_TS=\"$REVIEW_TS\"" >> /tmp/yolo_env.sh
    fi
    ```
 

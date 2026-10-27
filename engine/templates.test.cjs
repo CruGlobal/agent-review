@@ -3531,21 +3531,21 @@ test('init saves shadow as no and validates its answers, update-files guards Sta
   const addr = skillText('address').replace(/\s+/g, ' ');
   assert.ok(addr.includes('do not promise a CI re-review') && addr.includes('`undefined` or failed `config get reviews_run` counts as CI'));
   const yolo = skillText('yolo-review');
-  assert.ok(yolo.includes('.updated_at') && yolo.includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'yolo step 3 has the REVIEW_TS guard in the bash block');
+  assert.ok(yolo.includes('/tmp/yolo_report.md') && yolo.includes('[ "$REPORTED_HEAD" != "$(git rev-parse HEAD)" ]'), 'yolo step 3 has the head-marker guard in the bash block');
 });
-
-const REVIEW_TS_BLOCK = [
-  'REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-  'echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
-].join('\n');
 
 const REREVIEW_BLOCK = [
   '. /tmp/yolo_env.sh',
   'if [ "$(git rev-parse HEAD)" = "$FIX_FROM" ]; then',
   '  echo "no new commit: address changed nothing, so there is nothing to re-review"',
-  'else',
-  '  REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-  '  echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
+  'fi',
+].join('\n');
+
+const REPORT_HEAD_LINE =
+  "REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \\([0-9a-f]\\{7,40\\}\\) -->$/\\1/p' /tmp/yolo_report.md | head -1)";
+const REPORT_HEAD_GUARD = [
+  'if [ -z "$REPORTED_HEAD" ] || [ "$REPORTED_HEAD" != "$(git rev-parse HEAD)" ]; then',
+  '  echo "\u274c No report for the current head: the latest review or re-review failed before posting. Show its error and stop."; exit 1',
   'fi',
 ].join('\n');
 
@@ -3557,17 +3557,17 @@ function indentedBashBlocks(text) {
   return [...text.matchAll(/^ {3}```bash\n([\s\S]*?)\n {3}```$/gm)].map((m) => m[1].replace(/^ {3}/gm, ''));
 }
 
-test('yolo-review takes a fresh timestamp right before each review call and judges the report against it', (t) => {
+test('yolo-review uses a report only when its head marker names the current HEAD', (t) => {
   const yolo = skillText('yolo-review');
   const step2 = yoloStep(yolo, '2. **Review**', '3. **Fix blockers**');
   const step3 = yoloStep(yolo, '3. **Fix blockers**', '4. **Re-review**');
   const step4 = yoloStep(yolo, '4. **Re-review**', '5. **Bounded loop**');
-  for (const [label, step, block, call] of [
-    ['step 2', step2, REVIEW_TS_BLOCK, 'invoke `agent-review:review` with the argument `auto`'],
-    ['step 4', step4, REREVIEW_BLOCK, 'invoke `agent-review:review` with the arguments `auto incremental`'],
-  ]) {
-    assert.deepStrictEqual(indentedBashBlocks(step), [block], `${label} has the timestamp block`);
-    assert.ok(step.indexOf('REVIEW_TS=') < step.indexOf(call), `${label} takes the timestamp before the review call`);
+  for (const gone of ['REVIEW_TS', 'updated_at', 'UPDATED']) {
+    assert.ok(!yolo.includes(gone), `the clock-based guard is gone: ${gone}`);
+  }
+  assert.deepStrictEqual(indentedBashBlocks(step2), [], 'step 2 takes no timestamp');
+  assert.deepStrictEqual(indentedBashBlocks(step4), [REREVIEW_BLOCK], 'step 4 only checks that address committed something');
+  for (const [label, step] of [['step 2', step2], ['step 4', step4]]) {
     assert.ok(!step.split('\n')[0].includes('\u2014'), `${label}'s title line has no em dash`);
   }
   const flat4 = flatText(step4);
@@ -3580,12 +3580,21 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
   }
   const reviewSkill = skillText('review');
   assert.ok(reviewSkill.includes('already reviewed') && reviewSkill.includes('No net changes'), 'the review skill prints the phrases step 4 names');
+  assert.ok(
+    reviewSkill.includes(`[ -n "\${HEAD_REF:-}" ] && printf '%s\\n' "<!-- agent-review-head: $HEAD_REF -->"`),
+    'the report writes the head marker the guard reads',
+  );
   const guard = indentedBashBlocks(step3);
   assert.strictEqual(guard.length, 1);
+  assert.ok(guard[0].split('\n').includes(REPORT_HEAD_LINE), 'step 3 reads the head marker in the form the report writes it');
+  assert.ok(guard[0].includes(REPORT_HEAD_GUARD), 'step 3 compares the marker with the current HEAD');
   assert.ok(guard[0].endsWith('echo "export FIX_FROM=\\"$(git rev-parse HEAD)\\"" >> /tmp/yolo_env.sh'), 'step 3 records the head address starts from');
-  assert.ok(guard[0].includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'the guard compares against the per-call timestamp');
-  assert.ok(!guard[0].includes('START_TS'), 'the run start never stands in for the latest review call');
-  assert.ok(flatText(step3).includes('The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`'), step3);
+  assert.ok(
+    flatText(step3).includes(
+      'The guard in that block uses the report only if its `<!-- agent-review-head: <sha> -->` marker names the current `HEAD`, the commit the latest review or re-review covered.',
+    ),
+    step3,
+  );
   assert.ok(yoloStep(yolo, '6. **Approval**').includes('select(.submittedAt > \\"$START_TS\\")'), 'approval still counts from the run start');
 
   const { mkdirSync, writeFileSync } = require('node:fs');
@@ -3595,40 +3604,45 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
       const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
       mkdirSync(join(dir, 'bin'));
       writeFileSync(join(dir, 'yolo_env.sh'), 'export PR_NUMBER="7" START_TS="2000-01-01T00:00:00Z"\n');
-      writeFileSync(join(dir, 'head'), 'aaa111\n');
+      const head = 'aaaa111122223333444455556666777788889999';
+      writeFileSync(join(dir, 'head'), `${head}\n`);
       writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && cat "${dir}/head"\n`, { mode: 0o755 });
-      const stamps = () => (readFileSync(join(dir, 'yolo_env.sh'), 'utf8').match(/REVIEW_TS=/g) || []).length;
-      const stubGh = (updated) =>
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncase "$*" in\n  *.body*) cat "${dir}/body" ;;\n  *) echo x ;;\nesac\n`, { mode: 0o755 });
+      const stubComment = (marker) =>
         writeFileSync(
-          join(dir, 'bin', 'gh'),
-          `#!/bin/sh\ncase "$*" in\n  *updated_at*) echo "${updated}" ;;\n  *agent-review-ledger*|*.body*) echo '<!-- agent-review-ledger: [] -->' ;;\n  *) echo x ;;\nesac\n`,
-          { mode: 0o755 },
+          join(dir, 'body'),
+          ['<!-- agent-review -->', ...(marker ? [`<!-- agent-review-head: ${marker} -->`] : []), '<!-- agent-review-ledger: [] -->', '', 'report'].join('\r\n') + '\r\n',
         );
       const sh = (script) =>
         require('node:child_process').spawnSync(shell, ['-c', at(script)], {
           encoding: 'utf8',
           env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir },
         });
-      assert.strictEqual(sh(REVIEW_TS_BLOCK).status, 0, shell);
-      stubGh('2001-01-01T00:00:00Z');
-      const stale = sh(guard[0]);
-      assert.strictEqual(stale.status, 1, `${shell}: a report older than the latest review call stops the run`);
-      assert.match(stale.stdout, /\u274c No report newer than the latest review call/);
-      stubGh('2999-01-01T00:00:00Z');
+      for (const [label, marker] of [
+        ['an older head', 'bbbb111122223333444455556666777788889999'],
+        ['no head marker', null],
+        ['a short sha', head.slice(0, 12)],
+      ]) {
+        stubComment(marker);
+        const stale = sh(guard[0]);
+        assert.strictEqual(stale.status, 1, `${shell}, ${label}: a report for another head stops the run`);
+        assert.match(stale.stdout, /\u274c No report for the current head/, `${shell}, ${label}`);
+      }
+      stubComment(head);
       const fresh = sh(guard[0]);
       assert.strictEqual(fresh.status, 0, `${shell}: ${fresh.stdout}${fresh.stderr}`);
       assert.match(fresh.stdout, /open blockers: 0/);
+      assert.strictEqual(readFileSync(join(dir, 'yolo_ledger.json'), 'utf8'), '[]\n', `${shell}: the ledger comes from the same comment`);
 
-      assert.strictEqual(stamps(), 1, shell);
       const unchanged = sh(REREVIEW_BLOCK);
       assert.strictEqual(unchanged.status, 0, shell);
       assert.match(unchanged.stdout, /^no new commit: /, `${shell}: address committed nothing`);
-      assert.strictEqual(stamps(), 1, `${shell}: no re-review, so no new timestamp`);
-      writeFileSync(join(dir, 'head'), 'bbb222\n');
+      writeFileSync(join(dir, 'head'), 'cccc111122223333444455556666777788889999\n');
       const fixed = sh(REREVIEW_BLOCK);
       assert.strictEqual(fixed.status, 0, shell);
-      assert.strictEqual(fixed.stdout, '', shell);
-      assert.strictEqual(stamps(), 2, `${shell}: a new commit gets a fresh timestamp before the re-review`);
+      assert.strictEqual(fixed.stdout, '', `${shell}: a new commit goes on to the re-review`);
+      const behind = sh(guard[0]);
+      assert.strictEqual(behind.status, 1, `${shell}: after address commits, the old report no longer passes`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
