@@ -546,14 +546,16 @@ const CODE_REVIEW_LANE_PLACEHOLDERS = [
   'LEARNINGS',
   'IMPACT',
   'EXCLUDED_PATHS',
+  'REVIEWED_HEAD',
+  'REVIEWED_BASE',
 ];
 const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
 const LANE_FILES = ['raw', 'findings', 'dropped'].map((kind) => `/tmp/code_review_${kind}.{{ATTEMPT}}.json`);
 const LANE_PROOF_COMMAND =
-  'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}';
+  'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}} --head {{REVIEWED_HEAD}} --base {{REVIEWED_BASE}}';
 const PROMOTED_FINDINGS = '/tmp/agent_findings/code-review.json';
 const STAGE2_PROOF_COMMAND =
-  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
+  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --base "$REVIEWED_BASE" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
 const REVIEWED_HEAD_LINE = 'REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"';
 const QUIET_DISARM = 'agent-review capture disarm >/dev/null 2>&1 || true';
 
@@ -617,7 +619,7 @@ test('reviewer-code-review pins opus and no effort', () => {
   assert.ok(!body.includes('—'), 'new prose uses no em dashes');
 });
 
-test('lane template placeholders are exactly the twelve listed', () => {
+test('lane template placeholders are exactly the fourteen listed', () => {
   const found = new Set([...laneText().matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]));
   assert.deepStrictEqual(
     [...found].sort(),
@@ -625,7 +627,7 @@ test('lane template placeholders are exactly the twelve listed', () => {
     'code-review lane placeholder vocabulary drifted from the documented set',
   );
   const { section, rows } = lanePlaceholderRows();
-  assert.ok(section.includes('fill its twelve placeholders:'), 'the engine doc counts the twelve placeholders');
+  assert.ok(section.includes('fill its fourteen placeholders:'), 'the engine doc counts the fourteen placeholders');
   assert.deepStrictEqual(
     [...rows.keys()].sort(),
     [...CODE_REVIEW_LANE_PLACEHOLDERS].sort(),
@@ -861,8 +863,10 @@ test('lane template lists raw findings the way the check grounds them', () => {
     'For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.',
     'When none of these fits, or the result cannot be used, write `[]` as the raw list anyway,',
     'A web address such as `https://example.com:443` is not a location.',
-    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and is a file in the reviewed commit, by its whole path or by its file name, as in `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the commit has `lib/cart.rb`.',
-    'So a host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not locations.',
+    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and names a file in the reviewed commit, `{{REVIEWED_HEAD}}`, or in the review\'s base commit, `{{REVIEWED_BASE}}`.',
+    'A name with a `.` may be that file\'s name at any depth; a name with no `.` must be the file\'s whole path, at the repository root.',
+    'So `lib/cart.rb:51`, `Makefile:12` when the root has `Makefile`, and `cart.rb:51` when a commit has `lib/cart.rb` are locations, and so is a file the change deletes.',
+    'A host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` or `node:20` are not locations.',
     '`path:0` is a location with no line: its raw `line` is `null`.',
     'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
     'List each such line once, using the first location on it, even when two lines cite the same location and even when a line seems to give only context.',
@@ -1000,7 +1004,9 @@ test('lane template has no REFUTED drop and names both drop reasons', () => {
     '- that line has at least 6 characters besides spaces, so a short line such as `end`, `}`, or `nil` can never be the proof: cite a longer line near it;',
     '- the text right after `path:line` holds that whole line, quoted exactly. It may run on into the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.',
     'So write the quoted code right after `path:line`, and nothing after it.',
-    'The review reads each file as committed, never from your working copy, so quote committed code.',
+    'The review reads each file as committed at `{{REVIEWED_HEAD}}`, never from your working copy, which can hold other code.',
+    'So read the code you quote with `git show {{REVIEWED_HEAD}}:./<path>`, never with the Read tool or from the working copy.',
+    "For lines 16 to 20 of `lib/cart.rb`, run `git show {{REVIEWED_HEAD}}:./lib/cart.rb | sed -n '16,20p'`.",
   ]) {
     assert.ok(dropping.includes(needle), `DROPPING A FINDING must say ${JSON.stringify(needle)}`);
   }
@@ -1040,7 +1046,7 @@ test('lane template runs code-review-proof before its final line', () => {
     '- `stage` is `"lane"`: your files have the problem that `reason` names',
     'Never call the Skill tool again. Fix at most twice; if the check still fails, give the final line anyway.',
     "- `stage` is `\"capture\"`: /code-review's result cannot be used. Reply with the one line `/code-review returned no usable result` and nothing else.",
-    '- `stage` is `"config"`: the review\'s config could not be read, and you cannot fix that. Give the final line below.',
+    '- `stage` is `"config"`: the review\'s config could not be read, the reviewed head or base is not a commit here or its files cannot be listed, and you cannot fix that. Give the final line below.',
     'where `<N>` is `findings.length` in `/tmp/code_review_findings.{{ATTEMPT}}.json`',
   ]) {
     assert.ok(step5.includes(needle), `STEP 5 must say ${JSON.stringify(needle)}`);
@@ -2765,7 +2771,7 @@ test('SKILL.md has no code-review-engine-only prose outside one-line pointers', 
     if (name !== 'Stage 0') assert.ok(skill.includes(ENGINE_POINTER(name)), `SKILL.md points at "${name}"`);
   }
   const moved = [
-    'fill its twelve placeholders:',
+    'fill its fourteen placeholders:',
     '| `{{SCORING_RULES}}`',
     'launch a second Task',
     'agent-review code-review-proof --raw',
@@ -2955,9 +2961,11 @@ function runArmBlock(shell, env, plan) {
       `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\n[ "$1 $2" = "capture arm" ] && echo "armed $4: $6"\nexit 0\n`,
       { mode: 0o755 },
     );
-    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/git.args"\necho "merge-base diff"\n`, {
-      mode: 0o755,
-    });
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\ncase "$1" in\n  diff) echo "merge-base diff" ;;\n  merge-base) echo "mergebase90" ;;\n  rev-parse) echo "localhead1234" ;;\nesac\n`,
+      { mode: 0o755 },
+    );
     writeFileSync(join(dir, 'review_env.sh'), Object.entries(env).map(([k, v]) => `export ${k}="${v}"`).join('\n') + '\n');
     writeFileSync(join(dir, 'review_plan.json'), JSON.stringify(plan));
     writeFileSync(join(dir, 'pr_diff.txt'), 'two-dot diff\n');
@@ -3071,7 +3079,7 @@ test('full PR reviews give the lane a merge-base diff', (t) => {
   assert.ok(armBlock().includes('  git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt\n'));
   for (const shell of availableShells(t)) {
     const full = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } });
-    assert.strictEqual(full.git, 'diff\naaa111...bbb222\n', `${shell}: three dots diff against the merge base`);
+    assert.strictEqual(full.git, 'diff aaa111...bbb222\nmerge-base aaa111 bbb222\n', `${shell}: three dots diff against the merge base`);
     assert.strictEqual(full.diff, 'merge-base diff\n', `${shell}: the merge-base diff is written`);
     assert.ok(full.stdout.includes(`code-review diff: ${full.dir}/code_review_diff.txt\n`), `${shell}: ${full.stdout}`);
     assert.ok(full.env.includes(`CODE_REVIEW_DIFF="${full.dir}/code_review_diff.txt"`), `${shell}: the diff path is kept`);
@@ -3081,17 +3089,58 @@ test('full PR reviews give the lane a merge-base diff', (t) => {
       { ...FULL_PR_ENV, INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
       { engine: {} },
     );
-    assert.strictEqual(incremental.git, null, `${shell}: an incremental review keeps the reviewed range`);
+    assert.strictEqual(incremental.git, null, `${shell}: an incremental review keeps the reviewed range and runs no git`);
     assert.ok(incremental.stdout.includes(`code-review diff: ${incremental.dir}/pr_diff.txt\n`), `${shell}: ${incremental.stdout}`);
 
     const noPr = runArmBlock(
       shell,
-      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
       { engine: {} },
     );
-    assert.strictEqual(noPr.git, null, `${shell}: a range review keeps the reviewed range`);
+    assert.strictEqual(noPr.git, 'rev-parse HEAD\n', `${shell}: a range review keeps the reviewed range and reads only the local HEAD`);
     assert.ok(noPr.stdout.includes(`code-review diff: ${noPr.dir}/pr_diff.txt\n`), `${shell}: ${noPr.stdout}`);
   }
+});
+
+test('Stage 1 saves the reviewed head and base that the lane and Stage 2 both check', (t) => {
+  assert.ok(armBlock().split('\n').includes(REVIEWED_HEAD_LINE), 'the head is HEAD_REF, or the local HEAD when there is no PR head');
+  const cases = [
+    ['a full PR review', FULL_PR_ENV, 'bbb222', 'mergebase90'],
+    [
+      'an incremental review',
+      { ...FULL_PR_ENV, INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', RANGE: 'ccc333..bbb222', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
+      'bbb222',
+      'ccc333',
+    ],
+    ['a PR with no head or base ref', { ...FULL_PR_ENV, BASE_REF: '', HEAD_REF: '', RANGE: 'eee555..HEAD' }, 'localhead1234', 'eee555'],
+    [
+      'a local range review',
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      'localhead1234',
+      'ddd444',
+    ],
+  ];
+  for (const shell of availableShells(t)) {
+    for (const [label, env, head, base] of cases) {
+      const run = runArmBlock(shell, env, { engine: {} });
+      assert.strictEqual(run.status, 0, `${shell}, ${label}: ${run.stdout}`);
+      assert.ok(run.env.includes(`export REVIEWED_HEAD="${head}" REVIEWED_BASE="${base}"\n`), `${shell}, ${label}: ${run.env}`);
+      assert.ok(run.stdout.includes(`code-review head: ${head}\ncode-review base: ${base}\n`), `${shell}, ${label}: ${run.stdout}`);
+    }
+    const noBase = runArmBlock(shell, { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: '', CODE_REVIEW_TARGET: 'x' }, { engine: {} });
+    assert.notStrictEqual(noBase.status, 0, `${shell}: no base, no arm`);
+    assert.strictEqual(noBase.agentReview, null, `${shell}: capture is never armed without a base`);
+    assert.ok(noBase.stdout.includes('❌ Could not work out the reviewed head and base commits.'), `${shell}: ${noBase.stdout}`);
+  }
+  const { rows } = lanePlaceholderRows();
+  assert.strictEqual(
+    rows.get('REVIEWED_HEAD'),
+    "`$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR. Stage 2's proof reads the same saved value.",
+  );
+  assert.strictEqual(
+    rows.get('REVIEWED_BASE'),
+    "`$REVIEWED_BASE`, the value the block above prints as `code-review base:`: the commit the lane's diff starts from. That is the merge base of `BASE_REF` and `HEAD_REF` for a full PR review, and the start of `RANGE` otherwise (`LAST_REVIEWED` for an incremental review). Stage 2's proof reads the same saved value.",
+  );
 });
 
 test("Stage 2 waits for the lane's next final line after an early handback", () => {
@@ -3127,9 +3176,9 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
   const stage2 = engineSection('Stage 2: checking the code-review lane');
   const flat = flatText(stage2);
   assert.strictEqual(
-    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}').replace(' --head "$REVIEWED_HEAD"', ''),
+    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}').replace('"$REVIEWED_HEAD"', '{{REVIEWED_HEAD}}').replace('"$REVIEWED_BASE"', '{{REVIEWED_BASE}}'),
     `${LANE_PROOF_COMMAND} --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`,
-    "Stage 2 runs the lane's own check on the same attempt's files",
+    "Stage 2 runs the lane's own check on the same attempt's files, at the same head and base",
   );
   assert.ok(bashBlocks(stage2).includes(STAGE2_PROOF_COMMAND));
   for (const needle of [
@@ -3139,7 +3188,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     '`stage` is `"capture"`: relaunch with a new capture (step 3).',
     'A reply that starts with `/code-review did not finish` is that failure, whatever follows it.',
     '`/code-review did not finish: <reason>`, or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
-    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head is not a commit here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
+    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head or base is not a commit here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
     '**With the same capture.** Do not re-arm',
     '**With a new capture.** Re-arm with this block first, which clears the old result',
   ]) {
@@ -3202,13 +3251,13 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
   const proofBlocks = bashBlockList(stage2).filter((b) => b.includes('agent-review code-review-proof'));
   assert.deepStrictEqual(
     proofBlocks,
-    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${REVIEWED_HEAD_LINE}\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
-    'the proof reads the attempt Stage 1 or the relaunch saved, at the reviewed head',
+    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
+    'the proof reads the attempt Stage 1 or the relaunch saved, at the head and base Stage 1 saved',
   );
   assert.ok(!/:\+\s*--head/.test(doc), 'the head is passed plainly: zsh drops a ${X:+--head ...} expansion');
   assert.ok(
-    flatText(stage2).includes("The proof reads each disproof's file as committed at the reviewed head: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR."),
-    'Stage 2 says which commit the proof reads',
+    flatText(stage2).includes("The proof reads each disproof's file as committed at the reviewed head, and takes the names of files whose path has no `/` from that commit and from the review's base commit. Both come from `/tmp/review_env.sh`, where Stage 1 saved them as `REVIEWED_HEAD` and `REVIEWED_BASE`, the same values the lane's own check used."),
+    'Stage 2 says which commits the proof reads',
   );
   assert.ok(!/^ATTEMPT="\$REVIEW_ID-/m.test(doc) && !doc.includes('# ←'), 'no block asks for a hand-edited attempt id');
   assert.ok(!/\bcp\b[^\n]*agent_findings/.test(doc), 'consensus reads the file the proof promoted, never a copy');
@@ -3224,8 +3273,8 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       mkdirSync(join(dir, 'bin'));
       mkdirSync(join(dir, 'agent_findings'));
       writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\necho '{"ok":true}'\n`, { mode: 0o755 });
-      writeFileSync(join(dir, 'bin', 'git'), '#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && echo localhead1234\n', { mode: 0o755 });
-      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="prhead5678"\n');
+      writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="prhead5678" REVIEWED_HEAD="prhead5678" REVIEWED_BASE="mergebase90"\n');
       writeFileSync(join(dir, 'agent_findings', 'code-review.json'), '{"findings":[]}');
       const sh = (script) =>
         require('node:child_process').spawnSync(shell, ['-c', at(script)], {
@@ -3238,7 +3287,8 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       let args = argsOf();
       assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-1.json`, `${shell}: attempt 1`);
       assert.strictEqual(args[args.indexOf('--promote') + 1], `${dir}/agent_findings/code-review.json`, `${shell}: promotes for consensus`);
-      assert.strictEqual(args[args.indexOf('--head') + 1], 'prhead5678', `${shell}: the PR head`);
+      assert.strictEqual(args[args.indexOf('--head') + 1], 'prhead5678', `${shell}: the reviewed head`);
+      assert.strictEqual(args[args.indexOf('--base') + 1], 'mergebase90', `${shell}: the reviewed base`);
 
       const relaunched = sh(RELAUNCH_ATTEMPT_BLOCK);
       assert.strictEqual(relaunched.status, 0, shell);
@@ -3248,10 +3298,12 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       args = argsOf();
       assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-2.json`, `${shell}: attempt 2`);
 
-      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF=""\n');
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="" REVIEWED_HEAD="localhead1234" REVIEWED_BASE="rangestart5"\n');
       assert.strictEqual(sh(proofBlocks[0]).status, 0, shell);
       args = argsOf();
-      assert.strictEqual(args[args.indexOf('--head') + 1], 'localhead1234', `${shell}: with no PR head, the local HEAD`);
+      assert.strictEqual(args[args.indexOf('--head') + 1], 'localhead1234', `${shell}: the head Stage 1 saved, not a fresh HEAD`);
+      assert.strictEqual(args[args.indexOf('--base') + 1], 'rangestart5', `${shell}: the base Stage 1 saved`);
+      assert.ok(!existsSync(join(dir, 'git.args')), `${shell}: the proof block works out no commit of its own`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
