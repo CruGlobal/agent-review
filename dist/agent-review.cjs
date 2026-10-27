@@ -18745,20 +18745,6 @@ var require_reportState = __commonJS({
         (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line) && similarWording(entry.message, finding.message)
       );
     }
-    function raiseEntry(entry, finding) {
-      const raised = {
-        ...entry,
-        severity: finding.severity,
-        file: finding.file,
-        line: finding.line,
-        message: finding.message
-      };
-      for (const field of ["confidence", "evidence"]) {
-        if (finding[field]) raised[field] = finding[field];
-        else delete raised[field];
-      }
-      return raised;
-    }
     function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
       const previous = cleanPrevious(previousInput || []);
       const bySignature = new Map(previous.map((entry, i) => [entry.signature, i]));
@@ -18773,7 +18759,7 @@ var require_reportState = __commonJS({
         const at = bySignature.get(finding.signature);
         if (at !== void 0) {
           if (merged[at].status === "open" && finding.severity > merged[at].severity) {
-            merged[at] = raiseEntry(merged[at], finding);
+            merged[at] = { n: merged[at].n, ...finding, status: "open" };
           }
           continue;
         }

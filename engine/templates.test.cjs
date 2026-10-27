@@ -2666,7 +2666,7 @@ test('the capture spec records that PR #35 closes the default-engine averaging f
     'a 7+ that survives its lane\'s caps and the blocker bar keeps its score',
     'two 7+ findings group at the higher score',
     'a group below 7 takes the longest trimmed evidence',
-    'the entry takes the new severity, file, line, message, confidence, and evidence',
+    'the entry becomes the new finding, cleaned like any new finding, and keeps only its number and its open status',
     'Dismissed and fixed entries never change.',
   ]) {
     assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);

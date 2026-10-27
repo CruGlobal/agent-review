@@ -42,16 +42,28 @@ test('incremental ledger preserves prior state and appends only new signatures',
   assert.equal(ledger[1].signature, 'sig-2');
 });
 
+const averaged = (over = {}) => ({
+  ...finding({
+    id: 'old-id',
+    severity: 6,
+    line: 12,
+    confidence: 'Medium',
+    evidence: 'averaged with a standards 4',
+    recommendation: 'the averaged group\'s advice',
+    fix: 'the averaged group\'s fix',
+    agents: 'security,standards',
+    needsHumanReview: true,
+    ...over,
+  }),
+  status: 'open',
+});
+
 test('a finding that comes back higher raises its open entry, which then blocks', () => {
-  const previous = [
-    { n: 1, ...finding({ severity: 6, line: 12, confidence: 'Medium', evidence: 'averaged with a standards 4' }), status: 'open' },
-  ];
-  const ledger = mergeLedger(previous, [finding({ severity: 8, line: 14, evidence: 'request reaches line 14 unchecked' })]);
+  const previous = [{ n: 1, ...averaged() }];
+  const next = finding({ id: 'new-id', severity: 8, line: 14, evidence: 'request reaches line 14 unchecked', recommendation: 'authorize the record' });
+  const ledger = mergeLedger(previous, [next]);
   assert.equal(ledger.length, 1);
-  assert.deepEqual(
-    [ledger[0].n, ledger[0].status, ledger[0].severity, ledger[0].line, ledger[0].confidence, ledger[0].evidence],
-    [1, 'open', 8, 14, 'High', 'request reaches line 14 unchecked'],
-  );
+  assert.deepEqual(ledger, [{ ...mergeLedger([], [next])[0], n: 1 }], 'the raised entry is the new finding under the old number');
   const status = buildStatus({ ledger, plan: { risk: { level: 'LOW' } }, safety: { irreversible: false, reasons: [] } });
   assert.equal(status.openBlockers, 1);
   assert.equal(status.pass, false);
@@ -73,13 +85,14 @@ test('a raised entry takes the new finding\'s file, line, message and evidence a
   );
 });
 
-test('a raise below 7 carries only the fields the new finding has', () => {
-  const previous = [{ n: 2, ...finding({ severity: 3, line: 5, confidence: 'Low', evidence: 'old trace' }), status: 'open' }];
-  const ledger = mergeLedger(previous, [finding({ severity: 6, line: null, confidence: undefined, evidence: undefined })]);
+test('a raised entry keeps nothing from the old entry but its number', () => {
+  const previous = [{ n: 2, ...averaged({ severity: 3, line: 5 }) }];
+  const ledger = mergeLedger(previous, [finding({ id: undefined, severity: 6, line: null, confidence: undefined, evidence: undefined })]);
   assert.equal(ledger.length, 1);
-  assert.deepEqual([ledger[0].n, ledger[0].severity, ledger[0].line], [2, 6, null]);
-  assert.equal('confidence' in ledger[0], false);
-  assert.equal('evidence' in ledger[0], false);
+  assert.deepEqual([ledger[0].n, ledger[0].status, ledger[0].severity, ledger[0].line, ledger[0].id], [2, 'open', 6, null, '']);
+  for (const field of ['confidence', 'evidence', 'recommendation', 'fix', 'agents', 'needsHumanReview']) {
+    assert.equal(field in ledger[0], false, `${field} comes only from the new finding`);
+  }
 });
 
 test('dismissed and fixed entries never change when their finding comes back higher', () => {
