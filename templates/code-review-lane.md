@@ -119,10 +119,14 @@ Find the entries this way:
    whole number above 0 gives `null`.
 2. Finding lines. Otherwise, every line of the result that cites a location is one raw finding.
    A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or
-   has no `/` and is a file in the reviewed commit, by its whole path or by its file name, as in
-   `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the commit has `lib/cart.rb`. So a
-   host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not
-   locations. For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.
+   has no `/` and names a file in the reviewed commit, `{{REVIEWED_HEAD}}`, or in the review's
+   base commit, `{{REVIEWED_BASE}}`. A name with a `.` or a capital letter may be that file's
+   name at any depth; an all-lowercase name with no `.` must be the file's whole path, at the
+   repository root. So `lib/cart.rb:51`, `Dockerfile:3` when a commit has `docker/Dockerfile`,
+   and `cart.rb:51` when a commit has `lib/cart.rb` are locations, and so is a file the change
+   deletes. A host and port such as
+   `api.example.com:443` and an image tag such as `ruby:3.3` or `node:20` are not locations.
+   For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.
    `path:0` is a location with no line: its raw `line` is `null`. A web address such as
    `https://example.com:443` is not a location. Backticks and `*` around a location do not
    matter. This covers bullets, nested bullets, and lines inside a fenced block
@@ -176,7 +180,9 @@ it is there.
 In a block, a line this change adds or changes starts with `+` (not `+++`), and each hunk header
 `@@ -a,b +c,d @@` gives the new file's line numbers, starting at c. Then take the raw findings
 one at a time. Read the lines each one names, plus enough of the code around them to follow its
-failure scenario. Open other files only when the scenario runs through them. To see whether this
+failure scenario. When scoring, read the code you judge at the reviewed commit
+(`git show {{REVIEWED_HEAD}}:./<path>`), not the working copy. Open other files only when the
+scenario runs through them. To see whether this
 change touched one of those files, search {{DIFF_PATH}} for its `diff --git` line; never read the
 whole diff. A finding may have no failure scenario: score it from what the result says about it
 and from the code.
@@ -307,7 +313,10 @@ Drop a raw finding in only two cases:
      the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.
 
    So write the quoted code right after `path:line`, and nothing after it. The review reads each
-   file as committed, never from your working copy, so quote committed code.
+   file as committed at `{{REVIEWED_HEAD}}`, never from your working copy, which can hold other
+   code. So read the code you quote with `git show {{REVIEWED_HEAD}}:./<path>`, never with the
+   Read tool or from the working copy. For lines 16 to 20 of `lib/cart.rb`, run
+   `git show {{REVIEWED_HEAD}}:./lib/cart.rb | sed -n '16,20p'`.
 
 EXCLUDED PATHS (one glob per line, or `none`):
 
@@ -399,7 +408,7 @@ STEP 5. CHECK THE FILES
 Run the review's own check on your three files:
 
 ```bash
-agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}
+agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}} --head {{REVIEWED_HEAD}} --base {{REVIEWED_BASE}}
 ```
 
 It prints one JSON line. Act on its `ok` and `stage`:
@@ -412,8 +421,8 @@ It prints one JSON line. Act on its `ok` and `stage`:
   the Skill tool again. Fix at most twice; if the check still fails, give the final line anyway.
 - `stage` is `"capture"`: /code-review's result cannot be used. Reply with the one line
   `/code-review returned no usable result` and nothing else.
-- `stage` is `"config"`: the review's config could not be read, and you cannot fix that. Give the
-  final line below.
+- `stage` is `"config"`: the review's config could not be read, the reviewed head or base is not a
+  commit here or its files cannot be listed, and you cannot fix that. Give the final line below.
 
 When you are done, your final message must be exactly one line:
 

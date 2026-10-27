@@ -1,27 +1,37 @@
 #!/usr/bin/env node
 'use strict';
 // The plugin hooks run this on every Skill call and every subagent stop in every session, so it
-// must not load the bundle until an arm file exists. The dir rule must stay the same as
-// captureDir() in engine/captureHook.cjs.
-const { existsSync } = require('node:fs');
+// must not load the bundle unless the arm file holds a live arm. The dir rule must stay the same
+// as captureDir() in engine/captureHook.cjs.
+const { readFileSync } = require('node:fs');
 const { join } = require('node:path');
 
 const ARM_FILE = 'agent_review_capture.json';
+// Must equal ARM_MAX_AGE_SECONDS in engine/captureHook.cjs; a test checks it. This file cannot
+// require the engine without loading it.
+const ARM_MAX_AGE_SECONDS = 21600;
 
 function hookCaptureDir(env = process.env) {
   return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
 }
 
-function armFileExists() {
+function armIsLive(nowSeconds = Math.floor(Date.now() / 1000)) {
   try {
-    return existsSync(join(hookCaptureDir(), ARM_FILE));
+    const arm = JSON.parse(readFileSync(join(hookCaptureDir(), ARM_FILE), 'utf8'));
+    return (
+      arm !== null &&
+      typeof arm === 'object' &&
+      arm.armed === true &&
+      Number.isFinite(arm.created) &&
+      nowSeconds - arm.created <= ARM_MAX_AGE_SECONDS
+    );
   } catch {
     return false;
   }
 }
 
 if (require.main === module) {
-  if (!armFileExists()) process.exit(0);
+  if (!armIsLive()) process.exit(0);
   process.argv.splice(2, 0, 'hook');
   try {
     require('../dist/agent-review.cjs');
@@ -30,4 +40,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { ARM_FILE, hookCaptureDir };
+module.exports = { ARM_FILE, ARM_MAX_AGE_SECONDS, hookCaptureDir };

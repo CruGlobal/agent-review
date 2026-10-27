@@ -17,6 +17,7 @@ const CAPTURE_SOURCE = 'agent-review-capture-hook';
 
 const SKILL_HEADER = new RegExp(`^\\s*Skill "${CODE_REVIEW_SKILL}" completed`);
 const RESULT_LINE_WITHIN = 3;
+const RESULT_LABEL = 'Result:';
 
 function isObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -50,14 +51,21 @@ function armedState(arm, nowSeconds) {
   return arm;
 }
 
-// A Result: line anywhere but right below the Skill tool's own header is part of /code-review's text.
+// The Skill tool's header is stripped only when its Result: line follows it with nothing but blank
+// lines between; any other Result: line is part of /code-review's text, and so is everything above
+// it. Text after the label on that line is the start of the result.
 function stripSkillHeader(text) {
   const lines = text.split('\n');
   const header = lines.findIndex((line) => line.trim() !== '');
   if (header < 0 || !SKILL_HEADER.test(lines[header])) return text;
   const last = Math.min(header + RESULT_LINE_WITHIN, lines.length - 1);
   for (let i = header + 1; i <= last; i++) {
-    if (lines[i].trim() === 'Result:') return lines.slice(i + 1).join('\n');
+    const line = lines[i].trim();
+    if (line === '') continue;
+    if (!line.startsWith(RESULT_LABEL)) return text;
+    const first = line.slice(RESULT_LABEL.length).trim();
+    const rest = lines.slice(i + 1);
+    return (first === '' ? rest : [first, ...rest]).join('\n');
   }
   return text;
 }

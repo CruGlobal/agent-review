@@ -13,8 +13,9 @@ const {
   chmodSync,
   symlinkSync,
   lstatSync,
+  realpathSync,
 } = require('node:fs');
-const { join, relative } = require('node:path');
+const { join, relative, dirname } = require('node:path');
 const os = require('node:os');
 const {
   main,
@@ -927,7 +928,7 @@ test('startup notes leftover CI files when any of the three CI workflows remains
   }
 });
 
-const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--promote <f>\]\n$/;
+const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--base <sha>\] \[--promote <f>\]\n$/;
 
 // Writes the lane files into dir and the capture into a private dir under it, which the
 // command reads through AGENT_REVIEW_CAPTURE_DIR.
@@ -988,7 +989,7 @@ test('code-review-proof exits 1 with a usage line when a flag is missing, and re
       assert.equal(withFlag.code, 1);
       assert.match(withFlag.s, PROOF_USAGE, 'the capture path is never accepted from the command line');
     });
-    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--promote <f>\] {3}/m);
+    assert.match(run(['help']).s, /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--base <sha>\] \[--promote <f>\] {3}/m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1174,7 +1175,7 @@ test('code-review-proof lists --promote in its usage and needs a value for it', 
     assert.match(r.s, PROOF_USAGE);
     assert.match(
       run(['help']).s,
-      /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--promote <f>\] {3}.*--promote/m,
+      /^ {2}code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--base <sha>\] \[--promote <f>\] {3}.*--promote/m,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1270,6 +1271,115 @@ test('code-review-proof reads root-level file names at --head, not from the loca
   }
 });
 
+function withEnv(vars, fn) {
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test('code-review-proof reads no-slash names at --base too, so a finding on a root file the PR deleted must be claimed', () => {
+  const { parent, root, git } = proofRepo({ 'legacy_helper.rb': 'def format_money; end\n', 'lib/a.rb': 'x = 1\n' });
+  try {
+    const base = git('rev-parse', 'HEAD');
+    git('rm', '-q', 'legacy_helper.rb');
+    git('commit', '-q', '-m', 'drop the helper');
+    const head = git('rev-parse', 'HEAD');
+    const result = '- legacy_helper.rb:40: format_money removed but still called\n';
+    const legacy = { n: 1, file: 'legacy_helper.rb', line: 40, summary: 's' };
+    const f = proofFiles(parent, { raw: [], scored: [], dropped: [], result });
+    const proofWith = (raw, extra) => {
+      writeFileSync(f.raw, JSON.stringify(raw));
+      writeFileSync(f.findings, JSON.stringify(raw.map((entry) => ({ ...PROOF_SCORED[0], raw: entry.n, file: entry.file, line: entry.line }))));
+      return withCaptureDir(f.capDir, () => JSON.parse(run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere', ...extra])).s));
+    };
+    const unclaimed = proofWith([], ['--head', head, '--base', base]);
+    assert.equal(unclaimed.ok, false);
+    assert.equal(unclaimed.stage, 'lane', unclaimed.reason);
+    assert.match(unclaimed.reason, /\(legacy_helper\.rb:40\) is a finding line that no raw entry claims/);
+    const claimed = proofWith([legacy], ['--head', head, '--base', base]);
+    assert.equal(claimed.ok, true, claimed.reason);
+    assert.equal(claimed.mode, 'text');
+    assert.equal(proofWith([], ['--head', head]).stage, 'capture', 'with no --base, the file is not in the head commit');
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof refuses at stage config when --base is not a commit or its files cannot be listed', () => {
+  const { parent, root, git } = proofRepo({ 'old.rb': 'x = 1\n' });
+  try {
+    const base = git('rev-parse', 'HEAD');
+    const baseTree = git('rev-parse', 'HEAD^{tree}');
+    writeFileSync(join(root, 'new.rb'), 'y = 2\n');
+    git('add', 'new.rb');
+    git('commit', '-q', '-m', 'add new.rb');
+    const head = git('rev-parse', 'HEAD');
+    const raw = [{ n: 1, file: 'new.rb', line: 1, summary: 's' }];
+    const f = proofFiles(parent, { raw, scored: [{ ...PROOF_SCORED[0], raw: 1, file: 'new.rb', line: 1 }], dropped: [], result: '- new.rb:1 is wrong\n' });
+    const proofAt = (extra) => withCaptureDir(f.capDir, () => run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere', '--head', head, ...extra])));
+    const ok = JSON.parse(proofAt(['--base', base]).s);
+    assert.equal(ok.ok, true, ok.reason);
+    for (const bad of ['not-a-commit', '-x', '', `${base}^{tree}`]) {
+      const r = proofAt(['--base', bad]);
+      assert.equal(r.code, 1, bad);
+      const parsed = JSON.parse(r.s);
+      assert.equal(parsed.stage, 'config', bad);
+      assert.match(parsed.reason, /--base .* is not a commit in /, bad);
+    }
+    const missing = proofAt(['--base']);
+    assert.equal(missing.code, 1);
+    assert.match(missing.s, PROOF_USAGE);
+
+    rmSync(join(root, '.git', 'objects', baseTree.slice(0, 2), baseTree.slice(2)));
+    const unlisted = proofAt(['--base', base]);
+    assert.equal(unlisted.code, 1);
+    const parsed = JSON.parse(unlisted.s);
+    assert.equal(parsed.stage, 'config');
+    assert.match(parsed.reason, /could not list the files of base commit /);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('code-review-proof reads each disproof file with one git cat-file blob call', () => {
+  const cart = Array.from({ length: 20 }, (_, i) => (i === 17 ? '  if (!items) return [];' : `# line ${i + 1}`));
+  const { parent, root, git } = proofRepo({ 'lib/cart.rb': cart.join('\n') + '\n', 'lib/dir/a.rb': 'x = 1\n' });
+  try {
+    const head = git('rev-parse', 'HEAD');
+    const bin = join(parent, 'bin');
+    const log = join(parent, 'git.log');
+    mkdirSync(bin);
+    const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(log)}\nexec ${JSON.stringify(realGit)} "$@"\n`, { mode: 0o755 });
+    const result = 'Result:\n```json\n[{"file":"lib/cart.rb","line":18,"summary":"s"}]\n```\n';
+    const f = proofFiles(parent, { raw: [{ n: 1, file: 'lib/cart.rb', line: 18, summary: 's' }], scored: [], dropped: [], result });
+    const proofWith = (proof) => {
+      writeFileSync(f.dropped, JSON.stringify([{ raw: 1, reason: 'disproved', proof }]));
+      rmSync(log, { force: true });
+      const r = withEnv({ PATH: `${bin}:${process.env.PATH}` }, () =>
+        withCaptureDir(f.capDir, () => JSON.parse(run(proofArgs(f, ['--root', root, '--review-dir', 'nowhere', '--head', head])).s)),
+      );
+      return { r, calls: readFileSync(log, 'utf8').trim().split('\n') };
+    };
+    const passed = proofWith('already handled: lib/cart.rb:18 if (!items) return [];');
+    assert.equal(passed.r.ok, true, passed.r.reason);
+    assert.deepEqual(passed.calls.filter((c) => c.includes('lib/cart.rb')), [`cat-file blob ${head}:./lib/cart.rb`]);
+    const tree = proofWith('lib/dir:1 a.rb a.rb');
+    assert.equal(tree.r.ok, false);
+    assert.match(tree.r.reason, /no file lib\/dir exists/, 'a directory is not a blob');
+    assert.deepEqual(tree.calls.filter((c) => c.includes('lib/dir')), [`cat-file blob ${head}:./lib/dir`]);
+  } finally {
+    rmSync(parent, { recursive: true, force: true });
+  }
+});
+
 test('code-review-proof refuses at stage config when it cannot list the reviewed commit\'s files', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-crproof-nogit-'));
   try {
@@ -1280,7 +1390,10 @@ test('code-review-proof refuses at stage config when it cannot list the reviewed
       dropped: [],
       result: '- lib/cart.rb:1 skips the guard, and setup.py:12 pins an old version\n',
     });
-    const r = withCaptureDir(f.capDir, () => run(proofArgs(f, ['--root', dir, '--review-dir', 'nowhere'])));
+    // The temp dir may sit inside a git work tree; the ceiling keeps git from finding that repo.
+    const r = withEnv({ GIT_CEILING_DIRECTORIES: realpathSync(dirname(dir)) }, () =>
+      withCaptureDir(f.capDir, () => run(proofArgs(f, ['--root', dir, '--review-dir', 'nowhere']))),
+    );
     assert.equal(r.code, 1);
     const parsed = JSON.parse(r.s);
     assert.equal(parsed.ok, false);
@@ -1635,13 +1748,15 @@ const PLUGIN_ROOT = join(__dirname, '..');
 const HOOK_ENTRY = join(PLUGIN_ROOT, 'bin', 'agent-review-hook');
 const BUNDLE = join(PLUGIN_ROOT, 'dist', 'agent-review.cjs');
 
-test('the light hook entry and captureDir agree on the capture dir and the arm file', () => {
-  const { captureDir, CAPTURE_FILES } = require('./captureHook.cjs');
-  const { hookCaptureDir, ARM_FILE } = require(HOOK_ENTRY);
+test('the light hook entry and captureDir agree on the capture dir, the arm file, and the arm age limit', () => {
+  const { captureDir, CAPTURE_FILES, ARM_MAX_AGE_SECONDS } = require('./captureHook.cjs');
+  const hookEntry = require(HOOK_ENTRY);
+  const { hookCaptureDir, ARM_FILE } = hookEntry;
   assert.equal(hookCaptureDir({}), captureDir({}));
   assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }));
   assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }));
   assert.equal(ARM_FILE, CAPTURE_FILES.arm);
+  assert.equal(hookEntry.ARM_MAX_AGE_SECONDS, ARM_MAX_AGE_SECONDS, 'the light entry keeps its own copy of the arm age limit');
 });
 
 // Runs the light entry with a preload that records every module loaded, to see whether the bundle was.
@@ -1674,6 +1789,34 @@ test('the light hook entry exits 0 silently without loading the bundle when noth
       }
     }
     assert.deepEqual(readdirSync(dir), [], 'nothing is written while not armed');
+
+    const { ARM_MAX_AGE_SECONDS } = require('./captureHook.cjs');
+    const now = Math.floor(Date.now() / 1000);
+    const arm = join(dir, 'agent_review_capture.json');
+    for (const [label, text] of [
+      ['a stale arm', JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12', created: now - ARM_MAX_AGE_SECONDS - 60 })],
+      ['armed: false', JSON.stringify({ armed: false, run_id: 'r1', args: 'xhigh 12', created: now })],
+      ['armed: "true"', JSON.stringify({ armed: 'true', run_id: 'r1', args: 'xhigh 12', created: now })],
+      ['no created time', JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12' })],
+      ['a string created time', JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12', created: String(now) })],
+      ['malformed JSON', '{"armed": true,'],
+      ['JSON null', 'null'],
+      ['an empty file', ''],
+    ]) {
+      writeFileSync(arm, text);
+      for (const [name, payload] of [['post-skill', HEADLESS_SKILL], ['subagent-stop', FORK_STOP]]) {
+        const r = spawnHookEntry(name, { dir, input: JSON.stringify(payload) });
+        assert.deepEqual(r, { ...QUIET, bundleLoaded: false }, `${label}: ${name}`);
+      }
+    }
+    rmSync(arm);
+    mkdirSync(arm);
+    assert.deepEqual(spawnHookEntry('post-skill', { dir, input: JSON.stringify(HEADLESS_SKILL) }), { ...QUIET, bundleLoaded: false }, 'an unreadable arm file');
+    rmSync(arm, { recursive: true });
+    assert.deepEqual(readdirSync(dir), [], 'nothing is written for a stale or disarmed arm');
+
+    writeFileSync(arm, JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12', created: now - ARM_MAX_AGE_SECONDS + 60 }));
+    assert.deepEqual(spawnHookEntry('subagent-stop', { dir, input: JSON.stringify(FORK_STOP) }), { ...QUIET, bundleLoaded: true }, 'an arm inside the age limit hands off');
 
     armCapture(dir);
     const armed = spawnHookEntry('subagent-stop', { dir, input: JSON.stringify(FORK_STOP) });
