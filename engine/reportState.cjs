@@ -131,9 +131,26 @@ function matchesEarlierSpot(finding, previous) {
   );
 }
 
+// The raised entry must describe the finding that blocks, so it takes that finding's
+// anchor and proof whole, dropping any field the new finding lacks.
+function raiseEntry(entry, finding) {
+  const raised = {
+    ...entry,
+    severity: finding.severity,
+    file: finding.file,
+    line: finding.line,
+    message: finding.message,
+  };
+  for (const field of ['confidence', 'evidence']) {
+    if (finding[field]) raised[field] = finding[field];
+    else delete raised[field];
+  }
+  return raised;
+}
+
 function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
   const previous = cleanPrevious(previousInput || []);
-  const seen = new Set(previous.map((entry) => entry.signature));
+  const bySignature = new Map(previous.map((entry, i) => [entry.signature, i]));
   let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
   const additions = findingList(findingsInput)
     .map((finding) =>
@@ -148,9 +165,16 @@ function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation 
     );
   const merged = [...previous];
   for (const finding of additions) {
-    if (seen.has(finding.signature)) continue;
+    const at = bySignature.get(finding.signature);
+    if (at !== undefined) {
+      // Only an open entry moves, and only up. Dismissed and fixed entries never change.
+      if (merged[at].status === 'open' && finding.severity > merged[at].severity) {
+        merged[at] = raiseEntry(merged[at], finding);
+      }
+      continue;
+    }
     if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
-    seen.add(finding.signature);
+    bySignature.set(finding.signature, merged.length);
     merged.push({ n: next++, ...finding, status: 'open' });
   }
   return merged;
