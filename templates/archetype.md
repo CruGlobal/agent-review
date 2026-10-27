@@ -71,26 +71,33 @@ Do not write a markdown report. Write your findings to
 plus `overallConfidence` is a complete report on its own. Every entry's `agent` field must equal
 `{{AGENT_ID}}`.
 
-Write the file with `node -e` and `JSON.stringify` — never hand-escaped JSON. Evidence often
-quotes a hunk excerpt (embedded quotes, backslashes, newlines), and hand-escaping that into a
-JSON string reliably breaks; let `JSON.stringify` do the escaping instead:
+Write the file with a quoted `node - <<'EOF'` heredoc and `JSON.stringify`, never hand-escaped JSON.
+`JSON.stringify` writes the JSON, but you still write the JavaScript strings it is given. Evidence often quotes a hunk excerpt (embedded quotes, backslashes, newlines), so escape it as
+JavaScript string text, not as JSON:
 
 ```bash
-node -e '
+node - <<'EOF'
 const fs = require("fs");
 const out = {
   findings: [
     { agent: "{{AGENT_ID}}", category: "security", severity: 8, file: "app/models/user.rb",
       line: 42, message: "missing null check before save", confidence: "High",
-      evidence: "params[:name] used directly in user.save without validation",
+      evidence: "params[:name] is used in user.save without validation; lib/num.js:7 if (!/^\\d+$/.test(s)) return nil; and save(\"x\") run on the same path",
       recommendation: "add a presence check before save", fix: "add validates :name, presence: true" },
   ],
   questions: [],
   overallConfidence: "High",
 };
 fs.writeFileSync("/tmp/agent_findings/{{AGENT_ID}}.json", JSON.stringify(out, null, 2));
-'
+EOF
 ```
+
+The quoted `'EOF'` keeps the shell from changing anything, so a `'` in your text needs no rewrite,
+but the script is still JavaScript. Use double quotes for every JS string, never backticks: a
+backtick string runs any `${...}` in the code you quote. And inside a JS string, write a
+backslash as `\\` and a double quote as `\"`, and a line break as `\n`. So quoted code such as
+`/^\d+$/` goes in as `"/^\\d+$/"`. A single backslash corrupts the text (`\d` becomes `d`) or
+throws a SyntaxError (`\x`, `\u`), and then the file is never written.
 
 Keep every finding tight — the file states it once, so write it once, well:
 - message: ≤ 2 sentences naming the defect and its consequence
