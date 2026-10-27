@@ -18881,6 +18881,7 @@ var require_captureHook = __commonJS({
     var CAPTURE_SOURCE = "agent-review-capture-hook";
     var SKILL_HEADER = new RegExp(`^\\s*Skill "${CODE_REVIEW_SKILL}" completed`);
     var RESULT_LINE_WITHIN = 3;
+    var RESULT_LABEL = "Result:";
     function isObject(v) {
       return v !== null && typeof v === "object" && !Array.isArray(v);
     }
@@ -18912,7 +18913,11 @@ var require_captureHook = __commonJS({
       if (header < 0 || !SKILL_HEADER.test(lines[header])) return text;
       const last = Math.min(header + RESULT_LINE_WITHIN, lines.length - 1);
       for (let i = header + 1; i <= last; i++) {
-        if (lines[i].trim() === "Result:") return lines.slice(i + 1).join("\n");
+        const line = lines[i].trim();
+        if (!line.startsWith(RESULT_LABEL)) continue;
+        const first = line.slice(RESULT_LABEL.length).trim();
+        const rest = lines.slice(i + 1);
+        return (first === "" ? rest : [first, ...rest]).join("\n");
       }
       return text;
     }

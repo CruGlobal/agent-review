@@ -1748,13 +1748,15 @@ const PLUGIN_ROOT = join(__dirname, '..');
 const HOOK_ENTRY = join(PLUGIN_ROOT, 'bin', 'agent-review-hook');
 const BUNDLE = join(PLUGIN_ROOT, 'dist', 'agent-review.cjs');
 
-test('the light hook entry and captureDir agree on the capture dir and the arm file', () => {
-  const { captureDir, CAPTURE_FILES } = require('./captureHook.cjs');
-  const { hookCaptureDir, ARM_FILE } = require(HOOK_ENTRY);
+test('the light hook entry and captureDir agree on the capture dir, the arm file, and the arm age limit', () => {
+  const { captureDir, CAPTURE_FILES, ARM_MAX_AGE_SECONDS } = require('./captureHook.cjs');
+  const hookEntry = require(HOOK_ENTRY);
+  const { hookCaptureDir, ARM_FILE } = hookEntry;
   assert.equal(hookCaptureDir({}), captureDir({}));
   assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '/x/y' }));
   assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }));
   assert.equal(ARM_FILE, CAPTURE_FILES.arm);
+  assert.equal(hookEntry.ARM_MAX_AGE_SECONDS, ARM_MAX_AGE_SECONDS, 'the light entry keeps its own copy of the arm age limit');
 });
 
 // Runs the light entry with a preload that records every module loaded, to see whether the bundle was.
@@ -1787,6 +1789,34 @@ test('the light hook entry exits 0 silently without loading the bundle when noth
       }
     }
     assert.deepEqual(readdirSync(dir), [], 'nothing is written while not armed');
+
+    const { ARM_MAX_AGE_SECONDS } = require('./captureHook.cjs');
+    const now = Math.floor(Date.now() / 1000);
+    const arm = join(dir, 'agent_review_capture.json');
+    for (const [label, text] of [
+      ['a stale arm', JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12', created: now - ARM_MAX_AGE_SECONDS - 60 })],
+      ['armed: false', JSON.stringify({ armed: false, run_id: 'r1', args: 'xhigh 12', created: now })],
+      ['armed: "true"', JSON.stringify({ armed: 'true', run_id: 'r1', args: 'xhigh 12', created: now })],
+      ['no created time', JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12' })],
+      ['a string created time', JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12', created: String(now) })],
+      ['malformed JSON', '{"armed": true,'],
+      ['JSON null', 'null'],
+      ['an empty file', ''],
+    ]) {
+      writeFileSync(arm, text);
+      for (const [name, payload] of [['post-skill', HEADLESS_SKILL], ['subagent-stop', FORK_STOP]]) {
+        const r = spawnHookEntry(name, { dir, input: JSON.stringify(payload) });
+        assert.deepEqual(r, { ...QUIET, bundleLoaded: false }, `${label}: ${name}`);
+      }
+    }
+    rmSync(arm);
+    mkdirSync(arm);
+    assert.deepEqual(spawnHookEntry('post-skill', { dir, input: JSON.stringify(HEADLESS_SKILL) }), { ...QUIET, bundleLoaded: false }, 'an unreadable arm file');
+    rmSync(arm, { recursive: true });
+    assert.deepEqual(readdirSync(dir), [], 'nothing is written for a stale or disarmed arm');
+
+    writeFileSync(arm, JSON.stringify({ armed: true, run_id: 'r1', args: 'xhigh 12', created: now - ARM_MAX_AGE_SECONDS + 60 }));
+    assert.deepEqual(spawnHookEntry('subagent-stop', { dir, input: JSON.stringify(FORK_STOP) }), { ...QUIET, bundleLoaded: true }, 'an arm inside the age limit hands off');
 
     armCapture(dir);
     const armed = spawnHookEntry('subagent-stop', { dir, input: JSON.stringify(FORK_STOP) });

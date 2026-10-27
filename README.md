@@ -482,7 +482,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `agents/` | Thin per-tier subagent shells (`reviewer-opus`/`-sonnet`/`-haiku`) that the review skill's launch table selects by plan-resolved tier |
 | `engine/` | Node engine: risk scoring, agent selection, import-graph index, learnings store, approval rule, address grammar, CLI commands, unit tests (`*.test.cjs`) |
 | `bin/agent-review` | Thin shim that requires the bundled `dist/agent-review.cjs` |
-| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file exists, then hands the hook to `dist/agent-review.cjs` |
+| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
 | `schema/config.schema.json` | JSON Schema for `.claude/review/config.yml` |
 | `templates/` | Files `/agent-review:init` instantiates into a consuming repo (`config.yml` skeleton, `rules/*.md` starters, `settings-snippet.json`, `workflows/agent-review*.yml`), plus `archetype.md` and `report.md` — the agent-prompt and report skeletons ship inside the plugin and are read directly by `skills/review/SKILL.md`, never copied out |

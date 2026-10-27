@@ -2708,7 +2708,7 @@ test('README names the light hook entry in the repo layout', () => {
     'the hooks row names the light entry',
   );
   assert.ok(
-    layout.includes('| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file exists, then hands the hook to `dist/agent-review.cjs` |'),
+    layout.includes('| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |'),
     'the bin rows list the light entry',
   );
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
