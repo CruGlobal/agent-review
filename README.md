@@ -78,12 +78,18 @@ approval has to come from an account the branch rules trust. So:
 - the repo setting "Allow GitHub Actions to create and approve pull requests" is off
 - the `agent-review-approve.yml` workflow is not on the default branch yet
 
-When reviewers flag the same spot, their scores are averaged, with one exception: a 7 or more
-from any reviewer keeps its score, on every engine. Every 7 or more has already shown concrete
-evidence, so a lower score from another reviewer cannot pull it below the blocker line.
-
 The same rules apply when the review ran in CI instead of your terminal, and when you fix or
 dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]: reason`).
+
+When reviewers flag the same spot, their findings are combined into one and the scores are
+averaged, with two exceptions. A 7 or more keeps its score when it is combined with lower scores,
+on every engine. This only counts for a score that is still 7 or more after its reviewer's caps
+and the blocker bar: a line, High confidence, and evidence. When two findings of 7 or more are
+combined, the group takes the higher score.
+
+A later review can raise an earlier finding. If the same finding comes back with a higher score
+and the earlier one is still open, it keeps its number and moves up to the new score, with the
+new file, line, and evidence. A dismissed or fixed finding never changes.
 
 ## Set up a repo (once)
 

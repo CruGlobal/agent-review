@@ -2630,6 +2630,50 @@ test('README and the spec record the third /code-review round', () => {
   assert.ok(!round3.includes('\u2014'), 'new prose uses no em dashes');
 });
 
+test('README states the merge scoring rule after the approval rules it follows', () => {
+  const readme = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  assert.ok(
+    readme.includes('- the `agent-review-approve.yml` workflow is not on the default branch yet\n\nThe same rules apply when the review ran in CI'),
+    '"The same rules" follows the approval-conditions list it refers to',
+  );
+  const section = readme.slice(readme.indexOf('The same rules apply when the review ran in CI'), readme.indexOf('## Set up a repo (once)'));
+  const flat = section.replace(/\s+/g, ' ');
+  for (const needle of [
+    'A 7 or more keeps its score when it is combined with lower scores, on every engine.',
+    "This only counts for a score that is still 7 or more after its reviewer's caps and the blocker bar: a line, High confidence, and evidence.",
+    'When two findings of 7 or more are combined, the group takes the higher score.',
+    'If the same finding comes back with a higher score and the earlier one is still open, it keeps its number and moves up to the new score, with the new file, line, and evidence.',
+    'A dismissed or fixed finding never changes.',
+  ]) {
+    assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
+  }
+  const all = readme.replace(/\s+/g, ' ');
+  for (const stale of ['a 7 or more from any reviewer keeps its score, on every engine', 'Every 7 or more has already shown concrete evidence']) {
+    assert.ok(!all.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
+  }
+  assert.ok(!section.includes('\u2014'), 'new prose uses no em dashes');
+});
+
+test('the capture spec records that PR #35 closes the default-engine averaging follow-up', () => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const followUps = spec.slice(spec.indexOf('## Follow-ups'), spec.indexOf('## Calls made after the builder check'));
+  const start = followUps.indexOf('**Amendment, 2026-10-27 (PR #35).**');
+  assert.notStrictEqual(start, -1, 'the Follow-ups section has a dated PR #35 amendment');
+  const amendment = followUps.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+  for (const needle of [
+    'PR #35 does the default-engine blocker averaging follow-up',
+    'the Non-goals line that keeps the averaging unchanged and the Follow-ups entry for it are done',
+    'a 7+ that survives its lane\'s caps and the blocker bar keeps its score',
+    'two 7+ findings group at the higher score',
+    'a group below 7 takes the longest trimmed evidence',
+    'the entry takes the new severity, file, line, message, confidence, and evidence',
+    'Dismissed and fixed entries never change.',
+  ]) {
+    assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('\u2014'), 'new prose uses no em dashes');
+});
+
 test('the review skill matches ledger suggestions by location only under the code-review engine', () => {
   const usage = execFileSync(process.execPath, [join(ROOT, 'bin/agent-review'), 'help'], { encoding: 'utf8' });
   const ledgerUsage = usage.split('\n').find((line) => line.trim().startsWith('ledger '));
