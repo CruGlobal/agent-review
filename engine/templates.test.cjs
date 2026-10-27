@@ -2642,13 +2642,18 @@ test('README states the merge scoring rule after the approval rules it follows',
     'A 7 or more keeps its score when it is combined with lower scores, on every engine.',
     "This only counts for a score that is still 7 or more after its reviewer's caps and the blocker bar: a line, High confidence, and evidence.",
     'When two findings of 7 or more are combined, the group takes the higher score.',
-    'If the same finding comes back with a higher score and the earlier one is still open, it keeps its number and moves up to the new score, with the new file, line, and evidence.',
+    'If the same finding comes back with a higher score and the earlier one is still open, the new finding replaces it and keeps only its number.',
+    'The score, file, line, message, evidence, and everything else come from the new finding.',
     'A dismissed or fixed finding never changes.',
   ]) {
     assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
   }
   const all = readme.replace(/\s+/g, ' ');
-  for (const stale of ['a 7 or more from any reviewer keeps its score, on every engine', 'Every 7 or more has already shown concrete evidence']) {
+  for (const stale of [
+    'a 7 or more from any reviewer keeps its score, on every engine',
+    'Every 7 or more has already shown concrete evidence',
+    'moves up to the new score',
+  ]) {
     assert.ok(!all.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
   }
   assert.ok(!section.includes('\u2014'), 'new prose uses no em dashes');

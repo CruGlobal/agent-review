@@ -147,18 +147,23 @@ function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation 
         a.message.localeCompare(b.message),
     );
   const merged = [...previous];
+  const unmatched = [];
   for (const finding of additions) {
     const at = bySignature.get(finding.signature);
-    if (at !== undefined) {
-      // Only an open entry moves, and only up. Dismissed and fixed entries never change.
-      // A raised entry is the new finding under the old number, so nothing of the old
-      // entry survives to describe a finding other than the one that blocks.
-      if (merged[at].status === 'open' && finding.severity > merged[at].severity) {
-        merged[at] = { n: merged[at].n, ...finding, status: 'open' };
-      }
+    if (at === undefined) {
+      unmatched.push(finding);
       continue;
     }
-    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
+    // A raise never lowers an entry and never changes a dismissed or fixed one.
+    if (merged[at].status === 'open' && finding.severity > merged[at].severity) {
+      merged[at] = { n: merged[at].n, ...finding, status: 'open' };
+    }
+  }
+  // Location matching runs after every raise, against the moved entries.
+  const earlier = [...merged];
+  for (const finding of unmatched) {
+    if (bySignature.has(finding.signature)) continue;
+    if (matchSuggestionsByLocation && matchesEarlierSpot(finding, earlier)) continue;
     bySignature.set(finding.signature, merged.length);
     merged.push({ n: next++, ...finding, status: 'open' });
   }

@@ -18755,15 +18755,21 @@ var require_reportState = __commonJS({
         (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
       );
       const merged = [...previous];
+      const unmatched = [];
       for (const finding of additions) {
         const at = bySignature.get(finding.signature);
-        if (at !== void 0) {
-          if (merged[at].status === "open" && finding.severity > merged[at].severity) {
-            merged[at] = { n: merged[at].n, ...finding, status: "open" };
-          }
+        if (at === void 0) {
+          unmatched.push(finding);
           continue;
         }
-        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
+        if (merged[at].status === "open" && finding.severity > merged[at].severity) {
+          merged[at] = { n: merged[at].n, ...finding, status: "open" };
+        }
+      }
+      const earlier = [...merged];
+      for (const finding of unmatched) {
+        if (bySignature.has(finding.signature)) continue;
+        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, earlier)) continue;
         bySignature.set(finding.signature, merged.length);
         merged.push({ n: next++, ...finding, status: "open" });
       }

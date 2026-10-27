@@ -88,8 +88,9 @@ and the blocker bar: a line, High confidence, and evidence. When two findings of
 combined, the group takes the higher score.
 
 A later review can raise an earlier finding. If the same finding comes back with a higher score
-and the earlier one is still open, it keeps its number and moves up to the new score, with the
-new file, line, and evidence. A dismissed or fixed finding never changes.
+and the earlier one is still open, the new finding replaces it and keeps only its number. The
+score, file, line, message, evidence, and everything else come from the new finding. A dismissed
+or fixed finding never changes.
 
 ## Set up a repo (once)
 
