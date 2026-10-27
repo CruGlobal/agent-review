@@ -109,6 +109,20 @@ breaking changes as reported by the agents]
 - `#[N]` — [Agent 1] (Severity: [X]/10): [their specific concern] · [Agent 2] (Severity:
   [Y]/10): [their specific concern]
 
+[IF engine is code-review]
+
+**Engine**: code-review (from [engine source]) · effort [requested effort] (from [effort source]) · model [model] (from [model source])
+**/code-review findings**: found [N] · scored [M] · dropped [K] (scored findings under the
+profile's cutoff may not appear in the lists above)
+
+[FOR EACH dropped finding] - [file]:[line] [summary]: [why] [when line is null, print only
+[file], with no ":[line]"]
+
+[END IF engine is code-review]
+
+[IF any options notes] **Notes**: [one bullet per note in `notes`; this line is not part of the
+engine block and renders under any engine whenever `notes` is non-empty]
+
 **Debate summary** (omit this whole block if debate rounds were not run):
 
 - Rounds: [N] · Challenges raised: [N] (defended [N], conceded [N]) · Findings revised: [N] ·
@@ -126,6 +140,17 @@ breaking changes as reported by the agents]
 
 <details><summary>💬 How to act on this review</summary>
 
+[IF reviews_run is local]
+
+Every finding above is numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
+dismissed** before this review counts as passed; lower severities are advisory. This repo runs
+reviews locally only, so work this ledger with `/agent-review:address` in a Claude Code session.
+It fixes or dismisses findings (a reason code and explanation are required for a dismissal) and
+keeps this comment in sync. Valid codes: `false-positive`, `intentional`, `pre-existing`,
+`deferred`, `duplicate`, `insufficient-evidence`, `other`.
+
+[ELSE, reviews_run is local-and-ci:]
+
 Every finding above is numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
 dismissed** before this review counts as passed; lower severities are advisory. Interact from a
 PR comment — `@claude fix 1, 3` · `@claude dismiss 2 [false-positive]: <one-line reason>`
@@ -141,7 +166,9 @@ codes: `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
 
 Or locally: `/agent-review:address` pulls this ledger into a Claude Code session.
 
-[IF UNRESOLVED DEBATES: note that ledger items marked needs-human should be resolved by a senior
+[END IF reviews_run is local]
+
+[IF UNRESOLVED DEBATES, both variants: note that ledger items marked needs-human should be resolved by a senior
 developer, not dismissed reflexively.]
 
 </details>
