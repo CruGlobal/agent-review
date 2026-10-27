@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { readFileSync, mkdtempSync, rmSync } = require('node:fs');
-const { join } = require('node:path');
+const { join, relative } = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
@@ -3632,5 +3632,79 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+const HEAD_ARGS_LINES = ['HEAD_ARGS=()', 'if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi'];
+
+// Every `agent-review status` command in the review skill, with continuation lines joined, and
+// whether its bash block builds HEAD_ARGS before it.
+function statusCalls() {
+  const calls = [];
+  for (const block of bashBlockList(readFileSync(REVIEW_SKILL, 'utf8'))) {
+    const lines = block.split('\n');
+    const setup = lines.findIndex((l, i) => l.trim() === HEAD_ARGS_LINES[0] && (lines[i + 1] || '').trim() === HEAD_ARGS_LINES[1]);
+    lines.forEach((line, i) => {
+      if (!line.includes('agent-review status')) return;
+      let command = line.trim();
+      for (let j = i; lines[j].trimEnd().endsWith('\\'); j++) command = `${command}\n${lines[j + 1].trim()}`;
+      calls.push({ command, buildsHeadArgs: setup >= 0 && setup < i });
+    });
+  }
+  return calls;
+}
+
+test('agent-review status gets --head and the sha as two arguments under bash and zsh', (t) => {
+  const { mkdirSync, writeFileSync } = require('node:fs');
+  const calls = statusCalls();
+  assert.strictEqual(calls.length, 3, 'the two auto-mode skip calls and the Stage 5 status call');
+  for (const shell of availableShells(t)) {
+    for (const { command, buildsHeadArgs } of calls) {
+      for (const head of ['0123456789abcdef0123456789abcdef01234567', '']) {
+        const dir = mkdtempSync(join(os.tmpdir(), 'ar-status-head-'));
+        try {
+          mkdirSync(join(dir, 'bin'));
+          writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\n`, { mode: 0o755 });
+          const script = [`HEAD_REF="${head}"`, ...(buildsHeadArgs ? HEAD_ARGS_LINES : []), command.replaceAll('/tmp/', `${dir}/`)].join('\n');
+          const r = require('node:child_process').spawnSync(shell, ['-c', script], {
+            encoding: 'utf8',
+            env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
+          });
+          assert.strictEqual(r.status, 0, `${shell}: ${r.stderr}`);
+          const args = readFileSync(join(dir, 'agent-review.args'), 'utf8').split('\n').slice(0, -1);
+          const label = `${shell}, HEAD_REF=${JSON.stringify(head)}: ${command.split('\n')[0]}`;
+          if (head) {
+            assert.strictEqual(args[args.indexOf('--head') + 1], head, `${label}: ${JSON.stringify(args)}`);
+          } else {
+            assert.ok(!args.some((a) => a.includes('--head')), `${label}: ${JSON.stringify(args)}`);
+          }
+          assert.ok(!args.includes(''), `${label}: no empty argument`);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    }
+  }
+  for (const { command, buildsHeadArgs } of calls) {
+    assert.ok(buildsHeadArgs && command.includes('"${HEAD_ARGS[@]}"'), `the call passes the HEAD_ARGS array: ${command}`);
+  }
+});
+
+test('no skill or template passes a flag and its value through one ${X:+...} expansion', () => {
+  const { readdirSync, statSync } = require('node:fs');
+  const files = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (/\.(md|yml|yaml|sh)$/.test(name)) files.push(path);
+    }
+  };
+  for (const dir of ['skills', 'templates', 'agents']) walk(join(ROOT, dir));
+  const multiWord = /\$\{[A-Za-z_][A-Za-z0-9_]*:\+[^}]*\s[^}]*\}/;
+  for (const path of files) {
+    readFileSync(path, 'utf8').split('\n').forEach((line, i) => {
+      assert.ok(!multiWord.test(line), `${relative(ROOT, path)}:${i + 1} expands to two words in bash but one in zsh: ${line.trim()}`);
+    });
   }
 });

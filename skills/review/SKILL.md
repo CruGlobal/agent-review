@@ -615,6 +615,9 @@ score — never from your own judgment of the diff:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
+# A flag and its value go in an array: zsh never splits a ${X:+...} expansion into words.
+HEAD_ARGS=()
+if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi
 if [ "$MODE" = "auto" ]; then
   # The skip report keeps the options notes (such as the CI engine override) and the Notes bullets
   # the previous report for this PR carried; $1 is that previous comment, when there is one.
@@ -658,7 +661,7 @@ if [ "$MODE" = "auto" ]; then
       agent-review status --ledger /tmp/agent_review_ledger.json \
         --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
         --evidence /tmp/review_evidence.json \
-        ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+        "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
       # Post a minimal skip note. The CI posting step prepends the comment markers
       # (including the reviewed-head marker, so the next run still diffs incrementally). A
       # carried-forward open blocker from a prior run still blocks, so surface it here rather
@@ -687,7 +690,7 @@ if [ "$MODE" = "auto" ]; then
       sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_status.json
       [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' > /tmp/agent_review_safety.json
       agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
-      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --evidence /tmp/review_evidence.json ${HEAD_REF:+--head "$HEAD_REF"} > /tmp/agent_review_status.json
+      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --evidence /tmp/review_evidence.json "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
       OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
       { echo "🎚️ **agent-review: skipped** — no reviewable risk in the delta since the last review."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
@@ -1702,12 +1705,15 @@ gate plan. Never hand-author `openBlockers`, `pass`, or `risk`:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
+# A flag and its value go in an array: zsh never splits a ${X:+...} expansion into words.
+HEAD_ARGS=()
+if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi
 agent-review status \
   --ledger /tmp/agent_review_ledger.json \
   --plan /tmp/review_gate_plan.json \
   --safety /tmp/agent_review_safety.json \
   --evidence /tmp/review_evidence.json \
-  ${HEAD_REF:+--head "$HEAD_REF"} \
+  "${HEAD_ARGS[@]}" \
   > /tmp/agent_review_status.json
 ```
 
