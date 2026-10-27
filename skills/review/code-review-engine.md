@@ -50,29 +50,43 @@ fi
 MAX_FINDINGS=$(node -e 'const e = require("/tmp/review_plan.json").engine || {}; console.log(e.maxFindings == null ? "" : String(e.maxFindings))')
 MAX_FINDINGS_FLAG=" --max-findings ${MAX_FINDINGS:-default}"
 CODE_REVIEW_ARGS="$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"
+REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"
 if [ -z "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ] && [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt
   CODE_REVIEW_DIFF=/tmp/code_review_diff.txt
+  REVIEWED_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF")
 else
   CODE_REVIEW_DIFF=/tmp/pr_diff.txt
+  REVIEWED_BASE="${RANGE%%..*}"
+fi
+if [ -z "$REVIEWED_HEAD" ] || [ -z "$REVIEWED_BASE" ]; then
+  echo "❌ Could not work out the reviewed head and base commits."
+  exit 1
 fi
 CODE_REVIEW_ATTEMPT="$REVIEW_ID-1"
 agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"
 cat >> /tmp/review_env.sh <<EOF
 export CODE_REVIEW_ARGS="$CODE_REVIEW_ARGS" CODE_REVIEW_DIFF="$CODE_REVIEW_DIFF" CODE_REVIEW_ATTEMPT="$CODE_REVIEW_ATTEMPT"
+export REVIEWED_HEAD="$REVIEWED_HEAD" REVIEWED_BASE="$REVIEWED_BASE"
 EOF
 echo "code-review diff: $CODE_REVIEW_DIFF"
 echo "code-review attempt: $CODE_REVIEW_ATTEMPT"
+echo "code-review head: $REVIEWED_HEAD"
+echo "code-review base: $REVIEWED_BASE"
 ```
 
 If this block fails, stop the review and show its error. Without an armed capture, the lane's
 result cannot be checked, so the review cannot finish.
 
+`REVIEWED_HEAD` and `REVIEWED_BASE` are the commits the lane's own check and Stage 2's proof both
+read, so the two checks always look at the same code. Fill them from the values this block
+prints, and never work them out again later.
+
 From here until Stage 2 judges this lane, capture stays armed. If the run stops before then for
 any reason, run `agent-review capture disarm` before you stop (Stage 2, step 5).
 
 Then read the plugin's `templates/code-review-lane.md` (`../../templates/code-review-lane.md` from
-this file) and fill its twelve placeholders:
+this file) and fill its fourteen placeholders:
 
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -88,6 +102,8 @@ this file) and fill its twelve placeholders:
 | `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** in `SKILL.md`'s Stage 1), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
 | `{{EXCLUDED_PATHS}}`      | The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.                                                                          |
+| `{{REVIEWED_HEAD}}`       | `$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR. Stage 2's proof reads the same saved value. |
+| `{{REVIEWED_BASE}}`       | `$REVIEWED_BASE`, the value the block above prints as `code-review base:`: the commit the lane's diff starts from. That is the merge base of `BASE_REF` and `HEAD_REF` for a full PR review, and the start of `RANGE` otherwise (`LAST_REVIEWED` for an incremental review). Stage 2's proof reads the same saved value. |
 
 Launch the lane with the Task tool, in the same message as every other launch:
 
@@ -138,14 +154,15 @@ judge its next final line. If none arrives by then, judge the lane on what it ha
 The proof checks the lane's three files against the saved /code-review result. When they pass, it
 also saves the findings file it checked, byte for byte, as `/tmp/agent_findings/code-review.json`,
 the file consensus reads. When they fail, it removes that file. The proof reads each disproof's
-file as committed at the reviewed head: `HEAD_REF`, the PR head, or the local `HEAD` when there is
-no PR. Run it as written; the attempt id comes from `/tmp/review_env.sh`:
+file as committed at the reviewed head, and takes the names of files whose path has no `/` from
+that commit and from the review's base commit. Both come from `/tmp/review_env.sh`, where Stage 1
+saved them as `REVIEWED_HEAD` and `REVIEWED_BASE`, the same values the lane's own check used. Run
+it as written; the attempt id comes from `/tmp/review_env.sh` too:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 ATTEMPT="$CODE_REVIEW_ATTEMPT"
-REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"
-agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --promote /tmp/agent_findings/code-review.json > /tmp/code_review_proof.json
+agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --base "$REVIEWED_BASE" --promote /tmp/agent_findings/code-review.json > /tmp/code_review_proof.json
 cat /tmp/code_review_proof.json
 ```
 
@@ -153,9 +170,9 @@ It prints one JSON line, `{ ok, stage, reason, count, mode, dropped }`, and exit
 `false`. Act on it:
 
 - `ok` is `true` and the cross-check passed: the lane passed (step 4).
-- `stage` is `"config"`: the review's config cannot be read, the reviewed head is not a commit
-  here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch
-  cannot fix that. Fail the run now, with no relaunch (step 5).
+- `stage` is `"config"`: the review's config cannot be read, the reviewed head or base is not a
+  commit here or its files cannot be listed, or the proved findings cannot be saved, and a
+  relaunch cannot fix that. Fail the run now, with no relaunch (step 5).
 - `stage` is `"capture"`: relaunch with a new capture (step 3).
 - `stage` is `"lane"`: relaunch with the same capture (step 3), with the proof's `reason`.
 - `ok` is `true` but the cross-check failed: relaunch with the same capture (step 3), with one

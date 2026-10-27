@@ -50,13 +50,13 @@ function hasFile(value) {
 }
 
 // Returns null for a block that is not list-like, else { list } with list null when the block is
-// unusable. A block that fails to parse is still list-like when it names "file", so a cut-off or
-// malformed list can never pass as quoted code.
+// unusable. A block that fails to parse is still list-like when it opens like JSON and names
+// "file", so a cut-off or malformed list can never pass as quoted code.
 function listOf(block) {
   if (block.info !== 'json' && block.info !== '') return null;
   const body = block.body.trim();
   const parsed = parseJson(body);
-  if (!parsed) return body.includes('"file"') ? { list: null } : null;
+  if (!parsed) return /^[[{]/.test(body) && body.includes('"file"') ? { list: null } : null;
   const { value } = parsed;
   const listLike = Array.isArray(value)
     ? value.length === 0 || value.some(isPlainObject)
@@ -116,32 +116,45 @@ function mentionPath(path, isBareFile) {
   return typeof isBareFile === 'function' && Boolean(isBareFile(path) || isBareFile(trimWrappers(path)));
 }
 
-// `path:0` names the file with no line, the way a JSON line of 0 does.
-function mentionsIn(line, isBareFile) {
+// `path:0` names the file with no line, the way a JSON line of 0 does. `tail` is the rest of the
+// token after `path:line`, which in grep -n output is the start of the quoted line.
+function tokenMentions(token, isBareFile) {
   const mentions = [];
-  for (const token of line.split(/\s+/)) {
-    if (!token.includes(':')) continue;
-    const parts = token.split(':');
-    for (let i = 0; i + 1 < parts.length; i++) {
-      const at = LINE_PART.exec(parts[i + 1]);
-      if (!at) continue;
-      const file = parts[i].replace(PATH_LEAD, '');
-      const number = Number(at[1]);
-      if (mentionPath(file, isBareFile)) mentions.push({ file, line: number > 0 ? number : null });
-    }
+  if (!token.includes(':')) return mentions;
+  const parts = token.split(':');
+  for (let i = 0; i + 1 < parts.length; i++) {
+    const at = LINE_PART.exec(parts[i + 1]);
+    if (!at) continue;
+    const file = parts[i].replace(PATH_LEAD, '');
+    const number = Number(at[1]);
+    if (!mentionPath(file, isBareFile)) continue;
+    const tail = [parts[i + 1].slice(at[0].length), ...parts.slice(i + 2)].join(':');
+    mentions.push({ file, line: number > 0 ? number : null, tail });
   }
   return mentions;
+}
+
+function mentionsIn(line, isBareFile) {
+  return line.split(/\s+/).flatMap((token) => tokenMentions(token, isBareFile).map(({ file, line: at }) => ({ file, line: at })));
 }
 
 function mentionSpot(mention) {
   return `${mention.file}:${mention.line ?? 0}`;
 }
 
-// A name with no "/" is a file the repository tracks by that whole path or by that file name.
+// A name with no "/" and a "." or a capital letter matches a tracked file name at any depth; an
+// all-lowercase name with no "." matches only a tracked root-level path, so a lowercase image tag
+// such as node:20 never matches bin/node.
 function trackedLookup(paths) {
   const names = new Set();
-  for (const path of paths) names.add(String(path).slice(String(path).lastIndexOf('/') + 1));
-  return (name) => names.has(name);
+  const rootPaths = new Set();
+  for (const path of paths) {
+    const text = String(path);
+    const slash = text.lastIndexOf('/');
+    names.add(text.slice(slash + 1));
+    if (slash < 0) rootPaths.add(text);
+  }
+  return (name) => (name.includes('.') || /\p{Lu}/u.test(name) ? names.has(name) : rootPaths.has(name));
 }
 
 // A fence with no language label holds prose, so a finding there must be claimed like one outside.
@@ -420,7 +433,6 @@ function scoredEntryProblem(entry, i, rawByN, root) {
 }
 
 const QUOTE_LEAD = /^[\s:;,\-\u2013\u2014]+/;
-// A shorter line, such as `end` or `}`, appears all over a file, so quoting it proves nothing.
 const MIN_LINE_CHARS = 6;
 
 // normalizeLine already dropped backticks and `*` from the proof, so the file's lines lose them too.
@@ -445,8 +457,8 @@ function disproofProblem(proof, { fileExists, readLines, root }) {
   const tries = [];
   const isBareFile = (path) => path.includes('.') || exists(path);
   for (const token of text.matchAll(/\S+/g)) {
-    const rest = text.slice(token.index + token[0].length);
-    for (const mention of mentionsIn(token[0], isBareFile)) tries.push({ ...mention, rest });
+    const after = text.slice(token.index + token[0].length);
+    for (const { file, line, tail } of tokenMentions(token[0], isBareFile)) tries.push({ file, line, rest: tail + after });
   }
   if (tries.length === 0) return 'needs a proof that cites a path:line and then quotes the code there';
   let best = null;

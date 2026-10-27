@@ -3,7 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { readFileSync, mkdtempSync, mkdirSync, rmSync } = require('node:fs');
-const { join } = require('node:path');
+const { join, relative } = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
 const { createHash } = require('node:crypto');
@@ -546,14 +546,16 @@ const CODE_REVIEW_LANE_PLACEHOLDERS = [
   'LEARNINGS',
   'IMPACT',
   'EXCLUDED_PATHS',
+  'REVIEWED_HEAD',
+  'REVIEWED_BASE',
 ];
 const FINAL_LINE_CONTRACT = 'done — <N> findings, max severity <X>';
 const LANE_FILES = ['raw', 'findings', 'dropped'].map((kind) => `/tmp/code_review_${kind}.{{ATTEMPT}}.json`);
 const LANE_PROOF_COMMAND =
-  'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}}';
+  'agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}} --head {{REVIEWED_HEAD}} --base {{REVIEWED_BASE}}';
 const PROMOTED_FINDINGS = '/tmp/agent_findings/code-review.json';
 const STAGE2_PROOF_COMMAND =
-  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
+  `agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --base "$REVIEWED_BASE" --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`;
 const REVIEWED_HEAD_LINE = 'REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"';
 const QUIET_DISARM = 'agent-review capture disarm >/dev/null 2>&1 || true';
 
@@ -617,7 +619,7 @@ test('reviewer-code-review pins opus and no effort', () => {
   assert.ok(!body.includes('—'), 'new prose uses no em dashes');
 });
 
-test('lane template placeholders are exactly the twelve listed', () => {
+test('lane template placeholders are exactly the fourteen listed', () => {
   const found = new Set([...laneText().matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)].map((m) => m[1]));
   assert.deepStrictEqual(
     [...found].sort(),
@@ -625,7 +627,7 @@ test('lane template placeholders are exactly the twelve listed', () => {
     'code-review lane placeholder vocabulary drifted from the documented set',
   );
   const { section, rows } = lanePlaceholderRows();
-  assert.ok(section.includes('fill its twelve placeholders:'), 'the engine doc counts the twelve placeholders');
+  assert.ok(section.includes('fill its fourteen placeholders:'), 'the engine doc counts the fourteen placeholders');
   assert.deepStrictEqual(
     [...rows.keys()].sort(),
     [...CODE_REVIEW_LANE_PLACEHOLDERS].sort(),
@@ -861,8 +863,10 @@ test('lane template lists raw findings the way the check grounds them', () => {
     'For `path:start-end`, the raw `line` is `start`: `src/a.js:49-59` gives 49.',
     'When none of these fits, or the result cannot be used, write `[]` as the raw list anyway,',
     'A web address such as `https://example.com:443` is not a location.',
-    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and is a file in the reviewed commit, by its whole path or by its file name, as in `lib/cart.rb:51`, `Makefile:12`, or `cart.rb:51` when the commit has `lib/cart.rb`.',
-    'So a host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` are not locations.',
+    'A location is `path:line` or `path:start-end`, where the path holds a letter and a `/`, or has no `/` and names a file in the reviewed commit, `{{REVIEWED_HEAD}}`, or in the review\'s base commit, `{{REVIEWED_BASE}}`.',
+    'A name with a `.` or a capital letter may be that file\'s name at any depth; an all-lowercase name with no `.` must be the file\'s whole path, at the repository root.',
+    'So `lib/cart.rb:51`, `Dockerfile:3` when a commit has `docker/Dockerfile`, and `cart.rb:51` when a commit has `lib/cart.rb` are locations, and so is a file the change deletes.',
+    'A host and port such as `api.example.com:443` and an image tag such as `ruby:3.3` or `node:20` are not locations.',
     '`path:0` is a location with no line: its raw `line` is `null`.',
     'but not lines inside a code block labeled with a language, such as `js` or `ruby`.',
     'List each such line once, using the first location on it, even when two lines cite the same location and even when a line seems to give only context.',
@@ -899,6 +903,7 @@ test('lane template scores from the diff-for blocks, not the whole diff', () => 
     'It skips files on an excluded path, and for any other file it has no block for, it prints a line `no diff block for <file>`.',
     'A missing block never proves that a file is unchanged: the diff can spell a path another way, such as a quoted name or a rename.',
     'Before you set `outside_range` to `true` for a finding on such a file, run `grep -n "^diff --git" {{DIFF_PATH}}`, look for the file under any spelling, and read its block if it is there.',
+    'When scoring, read the code you judge at the reviewed commit (`git show {{REVIEWED_HEAD}}:./<path>`), not the working copy.',
   ]) {
     assert.ok(flat.includes(needle), `STEP 3 must say ${JSON.stringify(needle)}`);
   }
@@ -1000,7 +1005,9 @@ test('lane template has no REFUTED drop and names both drop reasons', () => {
     '- that line has at least 6 characters besides spaces, so a short line such as `end`, `}`, or `nil` can never be the proof: cite a longer line near it;',
     '- the text right after `path:line` holds that whole line, quoted exactly. It may run on into the lines around it. Spaces, line breaks, backticks, and `*` do not count when comparing.',
     'So write the quoted code right after `path:line`, and nothing after it.',
-    'The review reads each file as committed, never from your working copy, so quote committed code.',
+    'The review reads each file as committed at `{{REVIEWED_HEAD}}`, never from your working copy, which can hold other code.',
+    'So read the code you quote with `git show {{REVIEWED_HEAD}}:./<path>`, never with the Read tool or from the working copy.',
+    "For lines 16 to 20 of `lib/cart.rb`, run `git show {{REVIEWED_HEAD}}:./lib/cart.rb | sed -n '16,20p'`.",
   ]) {
     assert.ok(dropping.includes(needle), `DROPPING A FINDING must say ${JSON.stringify(needle)}`);
   }
@@ -1040,7 +1047,7 @@ test('lane template runs code-review-proof before its final line', () => {
     '- `stage` is `"lane"`: your files have the problem that `reason` names',
     'Never call the Skill tool again. Fix at most twice; if the check still fails, give the final line anyway.',
     "- `stage` is `\"capture\"`: /code-review's result cannot be used. Reply with the one line `/code-review returned no usable result` and nothing else.",
-    '- `stage` is `"config"`: the review\'s config could not be read, and you cannot fix that. Give the final line below.',
+    '- `stage` is `"config"`: the review\'s config could not be read, the reviewed head or base is not a commit here or its files cannot be listed, and you cannot fix that. Give the final line below.',
     'where `<N>` is `findings.length` in `/tmp/code_review_findings.{{ATTEMPT}}.json`',
   ]) {
     assert.ok(step5.includes(needle), `STEP 5 must say ${JSON.stringify(needle)}`);
@@ -2748,7 +2755,7 @@ test('README names the light hook entry in the repo layout', () => {
     'the hooks row names the light entry',
   );
   assert.ok(
-    layout.includes('| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file exists, then hands the hook to `dist/agent-review.cjs` |'),
+    layout.includes('| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |'),
     'the bin rows list the light entry',
   );
   const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
@@ -2805,7 +2812,7 @@ test('SKILL.md has no code-review-engine-only prose outside one-line pointers', 
     if (name !== 'Stage 0') assert.ok(skill.includes(ENGINE_POINTER(name)), `SKILL.md points at "${name}"`);
   }
   const moved = [
-    'fill its twelve placeholders:',
+    'fill its fourteen placeholders:',
     '| `{{SCORING_RULES}}`',
     'launch a second Task',
     'agent-review code-review-proof --raw',
@@ -2995,9 +3002,11 @@ function runArmBlock(shell, env, plan) {
       `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\n[ "$1 $2" = "capture arm" ] && echo "armed $4: $6"\nexit 0\n`,
       { mode: 0o755 },
     );
-    writeFileSync(join(bin, 'git'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/git.args"\necho "merge-base diff"\n`, {
-      mode: 0o755,
-    });
+    writeFileSync(
+      join(bin, 'git'),
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\ncase "$1" in\n  diff) echo "merge-base diff" ;;\n  merge-base) echo "mergebase90" ;;\n  rev-parse) echo "localhead1234" ;;\nesac\n`,
+      { mode: 0o755 },
+    );
     writeFileSync(join(dir, 'review_env.sh'), Object.entries(env).map(([k, v]) => `export ${k}="${v}"`).join('\n') + '\n');
     writeFileSync(join(dir, 'review_plan.json'), JSON.stringify(plan));
     writeFileSync(join(dir, 'pr_diff.txt'), 'two-dot diff\n');
@@ -3111,7 +3120,7 @@ test('full PR reviews give the lane a merge-base diff', (t) => {
   assert.ok(armBlock().includes('  git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt\n'));
   for (const shell of availableShells(t)) {
     const full = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } });
-    assert.strictEqual(full.git, 'diff\naaa111...bbb222\n', `${shell}: three dots diff against the merge base`);
+    assert.strictEqual(full.git, 'diff aaa111...bbb222\nmerge-base aaa111 bbb222\n', `${shell}: three dots diff against the merge base`);
     assert.strictEqual(full.diff, 'merge-base diff\n', `${shell}: the merge-base diff is written`);
     assert.ok(full.stdout.includes(`code-review diff: ${full.dir}/code_review_diff.txt\n`), `${shell}: ${full.stdout}`);
     assert.ok(full.env.includes(`CODE_REVIEW_DIFF="${full.dir}/code_review_diff.txt"`), `${shell}: the diff path is kept`);
@@ -3121,17 +3130,58 @@ test('full PR reviews give the lane a merge-base diff', (t) => {
       { ...FULL_PR_ENV, INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
       { engine: {} },
     );
-    assert.strictEqual(incremental.git, null, `${shell}: an incremental review keeps the reviewed range`);
+    assert.strictEqual(incremental.git, null, `${shell}: an incremental review keeps the reviewed range and runs no git`);
     assert.ok(incremental.stdout.includes(`code-review diff: ${incremental.dir}/pr_diff.txt\n`), `${shell}: ${incremental.stdout}`);
 
     const noPr = runArmBlock(
       shell,
-      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
       { engine: {} },
     );
-    assert.strictEqual(noPr.git, null, `${shell}: a range review keeps the reviewed range`);
+    assert.strictEqual(noPr.git, 'rev-parse HEAD\n', `${shell}: a range review keeps the reviewed range and reads only the local HEAD`);
     assert.ok(noPr.stdout.includes(`code-review diff: ${noPr.dir}/pr_diff.txt\n`), `${shell}: ${noPr.stdout}`);
   }
+});
+
+test('Stage 1 saves the reviewed head and base that the lane and Stage 2 both check', (t) => {
+  assert.ok(armBlock().split('\n').includes(REVIEWED_HEAD_LINE), 'the head is HEAD_REF, or the local HEAD when there is no PR head');
+  const cases = [
+    ['a full PR review', FULL_PR_ENV, 'bbb222', 'mergebase90'],
+    [
+      'an incremental review',
+      { ...FULL_PR_ENV, INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', RANGE: 'ccc333..bbb222', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
+      'bbb222',
+      'ccc333',
+    ],
+    ['a PR with no head or base ref', { ...FULL_PR_ENV, BASE_REF: '', HEAD_REF: '', RANGE: 'eee555..HEAD' }, 'localhead1234', 'eee555'],
+    [
+      'a local range review',
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      'localhead1234',
+      'ddd444',
+    ],
+  ];
+  for (const shell of availableShells(t)) {
+    for (const [label, env, head, base] of cases) {
+      const run = runArmBlock(shell, env, { engine: {} });
+      assert.strictEqual(run.status, 0, `${shell}, ${label}: ${run.stdout}`);
+      assert.ok(run.env.includes(`export REVIEWED_HEAD="${head}" REVIEWED_BASE="${base}"\n`), `${shell}, ${label}: ${run.env}`);
+      assert.ok(run.stdout.includes(`code-review head: ${head}\ncode-review base: ${base}\n`), `${shell}, ${label}: ${run.stdout}`);
+    }
+    const noBase = runArmBlock(shell, { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: '', CODE_REVIEW_TARGET: 'x' }, { engine: {} });
+    assert.notStrictEqual(noBase.status, 0, `${shell}: no base, no arm`);
+    assert.strictEqual(noBase.agentReview, null, `${shell}: capture is never armed without a base`);
+    assert.ok(noBase.stdout.includes('❌ Could not work out the reviewed head and base commits.'), `${shell}: ${noBase.stdout}`);
+  }
+  const { rows } = lanePlaceholderRows();
+  assert.strictEqual(
+    rows.get('REVIEWED_HEAD'),
+    "`$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR. Stage 2's proof reads the same saved value.",
+  );
+  assert.strictEqual(
+    rows.get('REVIEWED_BASE'),
+    "`$REVIEWED_BASE`, the value the block above prints as `code-review base:`: the commit the lane's diff starts from. That is the merge base of `BASE_REF` and `HEAD_REF` for a full PR review, and the start of `RANGE` otherwise (`LAST_REVIEWED` for an incremental review). Stage 2's proof reads the same saved value.",
+  );
 });
 
 test("Stage 2 waits for the lane's next final line after an early handback", () => {
@@ -3167,9 +3217,9 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
   const stage2 = engineSection('Stage 2: checking the code-review lane');
   const flat = flatText(stage2);
   assert.strictEqual(
-    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}').replace(' --head "$REVIEWED_HEAD"', ''),
+    STAGE2_PROOF_COMMAND.replaceAll('"/tmp/', '/tmp/').replaceAll('.$ATTEMPT.json"', '.{{ATTEMPT}}.json').replace('"$REVIEW_ID"', '{{RUN_ID}}').replace('"$REVIEWED_HEAD"', '{{REVIEWED_HEAD}}').replace('"$REVIEWED_BASE"', '{{REVIEWED_BASE}}'),
     `${LANE_PROOF_COMMAND} --promote ${PROMOTED_FINDINGS} > /tmp/code_review_proof.json`,
-    "Stage 2 runs the lane's own check on the same attempt's files",
+    "Stage 2 runs the lane's own check on the same attempt's files, at the same head and base",
   );
   assert.ok(bashBlocks(stage2).includes(STAGE2_PROOF_COMMAND));
   for (const needle of [
@@ -3179,7 +3229,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
     '`stage` is `"capture"`: relaunch with a new capture (step 3).',
     'A reply that starts with `/code-review did not finish` is that failure, whatever follows it.',
     '`/code-review did not finish: <reason>`, or `/code-review returned no usable result`: /code-review\'s result is missing or unusable. Relaunch with a new capture (step 3).',
-    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head is not a commit here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
+    '`stage` is `"config"`: the review\'s config cannot be read, the reviewed head or base is not a commit here or its files cannot be listed, or the proved findings cannot be saved, and a relaunch cannot fix that. Fail the run now, with no relaunch (step 5).',
     '**With the same capture.** Do not re-arm',
     '**With a new capture.** Re-arm with this block first, which clears the old result',
   ]) {
@@ -3242,13 +3292,13 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
   const proofBlocks = bashBlockList(stage2).filter((b) => b.includes('agent-review code-review-proof'));
   assert.deepStrictEqual(
     proofBlocks,
-    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${REVIEWED_HEAD_LINE}\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
-    'the proof reads the attempt Stage 1 or the relaunch saved, at the reviewed head',
+    [`. /tmp/review_env.sh 2>/dev/null || true\nATTEMPT="$CODE_REVIEW_ATTEMPT"\n${STAGE2_PROOF_COMMAND}\ncat /tmp/code_review_proof.json`],
+    'the proof reads the attempt Stage 1 or the relaunch saved, at the head and base Stage 1 saved',
   );
   assert.ok(!/:\+\s*--head/.test(doc), 'the head is passed plainly: zsh drops a ${X:+--head ...} expansion');
   assert.ok(
-    flatText(stage2).includes("The proof reads each disproof's file as committed at the reviewed head: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR."),
-    'Stage 2 says which commit the proof reads',
+    flatText(stage2).includes("The proof reads each disproof's file as committed at the reviewed head, and takes the names of files whose path has no `/` from that commit and from the review's base commit. Both come from `/tmp/review_env.sh`, where Stage 1 saved them as `REVIEWED_HEAD` and `REVIEWED_BASE`, the same values the lane's own check used."),
+    'Stage 2 says which commits the proof reads',
   );
   assert.ok(!/^ATTEMPT="\$REVIEW_ID-/m.test(doc) && !doc.includes('# ←'), 'no block asks for a hand-edited attempt id');
   assert.ok(!/\bcp\b[^\n]*agent_findings/.test(doc), 'consensus reads the file the proof promoted, never a copy');
@@ -3264,8 +3314,8 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       mkdirSync(join(dir, 'bin'));
       mkdirSync(join(dir, 'agent_findings'));
       writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\necho '{"ok":true}'\n`, { mode: 0o755 });
-      writeFileSync(join(dir, 'bin', 'git'), '#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && echo localhead1234\n', { mode: 0o755 });
-      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="prhead5678"\n');
+      writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="prhead5678" REVIEWED_HEAD="prhead5678" REVIEWED_BASE="mergebase90"\n');
       writeFileSync(join(dir, 'agent_findings', 'code-review.json'), '{"findings":[]}');
       const sh = (script) =>
         require('node:child_process').spawnSync(shell, ['-c', at(script)], {
@@ -3278,7 +3328,8 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       let args = argsOf();
       assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-1.json`, `${shell}: attempt 1`);
       assert.strictEqual(args[args.indexOf('--promote') + 1], `${dir}/agent_findings/code-review.json`, `${shell}: promotes for consensus`);
-      assert.strictEqual(args[args.indexOf('--head') + 1], 'prhead5678', `${shell}: the PR head`);
+      assert.strictEqual(args[args.indexOf('--head') + 1], 'prhead5678', `${shell}: the reviewed head`);
+      assert.strictEqual(args[args.indexOf('--base') + 1], 'mergebase90', `${shell}: the reviewed base`);
 
       const relaunched = sh(RELAUNCH_ATTEMPT_BLOCK);
       assert.strictEqual(relaunched.status, 0, shell);
@@ -3288,10 +3339,12 @@ test('Stage 2 proves and promotes the attempt saved in review_env.sh, with no ha
       args = argsOf();
       assert.strictEqual(args[args.indexOf('--findings') + 1], `${dir}/code_review_findings.r9-2.json`, `${shell}: attempt 2`);
 
-      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF=""\n');
+      writeFileSync(join(dir, 'review_env.sh'), 'export REVIEW_ID="r9" CODE_REVIEW_ATTEMPT="r9-1" HEAD_REF="" REVIEWED_HEAD="localhead1234" REVIEWED_BASE="rangestart5"\n');
       assert.strictEqual(sh(proofBlocks[0]).status, 0, shell);
       args = argsOf();
-      assert.strictEqual(args[args.indexOf('--head') + 1], 'localhead1234', `${shell}: with no PR head, the local HEAD`);
+      assert.strictEqual(args[args.indexOf('--head') + 1], 'localhead1234', `${shell}: the head Stage 1 saved, not a fresh HEAD`);
+      assert.strictEqual(args[args.indexOf('--base') + 1], 'rangestart5', `${shell}: the base Stage 1 saved`);
+      assert.ok(!existsSync(join(dir, 'git.args')), `${shell}: the proof block works out no commit of its own`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3519,21 +3572,21 @@ test('init saves shadow as no and validates its answers, update-files guards Sta
   const addr = skillText('address').replace(/\s+/g, ' ');
   assert.ok(addr.includes('do not promise a CI re-review') && addr.includes('`undefined` or failed `config get reviews_run` counts as CI'));
   const yolo = skillText('yolo-review');
-  assert.ok(yolo.includes('.updated_at') && yolo.includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'yolo step 3 has the REVIEW_TS guard in the bash block');
+  assert.ok(yolo.includes('/tmp/yolo_report.md') && yolo.includes('[ "$REPORTED_HEAD" != "$(git rev-parse HEAD)" ]'), 'yolo step 3 has the head-marker guard in the bash block');
 });
-
-const REVIEW_TS_BLOCK = [
-  'REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-  'echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
-].join('\n');
 
 const REREVIEW_BLOCK = [
   '. /tmp/yolo_env.sh',
   'if [ "$(git rev-parse HEAD)" = "$FIX_FROM" ]; then',
   '  echo "no new commit: address changed nothing, so there is nothing to re-review"',
-  'else',
-  '  REVIEW_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)',
-  '  echo "export REVIEW_TS=\\"$REVIEW_TS\\"" >> /tmp/yolo_env.sh',
+  'fi',
+].join('\n');
+
+const REPORT_HEAD_LINE =
+  "REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \\([0-9a-f]\\{7,40\\}\\) -->$/\\1/p' /tmp/yolo_report.md | head -1)";
+const REPORT_HEAD_GUARD = [
+  'if [ -z "$REPORTED_HEAD" ] || [ "$REPORTED_HEAD" != "$(git rev-parse HEAD)" ]; then',
+  '  echo "\u274c No report for the current head: the latest review or re-review failed before posting. Show its error and stop."; exit 1',
   'fi',
 ].join('\n');
 
@@ -3545,17 +3598,17 @@ function indentedBashBlocks(text) {
   return [...text.matchAll(/^ {3}```bash\n([\s\S]*?)\n {3}```$/gm)].map((m) => m[1].replace(/^ {3}/gm, ''));
 }
 
-test('yolo-review takes a fresh timestamp right before each review call and judges the report against it', (t) => {
+test('yolo-review uses a report only when its head marker names the current HEAD', (t) => {
   const yolo = skillText('yolo-review');
   const step2 = yoloStep(yolo, '2. **Review**', '3. **Fix blockers**');
   const step3 = yoloStep(yolo, '3. **Fix blockers**', '4. **Re-review**');
   const step4 = yoloStep(yolo, '4. **Re-review**', '5. **Bounded loop**');
-  for (const [label, step, block, call] of [
-    ['step 2', step2, REVIEW_TS_BLOCK, 'invoke `agent-review:review` with the argument `auto`'],
-    ['step 4', step4, REREVIEW_BLOCK, 'invoke `agent-review:review` with the arguments `auto incremental`'],
-  ]) {
-    assert.deepStrictEqual(indentedBashBlocks(step), [block], `${label} has the timestamp block`);
-    assert.ok(step.indexOf('REVIEW_TS=') < step.indexOf(call), `${label} takes the timestamp before the review call`);
+  for (const gone of ['REVIEW_TS', 'updated_at', 'UPDATED']) {
+    assert.ok(!yolo.includes(gone), `the clock-based guard is gone: ${gone}`);
+  }
+  assert.deepStrictEqual(indentedBashBlocks(step2), [], 'step 2 takes no timestamp');
+  assert.deepStrictEqual(indentedBashBlocks(step4), [REREVIEW_BLOCK], 'step 4 only checks that address committed something');
+  for (const [label, step] of [['step 2', step2], ['step 4', step4]]) {
     assert.ok(!step.split('\n')[0].includes('\u2014'), `${label}'s title line has no em dash`);
   }
   const flat4 = flatText(step4);
@@ -3568,12 +3621,21 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
   }
   const reviewSkill = skillText('review');
   assert.ok(reviewSkill.includes('already reviewed') && reviewSkill.includes('No net changes'), 'the review skill prints the phrases step 4 names');
+  assert.ok(
+    reviewSkill.includes(`[ -n "\${HEAD_REF:-}" ] && printf '%s\\n' "<!-- agent-review-head: $HEAD_REF -->"`),
+    'the report writes the head marker the guard reads',
+  );
   const guard = indentedBashBlocks(step3);
   assert.strictEqual(guard.length, 1);
+  assert.ok(guard[0].split('\n').includes(REPORT_HEAD_LINE), 'step 3 reads the head marker in the form the report writes it');
+  assert.ok(guard[0].includes(REPORT_HEAD_GUARD), 'step 3 compares the marker with the current HEAD');
   assert.ok(guard[0].endsWith('echo "export FIX_FROM=\\"$(git rev-parse HEAD)\\"" >> /tmp/yolo_env.sh'), 'step 3 records the head address starts from');
-  assert.ok(guard[0].includes('[[ "$UPDATED" < "$REVIEW_TS" ]]'), 'the guard compares against the per-call timestamp');
-  assert.ok(!guard[0].includes('START_TS'), 'the run start never stands in for the latest review call');
-  assert.ok(flatText(step3).includes('The guard in that block uses the report only if its comment was updated at or after `REVIEW_TS`'), step3);
+  assert.ok(
+    flatText(step3).includes(
+      'The guard in that block uses the report only if its `<!-- agent-review-head: <sha> -->` marker names the current `HEAD`, the commit the latest review or re-review covered.',
+    ),
+    step3,
+  );
   assert.ok(yoloStep(yolo, '6. **Approval**').includes('select(.submittedAt > \\"$START_TS\\")'), 'approval still counts from the run start');
 
   const { mkdirSync, writeFileSync } = require('node:fs');
@@ -3583,42 +3645,155 @@ test('yolo-review takes a fresh timestamp right before each review call and judg
       const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
       mkdirSync(join(dir, 'bin'));
       writeFileSync(join(dir, 'yolo_env.sh'), 'export PR_NUMBER="7" START_TS="2000-01-01T00:00:00Z"\n');
-      writeFileSync(join(dir, 'head'), 'aaa111\n');
+      const head = 'aaaa111122223333444455556666777788889999';
+      writeFileSync(join(dir, 'head'), `${head}\n`);
       writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && cat "${dir}/head"\n`, { mode: 0o755 });
-      const stamps = () => (readFileSync(join(dir, 'yolo_env.sh'), 'utf8').match(/REVIEW_TS=/g) || []).length;
-      const stubGh = (updated) =>
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncase "$*" in\n  *.body*) cat "${dir}/body" ;;\n  *) echo x ;;\nesac\n`, { mode: 0o755 });
+      const stubComment = (marker) =>
         writeFileSync(
-          join(dir, 'bin', 'gh'),
-          `#!/bin/sh\ncase "$*" in\n  *updated_at*) echo "${updated}" ;;\n  *agent-review-ledger*|*.body*) echo '<!-- agent-review-ledger: [] -->' ;;\n  *) echo x ;;\nesac\n`,
-          { mode: 0o755 },
+          join(dir, 'body'),
+          ['<!-- agent-review -->', ...(marker ? [`<!-- agent-review-head: ${marker} -->`] : []), '<!-- agent-review-ledger: [] -->', '', 'report'].join('\r\n') + '\r\n',
         );
       const sh = (script) =>
         require('node:child_process').spawnSync(shell, ['-c', at(script)], {
           encoding: 'utf8',
           env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir },
         });
-      assert.strictEqual(sh(REVIEW_TS_BLOCK).status, 0, shell);
-      stubGh('2001-01-01T00:00:00Z');
-      const stale = sh(guard[0]);
-      assert.strictEqual(stale.status, 1, `${shell}: a report older than the latest review call stops the run`);
-      assert.match(stale.stdout, /\u274c No report newer than the latest review call/);
-      stubGh('2999-01-01T00:00:00Z');
+      for (const [label, marker] of [
+        ['an older head', 'bbbb111122223333444455556666777788889999'],
+        ['no head marker', null],
+        ['a short sha', head.slice(0, 12)],
+      ]) {
+        stubComment(marker);
+        const stale = sh(guard[0]);
+        assert.strictEqual(stale.status, 1, `${shell}, ${label}: a report for another head stops the run`);
+        assert.match(stale.stdout, /\u274c No report for the current head/, `${shell}, ${label}`);
+      }
+      stubComment(head);
       const fresh = sh(guard[0]);
       assert.strictEqual(fresh.status, 0, `${shell}: ${fresh.stdout}${fresh.stderr}`);
       assert.match(fresh.stdout, /open blockers: 0/);
+      assert.strictEqual(readFileSync(join(dir, 'yolo_ledger.json'), 'utf8'), '[]\n', `${shell}: the ledger comes from the same comment`);
 
-      assert.strictEqual(stamps(), 1, shell);
       const unchanged = sh(REREVIEW_BLOCK);
       assert.strictEqual(unchanged.status, 0, shell);
       assert.match(unchanged.stdout, /^no new commit: /, `${shell}: address committed nothing`);
-      assert.strictEqual(stamps(), 1, `${shell}: no re-review, so no new timestamp`);
-      writeFileSync(join(dir, 'head'), 'bbb222\n');
+      writeFileSync(join(dir, 'head'), 'cccc111122223333444455556666777788889999\n');
       const fixed = sh(REREVIEW_BLOCK);
       assert.strictEqual(fixed.status, 0, shell);
-      assert.strictEqual(fixed.stdout, '', shell);
-      assert.strictEqual(stamps(), 2, `${shell}: a new commit gets a fresh timestamp before the re-review`);
+      assert.strictEqual(fixed.stdout, '', `${shell}: a new commit goes on to the re-review`);
+      const behind = sh(guard[0]);
+      assert.strictEqual(behind.status, 1, `${shell}: after address commits, the old report no longer passes`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
+});
+
+const HEAD_ARGS_LINES = ['HEAD_ARGS=()', 'if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi'];
+
+// Every `agent-review status` command in the review skill, with continuation lines joined, and
+// whether its bash block builds HEAD_ARGS before it.
+function statusCalls() {
+  const calls = [];
+  for (const block of bashBlockList(readFileSync(REVIEW_SKILL, 'utf8'))) {
+    const lines = block.split('\n');
+    const setup = lines.findIndex((l, i) => l.trim() === HEAD_ARGS_LINES[0] && (lines[i + 1] || '').trim() === HEAD_ARGS_LINES[1]);
+    lines.forEach((line, i) => {
+      if (!line.includes('agent-review status')) return;
+      let command = line.trim();
+      for (let j = i; lines[j].trimEnd().endsWith('\\'); j++) command = `${command}\n${lines[j + 1].trim()}`;
+      calls.push({ command, buildsHeadArgs: setup >= 0 && setup < i });
+    });
+  }
+  return calls;
+}
+
+test('agent-review status gets --head and the sha as two arguments under bash and zsh', (t) => {
+  const { mkdirSync, writeFileSync } = require('node:fs');
+  const calls = statusCalls();
+  assert.strictEqual(calls.length, 3, 'the two auto-mode skip calls and the Stage 5 status call');
+  for (const shell of availableShells(t)) {
+    for (const { command, buildsHeadArgs } of calls) {
+      for (const head of ['0123456789abcdef0123456789abcdef01234567', '']) {
+        const dir = mkdtempSync(join(os.tmpdir(), 'ar-status-head-'));
+        try {
+          mkdirSync(join(dir, 'bin'));
+          writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/agent-review.args"\n`, { mode: 0o755 });
+          const script = [`HEAD_REF="${head}"`, ...(buildsHeadArgs ? HEAD_ARGS_LINES : []), command.replaceAll('/tmp/', `${dir}/`)].join('\n');
+          const r = require('node:child_process').spawnSync(shell, ['-c', script], {
+            encoding: 'utf8',
+            env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
+          });
+          assert.strictEqual(r.status, 0, `${shell}: ${r.stderr}`);
+          const args = readFileSync(join(dir, 'agent-review.args'), 'utf8').split('\n').slice(0, -1);
+          const label = `${shell}, HEAD_REF=${JSON.stringify(head)}: ${command.split('\n')[0]}`;
+          if (head) {
+            assert.strictEqual(args[args.indexOf('--head') + 1], head, `${label}: ${JSON.stringify(args)}`);
+          } else {
+            assert.ok(!args.some((a) => a.includes('--head')), `${label}: ${JSON.stringify(args)}`);
+          }
+          assert.ok(!args.includes(''), `${label}: no empty argument`);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    }
+  }
+  for (const { command, buildsHeadArgs } of calls) {
+    assert.ok(buildsHeadArgs && command.includes('"${HEAD_ARGS[@]}"'), `the call passes the HEAD_ARGS array: ${command}`);
+  }
+});
+
+test('no skill or template passes a flag and its value through one ${X:+...} expansion', () => {
+  const { readdirSync, statSync } = require('node:fs');
+  const files = [];
+  const walk = (dir) => {
+    for (const name of readdirSync(dir)) {
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) walk(path);
+      else if (/\.(md|yml|yaml|sh)$/.test(name)) files.push(path);
+    }
+  };
+  for (const dir of ['skills', 'templates', 'agents']) walk(join(ROOT, dir));
+  const multiWord = /\$\{[A-Za-z_][A-Za-z0-9_]*:\+[^}]*\s[^}]*\}/;
+  for (const path of files) {
+    readFileSync(path, 'utf8').split('\n').forEach((line, i) => {
+      assert.ok(!multiWord.test(line), `${relative(ROOT, path)}:${i + 1} expands to two words in bash but one in zsh: ${line.trim()}`);
+    });
+  }
+});
+
+const pr33Amendment = (heading, nextHeading) => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const section = spec.slice(spec.indexOf(heading), spec.indexOf(nextHeading));
+  const start = section.indexOf('**Amendment, 2026-10-27 (PR #33 review).**');
+  assert.notStrictEqual(start, -1, `${heading} has a PR #33 review amendment`);
+  return section.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+};
+
+test('the capture spec records the PR #33 review changes to the hooks and the check', () => {
+  const hooks = pr33Amendment('### 1. Capture hooks', '### 2.');
+  for (const needle of [
+    'The light hook entry parses the arm file and loads the bundled CLI only when `armed` is `true` and `created` is within the 6-hour limit',
+    'A `Result:` line within 3 lines of the Skill header may carry text after the label; that text starts the result',
+    'The header is stripped only when every line between it and that `Result:` line is blank; otherwise the text is kept whole, findings above it included.',
+  ]) {
+    assert.ok(hooks.includes(needle), `the section 1 amendment must say ${JSON.stringify(needle)}`);
+  }
+  const check = pr33Amendment('### 4. The check', '### 5.');
+  for (const needle of [
+    'A `json` or unlabeled fenced block that does not parse is list-like only when its trimmed body starts with `[` or `{` and contains `"file"`.',
+    'A mention path with no `/` that has a `.` or a capital letter counts when a tracked file has that file name at any depth; an all-lowercase one with no `.` counts only when that exact root-level path is tracked.',
+    'while `Dockerfile:3` (a tracked `docker/Dockerfile`) and `cart.rb:12` (a tracked `lib/cart.rb`) are.',
+    'the lane reads the code it quotes and the code it scores with `git show <head>:./<path>`',
+    '`code-review-proof` takes an optional `--base <sha>`, and the tracked files are those at `--head` plus those at `--base`',
+    'A `--base` that is not a commit, or whose files cannot be listed, fails with `stage: config`.',
+    'The text after `path:line:` inside the same token is part of the quote',
+    'The disproof checks read each file with one `git cat-file blob <commit>:./<path>`',
+    'The lane\'s own check in STEP 5 passes the same `--head` and `--base` as Stage 2',
+  ]) {
+    assert.ok(check.includes(needle), `the section 4 amendment must say ${JSON.stringify(needle)}`);
+  }
+  for (const text of [hooks, check]) assert.ok(!text.includes('\u2014'), 'new prose uses no em dashes');
 });
