@@ -94,6 +94,7 @@ function cleanPrevious(raw) {
 const LOCATION_WINDOW = 5;
 const LOCATION_WORDING = 0.5;
 const CANDIDATE_WINDOW = 10;
+const PAIR_TEXT_LIMIT = 500;
 
 class MatchesRejected extends Error {}
 
@@ -196,14 +197,13 @@ function candidatePairs(earlier, fresh) {
 }
 
 // The matcher must never see how either side was scored or handled: no severity, status, agent,
-// or confidence leaves this function.
+// or confidence leaves this function, and no evidence, which can hold the reason for a score.
 function problemFields(finding) {
   return {
     line: finding.line,
     category: finding.category,
-    message: finding.message,
-    evidence: finding.evidence || '',
-    recommendation: finding.recommendation || '',
+    message: finding.message.slice(0, PAIR_TEXT_LIMIT),
+    recommendation: (finding.recommendation || '').slice(0, PAIR_TEXT_LIMIT),
   };
 }
 

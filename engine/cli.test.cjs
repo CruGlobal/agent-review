@@ -2471,7 +2471,7 @@ function ledgerMatchFiles(dir) {
   return { previous, paths };
 }
 
-test('ledger-candidates prints the pairs with no score, status, lane, or confidence in them', () => {
+test('ledger-candidates prints the pairs with no score, status, lane, confidence, or evidence in them', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-'));
   try {
     const { paths } = ledgerMatchFiles(dir);
@@ -2482,11 +2482,11 @@ test('ledger-candidates prints the pairs with no score, status, lane, or confide
       pairs: [{
         id: 'new-sig#3',
         file: 'a.rb',
-        earlier: { line: 40, category: 'correctness', message: 'the cache is never invalidated after a write', evidence: 'save() never calls expire', recommendation: '' },
-        finding: { line: 47, category: 'Correctness', message: 'Writes leave stale rows behind in the lookup store.', evidence: '', recommendation: 'expire the key after save' },
+        earlier: { line: 40, category: 'correctness', message: 'the cache is never invalidated after a write', recommendation: '' },
+        finding: { line: 47, category: 'Correctness', message: 'Writes leave stale rows behind in the lookup store.', recommendation: 'expire the key after save' },
       }],
     });
-    for (const hidden of ['severity', 'status', 'agent', 'confidence', 'dismissed', 'intentional', 'Medium', 'Low', 'code-review']) {
+    for (const hidden of ['severity', 'status', 'agent', 'confidence', 'evidence', 'save() never calls expire', 'dismissed', 'intentional', 'Medium', 'Low', 'code-review']) {
       assert.ok(!r.stdout.includes(hidden), `the candidates must not carry ${hidden}`);
     }
 

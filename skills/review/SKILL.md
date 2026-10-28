@@ -1621,6 +1621,8 @@ if [ -n "$LEDGER_BY_LOCATION" ]; then
   else
     echo "ledger matching skipped: the candidate pairs could not be computed"
   fi
+  echo "ledger matching: $LEDGER_PAIRS pairs"
+  echo "routing: ${ROUTING:-normal}"
 fi
 echo "export LEDGER_PAIRS=\"$LEDGER_PAIRS\"" >> /tmp/review_env.sh
 if [ "$LEDGER_PAIRS" = 0 ]; then
@@ -1629,8 +1631,6 @@ if [ "$LEDGER_PAIRS" = 0 ]; then
     --previous /tmp/previous_agent_review_ledger.json \
     ${LEDGER_BY_LOCATION:+--match-suggestions-by-location} \
     > /tmp/agent_review_ledger.json
-else
-  echo "ledger matching: $LEDGER_PAIRS pairs wait for the matcher; the ledger is built after it answers"
 fi
 ```
 
@@ -1674,9 +1674,9 @@ the feedback store):
 - Most rewordings share too few words for that check, so under the same engine a second step
   catches them. `agent-review ledger-candidates` pairs each new finding below 7 that the ledger
   would still add, other than a static finding, with every older open or dismissed entry from the
-  same lane and file within 10 lines. A fresh matcher agent sees only those pairs, with no score,
-  status, lane, or confidence, and answers whether each pair is the same problem.
-  `agent-review ledger --matches` checks every answer against the same pairs and leaves out each
+  same lane and file within 10 lines. A fresh matcher agent sees only those pairs: each side's
+  line, category, message, and recommendation, with no score, status, lane, confidence, or
+  evidence. It answers whether each pair is the same problem. `agent-review ledger --matches` checks every answer against the same pairs and leaves out each
   new finding judged the same. The older entry never changes, so a wrong match can hide only the
   new wording. If the matcher fails or its answers are refused, the ledger is built without them
   and the run goes on.

@@ -4,7 +4,8 @@ findings and say, for each pair, whether the two describe the same problem.
 INPUT
 
 Read `/tmp/ledger_candidates.json` and nothing else. Do not open the code, the diff, the PR, the
-report, or any other file. It holds one JSON object:
+report, or any other file. Read all of it: if it is long, read it in parts until you reach the end.
+Answer every pair. It holds one JSON object:
 
 ```json
 {
@@ -13,14 +14,14 @@ report, or any other file. It holds one JSON object:
     {
       "id": "3f2a9c1b7d4e#4",
       "file": "app/models/order.rb",
-      "earlier": { "line": 40, "category": "correctness", "message": "...", "evidence": "...", "recommendation": "..." },
-      "finding": { "line": 44, "category": "correctness", "message": "...", "evidence": "...", "recommendation": "..." }
+      "earlier": { "line": 40, "category": "correctness", "message": "...", "recommendation": "..." },
+      "finding": { "line": 44, "category": "correctness", "message": "...", "recommendation": "..." }
     },
     {
       "id": "3f2a9c1b7d4e#7",
       "file": "app/models/order.rb",
-      "earlier": { "line": 50, "category": "performance", "message": "...", "evidence": "", "recommendation": "" },
-      "finding": { "line": 44, "category": "correctness", "message": "...", "evidence": "...", "recommendation": "..." }
+      "earlier": { "line": 50, "category": "performance", "message": "...", "recommendation": "" },
+      "finding": { "line": 44, "category": "correctness", "message": "...", "recommendation": "..." }
     }
   ]
 }
@@ -28,7 +29,8 @@ report, or any other file. It holds one JSON object:
 
 `earlier` is a finding an earlier review already holds. `finding` is a new finding from this
 review. Both are about `file`. A `line` of `null` means the finding names no line. An empty
-`evidence` or `recommendation` means the finding has none.
+`recommendation` means the finding has none. A `message` or `recommendation` longer than 500
+characters is cut off at 500.
 
 TASK
 

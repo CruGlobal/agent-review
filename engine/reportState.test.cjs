@@ -382,7 +382,6 @@ const blind = (f) => ({
   line: f.line,
   category: f.category,
   message: f.message,
-  evidence: f.evidence || '',
   recommendation: f.recommendation || '',
 });
 
@@ -470,8 +469,62 @@ test('candidates carry only the fields that describe each problem', () => {
   const [pair] = ledgerCandidates([entry], [rephrased({ confidence: 'Low', fix: 'patch', agents: 'code-review' })]);
   assert.deepEqual(Object.keys(pair).sort(), ['earlier', 'file', 'finding', 'id']);
   for (const side of ['earlier', 'finding']) {
-    assert.deepEqual(Object.keys(pair[side]).sort(), ['category', 'evidence', 'line', 'message', 'recommendation'], side);
+    assert.deepEqual(Object.keys(pair[side]).sort(), ['category', 'line', 'message', 'recommendation'], side);
   }
+});
+
+test('candidates cut each message and recommendation to 500 characters', () => {
+  const long = (c, n) => c.repeat(n);
+  const entry = oldEntry({ message: long('a', 600), recommendation: long('b', 700) });
+  const next = rephrased({ message: long('c', 501), recommendation: long('d', 499) });
+  const [pair] = ledgerCandidates([entry], [next]);
+  assert.deepEqual(
+    [pair.earlier.message, pair.earlier.recommendation, pair.finding.message, pair.finding.recommendation],
+    [long('a', 500), long('b', 500), long('c', 500), long('d', 499)],
+  );
+  const ledger = mergeLedger([entry], [next], BY_LOCATION);
+  assert.equal(ledger[1].message, long('c', 501), 'the ledger keeps the whole message');
+});
+
+test('seeded property: all-false answers give the location-mode ledger, and all-true answers change no earlier entry', () => {
+  let seed = 20261027;
+  const pick = (n) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed % n;
+  };
+  const words = ['cache', 'stale', 'write', 'read', 'lock', 'race', 'nil', 'leak', 'rows', 'key'];
+  const one = () => {
+    const severity = 1 + pick(9);
+    return finding({
+      signature: `s${pick(12)}`,
+      agent: ['code-review', 'code-review', 'testing', 'static-analysis'][pick(4)],
+      category: ['correctness', 'Correctness', 'performance'][pick(3)],
+      severity,
+      file: ['a.rb', 'a.rb', 'b.rb'][pick(3)],
+      line: severity < 7 && pick(6) === 0 ? null : 1 + pick(20),
+      message: Array.from({ length: 2 + pick(4) }, () => words[pick(words.length)]).join(' '),
+      recommendation: pick(2) ? 'change it' : undefined,
+    });
+  };
+  let pairsSeen = 0;
+  let hidden = 0;
+  for (let i = 0; i < 300; i++) {
+    const previous = [];
+    for (let k = 0, count = 1 + pick(5); k < count; k++) {
+      const entry = { n: k + 1, ...one(), signature: `p${k}`, status: ['open', 'open', 'dismissed', 'fixed'][pick(4)] };
+      previous.push(entry);
+    }
+    const findings = Array.from({ length: 1 + pick(5) }, one);
+    const byLocation = mergeLedger(previous, findings, BY_LOCATION);
+    const pairs = ledgerCandidates(previous, findings);
+    pairsSeen += pairs.length;
+    const answers = (same) => pairs.map((pair) => ({ id: pair.id, same }));
+    assert.deepEqual(mergeLedger(previous, findings, { ...BY_LOCATION, matches: answers(false) }), byLocation, `case ${i}`);
+    const allTrue = mergeLedger(previous, findings, { ...BY_LOCATION, matches: answers(true) });
+    assert.deepEqual(allTrue.slice(0, previous.length), byLocation.slice(0, previous.length), `case ${i}: earlier entries`);
+    hidden += byLocation.length - allTrue.length;
+  }
+  assert.ok(pairsSeen > 100 && hidden > 50, `the cases must exercise matching (pairs ${pairsSeen}, hidden ${hidden})`);
 });
 
 function matchCase(over = {}) {

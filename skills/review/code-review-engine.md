@@ -246,13 +246,14 @@ from `/tmp/review_options.json`.
 
 Under the `code-review` engine, `/code-review` rewords the same suggestion on every run, and most
 rewordings share too few words for the ledger's location match. A fresh matcher agent judges
-the rest. It is blind: it sees only pairs of finding text, never a score, status, lane, or
-confidence, and it can answer only whether each pair is the same problem. Scores are already final
-here, and a match never changes an earlier entry.
+the rest. It is blind: for each side of a pair it sees only the line, category, message, and
+recommendation, never a score, status, lane, confidence, or evidence, and it can answer only
+whether each pair is the same problem. Scores are already final here, and a match never changes an
+earlier entry.
 
-The ledger block in `SKILL.md` saved `LEDGER_PAIRS` in `/tmp/review_env.sh` and printed the count.
-When it is 0, that block already built the ledger, so skip this section. Otherwise there is no
-ledger yet, and these steps build it:
+The ledger block in `SKILL.md` printed `ledger matching: <M> pairs` and saved M as `LEDGER_PAIRS`
+in `/tmp/review_env.sh`. When M is 0, that block already built the ledger, so skip this section.
+Otherwise there is no ledger yet, and these steps build it:
 
 1. Read the plugin's `templates/ledger-match.md` (`../../templates/ledger-match.md` from this file).
    It has no placeholders.
@@ -260,8 +261,8 @@ ledger yet, and these steps build it:
    `SKILL.md` has finished:
 
    - **description**: `"Ledger matcher"`
-   - **subagent_type**: `"agent-review:reviewer-sonnet"`, or `"general-purpose"` if `$ROUTING` is
-     `degraded`
+   - **subagent_type**: `"agent-review:reviewer-sonnet"`, or `"general-purpose"` when the ledger
+     block printed `routing: degraded`
    - **model**: `"sonnet"`
    - **prompt**: the whole text of `ledger-match.md`, as written
 
@@ -291,7 +292,8 @@ if [ -z "$LEDGER_SKIP" ]; then
       --match-suggestions-by-location --matches /tmp/ledger_matches.json \
       > /tmp/agent_review_ledger.json 2> /tmp/ledger_matches_error.txt; then
     MATCHED=$(node -e 'console.log(require("/tmp/ledger_matches.json").filter((m) => m.same).length)')
-    echo "ledger matching: $MATCHED of $LEDGER_PAIRS pairs judged the same"
+    ANSWERED=$(node -e 'console.log(require("/tmp/ledger_matches.json").length)')
+    echo "ledger matching: $MATCHED of $LEDGER_PAIRS pairs judged the same ($ANSWERED answered)"
   else
     LEDGER_SKIP=$(head -1 /tmp/ledger_matches_error.txt | sed 's/^ledger: //')
     LEDGER_SKIP="${LEDGER_SKIP:-the ledger refused the matches}"
