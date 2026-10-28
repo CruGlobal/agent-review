@@ -648,9 +648,10 @@ if [ "$MODE" = "auto" ]; then
     RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
     RULES_ERROR=""
     [ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
-    # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted.
+    # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
+    # keeps every path from the repo root, whatever the user's git config says.
     if [ -z "$RULES_ERROR" ]; then
-      git diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
+      git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
         && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
         || RULES_ERROR="could not list the changed files"
     fi
@@ -1798,9 +1799,10 @@ files. Never hand-author `openBlockers`, `pass`, `risk`, or `humanRequired`:
 RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
 RULES_ERROR=""
 [ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
-# --no-renames lists both sides of a rename; -z keeps unusual paths unquoted.
+# --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
+# keeps every path from the repo root, whatever the user's git config says.
 if [ -z "$RULES_ERROR" ]; then
-  git diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
+  git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
     && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
     || RULES_ERROR="could not list the changed files"
 fi

@@ -4094,6 +4094,10 @@ test("the status block checks the base commit's human approval rules against the
     rulesCheckLines().includes('if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then'),
     'ls-tree lists from the repo root, so a run from a subdirectory still finds the config',
   );
+  assert.ok(
+    rulesCheckLines().includes('git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \\'),
+    'a user\'s diff.relative=true never narrows the changed-file list',
+  );
   const { repo, fork, head, base, badConfig, noConfig, blobGone } = humanRulesRepo();
   const unread = (why) => ({ required: true, reasons: [`could not read the human approval rules: ${why}`] });
   const pr = (from) => ({ BASE_REF: from, HEAD_REF: head, FULL_RANGE: `${from}..${head}` });
@@ -4108,6 +4112,13 @@ test("the status block checks the base commit's human approval rules against the
     ['a base tree that cannot be listed', pr(base), unread('could not read the base tree'), 'ls-tree'],
     ['an unknown base commit', pr('0123456789abcdef0123456789abcdef01234567'), unread('could not list the changed files')],
     ['a local run from a subdirectory', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD` }, PCI_RULES, null, 'app/payments'],
+    [
+      'a local run from a subdirectory with diff.relative=true in the git config',
+      { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD`, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'diff.relative', GIT_CONFIG_VALUE_0: 'true' },
+      PCI_RULES,
+      null,
+      'app/payments',
+    ],
   ];
   const files = { 'agent_review_card_scan.json': '{ "cardData": false, "reasons": [] }\n' };
   try {
