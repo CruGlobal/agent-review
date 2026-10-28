@@ -624,15 +624,22 @@ recommendation. Do not skip a question because the recommendation looks obvious.
    the card-data check runs on every review. A yes means `auto_approve: true` on every installed caller,
    a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every caller is `false`
    whatever the answer.
-4. **Does every PR in this repo need a person's approval?** Recommend yes for staff_accounting_app
-   and for any repo the team says always needs a person; recommend no otherwise. A yes writes
+4. **Does every PR in this repo need a person's approval?** Recommend yes for a repo your team says
+   always needs a person, such as a financial or accounting app; recommend no otherwise. A yes writes
    `human_approval.always: true`; a no writes nothing for `always`. Then offer card paths:
    - Scan the repo for card-handling code:
 
      ```bash
-     git grep -P -l -i '\b(cvv2?|cvc|card_?number|pan|expir(y|ation)_?(date|month|year)|card_?token|tsys|cru[-_]payments|stripe|braintree)\b' -- . ':!*.md' ':!*.lock' ':!.claude/review' \
-       | sed 's|[^/]*$||' | sed 's|^$|./|' | sort | uniq -c | sort -rn
+     HITS=$(git grep -P -l -i '\b(cvv2?|cvc|card_?number|pan|expir(y|ation)_?(date|month|year)|card_?token|tsys|cru[-_]payments|stripe|braintree)\b' -- . ':!*.md' ':!*.lock' ':!.claude/review'); RC=$?
+     if [ "$RC" -gt 1 ]; then
+       echo "card-code scan unavailable: this git has no PCRE support, or the scan failed"
+     elif [ -n "$HITS" ]; then
+       printf '%s\n' "$HITS" | sed 's|[^/]*$||' | sed 's|^$|./|' | sort | uniq -c | sort -rn
+     fi
      ```
+
+   - If the block prints `card-code scan unavailable`, say so. Do not report "no card code found".
+     Offer to take `human_approval.paths` by hand, and go on with setup. This never stops setup.
 
    - Turn each folder into a glob (`app/payments/` becomes `app/payments/**`; `./` means files in
      the repo root, so list those files by name instead). Show the list with the hit counts and let

@@ -3632,6 +3632,7 @@ test('init keeps the approval answer in BOT_APPROVES and flips auto_approve with
 
 test('init names no consuming repo in the approval advice', () => {
   const init = skillText('init');
+  assert.ok(!init.includes('staff_accounting_app'));
   assert.ok(!init.includes('PCI-scope'));
   assert.ok(
     !init.replace(/\s+/g, ' ').includes('recommend no for repos your team requires human review on'),
@@ -4276,7 +4277,8 @@ test('init asks question 4, offers card paths, writes them only on a yes, and cr
   const flat = init.replace(/\s+/g, ' ');
   assert.ok(flat.includes('Such repos keep the bot on and use question 4'), 'question 3 points to question 4');
   assert.ok(flat.includes("Does every PR in this repo need a person's approval?"), 'question 4 is asked');
-  assert.ok(flat.includes('Recommend yes for staff_accounting_app'), 'question 4 recommendation');
+  assert.ok(flat.includes('Recommend yes for a repo your team says always needs a person, such as a financial or accounting app'), 'question 4 recommendation');
+  assert.ok(init.includes('card-code scan unavailable: this git has no PCRE support') && flat.includes('Do not report "no card code found"') && flat.includes('This never stops setup'), 'a failed git grep -P is visible and non-fatal');
   assert.ok(flat.includes('`human_approval.always: true`'), 'a yes writes always: true');
   assert.ok(init.includes('Ask the four setup choices'), 'four choices');
   assert.ok(
