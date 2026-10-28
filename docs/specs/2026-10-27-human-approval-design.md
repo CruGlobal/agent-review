@@ -184,6 +184,24 @@ Merge order: this PR is stacked on #33, so it merges after #33. Retarget it to `
   - a hand-added label holds the bot off;
   - on a protected branch, the bot takes back its earlier approval when a later head needs a person.
 
+**Amendment, 2026-10-28 (build).** These changes were made during the build. Where they disagree with the text above, they win.
+- **Dismissals.** `dismissBotApprovals` is `all`, `stale` or `none`.
+  - `all` dismisses every approval the bot gave the PR. It applies when the report or the repo rules say a person is needed. That includes a report for another head when the action's own rules re-check says so; the label is added then too. This replaces "When it can't judge ... it leaves the label alone" in section 6 for that case.
+  - `all` also applies when a person added the label.
+  - `stale` applies when the rules can't be read and nothing says a person is needed. Only bot approvals of other commits are dismissed.
+  - `none` applies in every other case.
+  - An unknown value counts as `all`.
+- **Big PRs.** An incomplete PR file list (over 3,000 files) blocks approval only in repos with rules, through `human-check --incomplete`. A repo with no rules still approves a big PR.
+- **Approval is pinned.** The approval goes to the exact commit that was judged, with a head re-check just before approving.
+- **CI.** The CI approve job also runs after a failed review job, so the rules re-check can act. Its condition is `!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'`.
+- **No base commit.** A review path with no base commit writes `required: true`, with the reason "could not read the human approval rules: no base commit".
+- **Unreadable config.** In the review, a config that exists at the base but can't be read means `required: true`. In the approve action, it is a rules error, so the action does not approve.
+- **Carried reasons.** On zero-risk incremental runs, the earlier `humanReasons` are carried forward and stay until the next full review. This fails closed.
+- **Card scan input.** The card scan reads the merge-base diff (`/tmp/pr_card_scan_diff.txt`), not the two-dot full diff.
+- **Strict status inputs.** `agent-review status` fails unless the rules and card-scan inputs have boolean `required` and `cardData` and lists of string reasons, and it fails on `cardData: false` with reasons. The approval rule does not judge a status whose `humanRequired` is present but not a boolean.
+- **Dry run.** The dry run found 0 false flags in 30 recent PRs. The token and expiry wording was tightened.
+- **Init.** Init names no consuming repo. It creates the label when the bot may approve, and it says so when the card-code search can't run.
+
 ## Left to the builder
 
 - exact function names, file layout, and test layout, following the repo's patterns;

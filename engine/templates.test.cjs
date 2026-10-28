@@ -4325,6 +4325,33 @@ test('init asks question 4, offers card paths, writes them only on a yes, and cr
   assert.ok(/⚠️ Could not create/.test(threeC.slice(threeC.indexOf('gh label create'))), 'a failed create warns and continues');
 });
 
+test('the human approval spec records the build amendment before Left to the builder', () => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-27-human-approval-design.md'), 'utf8');
+  const start = spec.indexOf('**Amendment, 2026-10-28 (build).**');
+  const end = spec.indexOf('## Left to the builder');
+  assert.ok(start !== -1 && start < end, 'the amendment sits before Left to the builder');
+  const amendment = spec.slice(start, end);
+  const flat = flatText(amendment);
+  for (const needle of [
+    '`dismissBotApprovals` is `all`, `stale` or `none`.',
+    'That includes a report for another head when the action\'s own rules re-check says so',
+    '`all` also applies when a person added the label.',
+    '`stale` applies when the rules can\'t be read and nothing says a person is needed. Only bot approvals of other commits are dismissed.',
+    'An unknown value counts as `all`.',
+    'blocks approval only in repos with rules, through `human-check --incomplete`',
+    'with a head re-check just before approving',
+    'The CI approve job also runs after a failed review job, so the rules re-check can act.',
+    'writes `required: true`, with the reason "could not read the human approval rules: no base commit"',
+    'This fails closed.',
+    '(`/tmp/pr_card_scan_diff.txt`), not the two-dot full diff',
+    'The dry run found 0 false flags in 30 recent PRs. The token and expiry wording was tightened.',
+    'Init names no consuming repo.',
+  ]) {
+    assert.ok(flat.includes(needle), `the amendment says ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('—'), 'the amendment uses no em dashes');
+});
+
 test('the config template carries a commented human_approval example', () => {
   const t = readFileSync(join(ROOT, 'templates/config.yml'), 'utf8');
   assert.ok(t.includes('# human_approval:'));
