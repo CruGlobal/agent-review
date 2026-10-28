@@ -75,6 +75,9 @@ function judge(body, { head } = {}) {
   if (!status || typeof status !== 'object' || Array.isArray(status)) {
     return unjudged('status marker is not an object');
   }
+  if (status.humanRequired !== undefined && typeof status.humanRequired !== 'boolean') {
+    return unjudged('status humanRequired is not a boolean');
+  }
   if (status.head !== undefined && String(status.head).toLowerCase() !== expected) {
     return { result: { ...no(`status head ${status.head} disagrees with the PR head ${expected}`), ...statusFields(status) }, judged: false };
   }
@@ -105,11 +108,13 @@ function cautionFor(result) {
   return `Caution: this change is irreversible (${reasons}). A revert will not undo it. Check backups and the deploy plan before you merge.`;
 }
 
-// label: 'add' | 'remove' | 'keep'. Only a judged report may change the label,
-// and a label a person added is never removed by the bot.
-// dismissBotApprovals: 'all' | 'stale' | 'none'. 'stale' means the bot's approvals of
-// other heads; only unreadable rules dismiss those, since stale approvals are kept
-// on purpose everywhere else.
+// label: 'add' | 'remove' | 'keep'. Only a judged report, or readable rules that
+// need a person, may change the label, and a label a person added is never
+// removed by the bot.
+// dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed
+// or a person's label is on the PR. 'stale' means the bot's approvals of other
+// heads; only unreadable rules dismiss those, since stale approvals are kept on
+// purpose everywhere else.
 function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   const { result, judged } = judge(report, { head });
   const caution = cautionFor(result);
@@ -120,8 +125,6 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     dismissBotApprovals,
     caution,
   });
-  if (!judged) return out(false, result.reason, 'keep', 'none');
-
   const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === 'string');
   const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
   const plain = rules !== null && typeof rules === 'object' && !Array.isArray(rules);
@@ -131,6 +134,15 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     typeof rules.required === 'boolean' &&
     Array.isArray(rules.reasons) &&
     rules.reasons.every((r) => typeof r === 'string');
+  // The rules re-check reads the base commit and the PR's current files, not
+  // the report, so it holds even when the report cannot be judged.
+  if (!judged) {
+    if (ruleOk && rules.required) {
+      return out(false, `a person must approve: ${rules.reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
+    }
+    return out(false, result.reason, 'keep', 'none');
+  }
+
   const reasons = [...result.humanReasons];
   if (ruleOk && rules.required) {
     for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
@@ -144,7 +156,7 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   }
   if (!labelsOk) return out(false, 'could not read the PR labels: expected a list of names', 'keep', 'none');
   if (present && labelOwner !== 'bot') {
-    return out(false, `a person added the ${LABEL} label`, 'keep', 'none');
+    return out(false, `a person added the ${LABEL} label`, 'keep', 'all');
   }
   return out(result.approve, result.reason, present ? 'remove' : 'keep', 'none');
 }

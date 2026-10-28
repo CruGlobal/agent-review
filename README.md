@@ -105,12 +105,22 @@ with no card data do not count. A hit shows as `👤 Needs a person's approval` 
 
 **The label.** When a person is needed, the approval job adds the `needs-human-approval` label.
 It removes the label only if the bot added it. A label added by hand (say you spot card code
-the check missed) keeps the bot from approving until a person removes it. `/agent-review:init`
-creates the label once. If it is missing, the job creates it when its token allows.
+the check missed) keeps the bot from approving until a person removes it. Adding the label does
+not run the approval job, so if the bot already approved the PR, dismiss that approval by hand.
+`/agent-review:init` creates the label once. If it is missing, the job creates it when its token
+allows.
 
-**Old approvals.** When a person is needed, the bot takes back (dismisses) its own earlier
-approvals. If it cannot read the rules, it takes back only its approvals of older commits. It
-approves only the exact commit it judged, and checks that the head did not move first.
+**Old approvals.** Each time the approval job runs, it takes back (dismisses) every approval the
+bot gave the PR when:
+
+- the report for the PR's newest commit says a person is needed;
+- the repo rules say so, even when the report covers an older commit or the CI review failed,
+  because the job checks the rules itself;
+- a person added the `needs-human-approval` label.
+
+If the job cannot read the rules and nothing says a person is needed, it takes back only the
+bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's
+review. It approves only the exact commit it judged, and checks that the head did not move first.
 
 **Irreversible changes.** A change that drops a column, deletes data or sends email is now a
 caution, not a stop. The report shows `⚠️ Irreversible`, and the approval message repeats it.

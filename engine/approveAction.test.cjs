@@ -339,6 +339,36 @@ const SCENARIOS = {
       ]);
     },
   ],
+  'a report for an older head still adds the label and dismisses every bot approval when a PCI path needs a person': [
+    { config: PCI, 'comments.json': JSON.stringify([{ user: { login: BOT }, body: report({ head: OLD }) }]), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.match(o.summary, /approve=false, label=add, dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
+      assert.deepEqual(o.writes, [
+        `label ¦ create ¦ ${LABEL} ¦ --repo ¦ o/r ¦ --color ¦ B60205 ¦ --description ¦ agent-review: a person must approve this PR ¦ `,
+        `api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ -f ¦ labels[]=${LABEL} ¦ `,
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/11/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/14/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+      ]);
+    },
+  ],
+  'a report for an older head changes nothing when the rules need no person': [
+    { 'comments.json': JSON.stringify([{ user: { login: BOT }, body: report({ head: OLD }) }]), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.writes, []);
+      assert.match(o.summary, /label=keep, dismiss bot approvals=none\./);
+    },
+  ],
+  'a label a person added takes back every bot approval and stays': [
+    { 'labels.json': JSON.stringify([{ name: LABEL }]), 'timeline.json': JSON.stringify([labeled('alice')]), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      noLabelWrites(o);
+      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.match(o.summary, /a person added the needs-human-approval label/);
+    },
+  ],
   'label remove: a bot-owned label comes off and the PR is approved': [
     {
       'labels.json': JSON.stringify([{ name: 'bug' }, { name: LABEL }]),

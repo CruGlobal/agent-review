@@ -18921,6 +18921,9 @@ var require_approval = __commonJS({
       if (!status || typeof status !== "object" || Array.isArray(status)) {
         return unjudged("status marker is not an object");
       }
+      if (status.humanRequired !== void 0 && typeof status.humanRequired !== "boolean") {
+        return unjudged("status humanRequired is not a boolean");
+      }
       if (status.head !== void 0 && String(status.head).toLowerCase() !== expected) {
         return { result: { ...no(`status head ${status.head} disagrees with the PR head ${expected}`), ...statusFields(status) }, judged: false };
       }
@@ -18958,11 +18961,16 @@ var require_approval = __commonJS({
         dismissBotApprovals,
         caution
       });
-      if (!judged) return out(false, result.reason, "keep", "none");
       const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === "string");
       const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
       const plain = rules !== null && typeof rules === "object" && !Array.isArray(rules);
       const ruleOk = plain && !("error" in rules) && typeof rules.required === "boolean" && Array.isArray(rules.reasons) && rules.reasons.every((r) => typeof r === "string");
+      if (!judged) {
+        if (ruleOk && rules.required) {
+          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, present ? "keep" : "add", "all");
+        }
+        return out(false, result.reason, "keep", "none");
+      }
       const reasons = [...result.humanReasons];
       if (ruleOk && rules.required) {
         for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
@@ -18976,7 +18984,7 @@ var require_approval = __commonJS({
       }
       if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", "none");
       if (present && labelOwner !== "bot") {
-        return out(false, `a person added the ${LABEL} label`, "keep", "none");
+        return out(false, `a person added the ${LABEL} label`, "keep", "all");
       }
       return out(result.approve, result.reason, present ? "remove" : "keep", "none");
     }

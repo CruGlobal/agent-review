@@ -1847,7 +1847,7 @@ test('interact.yml approves through the shared action, gated by auto_approve', (
   assert.ok(!body.includes('gh pr review'), 'interact.yml must not carry its own approval shell');
 });
 
-test('review.yml approves only when the caller opts in and the review job succeeded', () => {
+test('review.yml approves only when the caller opts in, and runs after a failed review so the rules re-check can act', () => {
   const { parse } = require('yaml');
   const doc = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
   const on = doc.on || doc[true];
@@ -1855,8 +1855,8 @@ test('review.yml approves only when the caller opts in and the review job succee
   assert.equal(on.workflow_call.inputs.auto_approve.default, false);
   const job = doc.jobs.approve;
   assert.ok(job, 'review.yml must define an approve job');
-  assert.equal(job.needs, 'review', 'a failed or skipped review must never reach the approver');
-  assert.equal(job.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
+  assert.equal(job.needs, 'review', 'the approver reads the engine the review job resolved');
+  assert.equal(job.if, "!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'", 'a failed review still reaches the approver; a cancelled one does not');
   assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' }, 'the runtime checkout needs contents: read');
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
@@ -2396,7 +2396,7 @@ test('review.yml reads the engine through the shared action and approves only on
   const { parse } = require('yaml');
   const wf = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
   assert.equal(wf.jobs.review.outputs.engine, '${{ steps.engine.outputs.name }}');
-  assert.equal(wf.jobs.approve.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
+  assert.equal(wf.jobs.approve.if, "!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
   const step = wf.jobs.review.steps.find((s) => s.id === 'engine');
   assert.ok(step, 'review job needs a step with id engine');
   assert.equal(step.uses, READ_ENGINE_USES);
@@ -4316,4 +4316,16 @@ test('README lists the person-must-approve rule, drops irreversible from the sto
     assert.ok(sec.includes(part), `section mentions ${part}`);
   }
   assert.ok(!r.includes('a human must approve'), 'old single approval rule is gone');
+  for (const part of [
+    'Adding the label does not run the approval job, so if the bot already approved the PR, dismiss that approval by hand.',
+    'Each time the approval job runs, it takes back (dismisses) every approval the bot gave the PR when:',
+    "- the report for the PR's newest commit says a person is needed;",
+    '- the repo rules say so, even when the report covers an older commit or the CI review failed, because the job checks the rules itself;',
+    '- a person added the `needs-human-approval` label.',
+    "If the job cannot read the rules and nothing says a person is needed, it takes back only the bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's review.",
+  ]) {
+    assert.ok(sec.includes(part), `the README says ${JSON.stringify(part)}`);
+  }
+  const own = r.slice(r.indexOf('## PCI and repos that always need a person'), r.indexOf('## Set up a repo (once)'));
+  assert.ok(own.length > 0 && !own.includes('\u2014'), 'the human approval section uses no em dashes');
 });
