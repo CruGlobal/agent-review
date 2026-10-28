@@ -18813,70 +18813,6 @@ var require_reportState = __commonJS({
   }
 });
 
-// engine/approval.cjs
-var require_approval = __commonJS({
-  "engine/approval.cjs"(exports2, module2) {
-    "use strict";
-    var MARKER = "<!-- agent-review -->";
-    var ROLLOUTS_THAT_APPROVE = /* @__PURE__ */ new Set(["advisory", "enforce"]);
-    function headerBlock(text) {
-      const lines = [];
-      for (const line of text.split("\n")) {
-        if (!/^<!-- agent-review(-[a-z]+: .*)? -->$/.test(line)) break;
-        lines.push(line);
-      }
-      return lines.join("\n");
-    }
-    function markerLine(header, name) {
-      const m = header.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, "m"));
-      return m ? m[1].trim() : null;
-    }
-    function no(reason) {
-      return { approve: false, reason };
-    }
-    function evaluateApproval(body, { head } = {}) {
-      const expected = String(head || "").trim().toLowerCase();
-      if (!expected) return no("no expected head SHA supplied");
-      const text = String(body || "").replace(/\r/g, "");
-      if (!text.startsWith(MARKER)) return no("not an agent-review report");
-      const header = headerBlock(text);
-      const rollout = markerLine(header, "rollout");
-      if (!rollout) return no("report carries no rollout marker");
-      if (rollout === "shadow") return no("shadow reports never approve");
-      if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return no(`unknown rollout mode "${rollout}"`);
-      const reportHead = markerLine(header, "head");
-      if (!reportHead) return no("report carries no reviewed-head marker");
-      if (reportHead.toLowerCase() !== expected) {
-        return no(`report covers ${reportHead} but the PR head is ${expected}`);
-      }
-      const statusRaw = markerLine(header, "status");
-      if (!statusRaw) return no("report carries no status marker");
-      let status;
-      try {
-        status = JSON.parse(statusRaw);
-      } catch {
-        return no("status marker is not valid JSON");
-      }
-      if (!status || typeof status !== "object" || Array.isArray(status)) {
-        return no("status marker is not an object");
-      }
-      if (status.head !== void 0 && String(status.head).toLowerCase() !== expected) {
-        return no(`status head ${status.head} disagrees with the PR head ${expected}`);
-      }
-      if (status.pass !== true) {
-        const open = Number.isInteger(status.openBlockers) ? status.openBlockers : "unknown";
-        return no(`status is not passing (${open} open blockers)`);
-      }
-      if (status.irreversible === true) return no("change is irreversible; a human must approve");
-      return {
-        approve: true,
-        reason: `report for ${expected} passes with no open blockers and the change is reversible`
-      };
-    }
-    module2.exports = { evaluateApproval, MARKER };
-  }
-});
-
 // engine/humanApproval.cjs
 var require_humanApproval = __commonJS({
   "engine/humanApproval.cjs"(exports2, module2) {
@@ -18920,6 +18856,126 @@ var require_humanApproval = __commonJS({
       return { required: reasons.length > 0, reasons };
     }
     module2.exports = { humanRules, LABEL };
+  }
+});
+
+// engine/approval.cjs
+var require_approval = __commonJS({
+  "engine/approval.cjs"(exports2, module2) {
+    "use strict";
+    var MARKER = "<!-- agent-review -->";
+    var { LABEL } = require_humanApproval();
+    var ROLLOUTS_THAT_APPROVE = /* @__PURE__ */ new Set(["advisory", "enforce"]);
+    function headerBlock(text) {
+      const lines = [];
+      for (const line of text.split("\n")) {
+        if (!/^<!-- agent-review(-[a-z]+: .*)? -->$/.test(line)) break;
+        lines.push(line);
+      }
+      return lines.join("\n");
+    }
+    function markerLine(header, name) {
+      const m = header.match(new RegExp(`^<!-- agent-review-${name}: (.*) -->$`, "m"));
+      return m ? m[1].trim() : null;
+    }
+    function no(reason) {
+      return { approve: false, reason };
+    }
+    function unjudged(reason) {
+      return { result: no(reason), judged: false };
+    }
+    function statusFields(status) {
+      const strings = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+      return {
+        irreversible: status.irreversible === true,
+        irreversibleReasons: strings(status.irreversibleReasons),
+        humanRequired: status.humanRequired === true,
+        humanReasons: strings(status.humanReasons)
+      };
+    }
+    function judge(body, { head } = {}) {
+      const expected = String(head || "").trim().toLowerCase();
+      if (!expected) return unjudged("no expected head SHA supplied");
+      const text = String(body || "").replace(/\r/g, "");
+      if (!text.startsWith(MARKER)) return unjudged("not an agent-review report");
+      const header = headerBlock(text);
+      const rollout = markerLine(header, "rollout");
+      if (!rollout) return unjudged("report carries no rollout marker");
+      if (rollout === "shadow") return unjudged("shadow reports never approve");
+      if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return unjudged(`unknown rollout mode "${rollout}"`);
+      const reportHead = markerLine(header, "head");
+      if (!reportHead) return unjudged("report carries no reviewed-head marker");
+      if (reportHead.toLowerCase() !== expected) {
+        return unjudged(`report covers ${reportHead} but the PR head is ${expected}`);
+      }
+      const statusRaw = markerLine(header, "status");
+      if (!statusRaw) return unjudged("report carries no status marker");
+      let status;
+      try {
+        status = JSON.parse(statusRaw);
+      } catch {
+        return unjudged("status marker is not valid JSON");
+      }
+      if (!status || typeof status !== "object" || Array.isArray(status)) {
+        return unjudged("status marker is not an object");
+      }
+      if (status.head !== void 0 && String(status.head).toLowerCase() !== expected) {
+        return { result: { ...no(`status head ${status.head} disagrees with the PR head ${expected}`), ...statusFields(status) }, judged: false };
+      }
+      const fields = statusFields(status);
+      if (status.pass !== true) {
+        const open = Number.isInteger(status.openBlockers) ? status.openBlockers : "unknown";
+        return { result: { ...no(`status is not passing (${open} open blockers)`), ...fields }, judged: true };
+      }
+      if (fields.humanRequired) {
+        return {
+          result: { ...no(`a person must approve: ${fields.humanReasons.join("; ")}`), ...fields },
+          judged: true
+        };
+      }
+      return {
+        result: { approve: true, reason: `report for ${expected} passes with no open blockers`, ...fields },
+        judged: true
+      };
+    }
+    function evaluateApproval(body, opts) {
+      return judge(body, opts).result;
+    }
+    function cautionFor(result) {
+      if (!result.irreversible) return null;
+      const reasons = result.irreversibleReasons.length ? result.irreversibleReasons.join("; ") : "no reason recorded";
+      return `Caution: this change is irreversible (${reasons}). A revert will not undo it. Check backups and the deploy plan before you merge.`;
+    }
+    function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
+      const { result, judged } = judge(report, { head });
+      const caution = cautionFor(result);
+      const out = (approve, reason, label, dismissBotApprovals) => ({
+        approve,
+        reason,
+        label,
+        dismissBotApprovals,
+        caution
+      });
+      if (!judged) return out(false, result.reason, "keep", false);
+      const present = Array.isArray(labels) && labels.includes(LABEL);
+      const ruleOk = rules && typeof rules === "object" && !rules.error;
+      const reasons = [...result.humanReasons];
+      if (ruleOk && rules.required === true) {
+        for (const r of Array.isArray(rules.reasons) ? rules.reasons : []) if (!reasons.includes(r)) reasons.push(r);
+      }
+      if (result.humanRequired || ruleOk && rules.required === true) {
+        return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", true);
+      }
+      if (!ruleOk) {
+        const why = rules && rules.error ? rules.error : "no rules supplied";
+        return out(false, `could not check the human approval rules: ${why}`, "keep", false);
+      }
+      if (present && labelOwner !== "bot") {
+        return out(false, `a person added the ${LABEL} label`, "keep", false);
+      }
+      return out(result.approve, result.reason, present ? "remove" : "keep", false);
+    }
+    module2.exports = { evaluateApproval, decideApproval, MARKER };
   }
 });
 
@@ -20671,7 +20727,7 @@ var require_cli = __commonJS({
     } = require_learningsStore();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
-    var { evaluateApproval } = require_approval();
+    var { evaluateApproval, decideApproval } = require_approval();
     var { humanRules } = require_humanApproval();
     var {
       CAPTURE_LIMIT_MINUTES,
@@ -21528,11 +21584,31 @@ var require_cli = __commonJS({
         case "approval": {
           const reportPath = flag(rest, "--report");
           const head = flag(rest, "--head");
-          if (!reportPath || !head) {
-            out("usage: agent-review approval --report <f> --head <sha>");
+          const rulesPath = flag(rest, "--rules");
+          const labelsPath = flag(rest, "--labels");
+          const labelOwner = flag(rest, "--label-owner") || "none";
+          if (!reportPath || !head || !["bot", "person", "none"].includes(labelOwner)) {
+            out(
+              "usage: agent-review approval --report <f> --head <sha> [--rules <f>] [--labels <f>] [--label-owner bot|person|none]"
+            );
             return 1;
           }
-          out(JSON.stringify(evaluateApproval(readFileSync(reportPath, "utf8"), { head })));
+          const report = readFileSync(reportPath, "utf8");
+          if (!rulesPath) {
+            out(JSON.stringify(evaluateApproval(report, { head })));
+            return 0;
+          }
+          out(
+            JSON.stringify(
+              decideApproval({
+                report,
+                head,
+                rules: JSON.parse(readFileSync(rulesPath, "utf8")),
+                labels: labelsPath ? JSON.parse(readFileSync(labelsPath, "utf8")) : [],
+                labelOwner
+              })
+            )
+          );
           return 0;
         }
         case "human-check": {

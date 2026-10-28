@@ -40,7 +40,7 @@ const {
 } = require('./learningsStore.cjs');
 const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, buildStatus } = require('./reportState.cjs');
-const { evaluateApproval } = require('./approval.cjs');
+const { evaluateApproval, decideApproval } = require('./approval.cjs');
 const { humanRules } = require('./humanApproval.cjs');
 const {
   CAPTURE_LIMIT_MINUTES,
@@ -992,11 +992,31 @@ function main(rawArgv) {
     case 'approval': {
       const reportPath = flag(rest, '--report');
       const head = flag(rest, '--head');
-      if (!reportPath || !head) {
-        out('usage: agent-review approval --report <f> --head <sha>');
+      const rulesPath = flag(rest, '--rules');
+      const labelsPath = flag(rest, '--labels');
+      const labelOwner = flag(rest, '--label-owner') || 'none';
+      if (!reportPath || !head || !['bot', 'person', 'none'].includes(labelOwner)) {
+        out(
+          'usage: agent-review approval --report <f> --head <sha> [--rules <f>] [--labels <f>] [--label-owner bot|person|none]',
+        );
         return 1;
       }
-      out(JSON.stringify(evaluateApproval(readFileSync(reportPath, 'utf8'), { head })));
+      const report = readFileSync(reportPath, 'utf8');
+      if (!rulesPath) {
+        out(JSON.stringify(evaluateApproval(report, { head })));
+        return 0;
+      }
+      out(
+        JSON.stringify(
+          decideApproval({
+            report,
+            head,
+            rules: JSON.parse(readFileSync(rulesPath, 'utf8')),
+            labels: labelsPath ? JSON.parse(readFileSync(labelsPath, 'utf8')) : [],
+            labelOwner,
+          }),
+        ),
+      );
       return 0;
     }
     case 'human-check': {

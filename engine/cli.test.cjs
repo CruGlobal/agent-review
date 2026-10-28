@@ -688,7 +688,11 @@ test('approval subcommand judges a report file against a head SHA', () => {
   assert.equal(ok.code, 0);
   assert.deepEqual(JSON.parse(ok.s), {
     approve: true,
-    reason: `report for ${head} passes with no open blockers and the change is reversible`,
+    reason: `report for ${head} passes with no open blockers`,
+    irreversible: false,
+    irreversibleReasons: [],
+    humanRequired: false,
+    humanReasons: [],
   });
   const stale = run(['approval', '--report', file, '--head', '0000000000000000000000000000000000000000']);
   assert.equal(stale.code, 0);
@@ -696,6 +700,31 @@ test('approval subcommand judges a report file against a head SHA', () => {
   const usage = run(['approval', '--report', file]);
   assert.equal(usage.code, 1);
   assert.match(usage.s, /usage: agent-review approval/);
+
+  const rules = join(dir, 'rules.json');
+  writeFileSync(rules, JSON.stringify({ required: false, reasons: [] }));
+  const labels = join(dir, 'labels.json');
+  writeFileSync(labels, JSON.stringify(['needs-human-approval']));
+  const decided = run(['approval', '--report', file, '--head', head, '--rules', rules]);
+  assert.equal(decided.code, 0);
+  assert.deepEqual(JSON.parse(decided.s), {
+    approve: true,
+    reason: `report for ${head} passes with no open blockers`,
+    label: 'keep',
+    dismissBotApprovals: false,
+    caution: null,
+  });
+  const owned = JSON.parse(
+    run(['approval', '--report', file, '--head', head, '--rules', rules, '--labels', labels, '--label-owner', 'bot']).s,
+  );
+  assert.equal(owned.label, 'remove');
+  const personOwned = JSON.parse(
+    run(['approval', '--report', file, '--head', head, '--rules', rules, '--labels', labels, '--label-owner', 'person']).s,
+  );
+  assert.equal(personOwned.approve, false);
+  const badOwner = run(['approval', '--report', file, '--head', head, '--rules', rules, '--label-owner', 'robot']);
+  assert.equal(badOwner.code, 1);
+  assert.match(badOwner.s, /usage: agent-review approval/);
   rmSync(dir, { recursive: true, force: true });
 });
 

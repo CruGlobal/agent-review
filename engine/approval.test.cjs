@@ -1,7 +1,7 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { evaluateApproval } = require('./approval.cjs');
+const { evaluateApproval, decideApproval } = require('./approval.cjs');
 
 const HEAD = 'abc123def4567890abc123def4567890abc12345';
 
@@ -65,13 +65,10 @@ test('refuses a report with no status marker or an unparseable one', () => {
   assert.match(evaluateApproval(report({ statusRaw: '"pass"' }), { head: HEAD }).reason, /not valid JSON|not an object/);
 });
 
-test('refuses a failing, irreversible, or head-disagreeing status', () => {
+test('refuses a failing or head-disagreeing status', () => {
   const failing = evaluateApproval(report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } }), { head: HEAD });
   assert.equal(failing.approve, false);
   assert.match(failing.reason, /2 open blockers/);
-  const irreversible = evaluateApproval(report({ status: { v: 1, head: HEAD, pass: true, irreversible: true } }), { head: HEAD });
-  assert.equal(irreversible.approve, false);
-  assert.match(irreversible.reason, /irreversible/);
   const disagree = evaluateApproval(report({ status: { v: 1, head: '0000' + HEAD.slice(4), pass: true } }), { head: HEAD });
   assert.equal(disagree.approve, false);
   assert.match(disagree.reason, /status head/);
@@ -105,4 +102,118 @@ test('markers are read only from the header block, never from the visible report
   const rollout = evaluateApproval(noRolloutUpTop, { head: HEAD });
   assert.equal(rollout.approve, false);
   assert.match(rollout.reason, /no rollout marker/);
+});
+
+const LABEL = 'needs-human-approval';
+const NONE = { required: false, reasons: [] };
+const decide = (o = {}) => decideApproval({ report: report(), head: HEAD, rules: NONE, labels: [], labelOwner: 'none', ...o });
+
+test('an irreversible passing report approves and returns its irreversible fields', () => {
+  const status = { v: 1, head: HEAD, pass: true, irreversible: true, irreversibleReasons: ['drops a column'] };
+  const r = evaluateApproval(report({ status }), { head: HEAD });
+  assert.equal(r.approve, true);
+  assert.equal(r.irreversible, true);
+  assert.deepEqual(r.irreversibleReasons, ['drops a column']);
+  assert.equal(r.humanRequired, false);
+  assert.deepEqual(r.humanReasons, []);
+});
+
+test('a humanRequired report refuses with the reasons', () => {
+  const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI path', 'staff app'] };
+  const r = evaluateApproval(report({ status }), { head: HEAD });
+  assert.equal(r.approve, false);
+  assert.equal(r.reason, 'a person must approve: PCI path; staff app');
+  assert.equal(r.humanRequired, true);
+});
+
+test('an old report with no human fields approves', () => {
+  const r = evaluateApproval(report({ status: { v: 1, head: HEAD, pass: true } }), { head: HEAD });
+  assert.equal(r.approve, true);
+  assert.equal(r.humanRequired, false);
+  assert.deepEqual(r.humanReasons, []);
+});
+
+test('decide: not judged keeps the label and dismisses nothing', () => {
+  for (const o of [
+    { report: '' },
+    { report: report({ head: 'ffff' + HEAD.slice(4) }) },
+    { report: report({ rollout: 'shadow' }) },
+    { report: report({ statusRaw: '{bad' }) },
+  ]) {
+    const d = decide({ ...o, labels: [LABEL], labelOwner: 'bot', rules: { required: true, reasons: ['x'] } });
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+  }
+});
+
+test('decide: a wrong-head report with a bot-owned label changes nothing (Review Focus 4)', () => {
+  const d = decide({ report: report({ head: 'ffff' + HEAD.slice(4) }), labels: [LABEL], labelOwner: 'bot' });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+});
+
+test('decide: rules.required adds the label and dismisses bot approvals', () => {
+  const d = decide({ rules: { required: true, reasons: ['touches app/payments/x.rb'] } });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+  assert.equal(d.reason, 'a person must approve: touches app/payments/x.rb');
+  assert.equal(decide({ rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'person' }).label, 'keep');
+});
+
+test('decide: status.humanRequired adds the label even with no rules required', () => {
+  const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
+  const d = decide({ report: report({ status }) });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+});
+
+test('decide: a failing judged report still adds the label when a person is needed', () => {
+  const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 1 } }), rules: { required: true, reasons: ['r'] } });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+});
+
+test('decide: a rules error never approves and keeps the label (Review Focus 3)', () => {
+  const d = decide({ rules: { error: 'too many files' } });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+  assert.equal(d.reason, 'could not check the human approval rules: too many files');
+});
+
+test('decide: a rules error while the status says a person is needed adds the label (Review Focus 3)', () => {
+  const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
+  const d = decide({ report: report({ status }), rules: { error: 'boom' } });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+});
+
+test('decide: a label not owned by the bot blocks approval and stays', () => {
+  for (const labelOwner of ['person', 'none']) {
+    const d = decide({ labels: [LABEL], labelOwner });
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+    assert.equal(d.reason, `a person added the ${LABEL} label`);
+  }
+});
+
+test('decide: a bot-owned label comes off and a passing report approves', () => {
+  const d = decide({ labels: [LABEL], labelOwner: 'bot' });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [true, 'remove', false]);
+});
+
+test('decide: a bot-owned label comes off even when the report does not pass', () => {
+  const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } }), labels: [LABEL], labelOwner: 'bot' });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', false]);
+});
+
+test('decide: no label and no person needed approves and keeps', () => {
+  const d = decide();
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals, d.caution], [true, 'keep', false, null]);
+});
+
+test('decide: an old 1.0.0 irreversible report approves with a caution naming the reasons (Review Focus 5)', () => {
+  const status = { v: 1, head: HEAD, pass: true, irreversible: true, irreversibleReasons: ['drops a column'] };
+  const d = decide({ report: report({ status }) });
+  assert.equal(d.approve, true);
+  assert.equal(
+    d.caution,
+    'Caution: this change is irreversible (drops a column). A revert will not undo it. Check backups and the deploy plan before you merge.',
+  );
+});
+
+test('decide: the caution is set even when approve is false', () => {
+  const status = { v: 1, head: HEAD, pass: false, openBlockers: 1, irreversible: true, irreversibleReasons: ['a'] };
+  assert.match(decide({ report: report({ status }) }).caution, /^Caution: this change is irreversible \(a\)/);
 });
