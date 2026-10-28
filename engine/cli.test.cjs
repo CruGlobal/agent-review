@@ -715,11 +715,12 @@ test('approval subcommand judges a report file against a head SHA', () => {
     caution: null,
   });
   const errorRules = join(dir, 'error-rules.json');
-  writeFileSync(errorRules, JSON.stringify({ error: "human-check: the PR's file list is incomplete" }));
+  writeFileSync(errorRules, JSON.stringify({ error: "the PR's file list is incomplete" }));
   const unreadable = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', errorRules, '--labels', labels, '--label-owner', 'bot']).s);
   assert.deepEqual([unreadable.approve, unreadable.label, unreadable.dismissBotApprovals], [false, 'keep', 'stale']);
-  writeFileSync(errorRules, JSON.stringify({ required: true, reasons: ['PCI path: app/pay.rb'] }));
-  const needed = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', errorRules]).s);
+  const requiredRules = join(dir, 'required-rules.json');
+  writeFileSync(requiredRules, JSON.stringify({ required: true, reasons: ['PCI path: app/pay.rb'] }));
+  const needed = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', requiredRules]).s);
   assert.deepEqual([needed.approve, needed.label, needed.dismissBotApprovals], [false, 'add', 'all']);
   const owned = JSON.parse(
     run(['approval', '--report', file, '--head', head, '--rules', rules, '--labels', labels, '--label-owner', 'bot']).s,

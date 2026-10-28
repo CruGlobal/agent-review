@@ -52,7 +52,13 @@ runs:
         # where `exit 0` would hand the warning back as the captured value, so a
         # subshell exits 1 and leaves the report to the top-level shell.
         trap '[ "$BASH_SUBSHELL" -eq 0 ] || exit 1; echo "::warning::agent-review approve could not judge PR #$PR (${BASH_COMMAND%% *} failed), not approving." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
-        note() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        # Notes can carry PR or report text, so their copy in the log sits between
+        # stop-commands markers, where a line starting with :: is not a command.
+        STOP_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+        note() {
+          echo "$1" >> "$GITHUB_STEP_SUMMARY"
+          printf '::stop-commands::%s\n%s\n::%s::\n' "$STOP_TOKEN" "$1" "$STOP_TOKEN"
+        }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
         LABEL=needs-human-approval
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
@@ -116,7 +122,7 @@ runs:
         # The files API stops at 3,000 entries. A list shorter than changed_files
         # goes to human-check marked --incomplete, which refuses it only when the
         # base config sets rules, so a repo with no rules still approves big PRs.
-        INCOMPLETE=()
+        SHORT_LIST=""
         if [ -z "$RULES_ERROR" ]; then
           if ! gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate > "$FILES_JSON"; then
             RULES_ERROR="could not read the PR's file list"
@@ -125,14 +131,18 @@ runs:
           elif ! jq -e --slurpfile pages "$FILES_JSON" \
             '(.changed_files | type == "number") and ([$pages[][] | select(.filename | type == "string")] | length) >= .changed_files' \
             "$PR_JSON" > /dev/null; then
-            INCOMPLETE=(--incomplete)
+            SHORT_LIST=yes
           fi
         fi
         if [ -z "$RULES_ERROR" ]; then
-          if CHECK=$(node "$RUNTIME_DIR/dist/agent-review.cjs" human-check --config "$CONFIG" --files "$FILES" "${INCOMPLETE[@]}"); then
+          if CHECK=$(node "$RUNTIME_DIR/dist/agent-review.cjs" human-check --config "$CONFIG" --files "$FILES" ${SHORT_LIST:+--incomplete}); then
             printf '%s\n' "$CHECK" > "$RULES"
+            if [ -n "$SHORT_LIST" ]; then
+              note "The file list for PR #$PR is incomplete, but the base config sets no human approval rules, so the full list is not needed."
+            fi
           else
-            RULES_ERROR=${CHECK:-human-check failed without a message}
+            RULES_ERROR=${CHECK#human-check: }
+            [ -n "$RULES_ERROR" ] || RULES_ERROR="human-check failed without a message"
           fi
         fi
         if [ -n "$RULES_ERROR" ]; then
@@ -145,9 +155,11 @@ runs:
         LABELS="$RUNNER_TEMP/agent-review-approve-labels.json"
         TIMELINE="$RUNNER_TEMP/agent-review-approve-timeline.json"
         LABEL_OWNER=none
+        LABEL_ON_PR=false
         if gh api "repos/$REPO/issues/$PR/labels?per_page=100" --paginate > "$LABELS.pages" \
           && jq -s '[.[][].name]' "$LABELS.pages" > "$LABELS"; then
           if jq -e --arg l "$LABEL" 'any(.[]; ascii_downcase == $l)' "$LABELS" > /dev/null; then
+            LABEL_ON_PR=true
             if gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$TIMELINE" \
               && OWNER=$(jq -rs --arg l "$LABEL" '
                 [.[][] | select(.event == "labeled" and ((.label.name // "") | ascii_downcase) == $l)]
@@ -177,11 +189,17 @@ runs:
         # warning and can never fire the ERR trap.
         case "$LABEL_ACTION" in
           add)
-            gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true
-            if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null; then
-              note "Added the $LABEL label to PR #$PR."
+            # Adding a label that is already on the PR can log a new bot labeled
+            # event, which would make a person's label the bot's.
+            if [ "$LABEL_ON_PR" = true ]; then
+              note "The $LABEL label is already on PR #$PR."
             else
-              warn "could not add the $LABEL label to PR #$PR."
+              gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true
+              if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null; then
+                note "Added the $LABEL label to PR #$PR."
+              else
+                warn "could not add the $LABEL label to PR #$PR."
+              fi
             fi
             ;;
           remove)
@@ -193,26 +211,31 @@ runs:
             ;;
         esac
         # all: every approval the bot posted. stale: only those on another head.
+        # The runtime and this script are fetched separately and may differ in
+        # version, so any value but none or stale is treated as all.
         case "$DISMISS" in
-          all|stale)
-            if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-              | jq -rs --arg mode "$DISMISS" --arg head "$HEAD_SHA" \
-                '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head)) | .id'); then
-              for REVIEW_ID in $BOT_APPROVALS; do
-                if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
-                  note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
-                else
-                  warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
-                fi
-              done
-            else
-              warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
-            fi
-            ;;
+          none) DISMISS_MODE="" ;;
+          stale) DISMISS_MODE=stale ;;
+          *) DISMISS_MODE=all ;;
         esac
+        if [ -n "$DISMISS_MODE" ]; then
+          if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" \
+              '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head)) | .id'); then
+            for REVIEW_ID in $BOT_APPROVALS; do
+              if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
+                note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
+              else
+                warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+              fi
+            done
+          else
+            warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+          fi
+        fi
 
         if [ "$APPROVE" != "true" ]; then
-          echo "Not approving PR #$PR: $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+          note "Not approving PR #$PR: $REASON"
           exit 0
         fi
         # The approval is pinned to the judged commit, and a stale approval still

@@ -1705,10 +1705,10 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
   assert.ok(run.includes('.changed_files'), 'the listed files are counted against changed_files');
   // A repo with no rules must approve a PR of any size, so the action passes a
   // short list on and human-check refuses it only where the base config sets rules.
-  assert.ok(run.includes('INCOMPLETE=(--incomplete)'), 'a short file list is marked for human-check');
+  assert.ok(run.includes('SHORT_LIST=yes'), 'a short file list is marked for human-check');
   assert.ok(!run.includes("file list is incomplete"), 'the action never refuses a short list on its own');
   assert.ok(
-    run.includes('agent-review.cjs" human-check --config "$CONFIG" --files "$FILES" "${INCOMPLETE[@]}"'),
+    run.includes('agent-review.cjs" human-check --config "$CONFIG" --files "$FILES" ${SHORT_LIST:+--incomplete}'),
     'the action runs the repo rules itself',
   );
   assert.ok(run.includes(`jq -n --arg e "$RULES_ERROR" '{error: $e}' > "$RULES"`), 'the rules error is JSON built by jq');
@@ -1738,8 +1738,12 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
     ),
     'only the bot\'s own approvals are dismissed, never a person\'s review; stale means another head',
   );
-  assert.ok(run.includes('--arg mode "$DISMISS" --arg head "$HEAD_SHA"'));
-  assert.ok(run.includes('all|stale)'), 'only the engine\'s all and stale modes dismiss');
+  assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA"'));
+  assert.ok(run.includes('*) DISMISS_MODE=all ;;'), 'a dismiss value from another engine version fails closed to all');
+  // Bash before 4.4 calls an empty array unbound under set -u, so the script
+  // keeps to plain strings; engine/approveAction.test.cjs runs it on the system bash.
+  assert.ok(!/\b[A-Z_]+=\(/.test(run), 'no array assignments');
+  assert.ok(run.includes('::stop-commands::'), 'notes are fenced off from workflow-command parsing');
   assert.ok(
     run.includes(
       'if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS',

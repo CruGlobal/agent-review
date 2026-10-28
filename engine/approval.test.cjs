@@ -255,7 +255,7 @@ test('decide: an irreversible status with no reasons gives a caution saying no r
   assert.match(d.caution, /\(no reason recorded\)/);
 });
 
-test('decide: dismissBotApprovals is all, stale, or none, and only row 3 dismisses stale approvals', () => {
+test('decide: dismissBotApprovals is all when a person is needed, stale only when the rules cannot be read, and none otherwise', () => {
   const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } });
   const cases = [
     ['a person is needed', { rules: { required: true, reasons: ['r'] } }, 'all'],
