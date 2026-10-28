@@ -231,6 +231,12 @@ context:
 # Uncomment it only for local: plugin 1.0.0 cannot load a config that has it.
 # reviews_run: local
 
+# People-only approval. The bot never approves a PR that needs a person. Leave this block out
+# unless the repo sets it; both keys are optional (always defaults to false, paths to []).
+# human_approval:
+#   always: false   # true: every PR in this repo needs a person's approval
+#   paths: ['app/payments/**']   # a PR that touches any of these globs needs a person's approval
+
 # Reports approve by default (`advisory`). Set `shadow` to post advice only; the
 # review workflow refuses a caller whose rollout_mode disagrees with this value,
 # so change the caller templates and this key together. `agent-review rollout`

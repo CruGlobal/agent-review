@@ -3632,9 +3632,11 @@ test('init keeps the approval answer in BOT_APPROVES and flips auto_approve with
 
 test('init names no consuming repo in the approval advice', () => {
   const init = skillText('init');
-  assert.ok(!init.includes('staff_accounting_app'));
   assert.ok(!init.includes('PCI-scope'));
-  assert.ok(init.replace(/\s+/g, ' ').includes('recommend no for repos your team requires human review on, such as payment or financial code'));
+  assert.ok(
+    !init.replace(/\s+/g, ' ').includes('recommend no for repos your team requires human review on'),
+    'payment repos keep the bot on and use question 4 instead',
+  );
 });
 
 test('update-files treats a classic-protection 404 as could-not-verify unless the user is an admin', () => {
@@ -4267,4 +4269,49 @@ test('address skill leaves the human fields alone and reminds about a person onl
   assert.ok(skill.includes('`humanRequired` / `humanReasons`'), 'address never touches the human fields');
   assert.ok(skill.includes('`humanRequired: true`, remind the user that a person must approve this PR'));
   assert.ok(!skill.includes('`irreversible: true`, remind the user that a human approval is required regardless'), 'old irreversible reminder is gone');
+});
+
+test('init asks question 4, offers card paths, writes them only on a yes, and creates the label when the bot may approve', () => {
+  const init = skillText('init');
+  const flat = init.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('Such repos keep the bot on and use question 4'), 'question 3 points to question 4');
+  assert.ok(flat.includes("Does every PR in this repo need a person's approval?"), 'question 4 is asked');
+  assert.ok(flat.includes('Recommend yes for staff_accounting_app'), 'question 4 recommendation');
+  assert.ok(flat.includes('`human_approval.always: true`'), 'a yes writes always: true');
+  assert.ok(init.includes('Ask the four setup choices'), 'four choices');
+  assert.ok(
+    init.includes("git grep -P -l -i '\\b(cvv2?|cvc|card_?number|pan|expir(y|ation)_?(date|month|year)|card_?token|tsys|cru[-_]payments|stripe|braintree)\\b'"),
+    'the card scan pattern is verbatim',
+  );
+  assert.ok(flat.includes('`human_approval.paths`') && /only on a yes/.test(flat), 'paths are written only on a yes');
+  const gate = stageSlice(init, '### 3B', '### 3C').replace(/\s+/g, ' ');
+  assert.ok(gate.includes('Does every PR need a person?') && gate.includes('suggested card paths'), 'the gate lists both answers');
+  const threeC = stageSlice(init, '### 3C', '### 3D');
+  assert.ok(
+    threeC.includes('gh label create needs-human-approval --color B60205 --description "agent-review: a person must approve this PR" --force'),
+    'init creates the label with --force',
+  );
+  assert.ok(threeC.includes('if [ "$BOT_APPROVES" = "yes" ]; then'), 'only when the bot may approve');
+  assert.ok(/⚠️ Could not create/.test(threeC.slice(threeC.indexOf('gh label create'))), 'a failed create warns and continues');
+});
+
+test('the config template carries a commented human_approval example', () => {
+  const t = readFileSync(join(ROOT, 'templates/config.yml'), 'utf8');
+  assert.ok(t.includes('# human_approval:'));
+  assert.ok(t.includes('#   always:'));
+  assert.ok(t.includes('#   paths:'));
+  assert.ok(t.indexOf('# human_approval:') > t.indexOf('# reviews_run: local'), 'sits under reviews_run');
+});
+
+test('README lists the person-must-approve rule, drops irreversible from the stop list, and has the new section', () => {
+  const r = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const stop = r.slice(r.indexOf('**It will NOT approve if:**'), r.indexOf('## PCI and repos that always need a person'));
+  assert.ok(!stop.includes('irreversible'), 'irreversible is no longer a stop');
+  assert.ok(stop.includes("a person must approve: the repo's `human_approval` rules or the card-data check say so, or someone added the `needs-human-approval` label"));
+  assert.ok(r.includes('## PCI and repos that always need a person'));
+  const sec = r.slice(r.indexOf('## PCI and repos that always need a person')).replace(/\s+/g, ' ');
+  for (const part of ['human_approval:', 'card-data check', 'needs-human-approval', 'added by hand', 'takes back', 'Irreversible changes', 'Allow GitHub Actions to create and approve pull requests', 'plugin']) {
+    assert.ok(sec.includes(part), `section mentions ${part}`);
+  }
+  assert.ok(!r.includes('a human must approve'), 'old single approval rule is gone');
 });
