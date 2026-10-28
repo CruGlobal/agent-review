@@ -20124,7 +20124,8 @@ var require_addressState = __commonJS({
       ).replace(/^🤖 agent-review · .*$/m, () => {
         const blockersText = nextStatus.pass ? "\u2705 no blockers" : `\u274C ${nextStatus.openBlockers} blockers open`;
         const irreversibleText = nextStatus.irreversible ? " \xB7 \u26A0\uFE0F irreversible" : "";
-        return `\u{1F916} agent-review \xB7 ${blockersText} \xB7 risk ${nextStatus.risk}${irreversibleText}`;
+        const humanText = nextStatus.humanRequired ? " \xB7 \u{1F464} needs a person" : "";
+        return `\u{1F916} agent-review \xB7 ${blockersText} \xB7 risk ${nextStatus.risk}${irreversibleText}${humanText}`;
       });
       if (Buffer.byteLength(updatedReport) > 65500) throw new Error("updated report exceeds GitHub comment limit");
       const lines = [];
@@ -20147,10 +20148,15 @@ var require_addressState = __commonJS({
       lines.push(
         nextStatus.pass ? "The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review." : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`
       );
+      const reasonsText = (reasons) => Array.isArray(reasons) && reasons.length ? ` (${reasons.map((reason) => String(reason).replace(/[\r\n]/g, " ")).join("; ")})` : "";
       if (status.irreversible) {
-        const why = Array.isArray(status.irreversibleReasons) && status.irreversibleReasons.length ? ` (${status.irreversibleReasons.map((reason) => String(reason).replace(/[\r\n]/g, " ")).join("; ")})` : "";
         lines.push(
-          `\u26A0\uFE0F This change is marked irreversible${why} \u2014 auto-approval stays off and a human approval is required regardless of the ledger.`
+          `\u26A0\uFE0F This change is marked irreversible${reasonsText(status.irreversibleReasons)}. A revert will not undo it. Check backups and the deploy plan before you merge.`
+        );
+      }
+      if (status.humanRequired === true) {
+        lines.push(
+          `\u{1F464} A person must approve this PR${reasonsText(status.humanReasons)}. The bot will not approve it.`
         );
       }
       return {

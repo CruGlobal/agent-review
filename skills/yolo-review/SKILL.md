@@ -101,8 +101,15 @@ re-reviews cheap.
      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" | tr -d '\r' \
      | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
    PASS=$(printf '%s' "$STATUS" | jq -r '.pass // false'); IRREVERSIBLE=$(printf '%s' "$STATUS" | jq -r '.irreversible // false')
-   echo "pass=$PASS irreversible=$IRREVERSIBLE"
-   if [ "$PASS" = "true" ] && [ "$IRREVERSIBLE" != "true" ]; then
+   HUMAN=$(printf '%s' "$STATUS" | jq -r '.humanRequired // false')
+   echo "pass=$PASS irreversible=$IRREVERSIBLE humanRequired=$HUMAN"
+   if [ "$IRREVERSIBLE" = "true" ]; then
+     echo "Caution: this change is irreversible ($(printf '%s' "$STATUS" | jq -r '(.irreversibleReasons // []) | join("; ")')). A revert will not undo it. Check backups and the deploy plan before you merge."
+   fi
+   if [ "$HUMAN" = "true" ]; then
+     echo "Stopping: a person must approve: $(printf '%s' "$STATUS" | jq -r '(.humanReasons // []) | join("; ")'). The bot will not approve this PR."
+   fi
+   if [ "$PASS" = "true" ] && [ "$HUMAN" != "true" ]; then
      for i in $(seq 1 9); do
        # gh's --jq takes one expression (no --arg); GraphQL reports the bot as github-actions.
        APPROVED=$(gh pr view "$PR_NUMBER" --json reviews \
@@ -117,6 +124,7 @@ re-reviews cheap.
 7. **Report** — one of: approved by the bot; ledger passes, no approval (say which of the two
    causes above applies if you can tell from `gh run list --workflow "agent-review approve"`);
    `N` blockers remain that could not be fixed (list each with its number, file:line, and the
-   reason the fix was not applied); or the change is irreversible and a human must approve.
+   reason the fix was not applied); or a person must approve (`humanRequired` is true; give the reasons).
+   If the change is irreversible, add the caution: a revert will not undo it, so check backups and the deploy plan before merging.
    End with the open suggestions (severity < 7) as a plain list. Do not run anything under
    `/tmp/automated_fixes`.

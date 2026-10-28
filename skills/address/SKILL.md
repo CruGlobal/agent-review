@@ -248,7 +248,7 @@ the comment — mutate ONLY these three things, leaving every other byte untouch
 1. The `<!-- agent-review-ledger: … -->` line (the updated JSON).
 2. The `<!-- agent-review-status: … -->` line: recompute `openBlockers` (ledger entries with
    severity ≥ 7 still `open`) and `pass` (`openBlockers == 0`). Never touch `irreversible` /
-   `irreversibleReasons` — reversibility is a property of the reviewed diff; only a re-review
+   `irreversibleReasons` or `humanRequired` / `humanReasons` — reversibility and the need for a person are properties of the reviewed diff; only a re-review
    may change it.
 3. The ledger section's item lines, exactly per the report skeleton's fixed/dismissed formats
    (`✅ fixed in <sha>` / `🚫 dismissed by @<user>: <reason>`, checked boxes, struck-through
@@ -299,4 +299,4 @@ pushed, lead with an explicit request to review the commit. Then read
 the author to run `/agent-review:re-review` and do not promise a CI re-review (the report's head marker
 still names the old SHA, so the approve workflow refuses it until a re-review posts). An
 `undefined` or failed `config get reviews_run` counts as CI (`local-and-ci`). If the status carries
-`irreversible: true`, remind the user that a human approval is required regardless.
+`humanRequired: true`, remind the user that a person must approve this PR and the bot will not.

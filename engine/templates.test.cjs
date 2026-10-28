@@ -4248,3 +4248,23 @@ test('the capture spec records the PR #33 review changes to the hooks and the ch
   }
   for (const text of [hooks, check]) assert.ok(!text.includes('\u2014'), 'new prose uses no em dashes');
 });
+
+test('yolo-review reads humanRequired and treats irreversible as a caution', () => {
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  for (const needle of [
+    "HUMAN=$(printf '%s' \"$STATUS\" | jq -r '.humanRequired // false')",
+    'if [ "$PASS" = "true" ] && [ "$HUMAN" != "true" ]; then',
+    'a person must approve:',
+    'A revert will not undo it. Check backups and the deploy plan before you merge.',
+  ]) assert.ok(yolo.includes(needle), `yolo-review must say ${JSON.stringify(needle)}`);
+  assert.ok(!yolo.includes('"$IRREVERSIBLE" != "true"'), 'irreversible no longer blocks the wait');
+  assert.ok(!yolo.includes('the change is irreversible and a human must approve'), 'old irreversible stop text is gone');
+  assert.ok(!yolo.includes('\u2014 a person'), 'no em dash in the new stop text');
+});
+
+test('address skill leaves the human fields alone and reminds about a person only when required', () => {
+  const skill = readFileSync(ADDRESS_SKILL, 'utf8');
+  assert.ok(skill.includes('`humanRequired` / `humanReasons`'), 'address never touches the human fields');
+  assert.ok(skill.includes('`humanRequired: true`, remind the user that a person must approve this PR'));
+  assert.ok(!skill.includes('`irreversible: true`, remind the user that a human approval is required regardless'), 'old irreversible reminder is gone');
+});
