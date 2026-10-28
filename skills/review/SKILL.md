@@ -49,6 +49,7 @@ levels up:
 
 - archetype prompt: `../../templates/archetype.md`
 - code-review lane prompt: `../../templates/code-review-lane.md` (only under the code-review engine)
+- ledger matcher prompt: `../../templates/ledger-match.md` (only under the code-review engine)
 - report skeleton: `../../templates/report.md`
 
 (If `${CLAUDE_PLUGIN_ROOT}` is set in the environment, `$CLAUDE_PLUGIN_ROOT/templates/…` is the
@@ -1610,12 +1611,30 @@ if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then
 fi
 LEDGER_BY_LOCATION=""
 [ "$ENGINE" = "code-review" ] && LEDGER_BY_LOCATION=1
-agent-review ledger \
-  --findings /tmp/review_filtered.json \
-  --previous /tmp/previous_agent_review_ledger.json \
-  ${LEDGER_BY_LOCATION:+--match-suggestions-by-location} \
-  > /tmp/agent_review_ledger.json
+# While matcher pairs exist, no ledger may exist: the next step builds it from the matcher's answers.
+rm -f /tmp/ledger_candidates.json /tmp/ledger_matches.json /tmp/agent_review_ledger.json
+LEDGER_PAIRS=0
+if [ -n "$LEDGER_BY_LOCATION" ]; then
+  if agent-review ledger-candidates --findings /tmp/review_filtered.json \
+      --previous /tmp/previous_agent_review_ledger.json > /tmp/ledger_candidates.json; then
+    LEDGER_PAIRS=$(node -e 'console.log(require("/tmp/ledger_candidates.json").count)') || LEDGER_PAIRS=0
+  else
+    echo "ledger matching skipped: the candidate pairs could not be computed"
+  fi
+fi
+echo "export LEDGER_PAIRS=\"$LEDGER_PAIRS\"" >> /tmp/review_env.sh
+if [ "$LEDGER_PAIRS" = 0 ]; then
+  agent-review ledger \
+    --findings /tmp/review_filtered.json \
+    --previous /tmp/previous_agent_review_ledger.json \
+    ${LEDGER_BY_LOCATION:+--match-suggestions-by-location} \
+    > /tmp/agent_review_ledger.json
+else
+  echo "ledger matching: $LEDGER_PAIRS pairs wait for the matcher; the ledger is built after it answers"
+fi
 ```
+
+When $ENGINE is code-review, read code-review-engine.md, section "Stage 6: the ledger matcher", and follow it.
 
 Report the `kept` findings from `/tmp/review_filtered.json` and note the count of `suppressed`
 findings (suppressed by approved learnings). Tell the user they can mark outcomes in the emitted
@@ -1652,11 +1671,20 @@ the feedback store):
   and says much the same thing (a token Jaccard of 0.5 or more between the two messages), is
   treated as that entry and gets no new number. Blockers are never matched this way, and
   neither are fixed entries or other lanes' entries.
+- Most rewordings share too few words for that check, so under the same engine a second step
+  catches them. `agent-review ledger-candidates` pairs each new finding below 7 that the ledger
+  would still add, other than a static finding, with every older open or dismissed entry from the
+  same lane and file within 10 lines. A fresh matcher agent sees only those pairs, with no score,
+  status, lane, or confidence, and answers whether each pair is the same problem.
+  `agent-review ledger --matches` checks every answer against the same pairs and leaves out each
+  new finding judged the same. The older entry never changes, so a wrong match can hide only the
+  new wording. If the matcher fails or its answers are refused, the ledger is built without them
+  and the run goes on.
 - The ledger also carries bounded `evidence` and `recommendation` fields. This preserves enough
   context to address an older open finding after the visible report is updated by a later run.
 
-Computed above, in the same shell as **Capture consensus for the learning layer** — see that
-block for the exact commands.
+Computed above, in the same shell as **Capture consensus for the learning layer**, or right after
+it by the ledger matcher step. See those blocks for the exact commands.
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 
@@ -2037,7 +2065,7 @@ Every bash block runs in its own shell. `/tmp/review_env.sh` is the only carrier
 Stage 0A truncates it and writes `MODE`/`AGENT_MODE`, `ENGINE`/`EFFORT`/`REVIEWS_RUN` (from
 `/tmp/review_options.json`; `EFFORT` is empty under the `agent-review` engine), then `CI_MODE`; Stage 0 adds `DAY_OF_WEEK`,
 `BASE_REF`, `RANGE`; the Stage 0B smoke test adds `ROUTING`; Stage 2B adds `FIX_COUNT`; Stage 5B
-adds `PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`. Any block using a value it did not compute
+adds `PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`; Stage 6 adds `LEDGER_PAIRS`. Any block using a value it did not compute
 itself begins with `. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the
 discipline.
 
