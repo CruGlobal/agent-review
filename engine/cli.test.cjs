@@ -727,6 +727,11 @@ test('status carries the human fields and requires both new inputs', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('help lists the required status inputs', () => {
+  const { s } = run(['help']);
+  assert.match(s, /status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f>/);
+});
+
 test('human-check prints the rules for a config file and a file list', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-human-'));
   const cfg = join(dir, 'config.yml');
