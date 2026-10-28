@@ -139,6 +139,7 @@ test('decide: not judged keeps the label and dismisses nothing', () => {
     { report: report({ head: 'ffff' + HEAD.slice(4) }) },
     { report: report({ rollout: 'shadow' }) },
     { report: report({ statusRaw: '{bad' }) },
+    { report: report({ status: { v: 1, head: '0000' + HEAD.slice(4), pass: true } }) },
   ]) {
     const d = decide({ ...o, labels: [LABEL], labelOwner: 'bot', rules: { required: true, reasons: ['x'] } });
     assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
@@ -216,4 +217,40 @@ test('decide: an old 1.0.0 irreversible report approves with a caution naming th
 test('decide: the caution is set even when approve is false', () => {
   const status = { v: 1, head: HEAD, pass: false, openBlockers: 1, irreversible: true, irreversibleReasons: ['a'] };
   assert.match(decide({ report: report({ status }) }).caution, /^Caution: this change is irreversible \(a\)/);
+});
+
+test('decide: malformed rules never approve', () => {
+  for (const rules of [{}, { error: '' }, [], { required: 'true', reasons: ['x'] }, undefined, null, { required: false }, { required: false, reasons: [1] }]) {
+    const d = decide({ rules });
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false], JSON.stringify(rules));
+    assert.match(d.reason, /^could not check the human approval rules: /);
+  }
+  assert.match(decide({ rules: undefined }).reason, /missing or malformed/);
+  assert.match(decide({ rules: { error: '' } }).reason, /missing or malformed/);
+});
+
+test('decide: malformed labels never approve', () => {
+  for (const labels of ['needs-human-approval', [{ name: LABEL }], null, undefined]) {
+    const d = decide({ labels, labelOwner: 'person' });
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+    assert.match(d.reason, /could not read the PR labels/);
+  }
+});
+
+test('decide: the label matches case-insensitively', () => {
+  const d = decide({ labels: ['Needs-Human-Approval'], labelOwner: 'person' });
+  assert.deepEqual([d.approve, d.label], [false, 'keep']);
+  assert.equal(d.reason, `a person added the ${LABEL} label`);
+  assert.equal(decide({ labels: ['Needs-Human-Approval'], labelOwner: 'bot' }).label, 'remove');
+});
+
+test('decide: rules reasons merge with status reasons without duplicates', () => {
+  const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI', 'shared'] };
+  const d = decide({ report: report({ status }), rules: { required: true, reasons: ['shared', 'staff app'] } });
+  assert.equal(d.reason, 'a person must approve: PCI; shared; staff app');
+});
+
+test('decide: an irreversible status with no reasons gives a caution saying no reason recorded', () => {
+  const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: true, irreversible: true } }) });
+  assert.match(d.caution, /\(no reason recorded\)/);
 });
