@@ -699,6 +699,34 @@ test('approval subcommand judges a report file against a head SHA', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('human-check prints the rules for a config file and a file list', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-human-'));
+  const cfg = join(dir, 'config.yml');
+  const files = join(dir, 'files.txt');
+  writeFileSync(cfg, 'human_approval:\n  paths: ["app/payments/**"]\n');
+  writeFileSync(files, 'app/payments/a.rb\nlib/x.rb\n');
+  const r = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(r.code, 0);
+  assert.deepEqual(JSON.parse(r.s), { required: true, reasons: ['PCI path: app/payments/a.rb'] });
+
+  writeFileSync(cfg, '');
+  const none = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(none.code, 0);
+  assert.deepEqual(JSON.parse(none.s), { required: false, reasons: [] });
+
+  for (const args of [['--files', files], ['--config', cfg]]) {
+    const usage = run(['human-check', ...args]);
+    assert.equal(usage.code, 1);
+    assert.match(usage.s, /usage: agent-review human-check/);
+  }
+
+  writeFileSync(cfg, 'a: [unclosed\n');
+  const bad = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.s, /^human-check: /);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('address parse prints lenient operations and rejects bare dismissals in strict mode', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-parse-'));
   const cmd = join(dir, 'cmd.txt');

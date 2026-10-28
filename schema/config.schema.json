@@ -295,6 +295,14 @@
       }
     },
     "reviews_run": { "type": "string", "enum": ["local", "local-and-ci"] },
+    "human_approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "always": { "type": "boolean" },
+        "paths": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      }
+    },
     "rollout": {
       "type": "object",
       "additionalProperties": false,
