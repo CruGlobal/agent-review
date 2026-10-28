@@ -112,21 +112,23 @@ runs:
         else
           RULES_ERROR="could not read the base config"
         fi
-        # The files API stops at 3,000 entries, so a shorter list than
-        # changed_files cannot prove that no listed path changed.
+        # The files API stops at 3,000 entries. A list shorter than changed_files
+        # goes to human-check marked --incomplete, which refuses it only when the
+        # base config sets rules, so a repo with no rules still approves big PRs.
+        INCOMPLETE=()
         if [ -z "$RULES_ERROR" ]; then
           if ! gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate > "$FILES_JSON"; then
+            RULES_ERROR="could not read the PR's file list"
+          elif ! jq -rs '.[][] | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$FILES"; then
             RULES_ERROR="could not read the PR's file list"
           elif ! jq -e --slurpfile pages "$FILES_JSON" \
             '(.changed_files | type == "number") and ([$pages[][] | select(.filename | type == "string")] | length) >= .changed_files' \
             "$PR_JSON" > /dev/null; then
-            RULES_ERROR="the PR's file list is incomplete"
-          elif ! jq -rs '.[][] | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$FILES"; then
-            RULES_ERROR="could not read the PR's file list"
+            INCOMPLETE=(--incomplete)
           fi
         fi
         if [ -z "$RULES_ERROR" ]; then
-          if CHECK=$(node "$RUNTIME_DIR/dist/agent-review.cjs" human-check --config "$CONFIG" --files "$FILES"); then
+          if CHECK=$(node "$RUNTIME_DIR/dist/agent-review.cjs" human-check --config "$CONFIG" --files "$FILES" "${INCOMPLETE[@]}"); then
             printf '%s\n' "$CHECK" > "$RULES"
           else
             RULES_ERROR=${CHECK:-human-check failed without a message}

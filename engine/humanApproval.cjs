@@ -34,16 +34,20 @@ function readBlock(configText) {
 }
 
 // `files` must hold both sides of a rename so a move out of a PCI path still matches.
-function humanRules(configText, files) {
+// `incomplete` marks a partial list, which cannot prove that no rule matches, so it
+// throws when the config sets any rule; with no rules the list does not matter.
+function humanRules(configText, files, { incomplete = false } = {}) {
   const rules = readBlock(configText);
   if (!rules) return { required: false, reasons: [] };
+  const hasRules = rules.always || rules.paths.length > 0;
+  if (incomplete && hasRules) throw new Error("the PR's file list is incomplete");
   const reasons = [];
   if (rules.always) reasons.push('every PR in this repo needs a person (human_approval.always)');
   const hits = [...new Set(files)]
     .filter((f) => rules.paths.some((g) => minimatch(f, g, OPTS)))
     .sort();
   for (const f of hits) reasons.push(`PCI path: ${f}`);
-  if (files.includes(CONFIG_PATH) && (rules.always || rules.paths.length > 0)) {
+  if (files.includes(CONFIG_PATH) && hasRules) {
     reasons.push('changes the human_approval config');
   }
   return { required: reasons.length > 0, reasons };

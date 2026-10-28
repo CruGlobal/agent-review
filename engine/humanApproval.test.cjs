@@ -79,6 +79,33 @@ test('a bad human_approval block or bad YAML throws', () => {
   assert.throws(() => humanRules('a: [unclosed\n', []));
 });
 
+test('an incomplete file list is an error when the base config sets paths', () => {
+  assert.throws(() => humanRules(PCI, ['lib/x.rb'], { incomplete: true }), /^Error: the PR's file list is incomplete$/);
+  assert.throws(
+    () => humanRules(PCI, ['app/payments/a.rb'], { incomplete: true }),
+    /the PR's file list is incomplete/,
+    'a partial list cannot prove the rest is clean, even when it already matches',
+  );
+});
+
+test('an incomplete file list is an error when the base config sets always', () => {
+  assert.throws(
+    () => humanRules('human_approval:\n  always: true\n', ['README.md'], { incomplete: true }),
+    /the PR's file list is incomplete/,
+  );
+});
+
+test('an incomplete file list changes nothing when the base config sets no rules', () => {
+  for (const cfg of [null, '', 'reviews_run: local\n', 'human_approval:\n  always: false\n  paths: []\n']) {
+    assert.deepEqual(humanRules(cfg, ['app/payments/a.rb'], { incomplete: true }), NONE);
+  }
+});
+
+test('a complete file list is judged as before', () => {
+  assert.deepEqual(humanRules(PCI, ['lib/x.rb'], { incomplete: false }), NONE);
+  assert.deepEqual(humanRules(PCI, ['lib/x.rb']), NONE);
+});
+
 test('unrelated keys do not break the rule check', () => {
   assert.deepEqual(humanRules('future_key: {x: 1}\n' + PCI, ['app/payments/a.rb']).required, true);
 });

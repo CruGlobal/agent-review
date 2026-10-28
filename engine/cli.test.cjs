@@ -789,6 +789,37 @@ test('human-check prints the rules for a config file and a file list', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('human-check --incomplete refuses a partial file list only when the base config sets rules', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-human-'));
+  const cfg = join(dir, 'config.yml');
+  const files = join(dir, 'files.txt');
+  writeFileSync(files, 'lib/x.rb\n');
+  const check = (config) => {
+    writeFileSync(cfg, config);
+    return run(['human-check', '--config', cfg, '--files', files, '--incomplete']);
+  };
+
+  const paths = check('human_approval:\n  paths: ["app/payments/**"]\n');
+  assert.equal(paths.code, 1);
+  assert.equal(paths.s.trim(), "human-check: the PR's file list is incomplete");
+
+  const always = check('human_approval:\n  always: true\n');
+  assert.equal(always.code, 1);
+  assert.equal(always.s.trim(), "human-check: the PR's file list is incomplete");
+
+  for (const none of ['', 'engine:\n  name: agent-review\n', 'human_approval:\n  always: false\n  paths: []\n']) {
+    const r = check(none);
+    assert.equal(r.code, 0, `no rules in ${JSON.stringify(none)}`);
+    assert.deepEqual(JSON.parse(r.s), { required: false, reasons: [] });
+  }
+
+  writeFileSync(cfg, 'human_approval:\n  paths: ["app/payments/**"]\n');
+  const complete = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(complete.code, 0, 'without the flag nothing changes');
+  assert.deepEqual(JSON.parse(complete.s), { required: false, reasons: [] });
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('address parse prints lenient operations and rejects bare dismissals in strict mode', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-parse-'));
   const cmd = join(dir, 'cmd.txt');
