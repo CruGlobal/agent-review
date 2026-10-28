@@ -1,9 +1,12 @@
 name: agent-review approve
 description: >-
   Approve a pull request when its published agent-review report passes for the
-  PR's current head. Fails closed on any missing or disagreeing marker, never
-  requests changes, never fails the job, and downgrades an approval API failure
-  to a warning.
+  PR's current head and no person needs to approve it. Re-checks the base
+  commit's human_approval rules, owns the needs-human-approval label, and
+  dismisses the bot's own earlier approvals when a person must approve. Fails
+  closed on any missing or disagreeing marker, never requests changes, never
+  fails the job, and downgrades a label, dismissal, or approval API failure to a
+  warning.
 inputs:
   pr_number:
     description: Pull request number
@@ -20,7 +23,7 @@ inputs:
     required: false
     default: >-
       Auto-approved: the agent-review report for this head passes with no open
-      blockers and the change is reversible.
+      blockers, and no repo rule or card-data check needs a person.
 runs:
   using: composite
   steps:
@@ -44,7 +47,13 @@ runs:
         # Anything unexpected (API error, deleted comment, runtime failure) is
         # "could not judge": report it and stop successfully, so the calling job
         # (which may already have published a ledger) never fails on approval.
-        trap 'echo "::warning::agent-review approve could not judge PR #$PR (${BASH_COMMAND%% *} failed) — not approving." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
+        # Under `set -E` a failure inside $(...) runs this trap in that subshell,
+        # where `exit 0` would hand the warning back as the captured value, so a
+        # subshell exits 1 and leaves the report to the top-level shell.
+        trap '[ "$BASH_SUBSHELL" -eq 0 ] || exit 1; echo "::warning::agent-review approve could not judge PR #$PR (${BASH_COMMAND%% *} failed), not approving." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
+        note() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        LABEL=needs-human-approval
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
         rm -rf "$RUNTIME_DIR"
         mv .agent-review-approve-runtime "$RUNTIME_DIR"
@@ -79,19 +88,136 @@ runs:
           echo "No agent-review report found for PR #$PR — not approving." | tee -a "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
-        HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
-        DECISION=$(node "$RUNTIME_DIR/dist/agent-review.cjs" approval --report "$REPORT" --head "$HEAD_SHA")
+        PR_JSON="$RUNNER_TEMP/agent-review-approve-pr.json"
+        gh api "repos/$REPO/pulls/$PR" > "$PR_JSON"
+        HEAD_SHA=$(jq -r .head.sha "$PR_JSON")
+        BASE_SHA=$(jq -r .base.sha "$PR_JSON")
+
+        # The rules are read from the base commit so a PR cannot switch off its
+        # own rule. Every failure to read them must end as an error rule, which
+        # the engine never approves; only a missing config file means no rules.
+        CONFIG="$RUNNER_TEMP/agent-review-approve-config.yml"
+        FILES_JSON="$RUNNER_TEMP/agent-review-approve-files.json"
+        FILES="$RUNNER_TEMP/agent-review-approve-files.txt"
+        RULES="$RUNNER_TEMP/agent-review-approve-rules.json"
+        RULES_ERROR=""
+        if gh api "repos/$REPO/contents/.claude/review/config.yml?ref=$BASE_SHA" \
+          --jq 'if .encoding == "base64" then .content else error("the config is not a readable file") end' \
+          > "$CONFIG.b64" 2> "$CONFIG.err"; then
+          base64 -d < "$CONFIG.b64" > "$CONFIG" || RULES_ERROR="could not read the base config"
+        elif grep -qF 'Not Found (HTTP 404)' "$CONFIG.err"; then
+          # Matched on the message: a base commit the API cannot find is also an
+          # HTTP 404 and must not read as "no config".
+          : > "$CONFIG"
+        else
+          RULES_ERROR="could not read the base config"
+        fi
+        # The files API stops at 3,000 entries, so a shorter list than
+        # changed_files cannot prove that no listed path changed.
+        if [ -z "$RULES_ERROR" ]; then
+          if ! gh api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate > "$FILES_JSON"; then
+            RULES_ERROR="could not read the PR's file list"
+          elif ! jq -e --slurpfile pages "$FILES_JSON" \
+            '(.changed_files | type == "number") and ([$pages[][] | select(.filename | type == "string")] | length) >= .changed_files' \
+            "$PR_JSON" > /dev/null; then
+            RULES_ERROR="the PR's file list is incomplete"
+          elif ! jq -rs '.[][] | .filename, (.previous_filename // empty)' "$FILES_JSON" > "$FILES"; then
+            RULES_ERROR="could not read the PR's file list"
+          fi
+        fi
+        if [ -z "$RULES_ERROR" ]; then
+          if CHECK=$(node "$RUNTIME_DIR/dist/agent-review.cjs" human-check --config "$CONFIG" --files "$FILES"); then
+            printf '%s\n' "$CHECK" > "$RULES"
+          else
+            RULES_ERROR=${CHECK:-human-check failed without a message}
+          fi
+        fi
+        if [ -n "$RULES_ERROR" ]; then
+          jq -n --arg e "$RULES_ERROR" '{error: $e}' > "$RULES"
+          note "Could not check the human approval rules for PR #$PR: $RULES_ERROR"
+        fi
+
+        # The engine refuses to approve on a labels value that is not a list, so
+        # an unreadable label or owner is written as null rather than guessed.
+        LABELS="$RUNNER_TEMP/agent-review-approve-labels.json"
+        TIMELINE="$RUNNER_TEMP/agent-review-approve-timeline.json"
+        LABEL_OWNER=none
+        if gh api "repos/$REPO/issues/$PR/labels?per_page=100" --paginate > "$LABELS.pages" \
+          && jq -s '[.[][].name]' "$LABELS.pages" > "$LABELS"; then
+          if jq -e --arg l "$LABEL" 'any(.[]; ascii_downcase == $l)' "$LABELS" > /dev/null; then
+            if gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$TIMELINE" \
+              && OWNER=$(jq -rs --arg l "$LABEL" '
+                [.[][] | select(.event == "labeled" and ((.label.name // "") | ascii_downcase) == $l)]
+                | last
+                | if . == null then "none" elif .actor.login == "github-actions[bot]" then "bot" else "person" end
+              ' "$TIMELINE"); then
+              LABEL_OWNER=$OWNER
+            else
+              note "Could not read who added the $LABEL label to PR #$PR."
+              echo null > "$LABELS"
+            fi
+          fi
+        else
+          note "Could not read the labels on PR #$PR."
+          echo null > "$LABELS"
+        fi
+
+        DECISION=$(node "$RUNTIME_DIR/dist/agent-review.cjs" approval --report "$REPORT" --head "$HEAD_SHA" --rules "$RULES" --labels "$LABELS" --label-owner "$LABEL_OWNER")
         APPROVE=$(printf '%s' "$DECISION" | jq -r '.approve')
         REASON=$(printf '%s' "$DECISION" | jq -r '.reason')
+        LABEL_ACTION=$(printf '%s' "$DECISION" | jq -r '.label')
+        DISMISS=$(printf '%s' "$DECISION" | jq -r '.dismissBotApprovals')
+        CAUTION=$(printf '%s' "$DECISION" | jq -r '.caution // empty')
+        note "Decision for PR #$PR: approve=$APPROVE, label=$LABEL_ACTION, dismiss bot approvals=$DISMISS. $REASON"
+
+        # Label and dismissal calls sit in `if` conditions so a failure is a
+        # warning and can never fire the ERR trap.
+        case "$LABEL_ACTION" in
+          add)
+            gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true
+            if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null; then
+              note "Added the $LABEL label to PR #$PR."
+            else
+              warn "could not add the $LABEL label to PR #$PR."
+            fi
+            ;;
+          remove)
+            if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL" > /dev/null; then
+              note "Removed the $LABEL label the bot had added to PR #$PR."
+            else
+              warn "could not remove the $LABEL label from PR #$PR."
+            fi
+            ;;
+        esac
+        if [ "$DISMISS" = "true" ]; then
+          if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+            | jq -rs '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED") | .id'); then
+            for REVIEW_ID in $BOT_APPROVALS; do
+              if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
+                note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
+              else
+                warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+              fi
+            done
+          else
+            warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+          fi
+        fi
+
         if [ "$APPROVE" != "true" ]; then
           echo "Not approving PR #$PR: $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
           exit 0
         fi
+        BODY=$APPROVAL_BODY
+        if [ -n "$CAUTION" ]; then
+          BODY="$APPROVAL_BODY"$'\n\n'"$CAUTION"
+        fi
         # Needs the repo/org setting "Allow GitHub Actions to create and approve
         # pull requests" (off by GitHub default). A 422 here means it is disabled:
         # warn instead of failing, so a passing review never shows as a red check.
-        if gh pr review "$PR" --repo "$REPO" --approve --body "$APPROVAL_BODY"; then
-          echo "Approved PR #$PR: $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+        if gh pr review "$PR" --repo "$REPO" --approve --body "$BODY"; then
+          note "Approved PR #$PR: $REASON"
+          if [ -n "$CAUTION" ]; then note "$CAUTION"; fi
         else
-          echo "::warning::Review passed but approval failed — enable 'Allow GitHub Actions to create and approve pull requests' in repo/org Actions settings."
+          warn "Review passed but approval failed. Enable 'Allow GitHub Actions to create and approve pull requests' in repo/org Actions settings."
         fi

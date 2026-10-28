@@ -193,7 +193,8 @@ test('CI workflows fail closed on missing/stale reports and use portable paginat
   // PR's current head and the engine rule (approval.test.cjs) rejects a report
   // for any other head.
   const approveAction = readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8');
-  assert.ok(approveAction.includes('HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)'));
+  assert.ok(approveAction.includes('gh api "repos/$REPO/pulls/$PR" > "$PR_JSON"'));
+  assert.ok(approveAction.includes('HEAD_SHA=$(jq -r .head.sha "$PR_JSON")'));
   assert.ok(approveAction.includes('--head "$HEAD_SHA"'));
   assert.ok(!review.includes('--paginate --slurp'));
   assert.ok(!interact.includes('--paginate --slurp'));
@@ -1680,6 +1681,136 @@ test('the approval gate is one composite action that delegates the decision to t
   // must not fail the interact publish job after the ledger is already posted.
   assert.ok(run.includes("trap '"), 'errors are trapped');
   assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
+});
+
+test('the approve action re-checks the base commit rules, owns the label, and takes back bot approvals', () => {
+  const { parse } = require('yaml');
+  const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
+  const run = action.runs.steps.map((s) => s.run || '').join('\n');
+  // Under `set -E` a failure inside $(...) runs the trap in that subshell, where
+  // `exit 0` would hand the warning text back as the captured value.
+  assert.ok(run.includes('[ "$BASH_SUBSHELL" -eq 0 ] || exit 1;'), 'a trapped subshell failure must reach the top-level trap');
+
+  assert.ok(run.includes('contents/.claude/review/config.yml?ref=$BASE_SHA'), 'the rules come from the base commit, never the PR');
+  assert.ok(
+    run.includes("grep -qF 'Not Found (HTTP 404)'"),
+    'only a missing file reads as no config; a missing ref is also an HTTP 404',
+  );
+  assert.ok(run.includes('RULES_ERROR="could not read the base config"'));
+  assert.ok(run.includes('.filename, (.previous_filename // empty)'), 'both sides of a rename are checked');
+  assert.ok(run.includes('.changed_files'), 'the listed files are counted against changed_files');
+  assert.ok(run.includes(`RULES_ERROR="the PR's file list is incomplete"`));
+  assert.ok(
+    run.includes('agent-review.cjs" human-check --config "$CONFIG" --files "$FILES"'),
+    'the action runs the repo rules itself',
+  );
+  assert.ok(run.includes(`jq -n --arg e "$RULES_ERROR" '{error: $e}' > "$RULES"`), 'the rules error is JSON built by jq');
+  assert.ok(
+    run.includes(
+      'agent-review.cjs" approval --report "$REPORT" --head "$HEAD_SHA" --rules "$RULES" --labels "$LABELS" --label-owner "$LABEL_OWNER"',
+    ),
+    'the engine decides with the rules, the labels, and the label owner',
+  );
+
+  assert.ok(run.includes('LABEL=needs-human-approval'), 'the label name is exact');
+  assert.ok(run.includes('issues/$PR/labels?per_page=100" --paginate'), 'every label page is read');
+  assert.ok(run.includes('issues/$PR/timeline?per_page=100" --paginate'), 'the owner comes from the timeline');
+  assert.ok(run.includes('.actor.login == "github-actions[bot]" then "bot"'), 'only the bot\'s own label is the bot\'s');
+  assert.ok(run.includes('echo null > "$LABELS"'), 'unreadable labels reach the engine as a value it refuses to approve');
+  assert.ok(
+    run.includes(
+      'gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true',
+    ),
+  );
+  assert.ok(run.includes(`if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL"`));
+  assert.ok(run.includes(`if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"`));
+
+  assert.ok(
+    run.includes('select(.user.login == "github-actions[bot]" and .state == "APPROVED")'),
+    'only the bot\'s own approvals are dismissed, never a person\'s review',
+  );
+  assert.ok(
+    run.includes(
+      'if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS',
+    ),
+  );
+  // A label or dismissal failure is a warning: each write sits in an `if`, where
+  // a failure cannot fire the ERR trap that ends the step.
+  const writes = run.split('\n').filter((line) => /gh api -X (POST|PUT|DELETE)/.test(line));
+  assert.equal(writes.length, 3, 'label add, label remove, and dismiss are the only API writes');
+  for (const line of writes) assert.match(line.trim(), /^if gh api -X /);
+
+  assert.ok(run.includes(".caution // empty"), 'the caution is read from the decision');
+  assert.ok(run.includes(`BODY="$APPROVAL_BODY"$'\\n\\n'"$CAUTION"`), 'the caution follows the body after a blank line');
+  assert.ok(run.includes('--approve --body "$BODY"'));
+  assert.ok(run.includes('GITHUB_STEP_SUMMARY'));
+});
+
+test('no shared workflow or action asks for a token permission its callers do not grant', () => {
+  const { parse } = require('yaml');
+  const { readdirSync, existsSync } = require('node:fs');
+  const workflowDir = join(ROOT, '.github/workflows');
+  const actionDir = join(ROOT, '.github/actions');
+  const files = [
+    ...readdirSync(workflowDir)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .map((f) => join(workflowDir, f)),
+    ...readdirSync(actionDir)
+      .map((d) => join(actionDir, d, 'action.yml'))
+      .filter((f) => existsSync(f)),
+  ];
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    const name = relative(ROOT, file);
+    assert.ok(!/^\s*issues:\s*(read|write)\b/m.test(text), `${name} must not ask for an issues permission`);
+    const doc = parse(text);
+    const blocks = [doc.permissions, ...Object.values(doc.jobs || {}).map((job) => job.permissions)];
+    for (const block of blocks.filter((b) => b !== undefined)) {
+      assert.equal(typeof block, 'object', `${name} must list permissions, never read-all or write-all`);
+      assert.ok(!('issues' in block), `${name} must not ask for an issues permission`);
+    }
+  }
+  const job = (path, name) => parse(readFileSync(join(ROOT, path), 'utf8')).jobs[name];
+  assert.deepEqual(job('.github/workflows/approve.yml', 'approve').permissions, {
+    contents: 'read',
+    'pull-requests': 'write',
+  });
+  assert.deepEqual(job('.github/workflows/review.yml', 'approve').permissions, {
+    contents: 'read',
+    'pull-requests': 'write',
+  });
+  assert.deepEqual(job('.github/workflows/interact.yml', 'publish').permissions, {
+    actions: 'write',
+    contents: 'write',
+    'pull-requests': 'write',
+  });
+});
+
+test('every approval body names the human approval checks and drops the reversibility claim', () => {
+  const { parse } = require('yaml');
+  const REPORT_BODY =
+    'Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or card-data check needs a person.';
+  const LEDGER_BODY =
+    'Auto-approved: every agent-review finding is fixed or dismissed with a reason, and no repo rule or card-data check needs a person.';
+  const files = {
+    action: join(ROOT, '.github/actions/approve/action.yml'),
+    approve: join(ROOT, '.github/workflows/approve.yml'),
+    review: REVIEW_WORKFLOW,
+    interact: INTERACT_WORKFLOW,
+  };
+  const doc = (key) => parse(readFileSync(files[key], 'utf8'));
+  const approveStep = (key, job) =>
+    doc(key).jobs[job].steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
+  const actionDefault = doc('action').inputs.approval_body.default;
+  assert.equal(actionDefault, REPORT_BODY);
+  assert.equal(approveStep('approve', 'approve').with.approval_body, REPORT_BODY);
+  assert.equal(approveStep('review', 'approve').with.approval_body ?? actionDefault, REPORT_BODY);
+  const interact = approveStep('interact', 'publish');
+  assert.equal(interact.with.approval_body, LEDGER_BODY);
+  assert.equal(interact.name, 'Approve when the ledger is fully addressed and no person is needed');
+  for (const [key, path] of Object.entries(files)) {
+    assert.ok(!readFileSync(path, 'utf8').includes('change is reversible'), `${key}: the reversibility claim is gone`);
+  }
 });
 
 test('interact.yml approves through the shared action, gated by auto_approve', () => {

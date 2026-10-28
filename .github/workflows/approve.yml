@@ -33,5 +33,5 @@ jobs:
           pr_number: ${{ inputs.pr_number }}
           report_comment_id: ${{ inputs.comment_id }}
           approval_body: >-
-            Auto-approved: the posted agent-review report covers the current head,
-            passes with no open blockers, and the change is reversible.
+            Auto-approved: the agent-review report for this head passes with no open
+            blockers, and no repo rule or card-data check needs a person.
