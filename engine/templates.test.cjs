@@ -3888,9 +3888,11 @@ function rulesCheckLines() {
 
 // A repo whose base config lists app/payments/** as PCI code. The PR moves a file out of that
 // path, edits a PCI file with a non-ASCII name, and empties the list in its own config. After the
-// fork, the base branch adds a PCI file the PR never touched. HEAD is left on the PR head.
+// fork, the base branch adds a PCI file the PR never touched. `blobGone` lists a config whose
+// blob is deleted, as in a partial clone that cannot fetch it; `lonely` shares no history with the
+// PR. HEAD is left on the PR head.
 function humanRulesRepo() {
-  const { mkdirSync, writeFileSync } = require('node:fs');
+  const { mkdirSync, writeFileSync, unlinkSync } = require('node:fs');
   const { dirname } = require('node:path');
   const repo = mkdtempSync(join(os.tmpdir(), 'ar-rules-repo-'));
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
@@ -3923,14 +3925,21 @@ function humanRulesRepo() {
   const base = offFork('the base branch moves on', () => write('app/payments/later.rb', 'later\n'));
   const badConfig = offFork('a malformed rule', () => write('.claude/review/config.yml', 'human_approval:\n  always: "yes"\n'));
   const noConfig = offFork('no config', () => git('rm', '-q', '.claude/review/config.yml'));
+  const blobGone = offFork('a config that will not show', () =>
+    write('.claude/review/config.yml', 'human_approval:\n  paths:\n    - "app/payments/**"\n# fetched on demand\n'),
+  );
+  const lonely = git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-m', 'unrelated');
   git('checkout', '-q', head);
-  return { repo, fork, head, base, badConfig, noConfig };
+  const blob = git('rev-parse', `${blobGone}:.claude/review/config.yml`);
+  unlinkSync(join(repo, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+  return { repo, fork, head, base, badConfig, noConfig, blobGone, lonely };
 }
 
 // Runs a review-skill block in `repo` with its /tmp files moved to a private directory. The real
 // CLI runs human-check; ledger is stubbed, status records its arguments, and gh prints the
-// previous comment.
-function runRulesBlock(shell, block, { repo, env = {}, files = {} }) {
+// previous comment. `failGit` names a git subcommand that fails; `want` lists extra /tmp files
+// to return.
+function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = null, want = [] }) {
   const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
   const { dirname } = require('node:path');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-rules-'));
@@ -3943,6 +3952,10 @@ function runRulesBlock(shell, block, { repo, env = {}, files = {} }) {
       { mode: 0o755 },
     );
     writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) cat "${dir}/previous_comment.md" ;;\nesac\n`, { mode: 0o755 });
+    if (failGit) {
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      writeFileSync(join(bin, 'git'), `#!/bin/sh\n[ "$1" = "${failGit}" ] && exit 128\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    }
     const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
     writeFileSync(join(dir, 'review_env.sh'), at(Object.entries(env).map(([k, v]) => `export ${k}="${v}"\n`).join('')));
     for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
@@ -3961,6 +3974,7 @@ function runRulesBlock(shell, block, { repo, env = {}, files = {} }) {
       cardScan: json('agent_review_card_scan.json'),
       changedFiles: read('agent_review_changed_files.txt'),
       statusArgs: args === null ? null : args.split('\n').slice(0, -1).map((a) => a.replaceAll(`${dir}/`, '/tmp/')),
+      wanted: Object.fromEntries(want.map((name) => [name, read(name)])),
     };
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -3987,7 +4001,7 @@ test('the status step judges card data on the full PR diff, with the spec lists 
   const scan = section.slice(card, json);
   const flat = flatText(scan);
   for (const needle of [
-    'Judge from the same full diff, `/tmp/pr_full_diff.txt`,',
+    "Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the merge base (never the incremental-only `/tmp/pr_diff.txt`),",
     "Run this scan on every review, in every repo, whether or not the repo's config sets `human_approval`",
     'reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, expiry date, or cardholder name together with card data',
     'handles card tokens or vault ids from a payment processor',
@@ -4003,6 +4017,7 @@ test('the status step judges card data on the full PR diff, with the spec lists 
     assert.ok(flat.includes(needle), `the card-data scan must say ${JSON.stringify(needle)}`);
   }
   assert.ok(!scan.includes('\u2014'), 'the card-data prose uses no em dashes');
+  assert.ok(!scan.includes('/tmp/pr_full_diff.txt'), 'the two-dot full diff also shows base-branch commits after the fork');
 
   assert.ok(flatText(section).includes('classify irreversible: the only cost is a caution line.'), 'when unsure about reversibility, the cost is now a caution line');
   assert.ok(!skill.includes('the only cost is a human look'), 'irreversible no longer costs a human look');
@@ -4057,7 +4072,7 @@ test('the report skeleton carries the needs-a-person tag and line, and the irrev
 test("the status block checks the base commit's human approval rules against the whole PR under bash and zsh", (t) => {
   const block = mainStatusBlock();
   assert.ok(block.startsWith('. /tmp/review_env.sh 2>/dev/null || true\n'), 'the block sources the saved state first');
-  const { repo, fork, head, base, badConfig, noConfig } = humanRulesRepo();
+  const { repo, fork, head, base, badConfig, noConfig, blobGone } = humanRulesRepo();
   const unread = (why) => ({ required: true, reasons: [`could not read the human approval rules: ${why}`] });
   const pr = (from) => ({ BASE_REF: from, HEAD_REF: head, FULL_RANGE: `${from}..${head}` });
   const cases = [
@@ -4067,13 +4082,15 @@ test("the status block checks the base commit's human approval rules against the
     ['no saved range', {}, unread('no base commit')],
     ['a malformed rule at the base', pr(badConfig), unread('human_approval.always must be a boolean')],
     ['no config at the base', pr(noConfig), { required: false, reasons: [] }],
+    ['a listed config that will not show', pr(blobGone), unread('could not read the base config')],
+    ['a base tree that cannot be listed', pr(base), unread('could not read the base tree'), 'ls-tree'],
     ['an unknown base commit', pr('0123456789abcdef0123456789abcdef01234567'), unread('could not list the changed files')],
   ];
   const files = { 'agent_review_card_scan.json': '{ "cardData": false, "reasons": [] }\n' };
   try {
     for (const shell of availableShells(t)) {
-      for (const [label, env, rules] of cases) {
-        const run = runRulesBlock(shell, block, { repo, env, files });
+      for (const [label, env, rules, failGit] of cases) {
+        const run = runRulesBlock(shell, block, { repo, env, files, failGit });
         assert.strictEqual(run.status, 0, `${shell}, ${label}: ${run.output}`);
         assert.deepStrictEqual(run.rules, rules, `${shell}, ${label}: ${run.output}`);
         assert.ok(passesRuleFiles(run.statusArgs), `${shell}, ${label}: ${JSON.stringify(run.statusArgs)}`);
@@ -4142,6 +4159,37 @@ test('both zero-risk skip paths check the repo rules and carry the needs-a-perso
         assert.deepStrictEqual(run.cardScan, cardScan, `${shell}, ${label}`);
         assert.ok(passesRuleFiles(run.statusArgs), `${shell}, ${label}: ${JSON.stringify(run.statusArgs)}`);
       }
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("the card scan reads the PR's own changes from the merge base under bash and zsh", (t) => {
+  const blocks = bashBlockList(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Gather PR Context & Diff Manifest', '### Build the Review Plan & Load Evidence'));
+  assert.strictEqual(blocks.length, 1, 'the diff manifest is one block');
+  const lines = blocks[0].split('\n');
+  const start = lines.findIndex((l) => l.startsWith('# The card scan reads'));
+  const end = lines.findIndex((l, i) => i > start && l === 'fi');
+  const fullDiff = lines.findIndex((l) => l.includes('> /tmp/pr_full_diff.txt'));
+  assert.ok(start !== -1 && end > start, 'the diff-manifest block writes the card-scan diff');
+  assert.ok(fullDiff !== -1 && fullDiff < start, 'the card-scan diff follows the full diff it falls back to');
+  const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start, end + 1)].join('\n');
+
+  const { repo, head, base, lonely } = humanRulesRepo();
+  const full = 'the two-dot full diff\n';
+  try {
+    for (const shell of availableShells(t)) {
+      const scanDiff = (env) => {
+        const run = runRulesBlock(shell, script, { repo, env, files: { 'pr_full_diff.txt': full }, want: ['pr_card_scan_diff.txt'] });
+        assert.strictEqual(run.status, 0, `${shell}: ${run.output}`);
+        return run.wanted['pr_card_scan_diff.txt'];
+      };
+      const pr = scanDiff({ BASE_REF: base, HEAD_REF: head });
+      assert.ok(pr.includes('lib/charge.rb') && pr.includes('app/other.rb'), `${shell}: the PR's own changes: ${pr}`);
+      assert.ok(!pr.includes('later.rb'), `${shell}: no base-branch commit after the fork: ${pr}`);
+      assert.strictEqual(scanDiff({ BASE_REF: '', HEAD_REF: '' }), full, `${shell}: a range review already diffs from the merge base`);
+      assert.strictEqual(scanDiff({ BASE_REF: lonely, HEAD_REF: head }), full, `${shell}: no merge base falls back to the full diff`);
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });

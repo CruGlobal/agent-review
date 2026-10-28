@@ -342,6 +342,14 @@ else
   git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
   git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
 fi
+# The card scan reads only the PR's own changes: a two-dot diff also shows, reversed, the base
+# branch's commits after the fork. With no merge base, it falls back to the full diff.
+if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+  git diff "${BASE_REF}...${HEAD_REF}" > /tmp/pr_card_scan_diff.txt 2>/dev/null \
+    || cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
+else
+  cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
+fi
 
 if [ ! -s /tmp/changed_files.txt ]; then
   if [ -n "$INCREMENTAL" ]; then
@@ -638,20 +646,31 @@ if [ "$MODE" = "auto" ]; then
     # commit, the one the approve action reads, never from the PR's own changes. FULL_RANGE starts
     # at that commit on a PR, and at the range's start otherwise.
     RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
-    RULES_ERROR="no base commit"
-    if [ -n "$RULES_BASE" ]; then
-      RULES_ERROR="could not list the changed files"
-      # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted.
-      if git diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z; then
-        tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt
-        # The diff above proves the base commit exists, so a failed show means no config there.
-        git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null || : > /tmp/agent_review_base_config.yml
-        if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
-          printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json && RULES_ERROR=""
-        else
-          RULES_ERROR="${HUMAN_CHECK#human-check: }"
-          RULES_ERROR="${RULES_ERROR:-human-check failed}"
-        fi
+    RULES_ERROR=""
+    [ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
+    # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted.
+    if [ -z "$RULES_ERROR" ]; then
+      git diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
+        && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
+        || RULES_ERROR="could not list the changed files"
+    fi
+    # Only a path missing from the base tree means no config. A listed config that will not show,
+    # as in a partial clone that cannot fetch it, is unreadable.
+    if [ -z "$RULES_ERROR" ]; then
+      if ! CONFIG_ENTRY=$(git ls-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
+        RULES_ERROR="could not read the base tree"
+      elif [ -z "$CONFIG_ENTRY" ]; then
+        : > /tmp/agent_review_base_config.yml
+      elif ! git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null; then
+        RULES_ERROR="could not read the base config"
+      fi
+    fi
+    if [ -z "$RULES_ERROR" ]; then
+      if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
+        printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json
+      else
+        RULES_ERROR="${HUMAN_CHECK#human-check: }"
+        RULES_ERROR="${RULES_ERROR:-human-check failed}"
       fi
     fi
     if [ -n "$RULES_ERROR" ]; then
@@ -1721,10 +1740,11 @@ Purely additive changes (new column, new table, new index, new code paths, confi
 List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
 
-**Card data.** Judge from the same full diff, `/tmp/pr_full_diff.txt`, whether the PR touches
-payment card handling. Run this scan on every review, in every repo, whether or not the repo's
-config sets `human_approval`: a repo with no card code today may add some later. Flag the PR when
-the diff adds or changes code that does any of these:
+**Card data.** Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the
+merge base (never the incremental-only `/tmp/pr_diff.txt`), whether the PR touches payment card
+handling. Run this scan on every review, in every repo, whether or not the repo's config sets
+`human_approval`: a repo with no card code today may add some later. Flag the PR when the diff
+adds or changes code that does any of these:
 
 - reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, expiry
   date, or cardholder name together with card data
@@ -1773,20 +1793,31 @@ files. Never hand-author `openBlockers`, `pass`, `risk`, or `humanRequired`:
 # The rules come from the base commit, the one the approve action reads, never from the PR's own
 # changes. FULL_RANGE starts at that commit on a PR, and at the range's start otherwise.
 RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
-RULES_ERROR="no base commit"
-if [ -n "$RULES_BASE" ]; then
-  RULES_ERROR="could not list the changed files"
-  # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted.
-  if git diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z; then
-    tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt
-    # The diff above proves the base commit exists, so a failed show means no config there.
-    git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null || : > /tmp/agent_review_base_config.yml
-    if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
-      printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json && RULES_ERROR=""
-    else
-      RULES_ERROR="${HUMAN_CHECK#human-check: }"
-      RULES_ERROR="${RULES_ERROR:-human-check failed}"
-    fi
+RULES_ERROR=""
+[ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
+# --no-renames lists both sides of a rename; -z keeps unusual paths unquoted.
+if [ -z "$RULES_ERROR" ]; then
+  git diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
+    && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
+    || RULES_ERROR="could not list the changed files"
+fi
+# Only a path missing from the base tree means no config. A listed config that will not show,
+# as in a partial clone that cannot fetch it, is unreadable.
+if [ -z "$RULES_ERROR" ]; then
+  if ! CONFIG_ENTRY=$(git ls-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
+    RULES_ERROR="could not read the base tree"
+  elif [ -z "$CONFIG_ENTRY" ]; then
+    : > /tmp/agent_review_base_config.yml
+  elif ! git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null; then
+    RULES_ERROR="could not read the base config"
+  fi
+fi
+if [ -z "$RULES_ERROR" ]; then
+  if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
+    printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json
+  else
+    RULES_ERROR="${HUMAN_CHECK#human-check: }"
+    RULES_ERROR="${RULES_ERROR:-human-check failed}"
   fi
 fi
 if [ -n "$RULES_ERROR" ]; then
