@@ -497,7 +497,7 @@ jobs:
           pr_number: ${{ inputs.pr_number }}
           approval_body: >-
             Auto-approved: every agent-review finding is fixed or dismissed with
-            a reason, and no repo rule or card-data check needs a person.
+            a reason, and no repo rule or recorded check needs a person.
       - name: Delete the successful handoff artifact
         if: success()
         env:

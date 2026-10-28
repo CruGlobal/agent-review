@@ -248,8 +248,8 @@ the comment — mutate ONLY these three things, leaving every other byte untouch
 1. The `<!-- agent-review-ledger: … -->` line (the updated JSON).
 2. The `<!-- agent-review-status: … -->` line: recompute `openBlockers` (ledger entries with
    severity ≥ 7 still `open`) and `pass` (`openBlockers == 0`). Never touch `irreversible` /
-   `irreversibleReasons` or `humanRequired` / `humanReasons` — reversibility and the need for a person are properties of the reviewed diff; only a re-review
-   may change it.
+   `irreversibleReasons` or `humanRequired` / `humanReasons`: reversibility and the need for a
+   person are properties of the reviewed diff, and only a re-review may change them.
 3. The ledger section's item lines, exactly per the report skeleton's fixed/dismissed formats
    (`✅ fixed in <sha>` / `🚫 dismissed by @<user>: <reason>`, checked boxes, struck-through
    message).

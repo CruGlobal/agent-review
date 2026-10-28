@@ -27,7 +27,7 @@ const OLD = 'd'.repeat(40);
 const LABEL = 'needs-human-approval';
 const BOT = 'github-actions[bot]';
 const BODY =
-  'Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or card-data check needs a person.';
+  'Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or recorded check needs a person.';
 const PCI = 'human_approval:\n  paths:\n    - "app/pci/**"\n';
 
 const FAKE_GH = `#!/usr/bin/env bash

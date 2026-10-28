@@ -657,7 +657,7 @@ if [ "$MODE" = "auto" ]; then
     # Only a path missing from the base tree means no config. A listed config that will not show,
     # as in a partial clone that cannot fetch it, is unreadable.
     if [ -z "$RULES_ERROR" ]; then
-      if ! CONFIG_ENTRY=$(git ls-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
+      if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
         RULES_ERROR="could not read the base tree"
       elif [ -z "$CONFIG_ENTRY" ]; then
         : > /tmp/agent_review_base_config.yml
@@ -1742,13 +1742,15 @@ migration X"`), each traceable to a diff hunk.
 
 **Card data.** Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the
 merge base (never the incremental-only `/tmp/pr_diff.txt`), whether the PR touches payment card
-handling. Run this scan on every review, in every repo, whether or not the repo's config sets
-`human_approval`: a repo with no card code today may add some later. Flag the PR when the diff
-adds or changes code that does any of these:
+handling. Read all of `/tmp/pr_card_scan_diff.txt`, in parts if it is long. Lockfiles cannot
+carry card handling, so skip them. Run this scan on every review, in every repo, whether or not
+the repo's config sets `human_approval`: a repo with no card code today may add some later. Flag
+the PR when the diff adds or changes code that does any of these:
 
-- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, expiry
-  date, or cardholder name together with card data
-- handles card tokens or vault ids from a payment processor
+- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card
+  expiry date (MM/YY), or cardholder name together with card data
+- handles a processor-issued card token or vault id (for example a TSYS or Stripe
+  payment-method token)
 - calls a payment processor or gateway to charge, authorize, refund or store a card (TSYS,
   cru-payments, Stripe and similar)
 - changes a payment form's card fields, or how card data moves to or from the browser
@@ -1805,7 +1807,7 @@ fi
 # Only a path missing from the base tree means no config. A listed config that will not show,
 # as in a partial clone that cannot fetch it, is unreadable.
 if [ -z "$RULES_ERROR" ]; then
-  if ! CONFIG_ENTRY=$(git ls-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
+  if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
     RULES_ERROR="could not read the base tree"
   elif [ -z "$CONFIG_ENTRY" ]; then
     : > /tmp/agent_review_base_config.yml

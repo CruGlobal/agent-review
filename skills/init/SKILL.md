@@ -619,11 +619,11 @@ recommendation. Do not skip a question because the recommendation looks obvious.
    - **Local + CI:** CI also reviews labeled PRs, so all four workflows are installed and the
      `ANTHROPIC_API_KEY` secret is needed. Costs API usage on every labeled PR. Write no
      `reviews_run:` key; `local-and-ci` is the default.
-3. **Should the bot approve PRs in this repo?** Recommended: yes. Such repos keep the bot on and
-   use question 4: payment or financial code still gets a person's approval where it matters, and
-   the card-data check runs on every review. A yes means `auto_approve: true` on every installed caller,
-   a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every caller is `false`
-   whatever the answer.
+3. **Should the bot approve PRs in this repo?** Recommended: yes. Repos with payment or financial
+   code keep the bot on and use question 4: that code still gets a person's approval where it
+   matters, and the card-data check runs on every review. A yes means `auto_approve: true` on
+   every installed caller, a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every
+   caller is `false` whatever the answer.
 4. **Does every PR in this repo need a person's approval?** Recommend yes for a repo your team says
    always needs a person, such as a financial or accounting app; recommend no otherwise. A yes writes
    `human_approval.always: true`; a no writes nothing for `always`. Then offer card paths:

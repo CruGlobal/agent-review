@@ -1811,9 +1811,9 @@ test('no shared workflow or action asks for a token permission its callers do no
 test('every approval body names the human approval checks and drops the reversibility claim', () => {
   const { parse } = require('yaml');
   const REPORT_BODY =
-    'Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or card-data check needs a person.';
+    'Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or recorded check needs a person.';
   const LEDGER_BODY =
-    'Auto-approved: every agent-review finding is fixed or dismissed with a reason, and no repo rule or card-data check needs a person.';
+    'Auto-approved: every agent-review finding is fixed or dismissed with a reason, and no repo rule or recorded check needs a person.';
   const files = {
     action: join(ROOT, '.github/actions/approve/action.yml'),
     approve: join(ROOT, '.github/workflows/approve.yml'),
@@ -1832,6 +1832,7 @@ test('every approval body names the human approval checks and drops the reversib
   assert.equal(interact.name, 'Approve when the ledger is fully addressed and no person is needed');
   for (const [key, path] of Object.entries(files)) {
     assert.ok(!readFileSync(path, 'utf8').includes('change is reversible'), `${key}: the reversibility claim is gone`);
+    assert.ok(!flatText(readFileSync(path, 'utf8')).includes('card-data check needs a person'), `${key}: the old approval wording is gone`);
   }
 });
 
@@ -3941,8 +3942,8 @@ function humanRulesRepo() {
 // Runs a review-skill block in `repo` with its /tmp files moved to a private directory. The real
 // CLI runs human-check; ledger is stubbed, status records its arguments, and gh prints the
 // previous comment. `failGit` names a git subcommand that fails; `want` lists extra /tmp files
-// to return.
-function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = null, want = [] }) {
+// to return; `subdir` runs the block from that folder of `repo`.
+function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = null, want = [], subdir = '' }) {
   const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
   const { dirname } = require('node:path');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-rules-'));
@@ -3963,7 +3964,7 @@ function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = nul
     writeFileSync(join(dir, 'review_env.sh'), at(Object.entries(env).map(([k, v]) => `export ${k}="${v}"\n`).join('')));
     for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
     const r = require('node:child_process').spawnSync(shell, ['-c', at(block)], {
-      cwd: repo,
+      cwd: join(repo, subdir),
       encoding: 'utf8',
       env: { PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, HOME: process.env.HOME },
     });
@@ -4006,8 +4007,9 @@ test('the status step judges card data on the full PR diff, with the spec lists 
   for (const needle of [
     "Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the merge base (never the incremental-only `/tmp/pr_diff.txt`),",
     "Run this scan on every review, in every repo, whether or not the repo's config sets `human_approval`",
-    'reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, expiry date, or cardholder name together with card data',
-    'handles card tokens or vault ids from a payment processor',
+    'Read all of `/tmp/pr_card_scan_diff.txt`, in parts if it is long. Lockfiles cannot carry card handling, so skip them.',
+    'reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card expiry date (MM/YY), or cardholder name together with card data',
+    'handles a processor-issued card token or vault id (for example a TSYS or Stripe payment-method token)',
     'calls a payment processor or gateway to charge, authorize, refund or store a card (TSYS, cru-payments, Stripe and similar)',
     "changes a payment form's card fields, or how card data moves to or from the browser",
     'changes logging or error reporting in code that handles card data',
@@ -4020,6 +4022,15 @@ test('the status step judges card data on the full PR diff, with the spec lists 
     assert.ok(flat.includes(needle), `the card-data scan must say ${JSON.stringify(needle)}`);
   }
   assert.ok(!scan.includes('\u2014'), 'the card-data prose uses no em dashes');
+  assert.ok(!flat.includes('handles card tokens or vault ids from a payment processor'), 'the loose token wording is gone');
+  const spec = flatText(readFileSync(join(ROOT, 'docs/specs/2026-10-27-human-approval-design.md'), 'utf8'));
+  const specScan = spec.slice(spec.indexOf('### 3. The card-data scan'), spec.indexOf('### 4. The status marker'));
+  for (const needle of [
+    '- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card expiry date (MM/YY), or cardholder name together with card data;',
+    '- handles a processor-issued card token or vault id (for example a TSYS or Stripe payment-method token);',
+  ]) {
+    assert.ok(specScan.includes(needle), `spec section 3 mirrors ${JSON.stringify(needle)}`);
+  }
   assert.ok(!scan.includes('/tmp/pr_full_diff.txt'), 'the two-dot full diff also shows base-branch commits after the fork');
 
   assert.ok(flatText(section).includes('classify irreversible: the only cost is a caution line.'), 'when unsure about reversibility, the cost is now a caution line');
@@ -4079,6 +4090,10 @@ test('the report skeleton carries the needs-a-person tag and line, and the irrev
 test("the status block checks the base commit's human approval rules against the whole PR under bash and zsh", (t) => {
   const block = mainStatusBlock();
   assert.ok(block.startsWith('. /tmp/review_env.sh 2>/dev/null || true\n'), 'the block sources the saved state first');
+  assert.ok(
+    rulesCheckLines().includes('if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then'),
+    'ls-tree lists from the repo root, so a run from a subdirectory still finds the config',
+  );
   const { repo, fork, head, base, badConfig, noConfig, blobGone } = humanRulesRepo();
   const unread = (why) => ({ required: true, reasons: [`could not read the human approval rules: ${why}`] });
   const pr = (from) => ({ BASE_REF: from, HEAD_REF: head, FULL_RANGE: `${from}..${head}` });
@@ -4092,12 +4107,13 @@ test("the status block checks the base commit's human approval rules against the
     ['a listed config that will not show', pr(blobGone), unread('could not read the base config')],
     ['a base tree that cannot be listed', pr(base), unread('could not read the base tree'), 'ls-tree'],
     ['an unknown base commit', pr('0123456789abcdef0123456789abcdef01234567'), unread('could not list the changed files')],
+    ['a local run from a subdirectory', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD` }, PCI_RULES, null, 'app/payments'],
   ];
   const files = { 'agent_review_card_scan.json': '{ "cardData": false, "reasons": [] }\n' };
   try {
     for (const shell of availableShells(t)) {
-      for (const [label, env, rules, failGit] of cases) {
-        const run = runRulesBlock(shell, block, { repo, env, files, failGit });
+      for (const [label, env, rules, failGit, subdir] of cases) {
+        const run = runRulesBlock(shell, block, { repo, env, files, failGit, subdir });
         assert.strictEqual(run.status, 0, `${shell}, ${label}: ${run.output}`);
         assert.deepStrictEqual(run.rules, rules, `${shell}, ${label}: ${run.output}`);
         assert.ok(passesRuleFiles(run.statusArgs), `${shell}, ${label}: ${JSON.stringify(run.statusArgs)}`);
@@ -4272,6 +4288,13 @@ test('yolo-review reads humanRequired and treats irreversible as a caution', () 
 test('address skill leaves the human fields alone and reminds about a person only when required', () => {
   const skill = readFileSync(ADDRESS_SKILL, 'utf8');
   assert.ok(skill.includes('`humanRequired` / `humanReasons`'), 'address never touches the human fields');
+  assert.ok(
+    flatText(skill).includes('Never touch `irreversible` / `irreversibleReasons` or `humanRequired` / `humanReasons`: reversibility and the need for a person are properties of the reviewed diff, and only a re-review may change them.'),
+    'the never-touch rule',
+  );
+  const neverTouch = skill.slice(skill.indexOf('Never touch `irreversible`'), skill.indexOf('3. The ledger section'));
+  assert.ok(!neverTouch.includes('\u2014'), 'the never-touch rule has no em dash');
+  for (const line of neverTouch.split('\n')) assert.ok(line.length <= 100, `the never-touch rule is wrapped: ${line}`);
   assert.ok(skill.includes('`humanRequired: true`, remind the user that a person must approve this PR'));
   assert.ok(!skill.includes('`irreversible: true`, remind the user that a human approval is required regardless'), 'old irreversible reminder is gone');
 });
@@ -4279,7 +4302,8 @@ test('address skill leaves the human fields alone and reminds about a person onl
 test('init asks question 4, offers card paths, writes them only on a yes, and creates the label when the bot may approve', () => {
   const init = skillText('init');
   const flat = init.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('Such repos keep the bot on and use question 4'), 'question 3 points to question 4');
+  assert.ok(flat.includes('Repos with payment or financial code keep the bot on and use question 4'), 'question 3 names the repos it means');
+  assert.ok(!flat.includes('Such repos'), 'question 3 has no dangling reference');
   assert.ok(flat.includes("Does every PR in this repo need a person's approval?"), 'question 4 is asked');
   assert.ok(flat.includes('Recommend yes for a repo your team says always needs a person, such as a financial or accounting app'), 'question 4 recommendation');
   assert.ok(init.includes('card-code scan unavailable: this git has no PCRE support') && flat.includes('Do not report "no card code found"') && flat.includes('This never stops setup'), 'a failed git grep -P is visible and non-fatal');

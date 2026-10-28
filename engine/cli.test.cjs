@@ -764,6 +764,14 @@ test('status carries the human fields and requires both new inputs', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('help lists the approval inputs', () => {
+  const { s } = run(['help']);
+  assert.ok(
+    s.includes('  approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   '),
+    s,
+  );
+});
+
 test('help lists the required status inputs', () => {
   const { s } = run(['help']);
   assert.match(s, /status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f>/);

@@ -90,8 +90,8 @@ human_approval:
 The review skill judges a second question about the full PR diff, next to reversibility, in the same step.
 
 **What it flags.** A PR is flagged when the diff adds or changes code that does any of these:
-- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, expiry date, or cardholder name together with card data;
-- handles card tokens or vault ids from a payment processor;
+- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card expiry date (MM/YY), or cardholder name together with card data;
+- handles a processor-issued card token or vault id (for example a TSYS or Stripe payment-method token);
 - calls a payment processor or gateway to charge, authorize, refund or store a card (TSYS, cru-payments, Stripe and similar);
 - changes a payment form's card fields, or how card data moves to or from the browser;
 - changes logging or error reporting in code that handles card data.

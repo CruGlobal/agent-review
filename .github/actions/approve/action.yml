@@ -24,7 +24,7 @@ inputs:
     required: false
     default: >-
       Auto-approved: the agent-review report for this head passes with no open
-      blockers, and no repo rule or card-data check needs a person.
+      blockers, and no repo rule or recorded check needs a person.
 runs:
   using: composite
   steps:
