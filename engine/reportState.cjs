@@ -156,7 +156,7 @@ function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation 
   return merged;
 }
 
-function buildStatus({ ledger, head, plan, safety, evidence }) {
+function buildStatus({ ledger, head, plan, safety, evidence, human, cardScan }) {
   const clean = cleanPrevious(ledger || []);
   const risk = plan && plan.risk && plan.risk.level;
   if (!RISKS.has(risk)) throw new Error(`invalid gate-plan risk: ${risk}`);
@@ -167,6 +167,18 @@ function buildStatus({ ledger, head, plan, safety, evidence }) {
   if (irreversible && irreversibleReasons.length === 0) {
     throw new Error('irreversible safety result requires at least one reason');
   }
+  if (!human || typeof human !== 'object') throw new Error('status requires human input');
+  if (!cardScan || typeof cardScan !== 'object') throw new Error('status requires cardScan input');
+  const humanList = human.required ? (human.reasons || []).map(String) : [];
+  const cardList = cardScan.cardData ? (cardScan.reasons || []).map(String) : [];
+  if (human.required && humanList.length === 0) {
+    throw new Error('human approval requirement requires at least one reason');
+  }
+  if (cardScan.cardData && cardList.length === 0) {
+    throw new Error('card data finding requires at least one reason');
+  }
+  const humanRequired = Boolean(human.required || cardScan.cardData);
+  const humanReasons = [...new Set([...humanList, ...cardList])];
   const openBlockers = clean.filter(
     (entry) => entry.status === 'open' && entry.severity >= 7,
   ).length;
@@ -185,6 +197,8 @@ function buildStatus({ ledger, head, plan, safety, evidence }) {
     pass: openBlockers === 0,
     irreversible,
     irreversibleReasons,
+    humanRequired,
+    humanReasons,
     ...(ci ? { ci } : {}),
   };
 }

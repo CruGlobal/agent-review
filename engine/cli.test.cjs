@@ -699,6 +699,34 @@ test('approval subcommand judges a report file against a head SHA', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('status carries the human fields and requires both new inputs', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-status-'));
+  const f = (name, value) => {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  };
+  const base = [
+    'status',
+    '--ledger', f('ledger.json', []),
+    '--plan', f('plan.json', { risk: { level: 'LOW' } }),
+    '--safety', f('safety.json', { irreversible: false, reasons: [] }),
+  ];
+  const human = f('human.json', { required: true, reasons: ['PCI path: app/payments/a.rb'] });
+  const card = f('card.json', { cardData: true, reasons: ['stores PAN', 'PCI path: app/payments/a.rb'] });
+  const r = run([...base, '--human', human, '--card-scan', card]);
+  assert.equal(r.code, 0);
+  const json = JSON.parse(r.s);
+  assert.equal(json.humanRequired, true);
+  assert.deepEqual(json.humanReasons, ['PCI path: app/payments/a.rb', 'stores PAN']);
+  for (const extra of [[], ['--human', human], ['--card-scan', card]]) {
+    const usage = run([...base, ...extra]);
+    assert.equal(usage.code, 1);
+    assert.match(usage.s, /usage: agent-review status/);
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('human-check prints the rules for a config file and a file list', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-human-'));
   const cfg = join(dir, 'config.yml');

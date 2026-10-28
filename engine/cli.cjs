@@ -962,8 +962,12 @@ function main(rawArgv) {
       const ledgerPath = flag(rest, '--ledger');
       const planPath = flag(rest, '--plan');
       const safetyPath = flag(rest, '--safety');
-      if (!ledgerPath || !planPath || !safetyPath) {
-        out('usage: agent-review status --ledger <f> --plan <f> --safety <f> [--head <sha>]');
+      const humanPath = flag(rest, '--human');
+      const cardScanPath = flag(rest, '--card-scan');
+      if (!ledgerPath || !planPath || !safetyPath || !humanPath || !cardScanPath) {
+        out(
+          'usage: agent-review status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>]',
+        );
         return 1;
       }
       out(
@@ -972,6 +976,8 @@ function main(rawArgv) {
             ledger: JSON.parse(readFileSync(ledgerPath, 'utf8')),
             plan: JSON.parse(readFileSync(planPath, 'utf8')),
             safety: JSON.parse(readFileSync(safetyPath, 'utf8')),
+            human: JSON.parse(readFileSync(humanPath, 'utf8')),
+            cardScan: JSON.parse(readFileSync(cardScanPath, 'utf8')),
             head: flag(rest, '--head'),
             evidence: flag(rest, '--evidence')
               ? JSON.parse(readFileSync(flag(rest, '--evidence'), 'utf8'))
