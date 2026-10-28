@@ -434,7 +434,7 @@ jobs:
   # Opt-in. Reads only the bot-authored report the publish step validated, so a
   # hand-typed marker comment can never be the one judged. Runs after a failed
   # review too, so the action's own rules re-check can add the label and take
-  # back the bot's approvals; a report for another head never approves.
+  # back the bot's approvals. Only a review job that succeeded may approve.
   approve:
     needs: review
     if: "!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'"
@@ -446,3 +446,4 @@ jobs:
       - uses: CruGlobal/agent-review/.github/actions/approve@main
         with:
           pr_number: ${{ github.event.pull_request.number }}
+          approve_allowed: ${{ needs.review.result == 'success' }}

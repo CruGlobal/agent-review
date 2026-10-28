@@ -5,7 +5,7 @@ description: >-
   commit's human_approval rules, owns the needs-human-approval label, and
   dismisses the bot's own earlier approvals when a person must approve, or its
   approvals of other heads when the rules cannot be read. The approval is pinned
-  to the judged commit. Fails closed on any missing or disagreeing marker, never
+  to the judged commit, and is never posted unless approve_allowed is 'true'. Fails closed on any missing or disagreeing marker, never
   requests changes, never fails the job, and downgrades a label, dismissal, or
   approval API failure to a warning.
 inputs:
@@ -25,6 +25,13 @@ inputs:
     default: >-
       Auto-approved: the agent-review report for this head passes with no open
       blockers, and no repo rule or recorded check needs a person.
+  approve_allowed:
+    description: >-
+      'true' lets the action approve. Any other value runs the rules re-check,
+      the label, and the dismissals as usual but never approves, for a review
+      that did not finish.
+    required: false
+    default: 'true'
 runs:
   using: composite
   steps:
@@ -43,6 +50,7 @@ runs:
         PR: ${{ inputs.pr_number }}
         REPORT_COMMENT_ID: ${{ inputs.report_comment_id }}
         APPROVAL_BODY: ${{ inputs.approval_body }}
+        APPROVE_ALLOWED: ${{ inputs.approve_allowed }}
       run: |
         set -eEuo pipefail
         # Anything unexpected (API error, deleted comment, runtime failure) is
@@ -236,6 +244,13 @@ runs:
 
         if [ "$APPROVE" != "true" ]; then
           note "Not approving PR #$PR: $REASON"
+        fi
+        # Any value but true never approves; the label and dismissals above
+        # still run.
+        if [ "$APPROVE_ALLOWED" != "true" ]; then
+          note "Approval was skipped for PR #$PR because the review did not finish."
+        fi
+        if [ "$APPROVE" != "true" ] || [ "$APPROVE_ALLOWED" != "true" ]; then
           exit 0
         fi
         # The approval is pinned to the judged commit, and a stale approval still

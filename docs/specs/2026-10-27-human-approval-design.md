@@ -193,7 +193,7 @@ Merge order: this PR is stacked on #33, so it merges after #33. Retarget it to `
   - An unknown value counts as `all`.
 - **Big PRs.** An incomplete PR file list (over 3,000 files) blocks approval only in repos with rules, through `human-check --incomplete`. A repo with no rules still approves a big PR.
 - **Approval is pinned.** The approval goes to the exact commit that was judged, with a head re-check just before approving.
-- **CI.** The CI approve job also runs after a failed review job, so the rules re-check can act. Its condition is `!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'`.
+- **CI.** The CI approve job also runs after a failed review job, so the rules re-check can act. Its condition is `!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'`. It passes `approve_allowed: ${{ needs.review.result == 'success' }}`. When that is not `true`, the action still adds or removes the label and dismisses bot approvals, but never approves, and its summary says approval was skipped because the review did not finish. So a failed review job never leads to an approval. `approve.yml` and `interact.yml` leave the input at its default, `'true'`.
 - **No base commit.** A review path with no base commit writes `required: true`, with the reason "could not read the human approval rules: no base commit".
 - **Unreadable config.** In the review, a config that exists at the base but can't be read means `required: true`. In the approve action, it is a rules error, so the action does not approve.
 - **Carried reasons.** On zero-risk incremental runs, the earlier `humanReasons` are carried forward and stay until the next full review. This fails closed.

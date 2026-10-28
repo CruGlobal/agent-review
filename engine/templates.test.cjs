@@ -1660,9 +1660,12 @@ test('the approval gate is one composite action that delegates the decision to t
   const { parse } = require('yaml');
   const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
   assert.equal(action.runs.using, 'composite');
-  assert.deepEqual(Object.keys(action.inputs).sort(), ['approval_body', 'pr_number', 'report_comment_id']);
+  assert.deepEqual(Object.keys(action.inputs).sort(), ['approval_body', 'approve_allowed', 'pr_number', 'report_comment_id']);
   assert.equal(action.inputs.pr_number.required, true);
   assert.equal(action.inputs.report_comment_id.default, '');
+  assert.equal(action.inputs.approve_allowed.required, false);
+  assert.equal(action.inputs.approve_allowed.default, 'true', 'callers that leave the input out approve as before');
+  assert.equal(action.runs.steps.find((s) => s.run).env.APPROVE_ALLOWED, '${{ inputs.approve_allowed }}');
   const checkout = action.runs.steps.find((s) => s.uses && s.uses.startsWith('actions/checkout@'));
   assert.equal(checkout.with.repository, 'CruGlobal/agent-review');
   assert.equal(checkout.with['persist-credentials'], false);
@@ -1844,6 +1847,7 @@ test('interact.yml approves through the shared action, gated by auto_approve', (
   assert.equal(step.if, "inputs.auto_approve && steps.engine.outputs.name == 'agent-review'");
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.match(step.with.approval_body, /fixed or dismissed/);
+  assert.equal(step.with.approve_allowed, undefined, 'interact.yml leaves approve_allowed at its default');
   const body = readFileSync(INTERACT_WORKFLOW, 'utf8');
   assert.ok(!body.includes('gh pr review'), 'interact.yml must not carry its own approval shell');
 });
@@ -1862,6 +1866,11 @@ test('review.yml approves only when the caller opts in, and runs after a failed 
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
   assert.equal(step.with.report_comment_id, undefined, 'CI judges only the bot report');
+  assert.equal(
+    step.with.approve_allowed,
+    "${{ needs.review.result == 'success' }}",
+    'a review job that did not succeed may add the label and dismiss, but never approves',
+  );
   assert.ok(doc.jobs['report-failure'], 'report-failure job must survive');
 });
 
@@ -1882,6 +1891,7 @@ test('approve.yml judges the posted comment, defaults auto_approve off, and re-c
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.equal(step.with.report_comment_id, '${{ inputs.comment_id }}');
+  assert.equal(step.with.approve_allowed, undefined, 'approve.yml leaves approve_allowed at its default');
   assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
 });
 
@@ -4352,6 +4362,7 @@ test('the human approval spec records the build amendment before Left to the bui
     'blocks approval only in repos with rules, through `human-check --incomplete`',
     'with a head re-check just before approving',
     'The CI approve job also runs after a failed review job, so the rules re-check can act.',
+    "It passes `approve_allowed: ${{ needs.review.result == 'success' }}`. When that is not `true`, the action still adds or removes the label and dismisses bot approvals, but never approves, and its summary says approval was skipped because the review did not finish.",
     'writes `required: true`, with the reason "could not read the human approval rules: no base commit"',
     'This fails closed.',
     '(`/tmp/pr_card_scan_diff.txt`), not the two-dot full diff',

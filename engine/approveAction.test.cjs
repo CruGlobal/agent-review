@@ -175,7 +175,7 @@ function setup() {
   fs.symlinkSync(process.execPath, path.join(BIN, 'node'));
 }
 
-function run(name, overrides = {}, { dismiss } = {}) {
+function run(name, overrides = {}, { dismiss, approveAllowed = 'true' } = {}) {
   const dir = path.join(TMP, name);
   const fix = path.join(dir, 'fix');
   const ws = path.join(dir, 'ws');
@@ -204,6 +204,7 @@ function run(name, overrides = {}, { dismiss } = {}) {
     PR: '7',
     REPORT_COMMENT_ID: '',
     APPROVAL_BODY: BODY,
+    APPROVE_ALLOWED: approveAllowed,
   };
   fs.writeFileSync(env.GH_LOG, '');
   fs.writeFileSync(env.GITHUB_STEP_SUMMARY, '');
@@ -444,6 +445,44 @@ const SCENARIOS = {
     },
   ],
 };
+
+const SKIPPED = /^Approval was skipped for PR #7 because the review did not finish\.$/m;
+for (const value of ['false', '', 'TRUE']) {
+  SCENARIOS[`approve_allowed ${JSON.stringify(value)} with a passing report never approves and says why`] = [
+    {},
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.writes, []);
+      assert.match(o.summary, SKIPPED);
+      assert.match(o.summary, /Decision for PR #7: approve=true, label=keep, dismiss bot approvals=none\./);
+    },
+    { approveAllowed: value },
+  ];
+}
+SCENARIOS['approve_allowed "false" where a PCI path needs a person still adds the label and dismisses every bot approval'] = [
+  { config: PCI, 'reviews.json': REVIEWS },
+  (o) => {
+    notApproved(o);
+    assert.deepEqual(o.writes, [
+      `label ¦ create ¦ ${LABEL} ¦ --repo ¦ o/r ¦ --color ¦ B60205 ¦ --description ¦ agent-review: a person must approve this PR ¦ `,
+      `api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ -f ¦ labels[]=${LABEL} ¦ `,
+      'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/11/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+      'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/14/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+    ]);
+    assert.match(o.summary, SKIPPED);
+    assert.match(o.summary, /Not approving PR #7: a person must approve: PCI path: app\/pci\/x\.rb/);
+  },
+  { approveAllowed: 'false' },
+];
+SCENARIOS['approve_allowed "false" still removes a label the bot added, without approving'] = [
+  { 'labels.json': JSON.stringify([{ name: LABEL }]), 'timeline.json': JSON.stringify([labeled(BOT)]) },
+  (o) => {
+    notApproved(o);
+    assert.deepEqual(o.writes, [`api ¦ -X ¦ DELETE ¦ repos/o/r/issues/7/labels/${LABEL} ¦ `]);
+    assert.match(o.summary, SKIPPED);
+  },
+  { approveAllowed: 'false' },
+];
 
 for (const value of [true, '', 'bogus']) {
   SCENARIOS[`dismiss ${JSON.stringify(value)} from another engine version dismisses every bot approval`] = [
