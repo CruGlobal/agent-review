@@ -1772,7 +1772,8 @@ diff itself; neither is ever used to signal incomplete review coverage.
 ```
 
 Write the card-data judgment as `/tmp/agent_review_card_scan.json`. A `true` needs at least one
-reason; `agent-review status` fails on `true` with an empty list:
+reason, and a `false` takes an empty list. `agent-review status` fails on anything else,
+including a misnamed key:
 
 ```json
 { "cardData": false, "reasons": [] }

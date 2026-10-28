@@ -179,6 +179,26 @@ test('status human inputs fail closed', () => {
   assert.throws(() => humanStatus(NO_HUMAN, undefined), /cardScan/);
 });
 
+test('status human inputs must have exact shapes', () => {
+  const cases = [
+    ['a misnamed card_data', NO_HUMAN, { card_data: true, reasons: ['stores PAN'] }, /cardScan\.cardData must be a boolean/],
+    ['a missing cardData', NO_HUMAN, { reasons: [] }, /cardScan\.cardData must be a boolean/],
+    ['a string cardData', NO_HUMAN, { cardData: 'false', reasons: [] }, /cardScan\.cardData must be a boolean/],
+    ['cardData false with reasons', NO_HUMAN, { cardData: false, reasons: ['stores PAN'] }, /cardScan\.cardData is false but lists reasons/],
+    ['missing card reasons', NO_HUMAN, { cardData: false }, /cardScan\.reasons must be a list of strings/],
+    ['card reasons that are not a list', NO_HUMAN, { cardData: true, reasons: 'stores PAN' }, /cardScan\.reasons must be a list of strings/],
+    ['non-string card reasons', NO_HUMAN, { cardData: true, reasons: ['stores PAN', 4] }, /cardScan\.reasons must be a list of strings/],
+    ['a string required', { required: 'true', reasons: ['PCI path'] }, NO_CARD, /human\.required must be a boolean/],
+    ['a missing required', { reasons: [] }, NO_CARD, /human\.required must be a boolean/],
+    ['missing human reasons', { required: false }, NO_CARD, /human\.reasons must be a list of strings/],
+    ['non-string human reasons', { required: true, reasons: [{ path: 'app/pci' }] }, NO_CARD, /human\.reasons must be a list of strings/],
+    ['an array for human', [], NO_CARD, /human\.required must be a boolean/],
+  ];
+  for (const [name, human, card, error] of cases) {
+    assert.throws(() => humanStatus(human, card), error, name);
+  }
+});
+
 const BY_LOCATION = { matchSuggestionsByLocation: true };
 
 function oldEntry(over = {}) {

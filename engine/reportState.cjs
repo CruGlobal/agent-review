@@ -169,8 +169,16 @@ function buildStatus({ ledger, head, plan, safety, evidence, human, cardScan }) 
   }
   if (!human || typeof human !== 'object') throw new Error('status requires human input');
   if (!cardScan || typeof cardScan !== 'object') throw new Error('status requires cardScan input');
-  const humanList = human.required ? (human.reasons || []).map(String) : [];
-  const cardList = cardScan.cardData ? (cardScan.reasons || []).map(String) : [];
+  const strings = (v) => Array.isArray(v) && v.every((x) => typeof x === 'string');
+  if (typeof human.required !== 'boolean') throw new Error('human.required must be a boolean');
+  if (!strings(human.reasons)) throw new Error('human.reasons must be a list of strings');
+  if (typeof cardScan.cardData !== 'boolean') throw new Error('cardScan.cardData must be a boolean');
+  if (!strings(cardScan.reasons)) throw new Error('cardScan.reasons must be a list of strings');
+  if (!cardScan.cardData && cardScan.reasons.length > 0) {
+    throw new Error('cardScan.cardData is false but lists reasons');
+  }
+  const humanList = human.required ? human.reasons : [];
+  const cardList = cardScan.cardData ? cardScan.reasons : [];
   if (human.required && humanList.length === 0) {
     throw new Error('human approval requirement requires at least one reason');
   }

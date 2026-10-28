@@ -4026,6 +4026,10 @@ test('the status step judges card data on the full PR diff, with the spec lists 
   assert.ok(!skill.includes('the only cost is a human look'), 'irreversible no longer costs a human look');
   const status = section.slice(json);
   assert.ok(flatText(status).includes('Write the card-data judgment as `/tmp/agent_review_card_scan.json`'), status);
+  assert.ok(
+    flatText(status).includes('A `true` needs at least one reason, and a `false` takes an empty list. `agent-review status` fails on anything else, including a misnamed key:'),
+    'the card scan file states the shapes the engine accepts',
+  );
   assert.ok(status.includes('```json\n{ "cardData": false, "reasons": [] }\n```'), 'the card scan file shape is shown');
   assert.ok(flatText(status).includes('never write `/tmp/agent_review_human_rules.json` by hand'), status);
 
