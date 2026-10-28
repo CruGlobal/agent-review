@@ -2714,7 +2714,7 @@ test('the review skill matches ledger suggestions by location only under the cod
   assert.strictEqual(
     all.split('--match-suggestions-by-location').length - 1,
     1,
-    'no other ledger call passes the flag',
+    'in SKILL.md only the guarded Stage 6 ledger call passes the flag (the matcher blocks in code-review-engine.md pass it directly)',
   );
 });
 
@@ -3805,4 +3805,285 @@ test('the capture spec records the PR #33 review changes to the hooks and the ch
     assert.ok(check.includes(needle), `the section 4 amendment must say ${JSON.stringify(needle)}`);
   }
   for (const text of [hooks, check]) assert.ok(!text.includes('\u2014'), 'new prose uses no em dashes');
+});
+
+// --- Blind ledger matching under the code-review engine ---
+
+const LEDGER_MATCH = join(ROOT, 'templates/ledger-match.md');
+const LEDGER_MATCHER_SECTION = 'Stage 6: the ledger matcher';
+
+test('the ledger matcher template reads only the candidates and writes only pair ids and booleans', () => {
+  const text = readFileSync(LEDGER_MATCH, 'utf8');
+  const flat = flatText(text);
+  for (const needle of [
+    'Read `/tmp/ledger_candidates.json` and nothing else.',
+    'Read all of it: if it is long, read it in parts until you reach the end.',
+    'Answer every pair.',
+    'A `message` or `recommendation` longer than 500 characters is cut off at 500.',
+    'decide whether `earlier` and `finding` describe the same problem in the same code, so that fixing one would fix the other.',
+    'A different problem on a nearby line is `false`.',
+    'When unsure, answer `false`. A wrong `false` only shows a duplicate.',
+    'Do not score, rate, or rank findings.',
+    'Write `/tmp/ledger_matches.json` as a JSON array with one item per pair',
+    'keep the delimiter quoted',
+    'End your reply with exactly one line: `matched <K> of <M>`',
+  ]) {
+    assert.ok(flat.includes(needle), `the template must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!text.includes('{{'), 'the template has no placeholders; the skill sends it as written');
+  assert.ok(!text.includes('—'), 'new prose uses no em dashes');
+  const heredoc = text.match(/^cat > \/tmp\/ledger_matches\.json <<'EOF'\n([\s\S]*?)\nEOF$/m);
+  assert.ok(heredoc, 'the template writes the answers with one quoted heredoc');
+  const example = JSON.parse(heredoc[1]);
+  assert.ok(Array.isArray(example) && example.length > 0);
+  for (const item of example) {
+    assert.deepStrictEqual(Object.keys(item), ['id', 'same']);
+    assert.match(item.id, /^[0-9a-f]+#\d+$/);
+    assert.strictEqual(typeof item.same, 'boolean');
+  }
+  for (const word of ['severity', 'confidence', 'evidence']) {
+    assert.ok(!text.toLowerCase().includes(word), `the template never names ${word}`);
+  }
+});
+
+test('the review skill finds the ledger matcher template like its other prompts', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  assert.ok(skill.includes('- ledger matcher prompt: `../../templates/ledger-match.md` (only under the code-review engine)'));
+  const section = flatText(engineSection(LEDGER_MATCHER_SECTION));
+  assert.ok(section.includes("Read the plugin's `templates/ledger-match.md` (`../../templates/ledger-match.md` from this file)."), section);
+});
+
+// Each call of `name` in a bash block, continuations joined, including one an `if` runs.
+function callsOf(bash, name) {
+  return bash
+    .replace(/\s*\\\n\s*/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${name} `) || line.startsWith(`if ${name} `));
+}
+
+function stage6LedgerBlock() {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const [block] = bashBlockList(stageSlice(skill, '### Capture consensus for the learning layer', '### Build the findings ledger'));
+  return block;
+}
+
+test('Stage 6 computes ledger candidates under the code-review engine and builds the ledger at once only when there are none', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const block = stage6LedgerBlock();
+  assert.deepStrictEqual(callsOf(block, 'agent-review ledger-candidates'), [
+    'if agent-review ledger-candidates --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json > /tmp/ledger_candidates.json; then',
+  ]);
+  const clear = block.indexOf('rm -f /tmp/ledger_candidates.json /tmp/ledger_matches.json /tmp/agent_review_ledger.json');
+  assert.ok(clear !== -1 && clear < block.indexOf('agent-review ledger-candidates'), 'stale candidates, answers, and ledger go first');
+  assert.ok(block.includes('if [ -n "$LEDGER_BY_LOCATION" ]; then'), 'candidates are computed only under the code-review engine');
+  assert.ok(block.includes('echo "export LEDGER_PAIRS=\\"$LEDGER_PAIRS\\"" >> /tmp/review_env.sh'), 'the pair count reaches the next block');
+  assert.ok(block.includes('  echo "ledger matching: $LEDGER_PAIRS pairs"\n  echo "routing: ${ROUTING:-normal}"\nfi'), 'the count and routing print under the code-review engine');
+  const gate = block.indexOf('if [ "$LEDGER_PAIRS" = 0 ]; then');
+  assert.ok(gate !== -1 && gate < block.indexOf('agent-review ledger \\'), 'the ledger runs here only when there are no pairs');
+
+  const pointer = ENGINE_POINTER(LEDGER_MATCHER_SECTION);
+  const at = skill.indexOf(pointer);
+  assert.ok(at !== -1, 'SKILL.md points at the matcher section');
+  assert.ok(at > skill.indexOf(block) + block.length && at < skill.indexOf('Report the `kept` findings'), 'the pointer comes right after the ledger block');
+});
+
+test('the matcher section launches a fresh sonnet matcher in a message of its own and falls back on any failure', () => {
+  const section = engineSection(LEDGER_MATCHER_SECTION);
+  const flat = flatText(section);
+  assert.match(flat, /^## Stage 6: the ledger matcher Under the `code-review` engine/);
+  for (const needle of [
+    'When M is 0, that block already built the ledger, so skip this section.',
+    'for each side of a pair it sees only the line, category, message, and recommendation, never a score, status, lane, confidence, or evidence',
+    'in a message of its own, after the ledger block in `SKILL.md` has finished',
+    '**subagent_type**: `"agent-review:reviewer-sonnet"`, or `"general-purpose"` when the ledger block printed `routing: degraded`',
+    '**model**: `"sonnet"`',
+    '**prompt**: the whole text of `ledger-match.md`, as written',
+    'A matcher failure never fails the review.',
+  ]) {
+    assert.ok(flat.includes(needle), `the section must say ${JSON.stringify(needle)}`);
+  }
+  const plain = 'agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json --match-suggestions-by-location > /tmp/agent_review_ledger.json';
+  const { errored, answered } = matcherLedgerBlocks();
+  assert.deepStrictEqual(callsOf(errored, 'agent-review ledger'), [plain], 'a Task error builds the plain ledger');
+  assert.deepStrictEqual(callsOf(answered, 'agent-review ledger'), [
+    'if agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json --match-suggestions-by-location --matches /tmp/ledger_matches.json > /tmp/agent_review_ledger.json 2> /tmp/ledger_matches_error.txt; then',
+    plain,
+  ], 'the matched ledger, then the plain fallback');
+  assert.ok(flat.indexOf('If the Task tool errored, run this block') < flat.indexOf('Otherwise run this one:'), flat);
+});
+
+// The matcher section's two ledger blocks: one for a Task error, one that reads the answers.
+function matcherLedgerBlocks() {
+  const blocks = bashBlockList(engineSection(LEDGER_MATCHER_SECTION));
+  assert.strictEqual(blocks.length, 2, 'two blocks build the ledger after the matcher');
+  const errored = blocks.find((b) => b.includes('the matcher Task errored'));
+  const answered = blocks.find((b) => b.includes('--matches /tmp/ledger_matches.json'));
+  assert.ok(errored && answered && errored !== answered, 'one block per outcome');
+  return { errored, answered };
+}
+
+const ENGINE_CLI_STUB = (dir, { failCandidates = false } = {}) => {
+  const { mkdirSync, writeFileSync } = require('node:fs');
+  const bin = join(dir, 'bin');
+  mkdirSync(bin);
+  const fail = failCandidates ? '[ "$1" = "ledger-candidates" ] && exit 1\n' : '';
+  writeFileSync(
+    join(bin, 'agent-review'),
+    `#!/bin/sh\n${fail}exec "${process.execPath}" "${join(ROOT, 'engine/cli.cjs')}" "$@"\n`,
+    { mode: 0o755 },
+  );
+  return bin;
+};
+
+const MATCH_PREVIOUS = [{
+  n: 3, signature: 'aa11', agent: 'code-review', category: 'correctness', severity: 3, file: 'a.rb', line: 40,
+  message: 'the cache is never invalidated after a write', status: 'open',
+}];
+const MATCH_FINDINGS = { kept: [{
+  signature: 'bb22', agent: 'code-review', category: 'correctness', severity: 5, file: 'a.rb', line: 47,
+  message: 'Writes leave stale rows behind in the lookup store.',
+}], suppressed: [] };
+
+// Runs `script` with /tmp moved to a private directory and the real CLI on PATH.
+function runLedgerScript(shell, script, { files = {}, env = {}, failCandidates = false } = {}) {
+  const { writeFileSync, existsSync } = require('node:fs');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-ledger-match-'));
+  try {
+    const bin = ENGINE_CLI_STUB(dir, { failCandidates });
+    writeFileSync(join(dir, 'review_env.sh'), '');
+    for (const [name, value] of Object.entries(files)) {
+      writeFileSync(join(dir, name), typeof value === 'string' ? value : JSON.stringify(value));
+    }
+    let stdout = '';
+    let status = 0;
+    try {
+      stdout = execFileSync(shell, ['-c', script.replaceAll('/tmp/', `${dir}/`)], {
+        encoding: 'utf8',
+        cwd: dir,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { PATH: `${bin}:${require('node:path').dirname(process.execPath)}:${process.env.PATH}`, HOME: process.env.HOME, ...env },
+      });
+    } catch (e) {
+      status = e.status;
+      stdout = String(e.stdout || '') + String(e.stderr || '');
+    }
+    const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null);
+    return { status, stdout, env: read('review_env.sh'), ledger: read('agent_review_ledger.json'), candidates: read('ledger_candidates.json') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('the Stage 6 ledger tail builds the ledger at once, or saves the pairs and waits, in bash and zsh', (t) => {
+  const block = stage6LedgerBlock();
+  const tail = `set -e\n${block.slice(block.indexOf('LEDGER_BY_LOCATION=""'))}`;
+  const files = { 'previous_agent_review_ledger.json': MATCH_PREVIOUS, 'review_filtered.json': MATCH_FINDINGS, 'agent_review_ledger.json': 'stale' };
+  for (const shell of availableShells(t)) {
+    const plain = runLedgerScript(shell, tail, { files, env: { ENGINE: 'agent-review' } });
+    assert.strictEqual(plain.status, 0, `${shell}: ${plain.stdout}`);
+    assert.deepStrictEqual(JSON.parse(plain.ledger).map((e) => e.n), [3, 4], `${shell}: the default engine merges at once`);
+    assert.strictEqual(plain.candidates, null, `${shell}: no candidates on the default engine`);
+    assert.strictEqual(plain.env, 'export LEDGER_PAIRS="0"\n', shell);
+    assert.strictEqual(plain.stdout, '', `${shell}: the default engine prints nothing about matching`);
+
+    const waits = runLedgerScript(shell, tail, { files, env: { ENGINE: 'code-review', ROUTING: 'degraded' } });
+    assert.strictEqual(waits.status, 0, `${shell}: ${waits.stdout}`);
+    assert.strictEqual(waits.ledger, null, `${shell}: the ledger waits for the matcher, and no stale ledger is left`);
+    assert.strictEqual(JSON.parse(waits.candidates).count, 1, shell);
+    assert.strictEqual(waits.env, 'export LEDGER_PAIRS="1"\n', shell);
+    assert.strictEqual(waits.stdout, 'ledger matching: 1 pairs\nrouting: degraded\n', shell);
+
+    const far = { ...files, 'review_filtered.json': { kept: [{ ...MATCH_FINDINGS.kept[0], line: 90 }], suppressed: [] } };
+    const none = runLedgerScript(shell, tail, { files: far, env: { ENGINE: 'code-review' } });
+    assert.strictEqual(none.status, 0, `${shell}: ${none.stdout}`);
+    assert.deepStrictEqual(JSON.parse(none.ledger).map((e) => e.n), [3, 4], `${shell}: no pairs, so the ledger is built at once`);
+    assert.strictEqual(none.env, 'export LEDGER_PAIRS="0"\n', shell);
+    assert.strictEqual(none.stdout, 'ledger matching: 0 pairs\nrouting: normal\n', `${shell}: the count prints even when it is 0`);
+
+    const failed = runLedgerScript(shell, tail, { files, env: { ENGINE: 'code-review' }, failCandidates: true });
+    assert.strictEqual(failed.status, 0, `${shell}: ${failed.stdout}`);
+    assert.strictEqual(
+      failed.stdout,
+      'ledger matching skipped: the candidate pairs could not be computed\nledger matching: 0 pairs\nrouting: normal\n',
+      shell,
+    );
+    assert.strictEqual(failed.env, 'export LEDGER_PAIRS="0"\n', shell);
+    assert.deepStrictEqual(JSON.parse(failed.ledger).map((e) => e.n), [3, 4], `${shell}: no candidates, so the plain ledger is built at once`);
+  }
+});
+
+test('the matcher ledger block uses valid answers and falls back to a plain merge on any failure, in bash and zsh', (t) => {
+  const { errored, answered: block } = matcherLedgerBlocks();
+  const base = {
+    'previous_agent_review_ledger.json': MATCH_PREVIOUS,
+    'review_filtered.json': MATCH_FINDINGS,
+    'review_env.sh': 'export LEDGER_PAIRS="1"\n',
+  };
+  for (const shell of availableShells(t)) {
+    const same = runLedgerScript(shell, block, { files: { ...base, 'ledger_matches.json': [{ id: 'bb22#3', same: true }] } });
+    assert.strictEqual(same.status, 0, `${shell}: ${same.stdout}`);
+    assert.strictEqual(same.stdout, 'ledger matching: 1 of 1 pairs judged the same (1 answered)\n', shell);
+    assert.deepStrictEqual(JSON.parse(same.ledger).map((e) => e.n), [3], shell);
+
+    const notSame = runLedgerScript(shell, block, { files: { ...base, 'ledger_matches.json': [{ id: 'bb22#3', same: false }] } });
+    assert.strictEqual(notSame.stdout, 'ledger matching: 0 of 1 pairs judged the same (1 answered)\n', shell);
+    assert.deepStrictEqual(JSON.parse(notSame.ledger).map((e) => e.n), [3, 4], shell);
+
+    const unanswered = runLedgerScript(shell, block, { files: { ...base, 'ledger_matches.json': [] } });
+    assert.strictEqual(unanswered.stdout, 'ledger matching: 0 of 1 pairs judged the same (0 answered)\n', shell);
+    assert.deepStrictEqual(JSON.parse(unanswered.ledger).map((e) => e.n), [3, 4], `${shell}: an unanswered pair counts as not the same`);
+
+    const cases = [
+      ['no answers file', block, {}, 'ledger matching skipped: the matcher wrote no /tmp/ledger_matches.json\n'],
+      ['a refused answer', block, { 'ledger_matches.json': [{ id: 'zz#3', same: true }] }, 'ledger matching skipped: matches rejected: "zz#3" is not a candidate pair for these findings\n'],
+      ['a Task error', errored, { 'ledger_matches.json': [{ id: 'bb22#3', same: true }] }, 'ledger matching skipped: the matcher Task errored\n'],
+    ];
+    for (const [label, script, extra, line] of cases) {
+      const r = runLedgerScript(shell, script, { files: { ...base, ...extra } });
+      assert.strictEqual(r.status, 0, `${shell} ${label}: ${r.stdout}`);
+      assert.strictEqual(r.stdout.replace(/\/[^ \n]*\/ledger_matches\.json/, '/tmp/ledger_matches.json'), line, `${shell} ${label}`);
+      assert.deepStrictEqual(JSON.parse(r.ledger).map((e) => e.n), [3, 4], `${shell} ${label}: the plain merge adds the finding`);
+    }
+  }
+});
+
+test('the ledger docs describe blind matching after the location match', () => {
+  const skill = flatText(readFileSync(REVIEW_SKILL, 'utf8'));
+  for (const needle of [
+    "A fresh matcher agent sees only those pairs: each side's line, category, message, and recommendation, with no score, status, lane, confidence, or evidence.",
+    'The older entry never changes, so a wrong match can hide only the new wording.',
+    'If the matcher fails or its answers are refused, the ledger is built without them and the run goes on.',
+  ]) {
+    assert.ok(skill.includes(needle), `SKILL.md must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(skill.includes('the Stage 0B smoke test adds `ROUTING`; Stage 2B adds `FIX_COUNT`; Stage 5B adds `PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`; Stage 6 adds `LEDGER_PAIRS`.'));
+
+  const readme = flatText(readFileSync(join(ROOT, 'README.md'), 'utf8'));
+  for (const needle of [
+    "A separate, fresh agent sees only each pair's lines, categories, messages, and recommendations, never a score, a status, or the evidence behind a score, and says whether the two are the same problem.",
+    'Expect dismissed findings to come back, and dismiss them again. Under the `code-review` engine, ledger matching usually catches a reworded suggestion within 10 lines of a dismissed one from the same reviewer in the same file, so this mostly applies across PRs.',
+    'The older finding never changes, so a wrong call can hide only the new wording, never the issue.',
+    'If the matcher fails, the review goes on and the suggestion is added, as before.',
+  ]) {
+    assert.ok(readme.includes(needle), `README must say ${JSON.stringify(needle)}`);
+  }
+
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-23-code-review-capture-design.md'), 'utf8');
+  const pr35 = spec.indexOf('**Amendment, 2026-10-27 (PR #35).**');
+  const start = spec.indexOf('**Amendment, 2026-10-27 (ledger matching).**');
+  assert.ok(pr35 !== -1 && start > pr35 && start < spec.indexOf('## Calls made after the builder check'), 'the amendment follows the PR #35 one');
+  const amendment = spec.slice(start).split('\n\n')[0].replace(/\s+/g, ' ');
+  for (const needle of [
+    'the limit that re-reviews add near-duplicate suggestions is addressed',
+    'Scoring stays blind:',
+    'within 10 lines',
+    "Each pair holds only the two findings' line, category, message, and recommendation, the last two cut to 500 characters, never a severity, status, lane, confidence, or evidence, because the lane's evidence can give the reason for a score.",
+    'writes only pair ids and `true` or `false`, so it cannot change a score',
+    'computes the pairs again and refuses any answer that is not one of them',
+    'the earlier entry never changes, so a wrong match hides only the new wording, never the old issue',
+  ]) {
+    assert.ok(amendment.includes(needle), `the amendment must say ${JSON.stringify(needle)}`);
+  }
+  for (const text of [amendment]) assert.ok(!text.includes('—'), 'new prose uses no em dashes');
 });
