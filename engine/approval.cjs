@@ -107,6 +107,9 @@ function cautionFor(result) {
 
 // label: 'add' | 'remove' | 'keep'. Only a judged report may change the label,
 // and a label a person added is never removed by the bot.
+// dismissBotApprovals: 'all' | 'stale' | 'none'. 'stale' means the bot's approvals of
+// other heads; only unreadable rules dismiss those, since stale approvals are kept
+// on purpose everywhere else.
 function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   const { result, judged } = judge(report, { head });
   const caution = cautionFor(result);
@@ -117,7 +120,7 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     dismissBotApprovals,
     caution,
   });
-  if (!judged) return out(false, result.reason, 'keep', false);
+  if (!judged) return out(false, result.reason, 'keep', 'none');
 
   const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === 'string');
   const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
@@ -133,17 +136,17 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
   }
   if (result.humanRequired || (ruleOk && rules.required)) {
-    return out(false, `a person must approve: ${reasons.join('; ')}`, present ? 'keep' : 'add', true);
+    return out(false, `a person must approve: ${reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
   }
   if (!ruleOk) {
     const why = plain && 'error' in rules && rules.error ? String(rules.error) : 'rules are missing or malformed';
-    return out(false, `could not check the human approval rules: ${why}`, 'keep', false);
+    return out(false, `could not check the human approval rules: ${why}`, 'keep', 'stale');
   }
-  if (!labelsOk) return out(false, 'could not read the PR labels: expected a list of names', 'keep', false);
+  if (!labelsOk) return out(false, 'could not read the PR labels: expected a list of names', 'keep', 'none');
   if (present && labelOwner !== 'bot') {
-    return out(false, `a person added the ${LABEL} label`, 'keep', false);
+    return out(false, `a person added the ${LABEL} label`, 'keep', 'none');
   }
-  return out(result.approve, result.reason, present ? 'remove' : 'keep', false);
+  return out(result.approve, result.reason, present ? 'remove' : 'keep', 'none');
 }
 
 module.exports = { evaluateApproval, decideApproval, MARKER };

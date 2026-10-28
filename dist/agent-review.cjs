@@ -18958,7 +18958,7 @@ var require_approval = __commonJS({
         dismissBotApprovals,
         caution
       });
-      if (!judged) return out(false, result.reason, "keep", false);
+      if (!judged) return out(false, result.reason, "keep", "none");
       const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === "string");
       const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
       const plain = rules !== null && typeof rules === "object" && !Array.isArray(rules);
@@ -18968,17 +18968,17 @@ var require_approval = __commonJS({
         for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
       }
       if (result.humanRequired || ruleOk && rules.required) {
-        return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", true);
+        return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", "all");
       }
       if (!ruleOk) {
         const why = plain && "error" in rules && rules.error ? String(rules.error) : "rules are missing or malformed";
-        return out(false, `could not check the human approval rules: ${why}`, "keep", false);
+        return out(false, `could not check the human approval rules: ${why}`, "keep", "stale");
       }
-      if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", false);
+      if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", "none");
       if (present && labelOwner !== "bot") {
-        return out(false, `a person added the ${LABEL} label`, "keep", false);
+        return out(false, `a person added the ${LABEL} label`, "keep", "none");
       }
-      return out(result.approve, result.reason, present ? "remove" : "keep", false);
+      return out(result.approve, result.reason, present ? "remove" : "keep", "none");
     }
     module2.exports = { evaluateApproval, decideApproval, MARKER };
   }

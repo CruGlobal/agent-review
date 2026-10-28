@@ -142,18 +142,18 @@ test('decide: not judged keeps the label and dismisses nothing', () => {
     { report: report({ status: { v: 1, head: '0000' + HEAD.slice(4), pass: true } }) },
   ]) {
     const d = decide({ ...o, labels: [LABEL], labelOwner: 'bot', rules: { required: true, reasons: ['x'] } });
-    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none']);
   }
 });
 
 test('decide: a wrong-head report with a bot-owned label changes nothing (Review Focus 4)', () => {
   const d = decide({ report: report({ head: 'ffff' + HEAD.slice(4) }), labels: [LABEL], labelOwner: 'bot' });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none']);
 });
 
 test('decide: rules.required adds the label and dismisses bot approvals', () => {
   const d = decide({ rules: { required: true, reasons: ['touches app/payments/x.rb'] } });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', 'all']);
   assert.equal(d.reason, 'a person must approve: touches app/payments/x.rb');
   assert.equal(decide({ rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'person' }).label, 'keep');
 });
@@ -161,47 +161,47 @@ test('decide: rules.required adds the label and dismisses bot approvals', () => 
 test('decide: status.humanRequired adds the label even with no rules required', () => {
   const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
   const d = decide({ report: report({ status }) });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', 'all']);
 });
 
 test('decide: a failing judged report still adds the label when a person is needed', () => {
   const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 1 } }), rules: { required: true, reasons: ['r'] } });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', 'all']);
 });
 
-test('decide: a rules error never approves and keeps the label (Review Focus 3)', () => {
+test('decide: a rules error never approves, keeps the label, and dismisses stale bot approvals (Review Focus 3)', () => {
   const d = decide({ rules: { error: 'too many files' } });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'stale']);
   assert.equal(d.reason, 'could not check the human approval rules: too many files');
 });
 
 test('decide: a rules error while the status says a person is needed adds the label (Review Focus 3)', () => {
   const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
   const d = decide({ report: report({ status }), rules: { error: 'boom' } });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', true]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'add', 'all']);
 });
 
 test('decide: a label not owned by the bot blocks approval and stays', () => {
   for (const labelOwner of ['person', 'none']) {
     const d = decide({ labels: [LABEL], labelOwner });
-    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none']);
     assert.equal(d.reason, `a person added the ${LABEL} label`);
   }
 });
 
 test('decide: a bot-owned label comes off and a passing report approves', () => {
   const d = decide({ labels: [LABEL], labelOwner: 'bot' });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [true, 'remove', false]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [true, 'remove', 'none']);
 });
 
 test('decide: a bot-owned label comes off even when the report does not pass', () => {
   const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } }), labels: [LABEL], labelOwner: 'bot' });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', false]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', 'none']);
 });
 
 test('decide: no label and no person needed approves and keeps', () => {
   const d = decide();
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals, d.caution], [true, 'keep', false, null]);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals, d.caution], [true, 'keep', 'none', null]);
 });
 
 test('decide: an old 1.0.0 irreversible report approves with a caution naming the reasons (Review Focus 5)', () => {
@@ -222,7 +222,7 @@ test('decide: the caution is set even when approve is false', () => {
 test('decide: malformed rules never approve', () => {
   for (const rules of [{}, { error: '' }, [], { required: 'true', reasons: ['x'] }, undefined, null, { required: false }, { required: false, reasons: [1] }]) {
     const d = decide({ rules });
-    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false], JSON.stringify(rules));
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'stale'], JSON.stringify(rules));
     assert.match(d.reason, /^could not check the human approval rules: /);
   }
   assert.match(decide({ rules: undefined }).reason, /missing or malformed/);
@@ -232,7 +232,7 @@ test('decide: malformed rules never approve', () => {
 test('decide: malformed labels never approve', () => {
   for (const labels of ['needs-human-approval', [{ name: LABEL }], null, undefined]) {
     const d = decide({ labels, labelOwner: 'person' });
-    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', false]);
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none']);
     assert.match(d.reason, /could not read the PR labels/);
   }
 });
@@ -253,4 +253,26 @@ test('decide: rules reasons merge with status reasons without duplicates', () =>
 test('decide: an irreversible status with no reasons gives a caution saying no reason recorded', () => {
   const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: true, irreversible: true } }) });
   assert.match(d.caution, /\(no reason recorded\)/);
+});
+
+test('decide: dismissBotApprovals is all, stale, or none, and only row 3 dismisses stale approvals', () => {
+  const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } });
+  const cases = [
+    ['a person is needed', { rules: { required: true, reasons: ['r'] } }, 'all'],
+    ['a person is needed and the label is already on', { rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'bot' }, 'all'],
+    ['rules unreadable', { rules: { error: 'boom' } }, 'stale'],
+    ['rules unreadable on a failing report', { report: failing, rules: { error: 'boom' } }, 'stale'],
+    ['rules unreadable and labels unreadable', { rules: { error: 'boom' }, labels: null }, 'stale'],
+    ['open blockers with readable rules', { report: failing }, 'none'],
+    ['labels unreadable', { labels: null }, 'none'],
+    ['a person added the label', { labels: [LABEL], labelOwner: 'person' }, 'none'],
+    ['approves', {}, 'none'],
+    ['not judged', { report: report({ head: 'ffff' + HEAD.slice(4) }), rules: { error: 'boom' } }, 'none'],
+  ];
+  for (const [name, o, want] of cases) assert.equal(decide(o).dismissBotApprovals, want, name);
+});
+
+test('decide: a rules error keeps a label the bot added and never approves', () => {
+  const d = decide({ rules: { error: 'boom' }, labels: [LABEL], labelOwner: 'bot' });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'stale']);
 });

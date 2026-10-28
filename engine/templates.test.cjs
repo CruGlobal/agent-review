@@ -1669,7 +1669,11 @@ test('the approval gate is one composite action that delegates the decision to t
   const run = action.runs.steps.map((s) => s.run || '').join('\n');
   assert.ok(run.includes('agent-review.cjs" approval --report'), 'the action must delegate the decision to the engine');
   assert.ok(run.includes('select(.user.login == "github-actions[bot]")'), 'without a comment id only the bot report counts');
-  assert.ok(run.includes('gh pr review "$PR" --repo "$REPO" --approve'), 'the action posts the approval');
+  assert.ok(
+    run.includes('gh api -X POST "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=APPROVE -f body="$BODY"'),
+    'the action posts the approval pinned to the judged commit',
+  );
+  assert.ok(!run.includes('gh pr review'), 'gh pr review approves whatever the head is when it runs');
   assert.ok(!run.includes('--request-changes'), 'the action never requests changes');
   assert.ok(run.includes('::warning::'), 'an approval API failure is a warning, never a red check');
   assert.ok(!run.includes("grep -q -- '- \\[ \\]'"), 'the checkbox fallback is gone; the engine decides');
@@ -1729,9 +1733,13 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
   assert.ok(run.includes(`if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"`));
 
   assert.ok(
-    run.includes('select(.user.login == "github-actions[bot]" and .state == "APPROVED")'),
-    'only the bot\'s own approvals are dismissed, never a person\'s review',
+    run.includes(
+      'select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head))',
+    ),
+    'only the bot\'s own approvals are dismissed, never a person\'s review; stale means another head',
   );
+  assert.ok(run.includes('--arg mode "$DISMISS" --arg head "$HEAD_SHA"'));
+  assert.ok(run.includes('all|stale)'), 'only the engine\'s all and stale modes dismiss');
   assert.ok(
     run.includes(
       'if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS',
@@ -1740,12 +1748,19 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
   // A label or dismissal failure is a warning: each write sits in an `if`, where
   // a failure cannot fire the ERR trap that ends the step.
   const writes = run.split('\n').filter((line) => /gh api -X (POST|PUT|DELETE)/.test(line));
-  assert.equal(writes.length, 3, 'label add, label remove, and dismiss are the only API writes');
+  assert.equal(writes.length, 4, 'label add, label remove, dismiss, and the approval are the only API writes');
   for (const line of writes) assert.match(line.trim(), /^if gh api -X /);
 
   assert.ok(run.includes(".caution // empty"), 'the caution is read from the decision');
   assert.ok(run.includes(`BODY="$APPROVAL_BODY"$'\\n\\n'"$CAUTION"`), 'the caution follows the body after a blank line');
-  assert.ok(run.includes('--approve --body "$BODY"'));
+  assert.ok(run.includes('CURRENT_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)'), 'the head is read again right before approving');
+  assert.ok(run.includes('[ "$CURRENT_HEAD" != "$HEAD_SHA" ]'));
+  assert.ok(run.includes('the PR head moved while it was being judged'));
+  assert.ok(
+    run.indexOf('the PR head moved') < run.indexOf('event=APPROVE'),
+    'the head check comes before the approval',
+  );
+  assert.ok(run.includes("Allow GitHub Actions to create and approve pull requests"), 'an approval failure keeps the settings hint');
   assert.ok(run.includes('GITHUB_STEP_SUMMARY'));
 });
 

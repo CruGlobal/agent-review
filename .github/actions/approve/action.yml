@@ -3,10 +3,11 @@ description: >-
   Approve a pull request when its published agent-review report passes for the
   PR's current head and no person needs to approve it. Re-checks the base
   commit's human_approval rules, owns the needs-human-approval label, and
-  dismisses the bot's own earlier approvals when a person must approve. Fails
-  closed on any missing or disagreeing marker, never requests changes, never
-  fails the job, and downgrades a label, dismissal, or approval API failure to a
-  warning.
+  dismisses the bot's own earlier approvals when a person must approve, or its
+  approvals of other heads when the rules cannot be read. The approval is pinned
+  to the judged commit. Fails closed on any missing or disagreeing marker, never
+  requests changes, never fails the job, and downgrades a label, dismissal, or
+  approval API failure to a warning.
 inputs:
   pr_number:
     description: Pull request number
@@ -191,23 +192,35 @@ runs:
             fi
             ;;
         esac
-        if [ "$DISMISS" = "true" ]; then
-          if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-            | jq -rs '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED") | .id'); then
-            for REVIEW_ID in $BOT_APPROVALS; do
-              if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
-                note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
-              else
-                warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
-              fi
-            done
-          else
-            warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
-          fi
-        fi
+        # all: every approval the bot posted. stale: only those on another head.
+        case "$DISMISS" in
+          all|stale)
+            if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+              | jq -rs --arg mode "$DISMISS" --arg head "$HEAD_SHA" \
+                '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head)) | .id'); then
+              for REVIEW_ID in $BOT_APPROVALS; do
+                if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
+                  note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
+                else
+                  warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+                fi
+              done
+            else
+              warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+            fi
+            ;;
+        esac
 
         if [ "$APPROVE" != "true" ]; then
           echo "Not approving PR #$PR: $REASON" | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+        fi
+        # The approval is pinned to the judged commit, and a stale approval still
+        # counts toward merging, so a head that moved since the first read must
+        # not be approved.
+        CURRENT_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)
+        if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+          note "Not approving PR #$PR: the PR head moved while it was being judged."
           exit 0
         fi
         BODY=$APPROVAL_BODY
@@ -217,7 +230,7 @@ runs:
         # Needs the repo/org setting "Allow GitHub Actions to create and approve
         # pull requests" (off by GitHub default). A 422 here means it is disabled:
         # warn instead of failing, so a passing review never shows as a red check.
-        if gh pr review "$PR" --repo "$REPO" --approve --body "$BODY"; then
+        if gh api -X POST "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=APPROVE -f body="$BODY" > /dev/null; then
           note "Approved PR #$PR: $REASON"
           if [ -n "$CAUTION" ]; then note "$CAUTION"; fi
         else

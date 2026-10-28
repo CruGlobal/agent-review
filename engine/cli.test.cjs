@@ -711,9 +711,16 @@ test('approval subcommand judges a report file against a head SHA', () => {
     approve: true,
     reason: `report for ${head} passes with no open blockers`,
     label: 'keep',
-    dismissBotApprovals: false,
+    dismissBotApprovals: 'none',
     caution: null,
   });
+  const errorRules = join(dir, 'error-rules.json');
+  writeFileSync(errorRules, JSON.stringify({ error: "human-check: the PR's file list is incomplete" }));
+  const unreadable = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', errorRules, '--labels', labels, '--label-owner', 'bot']).s);
+  assert.deepEqual([unreadable.approve, unreadable.label, unreadable.dismissBotApprovals], [false, 'keep', 'stale']);
+  writeFileSync(errorRules, JSON.stringify({ required: true, reasons: ['PCI path: app/pay.rb'] }));
+  const needed = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', errorRules]).s);
+  assert.deepEqual([needed.approve, needed.label, needed.dismissBotApprovals], [false, 'add', 'all']);
   const owned = JSON.parse(
     run(['approval', '--report', file, '--head', head, '--rules', rules, '--labels', labels, '--label-owner', 'bot']).s,
   );
