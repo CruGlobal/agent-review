@@ -392,7 +392,7 @@ this repo at `@main`.
 
 | Caller in the consumer repo | Reusable workflow here | Trigger | What it does |
 | --- | --- | --- | --- |
-| `agent-review.yml` | `review.yml` | PR opened/pushed, with the `agent-review` label | Runs `/agent-review:review auto ci`, publishes the report, then (with `auto_approve`) approves a passing report. Later pushes review only the new commits. |
+| `agent-review.yml` | `review.yml` | PR opened/pushed, with the `agent-review` label | Runs `/agent-review:review auto ci`, publishes the report, then (with `auto_approve`) approves a passing report. Later pushes review only the new commits. A push that only merges the base branch in, with no conflict fixes, is not reviewed: the last report moves to the new head. |
 | `agent-review-interact.yml` | `interact.yml` | `@claude fix …` / `@claude dismiss … [code]: reason` comment from a writer | Applies fixes in a read-only, credential-scrubbed model job; a separate trusted job validates and publishes them, updates the ledger, and (with `auto_approve`) approves once the ledger passes. |
 | `agent-review-approve.yml` | `approve.yml` | A PR comment starting with the report marker, created or edited by a writer | Judges a report a person posted from a terminal review and (with `auto_approve`) approves it. |
 | `agent-review-readiness.yml` | `readiness.yml` | Manual | Scores the seeded suite and telemetry against the rollout gates. |

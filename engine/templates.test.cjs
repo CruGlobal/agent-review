@@ -3741,7 +3741,7 @@ test('yolo-review uses a report only when its head marker names the current HEAD
   const flat4 = flatText(step4);
   for (const needle of [
     'If it prints `no new commit`, do not re-review: go to step 7 and report the open blockers as blockers that remain.',
-    'If that re-review stops with `already reviewed` or `No net changes`, it posted nothing: go to step 7 the same way.',
+    'If that re-review stops with `already reviewed` or `No net changes`, it found nothing new to review: go to step 7 the same way.',
     'Only a re-review that ran goes on to step 5, whose guard then checks its report.',
   ]) {
     assert.ok(flat4.includes(needle), `step 4 must say ${JSON.stringify(needle)}`);
@@ -4256,6 +4256,90 @@ test("PR diffs start at the merge base, not the base branch's tip, under bash an
       const noForkPoint = run('no merge base', { BASE_REF: lonely, HEAD_REF: head });
       assert.ok(noForkPoint.output.includes(`Full PR range: ${lonely}..${head}\n`), `${shell}: ${noForkPoint.output}`);
       assert.strictEqual(noForkPoint.wanted['full_changed_files.txt'], names(lonely), `${shell}: no merge base diffs from the base commit`);
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('a push that only merged the base branch moves the last report to the new head, and any other change gets a full review, under bash and zsh', (t) => {
+  const blocks = bashBlockList(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Gather PR Context & Diff Manifest', '### Build the Review Plan & Load Evidence'));
+  const lines = blocks[0].split('\n');
+  const start = lines.indexOf('# --- Build the diff manifest the whole review runs on ---');
+  assert.ok(start !== -1, 'the diff manifest builds its ranges');
+  const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start)].join('\n');
+
+  const { repo, head, base } = humanRulesRepo();
+  const { writeFileSync } = require('node:fs');
+  const git = (...args) =>
+    execFileSync('git', ['-C', repo, '-c', 'user.email=t@example.com', '-c', 'user.name=T', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const fromHead = (build) => {
+    git('checkout', '-q', '--detach', head);
+    build();
+    const sha = git('rev-parse', 'HEAD');
+    git('checkout', '-q', '--detach', head);
+    return sha;
+  };
+  const merged = fromHead(() => git('merge', '-q', '--no-edit', base));
+  const mergedPlus = fromHead(() => {
+    git('merge', '-q', '--no-commit', base);
+    writeFileSync(join(repo, 'app/other.rb'), 'slipped into the merge\n');
+    git('add', '-A');
+    git('commit', '-q', '--no-edit');
+  });
+  const cancelled = fromHead(() => {
+    writeFileSync(join(repo, 'app/other.rb'), 'for a moment\n');
+    git('commit', '-qam', 'try something');
+    git('revert', '--no-edit', 'HEAD');
+  });
+  const previous = (at) =>
+    [
+      '<!-- agent-review -->',
+      `<!-- agent-review-head: ${at} -->`,
+      '<!-- agent-review-rollout: advisory -->',
+      '<!-- agent-review-ledger: [{"n":1,"severity":3,"status":"open"}] -->',
+      `<!-- agent-review-status: {"v":1,"head":"${at}","pass":true} -->`,
+      '',
+      '## agent-review',
+      'The report body.',
+      '',
+    ].join('\n');
+  const CI = { BASE_REF: base, CI_MODE: '1', PR_NUMBER: '7', AGENT_REVIEW_PREVIOUS_COMMENT: '/tmp/previous_comment.md', AGENT_REVIEW_COMMENT_OUT: '/tmp/agent_review_comment.md' };
+  const LOCAL = { BASE_REF: base, INCREMENTAL_REQUESTED: '1', PR_NUMBER: '7' };
+  const PARTS = ['agent_review_comment.md', 'agent_review_status.json', 'agent_review_ledger.json', 'agent_review_report.md', 'review_env.sh'];
+  // Stale files from an earlier local run must never be posted with the moved report.
+  const stale = { 'agent_review_ledger.json': '[{"n":9}]\n', 'agent_review_status.json': '{"v":1,"head":"0000000","pass":false}\n', 'agent_review_report.md': 'stale\n' };
+  try {
+    for (const shell of availableShells(t)) {
+      const run = (label, env, files = {}) => {
+        const r = runRulesBlock(shell, script, { repo, env, files: { 'previous_comment.md': previous(head), ...files }, want: PARTS });
+        assert.strictEqual(r.status, 0, `${shell}, ${label}: ${r.output}`);
+        return r;
+      };
+      const SKIPPED = 'No net changes since the last reviewed head except a merge of the base branch, so the last review still holds.';
+
+      const ci = run('CI, a clean merge', { ...CI, HEAD_REF: merged });
+      assert.ok(ci.output.includes(SKIPPED), `${shell}: ${ci.output}`);
+      assert.strictEqual(ci.wanted['agent_review_comment.md'], previous(merged), `${shell}: CI hands the moved report to the publish step`);
+      assert.ok(!ci.output.includes('Diff range:'), `${shell}: nothing is reviewed`);
+
+      const extra = run('CI, a merge with another change', { ...CI, HEAD_REF: mergedPlus });
+      assert.ok(extra.output.includes('full review'), `${shell}: ${extra.output}`);
+      assert.ok(extra.output.includes(`Diff range: ${base}..${mergedPlus}\n`), `${shell}: a full review from the new merge base: ${extra.output}`);
+      assert.strictEqual(extra.wanted['agent_review_comment.md'], null, `${shell}: no report is moved`);
+
+      const local = run('local, a clean merge', { ...LOCAL, HEAD_REF: merged }, stale);
+      assert.ok(local.output.includes(SKIPPED), `${shell}: ${local.output}`);
+      assert.ok(local.output.includes("run only Stage 7's Post and print block"), `${shell}: ${local.output}`);
+      assert.deepStrictEqual(JSON.parse(local.wanted['agent_review_status.json']), { v: 1, head: merged, pass: true }, `${shell}: the status moves to the new head`);
+      assert.deepStrictEqual(JSON.parse(local.wanted['agent_review_ledger.json']), [{ n: 1, severity: 3, status: 'open' }], `${shell}: the findings stay`);
+      assert.strictEqual(local.wanted['agent_review_report.md'], '## agent-review\nThe report body.\n', `${shell}: the report body stays`);
+      assert.ok(local.wanted['review_env.sh'].includes(`export HEAD_REF="${merged}"`), `${shell}: Post and print reads the new head`);
+
+      const undone = run('local, commits that cancel out', { ...LOCAL, HEAD_REF: cancelled }, stale);
+      assert.ok(undone.output.includes('No net changes since the last reviewed head'), `${shell}: ${undone.output}`);
+      assert.deepStrictEqual(JSON.parse(undone.wanted['agent_review_status.json']), { v: 1, head: cancelled, pass: true }, `${shell}: ${undone.output}`);
+      assert.ok(undone.output.includes("run only Stage 7's Post and print block"), `${shell}: ${undone.output}`);
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });

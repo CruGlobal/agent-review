@@ -265,18 +265,21 @@ if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
   fi
   [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty — only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
 fi
+PREV_COMMENT=""
 if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
-    LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
-      | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+    PREV_COMMENT="$AGENT_REVIEW_PREVIOUS_COMMENT"
   else
+    PREV_COMMENT=/tmp/agent_review_previous_report.md
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
     # Local canonical comment: this user's own marked comment when one exists, else the oldest.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
-    LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
       --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
-      | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+      | tr -d '\r' > "$PREV_COMMENT" || true
   fi
+  LAST_REVIEWED=$(tr -d '\r' < "$PREV_COMMENT" \
+    | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   if [ -n "$LAST_REVIEWED" ] \
      && git cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null \
      && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
@@ -297,8 +300,58 @@ fi
 # On a PR, BASE_REF is the base branch's tip. A diff from the tip also shows, reversed, every
 # base-branch commit after the fork, so PR diffs start at the merge base. With no merge base
 # they fall back to the tip.
+PR_BASE=""
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   PR_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF" 2>/dev/null) || PR_BASE="$BASE_REF"
+fi
+
+# move_report <message>: for a head the last review still covers, moves the last report to
+# HEAD_REF and prints <message>. Only the head markers change; the findings and safety state stay.
+# CI hands the moved comment to the publish step. A local run writes the files Stage 7's Post
+# and print block posts from, and must never leave an earlier run's files in their place.
+move_report() {
+  if [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+    sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
+      -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
+      -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
+      "$PREV_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
+    echo "$1"
+    return 0
+  fi
+  rm -f /tmp/agent_review_ledger.json /tmp/agent_review_status.json /tmp/agent_review_report.md
+  node -e '
+const { readFileSync, writeFileSync } = require("fs");
+const [file, head] = process.argv.slice(1);
+const lines = readFileSync(file, "utf8").replace(/\r/g, "").split("\n");
+const markers = {};
+let i = 0;
+for (; i < lines.length; i++) {
+  const m = lines[i].match(/^<!-- agent-review(?:-([a-z]+): (.*))? -->$/);
+  if (!m) break;
+  if (m[1]) markers[m[1]] = m[2];
+}
+if (lines[i] === "") i++;
+const ledger = "ledger" in markers ? JSON.parse(markers.ledger) : null;
+const status = "status" in markers ? { ...JSON.parse(markers.status), head } : null;
+if (ledger) writeFileSync("/tmp/agent_review_ledger.json", JSON.stringify(ledger) + "\n");
+if (status) writeFileSync("/tmp/agent_review_status.json", JSON.stringify(status) + "\n");
+writeFileSync("/tmp/agent_review_report.md", lines.slice(i).join("\n"));
+' "$PREV_COMMENT" "$HEAD_REF" || return 1
+  echo "export HEAD_REF=\"$HEAD_REF\"" >> /tmp/review_env.sh
+  echo "$1"
+  echo "Next, run only Stage 7's Post and print block, which posts the moved report."
+}
+
+# A push that only merged the base branch leaves the PR's own changes as they were reviewed: the
+# new head's tree is exactly the reviewed head merged with the base. Any other change since the
+# last review, a conflict fix included, gets a full review.
+if [ -n "$INCREMENTAL" ] && [ "$(git merge-base "$BASE_REF" "$LAST_REVIEWED" 2>/dev/null)" != "$PR_BASE" ]; then
+  if [ "$(git merge-tree --write-tree "$LAST_REVIEWED" "$PR_BASE" 2>/dev/null)" = "$(git rev-parse "$HEAD_REF^{tree}")" ] \
+     && move_report "✅ No net changes since the last reviewed head except a merge of the base branch, so the last review still holds. Exiting."; then
+    exit 0
+  fi
+  echo "⚠️  The PR merged its base branch since $LAST_REVIEWED along with other changes, so this is a full review."
+  INCREMENTAL="" LAST_REVIEWED=""
 fi
 
 if [ -n "$INCREMENTAL" ]; then
@@ -354,15 +407,9 @@ cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
 
 if [ ! -s /tmp/changed_files.txt ]; then
   if [ -n "$INCREMENTAL" ]; then
-    if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-      # The commits cancel out to the already-reviewed tree. Advance only the
-      # reviewed-head marker; all findings and safety state remain valid.
-      sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
-        -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
-        -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
-        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
-    fi
-    echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
+    # The commits cancel out to the already-reviewed tree, so the last review still holds.
+    NO_NET="✅ No net changes since the last reviewed head — nothing to review. Exiting."
+    move_report "$NO_NET" || echo "$NO_NET"
     exit 0
   fi
   echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
@@ -375,6 +422,10 @@ export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FUL
 export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
 EOF
 ```
+
+**When the block says `Next, run only Stage 7's Post and print block`**, the last review still
+covers the new head and the block has moved that report to it. Run that one block now, then stop.
+Skip every other stage.
 
 **Checkpoint — set REVIEW_SCOPE (not a bash turn; a decision).** Read the changed-file list and
 diff stat from the previous block's output (`/tmp/changed_files.txt`, `/tmp/diff_stat.txt`) and

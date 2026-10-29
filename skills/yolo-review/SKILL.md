@@ -81,8 +81,8 @@ re-reviews cheap.
    If it prints `no new commit`, do not re-review: go to step 7 and report the open blockers as
    blockers that remain. Otherwise invoke `agent-review:review` with the arguments `auto incremental`, plus the
    user's `engine=` and `effort=` tokens, if any. If that re-review stops with `already reviewed`
-   or `No net changes`, it posted nothing: go to step 7 the same way. Only a re-review that ran
-   goes on to step 5, whose guard then checks its report.
+   or `No net changes`, it found nothing new to review: go to step 7 the same way. Only a
+   re-review that ran goes on to step 5, whose guard then checks its report.
 
 5. **Bounded loop** — recompute `OPEN` as in step 3. If it is greater than 0 and any open
    blocker is one this run has not yet tried to fix, repeat steps 3-4, at most two more times
