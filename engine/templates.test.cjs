@@ -193,7 +193,8 @@ test('CI workflows fail closed on missing/stale reports and use portable paginat
   // PR's current head and the engine rule (approval.test.cjs) rejects a report
   // for any other head.
   const approveAction = readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8');
-  assert.ok(approveAction.includes('HEAD_SHA=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)'));
+  assert.ok(approveAction.includes('gh api "repos/$REPO/pulls/$PR" > "$PR_JSON"'));
+  assert.ok(approveAction.includes('HEAD_SHA=$(jq -r .head.sha "$PR_JSON")'));
   assert.ok(approveAction.includes('--head "$HEAD_SHA"'));
   assert.ok(!review.includes('--paginate --slurp'));
   assert.ok(!interact.includes('--paginate --slurp'));
@@ -1659,16 +1660,23 @@ test('the approval gate is one composite action that delegates the decision to t
   const { parse } = require('yaml');
   const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
   assert.equal(action.runs.using, 'composite');
-  assert.deepEqual(Object.keys(action.inputs).sort(), ['approval_body', 'pr_number', 'report_comment_id']);
+  assert.deepEqual(Object.keys(action.inputs).sort(), ['approval_body', 'approve_allowed', 'pr_number', 'report_comment_id']);
   assert.equal(action.inputs.pr_number.required, true);
   assert.equal(action.inputs.report_comment_id.default, '');
+  assert.equal(action.inputs.approve_allowed.required, false);
+  assert.equal(action.inputs.approve_allowed.default, 'true', 'callers that leave the input out approve as before');
+  assert.equal(action.runs.steps.find((s) => s.run).env.APPROVE_ALLOWED, '${{ inputs.approve_allowed }}');
   const checkout = action.runs.steps.find((s) => s.uses && s.uses.startsWith('actions/checkout@'));
   assert.equal(checkout.with.repository, 'CruGlobal/agent-review');
   assert.equal(checkout.with['persist-credentials'], false);
   const run = action.runs.steps.map((s) => s.run || '').join('\n');
   assert.ok(run.includes('agent-review.cjs" approval --report'), 'the action must delegate the decision to the engine');
   assert.ok(run.includes('select(.user.login == "github-actions[bot]")'), 'without a comment id only the bot report counts');
-  assert.ok(run.includes('gh pr review "$PR" --repo "$REPO" --approve'), 'the action posts the approval');
+  assert.ok(
+    run.includes('gh api -X POST "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=APPROVE -f body="$BODY"'),
+    'the action posts the approval pinned to the judged commit',
+  );
+  assert.ok(!run.includes('gh pr review'), 'gh pr review approves whatever the head is when it runs');
   assert.ok(!run.includes('--request-changes'), 'the action never requests changes');
   assert.ok(run.includes('::warning::'), 'an approval API failure is a warning, never a red check');
   assert.ok(!run.includes("grep -q -- '- \\[ \\]'"), 'the checkbox fallback is gone; the engine decides');
@@ -1682,6 +1690,155 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
 });
 
+test('the approve action re-checks the base commit rules, owns the label, and takes back bot approvals', () => {
+  const { parse } = require('yaml');
+  const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
+  const run = action.runs.steps.map((s) => s.run || '').join('\n');
+  // Under `set -E` a failure inside $(...) runs the trap in that subshell, where
+  // `exit 0` would hand the warning text back as the captured value.
+  assert.ok(run.includes('[ "$BASH_SUBSHELL" -eq 0 ] || exit 1;'), 'a trapped subshell failure must reach the top-level trap');
+
+  assert.ok(run.includes('contents/.claude/review/config.yml?ref=$BASE_SHA'), 'the rules come from the base commit, never the PR');
+  assert.ok(
+    run.includes("grep -qF 'Not Found (HTTP 404)'"),
+    'only a missing file reads as no config; a missing ref is also an HTTP 404',
+  );
+  assert.ok(run.includes('RULES_ERROR="could not read the base config"'));
+  assert.ok(run.includes('.filename, (.previous_filename // empty)'), 'both sides of a rename are checked');
+  assert.ok(run.includes('.changed_files'), 'the listed files are counted against changed_files');
+  // A repo with no rules must approve a PR of any size, so the action passes a
+  // short list on and human-check refuses it only where the base config sets rules.
+  assert.ok(run.includes('SHORT_LIST=yes'), 'a short file list is marked for human-check');
+  assert.ok(!run.includes("file list is incomplete"), 'the action never refuses a short list on its own');
+  assert.ok(
+    run.includes('agent-review.cjs" human-check --config "$CONFIG" --files "$FILES" ${SHORT_LIST:+--incomplete}'),
+    'the action runs the repo rules itself',
+  );
+  assert.ok(run.includes(`jq -n --arg e "$RULES_ERROR" '{error: $e}' > "$RULES"`), 'the rules error is JSON built by jq');
+  assert.ok(
+    run.includes(
+      'agent-review.cjs" approval --report "$REPORT" --head "$HEAD_SHA" --rules "$RULES" --labels "$LABELS" --label-owner "$LABEL_OWNER"',
+    ),
+    'the engine decides with the rules, the labels, and the label owner',
+  );
+
+  assert.ok(run.includes('LABEL=needs-human-approval'), 'the label name is exact');
+  assert.ok(run.includes('issues/$PR/labels?per_page=100" --paginate'), 'every label page is read');
+  assert.ok(run.includes('issues/$PR/timeline?per_page=100" --paginate'), 'the owner comes from the timeline');
+  assert.ok(run.includes('.actor.login == "github-actions[bot]" then "bot"'), 'only the bot\'s own label is the bot\'s');
+  assert.ok(run.includes('echo null > "$LABELS"'), 'unreadable labels reach the engine as a value it refuses to approve');
+  assert.ok(
+    run.includes(
+      'gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true',
+    ),
+  );
+  assert.ok(run.includes(`if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL"`));
+  assert.ok(run.includes(`if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"`));
+
+  assert.ok(
+    run.includes(
+      'select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head))',
+    ),
+    'only the bot\'s own approvals are dismissed, never a person\'s review; stale means another head',
+  );
+  assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA"'));
+  assert.ok(run.includes('*) DISMISS_MODE=all ;;'), 'a dismiss value from another engine version fails closed to all');
+  // Bash before 4.4 calls an empty array unbound under set -u, so the script
+  // keeps to plain strings; engine/approveAction.test.cjs runs it on the system bash.
+  assert.ok(!/\b[A-Z_]+=\(/.test(run), 'no array assignments');
+  assert.ok(run.includes('::stop-commands::'), 'notes are fenced off from workflow-command parsing');
+  assert.ok(
+    run.includes(
+      'if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS',
+    ),
+  );
+  // A label or dismissal failure is a warning: each write sits in an `if`, where
+  // a failure cannot fire the ERR trap that ends the step.
+  const writes = run.split('\n').filter((line) => /gh api -X (POST|PUT|DELETE)/.test(line));
+  assert.equal(writes.length, 4, 'label add, label remove, dismiss, and the approval are the only API writes');
+  for (const line of writes) assert.match(line.trim(), /^if gh api -X /);
+
+  assert.ok(run.includes(".caution // empty"), 'the caution is read from the decision');
+  assert.ok(run.includes(`BODY="$APPROVAL_BODY"$'\\n\\n'"$CAUTION"`), 'the caution follows the body after a blank line');
+  assert.ok(run.includes('CURRENT_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)'), 'the head is read again right before approving');
+  assert.ok(run.includes('[ "$CURRENT_HEAD" != "$HEAD_SHA" ]'));
+  assert.ok(run.includes('the PR head moved while it was being judged'));
+  assert.ok(
+    run.indexOf('the PR head moved') < run.indexOf('event=APPROVE'),
+    'the head check comes before the approval',
+  );
+  assert.ok(run.includes("Allow GitHub Actions to create and approve pull requests"), 'an approval failure keeps the settings hint');
+  assert.ok(run.includes('GITHUB_STEP_SUMMARY'));
+});
+
+test('no shared workflow or action asks for a token permission its callers do not grant', () => {
+  const { parse } = require('yaml');
+  const { readdirSync, existsSync } = require('node:fs');
+  const workflowDir = join(ROOT, '.github/workflows');
+  const actionDir = join(ROOT, '.github/actions');
+  const files = [
+    ...readdirSync(workflowDir)
+      .filter((f) => /\.ya?ml$/.test(f))
+      .map((f) => join(workflowDir, f)),
+    ...readdirSync(actionDir)
+      .map((d) => join(actionDir, d, 'action.yml'))
+      .filter((f) => existsSync(f)),
+  ];
+  for (const file of files) {
+    const text = readFileSync(file, 'utf8');
+    const name = relative(ROOT, file);
+    assert.ok(!/^\s*issues:\s*(read|write)\b/m.test(text), `${name} must not ask for an issues permission`);
+    const doc = parse(text);
+    const blocks = [doc.permissions, ...Object.values(doc.jobs || {}).map((job) => job.permissions)];
+    for (const block of blocks.filter((b) => b !== undefined)) {
+      assert.equal(typeof block, 'object', `${name} must list permissions, never read-all or write-all`);
+      assert.ok(!('issues' in block), `${name} must not ask for an issues permission`);
+    }
+  }
+  const job = (path, name) => parse(readFileSync(join(ROOT, path), 'utf8')).jobs[name];
+  assert.deepEqual(job('.github/workflows/approve.yml', 'approve').permissions, {
+    contents: 'read',
+    'pull-requests': 'write',
+  });
+  assert.deepEqual(job('.github/workflows/review.yml', 'approve').permissions, {
+    contents: 'read',
+    'pull-requests': 'write',
+  });
+  assert.deepEqual(job('.github/workflows/interact.yml', 'publish').permissions, {
+    actions: 'write',
+    contents: 'write',
+    'pull-requests': 'write',
+  });
+});
+
+test('every approval body names the human approval checks and drops the reversibility claim', () => {
+  const { parse } = require('yaml');
+  const REPORT_BODY =
+    'Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or recorded check needs a person.';
+  const LEDGER_BODY =
+    'Auto-approved: every agent-review finding is fixed or dismissed with a reason, and no repo rule or recorded check needs a person.';
+  const files = {
+    action: join(ROOT, '.github/actions/approve/action.yml'),
+    approve: join(ROOT, '.github/workflows/approve.yml'),
+    review: REVIEW_WORKFLOW,
+    interact: INTERACT_WORKFLOW,
+  };
+  const doc = (key) => parse(readFileSync(files[key], 'utf8'));
+  const approveStep = (key, job) =>
+    doc(key).jobs[job].steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
+  const actionDefault = doc('action').inputs.approval_body.default;
+  assert.equal(actionDefault, REPORT_BODY);
+  assert.equal(approveStep('approve', 'approve').with.approval_body, REPORT_BODY);
+  assert.equal(approveStep('review', 'approve').with.approval_body ?? actionDefault, REPORT_BODY);
+  const interact = approveStep('interact', 'publish');
+  assert.equal(interact.with.approval_body, LEDGER_BODY);
+  assert.equal(interact.name, 'Approve when the ledger is fully addressed and no person is needed');
+  for (const [key, path] of Object.entries(files)) {
+    assert.ok(!readFileSync(path, 'utf8').includes('change is reversible'), `${key}: the reversibility claim is gone`);
+    assert.ok(!flatText(readFileSync(path, 'utf8')).includes('card-data check needs a person'), `${key}: the old approval wording is gone`);
+  }
+});
+
 test('interact.yml approves through the shared action, gated by auto_approve', () => {
   const { parse } = require('yaml');
   const doc = parse(readFileSync(INTERACT_WORKFLOW, 'utf8'));
@@ -1690,11 +1847,12 @@ test('interact.yml approves through the shared action, gated by auto_approve', (
   assert.equal(step.if, "inputs.auto_approve && steps.engine.outputs.name == 'agent-review'");
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.match(step.with.approval_body, /fixed or dismissed/);
+  assert.equal(step.with.approve_allowed, undefined, 'interact.yml leaves approve_allowed at its default');
   const body = readFileSync(INTERACT_WORKFLOW, 'utf8');
   assert.ok(!body.includes('gh pr review'), 'interact.yml must not carry its own approval shell');
 });
 
-test('review.yml approves only when the caller opts in and the review job succeeded', () => {
+test('review.yml approves only when the caller opts in, and runs after a failed review so the rules re-check can act', () => {
   const { parse } = require('yaml');
   const doc = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
   const on = doc.on || doc[true];
@@ -1702,12 +1860,17 @@ test('review.yml approves only when the caller opts in and the review job succee
   assert.equal(on.workflow_call.inputs.auto_approve.default, false);
   const job = doc.jobs.approve;
   assert.ok(job, 'review.yml must define an approve job');
-  assert.equal(job.needs, 'review', 'a failed or skipped review must never reach the approver');
-  assert.equal(job.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
+  assert.equal(job.needs, 'review', 'the approver reads the engine the review job resolved');
+  assert.equal(job.if, "!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'", 'a failed review still reaches the approver; a cancelled one does not');
   assert.deepEqual(job.permissions, { contents: 'read', 'pull-requests': 'write' }, 'the runtime checkout needs contents: read');
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ github.event.pull_request.number }}');
   assert.equal(step.with.report_comment_id, undefined, 'CI judges only the bot report');
+  assert.equal(
+    step.with.approve_allowed,
+    "${{ needs.review.result == 'success' }}",
+    'a review job that did not succeed may add the label and dismiss, but never approves',
+  );
   assert.ok(doc.jobs['report-failure'], 'report-failure job must survive');
 });
 
@@ -1728,6 +1891,7 @@ test('approve.yml judges the posted comment, defaults auto_approve off, and re-c
   const step = job.steps.find((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main');
   assert.equal(step.with.pr_number, '${{ inputs.pr_number }}');
   assert.equal(step.with.report_comment_id, '${{ inputs.comment_id }}');
+  assert.equal(step.with.approve_allowed, undefined, 'approve.yml leaves approve_allowed at its default');
   assert.ok(!readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8').includes('gh pr review'));
 });
 
@@ -2243,7 +2407,7 @@ test('review.yml reads the engine through the shared action and approves only on
   const { parse } = require('yaml');
   const wf = parse(readFileSync(REVIEW_WORKFLOW, 'utf8'));
   assert.equal(wf.jobs.review.outputs.engine, '${{ steps.engine.outputs.name }}');
-  assert.equal(wf.jobs.approve.if, "inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
+  assert.equal(wf.jobs.approve.if, "!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'");
   const step = wf.jobs.review.steps.find((s) => s.id === 'engine');
   assert.ok(step, 'review job needs a step with id engine');
   assert.equal(step.uses, READ_ENGINE_USES);
@@ -3481,7 +3645,10 @@ test('init names no consuming repo in the approval advice', () => {
   const init = skillText('init');
   assert.ok(!init.includes('staff_accounting_app'));
   assert.ok(!init.includes('PCI-scope'));
-  assert.ok(init.replace(/\s+/g, ' ').includes('recommend no for repos your team requires human review on, such as payment or financial code'));
+  assert.ok(
+    !init.replace(/\s+/g, ' ').includes('recommend no for repos your team requires human review on'),
+    'payment repos keep the bot on and use question 4 instead',
+  );
 });
 
 test('update-files treats a classic-protection 404 as could-not-verify unless the user is an admin', () => {
@@ -3669,7 +3836,7 @@ function statusCalls() {
   return calls;
 }
 
-test('agent-review status gets --head and the sha as two arguments under bash and zsh', (t) => {
+test('agent-review status gets --head and the sha as two arguments, and the human and card-scan files, under bash and zsh', (t) => {
   const { mkdirSync, writeFileSync } = require('node:fs');
   const calls = statusCalls();
   assert.strictEqual(calls.length, 3, 'the two auto-mode skip calls and the Stage 5 status call');
@@ -3693,6 +3860,8 @@ test('agent-review status gets --head and the sha as two arguments under bash an
           } else {
             assert.ok(!args.some((a) => a.includes('--head')), `${label}: ${JSON.stringify(args)}`);
           }
+          assert.strictEqual(args[args.indexOf('--human') + 1], `${dir}/agent_review_human_rules.json`, `${label}: ${JSON.stringify(args)}`);
+          assert.strictEqual(args[args.indexOf('--card-scan') + 1], `${dir}/agent_review_card_scan.json`, `${label}: ${JSON.stringify(args)}`);
           assert.ok(!args.includes(''), `${label}: no empty argument`);
         } finally {
           rmSync(dir, { recursive: true, force: true });
@@ -3702,6 +3871,372 @@ test('agent-review status gets --head and the sha as two arguments under bash an
   }
   for (const { command, buildsHeadArgs } of calls) {
     assert.ok(buildsHeadArgs && command.includes('"${HEAD_ARGS[@]}"'), `the call passes the HEAD_ARGS array: ${command}`);
+    assert.ok(command.includes('--human /tmp/agent_review_human_rules.json'), `the call passes the rules file: ${command}`);
+    assert.ok(command.includes('--card-scan /tmp/agent_review_card_scan.json'), `the call passes the card scan: ${command}`);
+  }
+});
+
+const statusSection = () =>
+  stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Assess reversibility & build the status marker', '### Write the report');
+
+function mainStatusBlock() {
+  const blocks = bashBlockList(statusSection()).filter((b) => b.includes('agent-review status'));
+  assert.strictEqual(blocks.length, 1, 'the status step has one block that runs agent-review status');
+  return blocks[0];
+}
+
+function autoModeBlock() {
+  const blocks = bashBlockList(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Auto Mode Resolution', '### Start-up Line'));
+  assert.strictEqual(blocks.length, 1, 'Auto Mode Resolution is one block');
+  return blocks[0];
+}
+
+// The status block's rules check, trimmed: from RULES_BASE= up to the HEAD_ARGS comment.
+function rulesCheckLines() {
+  const lines = mainStatusBlock().split('\n').map((l) => l.trim());
+  const start = lines.findIndex((l) => l.startsWith('RULES_BASE='));
+  const end = lines.findIndex((l) => l.startsWith('# A flag and its value go in an array'));
+  assert.ok(start > 0 && end > start, 'the status block checks the rules before it builds HEAD_ARGS');
+  return lines.slice(start, end);
+}
+
+// A repo whose base config lists app/payments/** as PCI code. The PR moves a file out of that
+// path, edits a PCI file with a non-ASCII name, and empties the list in its own config. After the
+// fork, the base branch adds a PCI file the PR never touched. `blobGone` lists a config whose
+// blob is deleted, as in a partial clone that cannot fetch it; `lonely` shares no history with the
+// PR. HEAD is left on the PR head.
+function humanRulesRepo() {
+  const { mkdirSync, writeFileSync, unlinkSync } = require('node:fs');
+  const { dirname } = require('node:path');
+  const repo = mkdtempSync(join(os.tmpdir(), 'ar-rules-repo-'));
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  const write = (path, text) => {
+    mkdirSync(dirname(join(repo, path)), { recursive: true });
+    writeFileSync(join(repo, path), text);
+  };
+  const commit = (message) => {
+    git('add', '-A');
+    git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit', '-q', '-m', message);
+    return git('rev-parse', 'HEAD');
+  };
+  git('init', '-q');
+  write('.claude/review/config.yml', 'human_approval:\n  paths:\n    - "app/payments/**"\n');
+  write('app/payments/charge.rb', 'charge\n');
+  write('app/payments/caf\u00e9.rb', 'card\n');
+  write('app/other.rb', 'other\n');
+  const fork = commit('base');
+  mkdirSync(join(repo, 'lib'));
+  git('mv', 'app/payments/charge.rb', 'lib/charge.rb');
+  write('app/payments/caf\u00e9.rb', 'card 2\n');
+  write('app/other.rb', 'other 2\n');
+  write('.claude/review/config.yml', 'human_approval:\n  paths: []\n');
+  const head = commit('the PR');
+  const offFork = (message, edit) => {
+    git('checkout', '-q', fork);
+    edit();
+    return commit(message);
+  };
+  const base = offFork('the base branch moves on', () => write('app/payments/later.rb', 'later\n'));
+  const badConfig = offFork('a malformed rule', () => write('.claude/review/config.yml', 'human_approval:\n  always: "yes"\n'));
+  const noConfig = offFork('no config', () => git('rm', '-q', '.claude/review/config.yml'));
+  const blobGone = offFork('a config that will not show', () =>
+    write('.claude/review/config.yml', 'human_approval:\n  paths:\n    - "app/payments/**"\n# fetched on demand\n'),
+  );
+  const lonely = git('-c', 'user.email=t@example.com', '-c', 'user.name=T', 'commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-m', 'unrelated');
+  git('checkout', '-q', head);
+  const blob = git('rev-parse', `${blobGone}:.claude/review/config.yml`);
+  unlinkSync(join(repo, '.git/objects', blob.slice(0, 2), blob.slice(2)));
+  return { repo, fork, head, base, badConfig, noConfig, blobGone, lonely };
+}
+
+// Runs a review-skill block in `repo` with its /tmp files moved to a private directory. The real
+// CLI runs human-check; ledger is stubbed, status records its arguments, and gh prints the
+// previous comment. `failGit` names a git subcommand that fails; `want` lists extra /tmp files
+// to return; `subdir` runs the block from that folder of `repo`.
+function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = null, want = [], subdir = '' }) {
+  const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
+  const { dirname } = require('node:path');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-rules-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, 'agent-review'),
+      `#!/bin/sh\ncase "$1" in\n  status) printf '%s\\n' "$@" > "${dir}/status.args"; echo '{}' ;;\n  ledger) echo '[]' ;;\n  *) exec node "${join(ROOT, 'bin/agent-review')}" "$@" ;;\nesac\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) cat "${dir}/previous_comment.md" ;;\nesac\n`, { mode: 0o755 });
+    if (failGit) {
+      const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      writeFileSync(join(bin, 'git'), `#!/bin/sh\n[ "$1" = "${failGit}" ] && exit 128\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+    }
+    const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
+    writeFileSync(join(dir, 'review_env.sh'), at(Object.entries(env).map(([k, v]) => `export ${k}="${v}"\n`).join('')));
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+    const r = require('node:child_process').spawnSync(shell, ['-c', at(block)], {
+      cwd: join(repo, subdir),
+      encoding: 'utf8',
+      env: { PATH: `${bin}:${dirname(process.execPath)}:${process.env.PATH}`, HOME: process.env.HOME },
+    });
+    const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : null);
+    const json = (name) => (read(name) === null ? null : JSON.parse(read(name)));
+    const args = read('status.args');
+    return {
+      status: r.status,
+      output: `${r.stdout}${r.stderr}`,
+      rules: json('agent_review_human_rules.json'),
+      cardScan: json('agent_review_card_scan.json'),
+      changedFiles: read('agent_review_changed_files.txt'),
+      statusArgs: args === null ? null : args.split('\n').slice(0, -1).map((a) => a.replaceAll(`${dir}/`, '/tmp/')),
+      wanted: Object.fromEntries(want.map((name) => [name, read(name)])),
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const PCI_RULES = {
+  required: true,
+  reasons: ['PCI path: app/payments/caf\u00e9.rb', 'PCI path: app/payments/charge.rb', 'changes the human_approval config'],
+};
+
+const passesRuleFiles = (args) =>
+  args !== null &&
+  args[args.indexOf('--human') + 1] === '/tmp/agent_review_human_rules.json' &&
+  args[args.indexOf('--card-scan') + 1] === '/tmp/agent_review_card_scan.json';
+
+test('the status step judges card data on the full PR diff, with the spec lists and the when-unsure rule', () => {
+  const skill = readFileSync(REVIEW_SKILL, 'utf8');
+  const section = statusSection();
+  const reversibility = section.indexOf('**Reversibility.**');
+  const card = section.indexOf('**Card data.**');
+  const json = section.indexOf('**Status JSON.**');
+  assert.ok(reversibility !== -1 && reversibility < card && card < json, 'Card data sits between Reversibility and Status JSON');
+  const scan = section.slice(card, json);
+  const flat = flatText(scan);
+  for (const needle of [
+    "Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the merge base (never the incremental-only `/tmp/pr_diff.txt`),",
+    "Run this scan on every review, in every repo, whether or not the repo's config sets `human_approval`",
+    'Read all of `/tmp/pr_card_scan_diff.txt`, in parts if it is long. Lockfiles cannot carry card handling, so skip them.',
+    'reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card expiry date (MM/YY), or cardholder name together with card data',
+    'handles a processor-issued card token or vault id (for example a TSYS or Stripe payment-method token)',
+    'calls a payment processor or gateway to charge, authorize, refund or store a card (TSYS, cru-payments, Stripe and similar)',
+    "changes a payment form's card fields, or how card data moves to or from the browser",
+    'changes logging or error reporting in code that handles card data',
+    'Do not flag code that only shows amounts, totals, invoices, donations or receipts, with no card data and no processor call.',
+    'Card data in tests and fixtures does not count, unless the test helper ships to production.',
+    "When unsure, flag it: the only cost is a person's look",
+    'name the file and the hunk',
+    '`"adds cvv2 to the TSYS sale request in app/models/charge.rb"`',
+  ]) {
+    assert.ok(flat.includes(needle), `the card-data scan must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!scan.includes('\u2014'), 'the card-data prose uses no em dashes');
+  assert.ok(!flat.includes('handles card tokens or vault ids from a payment processor'), 'the loose token wording is gone');
+  const spec = flatText(readFileSync(join(ROOT, 'docs/specs/2026-10-27-human-approval-design.md'), 'utf8'));
+  const specScan = spec.slice(spec.indexOf('### 3. The card-data scan'), spec.indexOf('### 4. The status marker'));
+  for (const needle of [
+    '- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card expiry date (MM/YY), or cardholder name together with card data;',
+    '- handles a processor-issued card token or vault id (for example a TSYS or Stripe payment-method token);',
+  ]) {
+    assert.ok(specScan.includes(needle), `spec section 3 mirrors ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!scan.includes('/tmp/pr_full_diff.txt'), 'the two-dot full diff also shows base-branch commits after the fork');
+
+  assert.ok(flatText(section).includes('classify irreversible: the only cost is a caution line.'), 'when unsure about reversibility, the cost is now a caution line');
+  assert.ok(!skill.includes('the only cost is a human look'), 'irreversible no longer costs a human look');
+  const status = section.slice(json);
+  assert.ok(flatText(status).includes('Write the card-data judgment as `/tmp/agent_review_card_scan.json`'), status);
+  assert.ok(
+    flatText(status).includes('A `true` needs at least one reason, and a `false` takes an empty list. `agent-review status` fails on anything else, including a misnamed key:'),
+    'the card scan file states the shapes the engine accepts',
+  );
+  assert.ok(status.includes('```json\n{ "cardData": false, "reasons": [] }\n```'), 'the card scan file shape is shown');
+  assert.ok(flatText(status).includes('never write `/tmp/agent_review_human_rules.json` by hand'), status);
+
+  const example = bashBlockList(status.replaceAll('```json\n', '```bash\n')).find((b) => b.includes('"v": 1'));
+  const { buildStatus } = require('./reportState.cjs');
+  const built = buildStatus({
+    ledger: [],
+    head: 'abc1234',
+    plan: { risk: { level: 'LOW' } },
+    safety: { irreversible: false, reasons: [] },
+    human: { required: false, reasons: [] },
+    cardScan: { cardData: false, reasons: [] },
+    evidence: { ci: { summary: { total: 1, success: 1 } } },
+  });
+  assert.deepStrictEqual(Object.keys(JSON.parse(example)), Object.keys(built), 'the status example has the keys the engine writes, in its order');
+
+  const init = bashBlocks(stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest'));
+  assert.ok(
+    init.split('\n').includes('rm -f /tmp/agent_review_card_scan.json /tmp/agent_review_human_rules.json'),
+    'no earlier run can stand in for this run\'s card scan or rules check',
+  );
+});
+
+test('the report skeleton carries the needs-a-person tag and line, and the irreversible line is a caution', () => {
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(report.includes(' · risk [LEVEL][ · ⚠️ irreversible][ · 👤 needs a person]\n'), 'the header tag follows the irreversible tag');
+  assert.ok(
+    report.includes(
+      '[IF status.irreversible:]\n⚠️ **Irreversible**: [semicolon-joined irreversibleReasons]. A revert will not undo this. Check backups and the deploy plan before you merge.\n',
+    ),
+    'the irreversible line is a caution',
+  );
+  assert.ok(
+    report.includes("[IF status.humanRequired:]\n👤 **Needs a person's approval**: [semicolon-joined humanReasons]. The bot will not approve this PR.\n"),
+    'the needs-a-person line',
+  );
+  assert.ok(!report.includes('auto-approval stays off; a human must approve'), 'irreversible no longer stops approval');
+  const fill = flatText(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Write the report', '## Stage 7'));
+  assert.ok(
+    fill.includes(
+      "The header's ` · ⚠️ irreversible` tag shows only when `status.irreversible` is true, and its ` · 👤 needs a person` tag only when `status.humanRequired` is true.",
+    ),
+    'the fill rules say when each header tag shows',
+  );
+});
+
+test("the status block checks the base commit's human approval rules against the whole PR under bash and zsh", (t) => {
+  const block = mainStatusBlock();
+  assert.ok(block.startsWith('. /tmp/review_env.sh 2>/dev/null || true\n'), 'the block sources the saved state first');
+  assert.ok(
+    rulesCheckLines().includes('if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then'),
+    'ls-tree lists from the repo root, so a run from a subdirectory still finds the config',
+  );
+  assert.ok(
+    rulesCheckLines().includes('git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \\'),
+    'a user\'s diff.relative=true never narrows the changed-file list',
+  );
+  const { repo, fork, head, base, badConfig, noConfig, blobGone } = humanRulesRepo();
+  const unread = (why) => ({ required: true, reasons: [`could not read the human approval rules: ${why}`] });
+  const pr = (from) => ({ BASE_REF: from, HEAD_REF: head, FULL_RANGE: `${from}..${head}` });
+  const cases = [
+    ['a PR', pr(base), PCI_RULES],
+    ['a local range review', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD` }, PCI_RULES],
+    ['no base commit', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: '..HEAD' }, unread('no base commit')],
+    ['no saved range', {}, unread('no base commit')],
+    ['a malformed rule at the base', pr(badConfig), unread('human_approval.always must be a boolean')],
+    ['no config at the base', pr(noConfig), { required: false, reasons: [] }],
+    ['a listed config that will not show', pr(blobGone), unread('could not read the base config')],
+    ['a base tree that cannot be listed', pr(base), unread('could not read the base tree'), 'ls-tree'],
+    ['an unknown base commit', pr('0123456789abcdef0123456789abcdef01234567'), unread('could not list the changed files')],
+    ['a local run from a subdirectory', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD` }, PCI_RULES, null, 'app/payments'],
+    [
+      'a local run from a subdirectory with diff.relative=true in the git config',
+      { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD`, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'diff.relative', GIT_CONFIG_VALUE_0: 'true' },
+      PCI_RULES,
+      null,
+      'app/payments',
+    ],
+  ];
+  const files = { 'agent_review_card_scan.json': '{ "cardData": false, "reasons": [] }\n' };
+  try {
+    for (const shell of availableShells(t)) {
+      for (const [label, env, rules, failGit, subdir] of cases) {
+        const run = runRulesBlock(shell, block, { repo, env, files, failGit, subdir });
+        assert.strictEqual(run.status, 0, `${shell}, ${label}: ${run.output}`);
+        assert.deepStrictEqual(run.rules, rules, `${shell}, ${label}: ${run.output}`);
+        assert.ok(passesRuleFiles(run.statusArgs), `${shell}, ${label}: ${JSON.stringify(run.statusArgs)}`);
+        if (label === 'a PR') {
+          assert.strictEqual(
+            run.changedFiles,
+            '.claude/review/config.yml\napp/other.rb\napp/payments/caf\u00e9.rb\napp/payments/charge.rb\nlib/charge.rb\n',
+            `${shell}: both sides of the rename, unquoted, and nothing the base branch changed after the fork`,
+          );
+        }
+      }
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('both zero-risk skip paths check the repo rules and carry the needs-a-person state forward under bash and zsh', (t) => {
+  const auto = autoModeBlock();
+  const skip = auto.indexOf('if [ "$RESOLVED" = "skip" ]');
+  const ci = auto.indexOf('    if [ -n "$CI_MODE" ]; then', skip);
+  const incremental = auto.indexOf('    elif [ -n "$INCREMENTAL_REQUESTED" ]; then', ci);
+  const plain = auto.indexOf('    else\n      echo "AUTO MODE: risk score 0', incremental);
+  assert.ok(skip !== -1 && skip < ci && ci < incremental && incremental < plain, 'the skip branch splits into the CI and local incremental paths');
+  const lines = auto.split('\n');
+  const rules = rulesCheckLines();
+  const at = lines.findIndex((l) => l.trim().startsWith('RULES_BASE='));
+  assert.deepStrictEqual(lines.slice(at, at + rules.length).map((l) => l.trim()), rules, 'the skip paths run the status step\'s own rules check');
+  const offset = lines.slice(0, at).join('\n').length;
+  assert.ok(skip < offset && offset < ci, 'the rules check runs in the skip branch, before the two paths split');
+  for (const [label, path] of [['CI', auto.slice(ci, incremental)], ['incremental', auto.slice(incremental, plain)]]) {
+    const status = path.indexOf('agent-review status');
+    const reset = path.indexOf(`echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json`);
+    const carry = path.indexOf('JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]})');
+    assert.ok(reset !== -1 && reset < carry && carry < status, `${label}: the card scan starts false and takes the previous status's humanRequired before status runs`);
+  }
+
+  const { repo, head, base } = humanRulesRepo();
+  const reason = 'adds cvv2 to the TSYS sale request in app/models/charge.rb';
+  const comment = (status) =>
+    ['<!-- agent-review -->', '<!-- agent-review-ledger: [] -->', `<!-- agent-review-status: ${JSON.stringify(status)} -->`, '', 'report', ''].join('\n');
+  const statusOf = (extra) => ({ v: 1, risk: 'LOW', openBlockers: 0, pass: true, irreversible: false, irreversibleReasons: [], ...extra });
+  const files = (previous) => ({
+    'review_plan.json': JSON.stringify({ risk: { level: 'LOW' }, mode: { resolved: 'skip' } }),
+    'review_evidence.json': JSON.stringify({ staticFindings: [] }),
+    'review_options.json': JSON.stringify({ notes: [] }),
+    ...(previous ? { 'previous_comment.md': comment(previous) } : {}),
+  });
+  const shared = { MODE: 'auto', BASE_REF: base, HEAD_REF: head, FULL_RANGE: `${base}..${head}`, PR_NUMBER: '7' };
+  const ciEnv = { ...shared, CI_MODE: 'true', AGENT_REVIEW_PREVIOUS_COMMENT: '/tmp/previous_comment.md' };
+  const localEnv = { ...shared, CI_MODE: '', INCREMENTAL_REQUESTED: 'true', GITHUB_REPOSITORY: 'o/r' };
+  const needsPerson = statusOf({ humanRequired: true, humanReasons: [reason] });
+  const v100 = statusOf({ irreversible: true, irreversibleReasons: ['drops a column'] });
+  const cases = [
+    ['CI, a previous report that needs a person', ciEnv, needsPerson, { cardData: true, reasons: [reason] }],
+    ['CI, a 1.0.0 report with no humanRequired', ciEnv, v100, { cardData: false, reasons: [] }],
+    ['CI, a first run with no previous report', ciEnv, null, { cardData: false, reasons: [] }],
+    ['local incremental, a previous report that needs a person', localEnv, needsPerson, { cardData: true, reasons: [reason] }],
+  ];
+  try {
+    for (const shell of availableShells(t)) {
+      for (const [label, env, previous, cardScan] of cases) {
+        const run = runRulesBlock(shell, auto, { repo, env, files: files(previous) });
+        assert.strictEqual(run.status, 0, `${shell}, ${label}: ${run.output}`);
+        assert.deepStrictEqual(run.rules, PCI_RULES, `${shell}, ${label}: ${run.output}`);
+        assert.deepStrictEqual(run.cardScan, cardScan, `${shell}, ${label}`);
+        assert.ok(passesRuleFiles(run.statusArgs), `${shell}, ${label}: ${JSON.stringify(run.statusArgs)}`);
+      }
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("the card scan reads the PR's own changes from the merge base under bash and zsh", (t) => {
+  const blocks = bashBlockList(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Gather PR Context & Diff Manifest', '### Build the Review Plan & Load Evidence'));
+  assert.strictEqual(blocks.length, 1, 'the diff manifest is one block');
+  const lines = blocks[0].split('\n');
+  const start = lines.findIndex((l) => l.startsWith('# The card scan reads'));
+  const end = lines.findIndex((l, i) => i > start && l === 'fi');
+  const fullDiff = lines.findIndex((l) => l.includes('> /tmp/pr_full_diff.txt'));
+  assert.ok(start !== -1 && end > start, 'the diff-manifest block writes the card-scan diff');
+  assert.ok(fullDiff !== -1 && fullDiff < start, 'the card-scan diff follows the full diff it falls back to');
+  const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start, end + 1)].join('\n');
+
+  const { repo, head, base, lonely } = humanRulesRepo();
+  const full = 'the two-dot full diff\n';
+  try {
+    for (const shell of availableShells(t)) {
+      const scanDiff = (env) => {
+        const run = runRulesBlock(shell, script, { repo, env, files: { 'pr_full_diff.txt': full }, want: ['pr_card_scan_diff.txt'] });
+        assert.strictEqual(run.status, 0, `${shell}: ${run.output}`);
+        return run.wanted['pr_card_scan_diff.txt'];
+      };
+      const pr = scanDiff({ BASE_REF: base, HEAD_REF: head });
+      assert.ok(pr.includes('lib/charge.rb') && pr.includes('app/other.rb'), `${shell}: the PR's own changes: ${pr}`);
+      assert.ok(!pr.includes('later.rb'), `${shell}: no base-branch commit after the fork: ${pr}`);
+      assert.strictEqual(scanDiff({ BASE_REF: '', HEAD_REF: '' }), full, `${shell}: a range review already diffs from the merge base`);
+      assert.strictEqual(scanDiff({ BASE_REF: lonely, HEAD_REF: head }), full, `${shell}: no merge base falls back to the full diff`);
+    }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
   }
 });
 
@@ -3756,4 +4291,118 @@ test('the capture spec records the PR #33 review changes to the hooks and the ch
     assert.ok(check.includes(needle), `the section 4 amendment must say ${JSON.stringify(needle)}`);
   }
   for (const text of [hooks, check]) assert.ok(!text.includes('\u2014'), 'new prose uses no em dashes');
+});
+
+test('yolo-review reads humanRequired and treats irreversible as a caution', () => {
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  for (const needle of [
+    "HUMAN=$(printf '%s' \"$STATUS\" | jq -r '.humanRequired // false')",
+    'if [ "$PASS" = "true" ] && [ "$HUMAN" != "true" ]; then',
+    'a person must approve:',
+    'A revert will not undo it. Check backups and the deploy plan before you merge.',
+  ]) assert.ok(yolo.includes(needle), `yolo-review must say ${JSON.stringify(needle)}`);
+  assert.ok(!yolo.includes('"$IRREVERSIBLE" != "true"'), 'irreversible no longer blocks the wait');
+  assert.ok(!yolo.includes('the change is irreversible and a human must approve'), 'old irreversible stop text is gone');
+  assert.ok(!yolo.includes('\u2014 a person'), 'no em dash in the new stop text');
+});
+
+test('address skill leaves the human fields alone and reminds about a person only when required', () => {
+  const skill = readFileSync(ADDRESS_SKILL, 'utf8');
+  assert.ok(skill.includes('`humanRequired` / `humanReasons`'), 'address never touches the human fields');
+  assert.ok(
+    flatText(skill).includes('Never touch `irreversible` / `irreversibleReasons` or `humanRequired` / `humanReasons`: reversibility and the need for a person are properties of the reviewed diff, and only a re-review may change them.'),
+    'the never-touch rule',
+  );
+  const neverTouch = skill.slice(skill.indexOf('Never touch `irreversible`'), skill.indexOf('3. The ledger section'));
+  assert.ok(!neverTouch.includes('\u2014'), 'the never-touch rule has no em dash');
+  for (const line of neverTouch.split('\n')) assert.ok(line.length <= 100, `the never-touch rule is wrapped: ${line}`);
+  assert.ok(skill.includes('`humanRequired: true`, remind the user that a person must approve this PR'));
+  assert.ok(!skill.includes('`irreversible: true`, remind the user that a human approval is required regardless'), 'old irreversible reminder is gone');
+});
+
+test('init asks question 4, offers card paths, writes them only on a yes, and creates the label when the bot may approve', () => {
+  const init = skillText('init');
+  const flat = init.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('Repos with payment or financial code keep the bot on and use question 4'), 'question 3 names the repos it means');
+  assert.ok(!flat.includes('Such repos'), 'question 3 has no dangling reference');
+  assert.ok(flat.includes("Does every PR in this repo need a person's approval?"), 'question 4 is asked');
+  assert.ok(flat.includes('Recommend yes for a repo your team says always needs a person, such as a financial or accounting app'), 'question 4 recommendation');
+  assert.ok(init.includes('card-code scan unavailable: this git has no PCRE support') && flat.includes('Do not report "no card code found"') && flat.includes('This never stops setup'), 'a failed git grep -P is visible and non-fatal');
+  assert.ok(flat.includes('`human_approval.always: true`'), 'a yes writes always: true');
+  assert.ok(init.includes('Ask the four setup choices'), 'four choices');
+  assert.ok(
+    init.includes("git grep -P -l -i '\\b(cvv2?|cvc|card_?number|pan|expir(y|ation)_?(date|month|year)|card_?token|tsys|cru[-_]payments|stripe|braintree)\\b'"),
+    'the card scan pattern is verbatim',
+  );
+  assert.ok(flat.includes('`human_approval.paths`') && /only on a yes/.test(flat), 'paths are written only on a yes');
+  const gate = stageSlice(init, '### 3B', '### 3C').replace(/\s+/g, ' ');
+  assert.ok(gate.includes('Does every PR need a person?') && gate.includes('suggested card paths'), 'the gate lists both answers');
+  const threeC = stageSlice(init, '### 3C', '### 3D');
+  assert.ok(
+    threeC.includes('gh label create needs-human-approval --color B60205 --description "agent-review: a person must approve this PR" --force'),
+    'init creates the label with --force',
+  );
+  assert.ok(threeC.includes('if [ "$BOT_APPROVES" = "yes" ]; then'), 'only when the bot may approve');
+  assert.ok(/⚠️ Could not create/.test(threeC.slice(threeC.indexOf('gh label create'))), 'a failed create warns and continues');
+});
+
+test('the human approval spec records the build amendment before Left to the builder', () => {
+  const spec = readFileSync(join(ROOT, 'docs/specs/2026-10-27-human-approval-design.md'), 'utf8');
+  const start = spec.indexOf('**Amendment, 2026-10-28 (build).**');
+  const end = spec.indexOf('## Left to the builder');
+  assert.ok(start !== -1 && start < end, 'the amendment sits before Left to the builder');
+  const amendment = spec.slice(start, end);
+  const flat = flatText(amendment);
+  for (const needle of [
+    '`dismissBotApprovals` is `all`, `stale` or `none`.',
+    'That includes a report for another head when the action\'s own rules re-check says so',
+    '`all` also applies when a person added the label, even when the report can\'t be judged or the rules can\'t be read.',
+    '`stale` applies when the rules can\'t be read, nothing says a person is needed, and no person added the label. Only bot approvals of other commits are dismissed.',
+    'An unknown value counts as `all`.',
+    'blocks approval only in repos with rules, through `human-check --incomplete`',
+    'with a head re-check just before approving',
+    'The CI approve job also runs after a failed review job, so the rules re-check can act.',
+    "It passes `approve_allowed: ${{ needs.review.result == 'success' }}`. When that is not `true`, the action still adds or removes the label and dismisses bot approvals, but never approves, and its summary says approval was skipped because the review did not finish.",
+    'writes `required: true`, with the reason "could not read the human approval rules: no base commit"',
+    'This fails closed.',
+    '(`/tmp/pr_card_scan_diff.txt`), not the two-dot full diff',
+    'The dry run found 0 false flags in 30 recent PRs. The token and expiry wording was tightened.',
+    'Init names no consuming repo.',
+  ]) {
+    assert.ok(flat.includes(needle), `the amendment says ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!amendment.includes('—'), 'the amendment uses no em dashes');
+});
+
+test('the config template carries a commented human_approval example', () => {
+  const t = readFileSync(join(ROOT, 'templates/config.yml'), 'utf8');
+  assert.ok(t.includes('# human_approval:'));
+  assert.ok(t.includes('#   always:'));
+  assert.ok(t.includes('#   paths:'));
+  assert.ok(t.indexOf('# human_approval:') > t.indexOf('# reviews_run: local'), 'sits under reviews_run');
+});
+
+test('README lists the person-must-approve rule, drops irreversible from the stop list, and has the new section', () => {
+  const r = readFileSync(join(ROOT, 'README.md'), 'utf8');
+  const stop = r.slice(r.indexOf('**It will NOT approve if:**'), r.indexOf('## PCI and repos that always need a person'));
+  assert.ok(!stop.includes('irreversible'), 'irreversible is no longer a stop');
+  assert.ok(stop.includes("a person must approve: the repo's `human_approval` rules or the card-data check say so, or someone added the `needs-human-approval` label"));
+  assert.ok(r.includes('## PCI and repos that always need a person'));
+  const sec = r.slice(r.indexOf('## PCI and repos that always need a person')).replace(/\s+/g, ' ');
+  for (const part of ['human_approval:', 'card-data check', 'needs-human-approval', 'added by hand', 'takes back', 'Irreversible changes', 'Allow GitHub Actions to create and approve pull requests', 'plugin']) {
+    assert.ok(sec.includes(part), `section mentions ${part}`);
+  }
+  assert.ok(!r.includes('a human must approve'), 'old single approval rule is gone');
+  for (const part of [
+    'Adding the label does not run the approval job, so if the bot already approved the PR, dismiss that approval by hand.',
+    'Each time the approval job runs, it takes back (dismisses) every approval the bot gave the PR when:',
+    "- the report for the PR's newest commit says a person is needed;",
+    '- the repo rules say so, even when the report covers an older commit or the CI review failed, because the job checks the rules itself;',
+    '- a person added the `needs-human-approval` label, even when the report covers an older commit or the job cannot read the rules.',
+    "If the job cannot read the rules and none of the above applies, it takes back only the bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's review.",
+  ]) {
+    assert.ok(sec.includes(part), `the README says ${JSON.stringify(part)}`);
+  }
+  const own = r.slice(r.indexOf('## PCI and repos that always need a person'), r.indexOf('## Set up a repo (once)'));
+  assert.ok(own.length > 0 && !own.includes('\u2014'), 'the human approval section uses no em dashes');
 });

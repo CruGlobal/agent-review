@@ -72,7 +72,7 @@ approval has to come from an account the branch rules trust. So:
 
 - a blocker (severity 7+) is still open — fix or dismiss it, then `re-review`
 - you have commits that are not pushed — push, then `re-review`
-- the change is **irreversible** (drops a column, deletes data, sends email): a human must approve
+- a person must approve: the repo's `human_approval` rules or the card-data check say so, or someone added the `needs-human-approval` label
 - the repo's report mode is `shadow` (see "Three switches")
 - the person who posted the report does not have write access to the repo
 - the repo setting "Allow GitHub Actions to create and approve pull requests" is off
@@ -80,6 +80,63 @@ approval has to come from an account the branch rules trust. So:
 
 The same rules apply when the review ran in CI instead of your terminal, and when you fix or
 dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]: reason`).
+
+## PCI and repos that always need a person
+
+Some repos need a person's approval on some or all PRs. The bot will not approve those.
+
+**Repo rules.** Add this to `.claude/review/config.yml`. Both keys are optional.
+
+```yaml
+human_approval:
+  always: false              # true: every PR needs a person
+  paths: ['app/payments/**'] # a PR that touches one of these needs a person
+```
+
+The approval job reads these rules from the PR's base commit, so a PR cannot loosen its own
+rules. A PR that edits this config file needs a person when the base sets rules. If the job
+cannot read the rules, it does not approve.
+
+**The card-data check.** Every review scans the PR's own changes for card data, in every repo,
+with no off switch. It flags card numbers, CVV, card expiry, a cardholder name next to card data,
+processor card tokens or vault ids, calls that charge, authorize, refund or store a card, payment
+form card fields, and logging in card-handling code. Amounts, invoices, donations and receipts
+with no card data do not count. A hit shows as `👤 Needs a person's approval` in the report.
+
+**The label.** When a person is needed, the approval job adds the `needs-human-approval` label.
+It removes the label only if the bot added it. A label added by hand (say you spot card code
+the check missed) keeps the bot from approving until a person removes it. Adding the label does
+not run the approval job, so if the bot already approved the PR, dismiss that approval by hand.
+`/agent-review:init` creates the label once. If it is missing, the job creates it when its token
+allows.
+
+**Old approvals.** Each time the approval job runs, it takes back (dismisses) every approval the
+bot gave the PR when:
+
+- the report for the PR's newest commit says a person is needed;
+- the repo rules say so, even when the report covers an older commit or the CI review failed,
+  because the job checks the rules itself;
+- a person added the `needs-human-approval` label, even when the report covers an older commit
+  or the job cannot read the rules.
+
+If the job cannot read the rules and none of the above applies, it takes back only the bot's
+approvals of older commits. Otherwise it takes back nothing. It never touches a person's
+review. It approves only the exact commit it judged, and checks that the head did not move first.
+
+**Irreversible changes.** A change that drops a column, deletes data or sends email is now a
+caution, not a stop. The report shows `⚠️ Irreversible`, and the approval message repeats it.
+Check backups and the deploy plan before you merge.
+
+**Repos with `always: true`.** Also turn off Settings → Actions → General → "Allow GitHub Actions
+to create and approve pull requests". It costs you nothing, since the bot never approves there.
+Someone with write access could still edit workflow files in their own branch to skip the check,
+so keep branch rules that require a person.
+
+**Rollout.** The approval job's rules take effect in every repo at once. CI reviews get the
+card-data check and the new report text at once. A review run from a terminal gets them only
+after you update the plugin. Until then, an old report that says `irreversible` can be approved,
+though its text still says a person must approve. Repos with `human_approval` set are protected
+right away, because the approval job re-checks the rules itself.
 
 ## Set up a repo (once)
 
@@ -341,7 +398,9 @@ this repo at `@main`.
 | `agent-review-readiness.yml` | `readiness.yml` | Manual | Scores the seeded suite and telemetry against the rollout gates. |
 
 All three approval paths share one rule (`agent-review approval`, `engine/approval.cjs`) and one
-composite action (`.github/actions/approve`). They fail closed, never request changes, never fail
+composite action (`.github/actions/approve`). The action also reads `human_approval` from the base
+commit, checks the PR's changed files and the `needs-human-approval` label, and takes back the
+bot's own approvals when a person is needed. They fail closed, never request changes, never fail
 the calling job, and report an approval API failure as a warning. The terminal path
 (`agent-review-approve.yml`) judges a comment authored by a person rather than the bot, so it
 additionally requires the poster to hold repository write access (the same bar interact applies

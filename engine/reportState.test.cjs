@@ -86,6 +86,9 @@ test('new blockers fail closed without high-confidence evidence', () => {
   );
 });
 
+const NO_HUMAN = { required: false, reasons: [] };
+const NO_CARD = { cardData: false, reasons: [] };
+
 test('status is computed from ledger blockers and full gate plan', () => {
   const ledger = mergeLedger([], [finding(), finding({ signature: 'sig-2', severity: 4 })]);
   const status = buildStatus({
@@ -93,6 +96,8 @@ test('status is computed from ledger blockers and full gate plan', () => {
     head: 'abc1234',
     plan: { risk: { level: 'CRITICAL' } },
     safety: { irreversible: false, reasons: [] },
+    human: NO_HUMAN,
+    cardScan: NO_CARD,
   });
   assert.deepEqual(status, {
     v: 1,
@@ -102,6 +107,8 @@ test('status is computed from ledger blockers and full gate plan', () => {
     pass: false,
     irreversible: false,
     irreversibleReasons: [],
+    humanRequired: false,
+    humanReasons: [],
   });
 });
 
@@ -112,6 +119,8 @@ test('irreversible status fails closed without a concrete reason', () => {
         ledger: [],
         plan: { risk: { level: 'LOW' } },
         safety: { irreversible: true, reasons: [] },
+        human: NO_HUMAN,
+    cardScan: NO_CARD,
       }),
     /requires at least one reason/,
   );
@@ -123,10 +132,71 @@ test('status carries the deterministic CI snapshot without changing review pass 
     head: 'abc',
     plan: { risk: { level: 'LOW' } },
     safety: { irreversible: false, reasons: [] },
+    human: NO_HUMAN,
+    cardScan: NO_CARD,
     evidence: { ci: { summary: { total: 2, success: 1, failed: 1, pending: 0, neutral: 0 } } },
   });
   assert.equal(status.pass, true);
   assert.deepEqual(status.ci, { total: 2, success: 1, failed: 1, pending: 0, neutral: 0 });
+});
+
+function humanStatus(human, cardScan) {
+  return buildStatus({
+    ledger: [],
+    plan: { risk: { level: 'LOW' } },
+    safety: { irreversible: false, reasons: [] },
+    human,
+    cardScan,
+  });
+}
+
+test('status needs a person when the rules or the card scan say so', () => {
+  assert.deepEqual(
+    [humanStatus(NO_HUMAN, NO_CARD).humanRequired, humanStatus(NO_HUMAN, NO_CARD).humanReasons],
+    [false, []],
+  );
+  const rules = humanStatus({ required: true, reasons: ['PCI path'] }, NO_CARD);
+  assert.equal(rules.humanRequired, true);
+  assert.deepEqual(rules.humanReasons, ['PCI path']);
+  const card = humanStatus(NO_HUMAN, { cardData: true, reasons: ['stores PAN'] });
+  assert.equal(card.humanRequired, true);
+  assert.deepEqual(card.humanReasons, ['stores PAN']);
+});
+
+test('status human reasons keep order and drop repeats', () => {
+  const status = humanStatus(
+    { required: true, reasons: ['a', 'b'] },
+    { cardData: true, reasons: ['b', 'c'] },
+  );
+  assert.equal(status.humanRequired, true);
+  assert.deepEqual(status.humanReasons, ['a', 'b', 'c']);
+});
+
+test('status human inputs fail closed', () => {
+  assert.throws(() => humanStatus(NO_HUMAN, { cardData: true, reasons: [] }), /requires at least one reason/);
+  assert.throws(() => humanStatus({ required: true, reasons: [] }, NO_CARD), /requires at least one reason/);
+  assert.throws(() => humanStatus(undefined, NO_CARD), /human/);
+  assert.throws(() => humanStatus(NO_HUMAN, undefined), /cardScan/);
+});
+
+test('status human inputs must have exact shapes', () => {
+  const cases = [
+    ['a misnamed card_data', NO_HUMAN, { card_data: true, reasons: ['stores PAN'] }, /cardScan\.cardData must be a boolean/],
+    ['a missing cardData', NO_HUMAN, { reasons: [] }, /cardScan\.cardData must be a boolean/],
+    ['a string cardData', NO_HUMAN, { cardData: 'false', reasons: [] }, /cardScan\.cardData must be a boolean/],
+    ['cardData false with reasons', NO_HUMAN, { cardData: false, reasons: ['stores PAN'] }, /cardScan\.cardData is false but lists reasons/],
+    ['missing card reasons', NO_HUMAN, { cardData: false }, /cardScan\.reasons must be a list of strings/],
+    ['card reasons that are not a list', NO_HUMAN, { cardData: true, reasons: 'stores PAN' }, /cardScan\.reasons must be a list of strings/],
+    ['non-string card reasons', NO_HUMAN, { cardData: true, reasons: ['stores PAN', 4] }, /cardScan\.reasons must be a list of strings/],
+    ['a string required', { required: 'true', reasons: ['PCI path'] }, NO_CARD, /human\.required must be a boolean/],
+    ['a missing required', { reasons: [] }, NO_CARD, /human\.required must be a boolean/],
+    ['missing human reasons', { required: false }, NO_CARD, /human\.reasons must be a list of strings/],
+    ['non-string human reasons', { required: true, reasons: [{ path: 'app/pci' }] }, NO_CARD, /human\.reasons must be a list of strings/],
+    ['an array for human', [], NO_CARD, /human\.required must be a boolean/],
+  ];
+  for (const [name, human, card, error] of cases) {
+    assert.throws(() => humanStatus(human, card), error, name);
+  }
 });
 
 const BY_LOCATION = { matchSuggestionsByLocation: true };

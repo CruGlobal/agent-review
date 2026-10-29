@@ -688,7 +688,11 @@ test('approval subcommand judges a report file against a head SHA', () => {
   assert.equal(ok.code, 0);
   assert.deepEqual(JSON.parse(ok.s), {
     approve: true,
-    reason: `report for ${head} passes with no open blockers and the change is reversible`,
+    reason: `report for ${head} passes with no open blockers`,
+    irreversible: false,
+    irreversibleReasons: [],
+    humanRequired: false,
+    humanReasons: [],
   });
   const stale = run(['approval', '--report', file, '--head', '0000000000000000000000000000000000000000']);
   assert.equal(stale.code, 0);
@@ -696,6 +700,139 @@ test('approval subcommand judges a report file against a head SHA', () => {
   const usage = run(['approval', '--report', file]);
   assert.equal(usage.code, 1);
   assert.match(usage.s, /usage: agent-review approval/);
+
+  const rules = join(dir, 'rules.json');
+  writeFileSync(rules, JSON.stringify({ required: false, reasons: [] }));
+  const labels = join(dir, 'labels.json');
+  writeFileSync(labels, JSON.stringify(['needs-human-approval']));
+  const decided = run(['approval', '--report', file, '--head', head, '--rules', rules]);
+  assert.equal(decided.code, 0);
+  assert.deepEqual(JSON.parse(decided.s), {
+    approve: true,
+    reason: `report for ${head} passes with no open blockers`,
+    label: 'keep',
+    dismissBotApprovals: 'none',
+    caution: null,
+  });
+  const errorRules = join(dir, 'error-rules.json');
+  writeFileSync(errorRules, JSON.stringify({ error: "the PR's file list is incomplete" }));
+  const unreadable = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', errorRules, '--labels', labels, '--label-owner', 'bot']).s);
+  assert.deepEqual([unreadable.approve, unreadable.label, unreadable.dismissBotApprovals], [false, 'keep', 'stale']);
+  const requiredRules = join(dir, 'required-rules.json');
+  writeFileSync(requiredRules, JSON.stringify({ required: true, reasons: ['PCI path: app/pay.rb'] }));
+  const needed = JSON.parse(run(['approval', '--report', file, '--head', head, '--rules', requiredRules]).s);
+  assert.deepEqual([needed.approve, needed.label, needed.dismissBotApprovals], [false, 'add', 'all']);
+  const owned = JSON.parse(
+    run(['approval', '--report', file, '--head', head, '--rules', rules, '--labels', labels, '--label-owner', 'bot']).s,
+  );
+  assert.equal(owned.label, 'remove');
+  const personOwned = JSON.parse(
+    run(['approval', '--report', file, '--head', head, '--rules', rules, '--labels', labels, '--label-owner', 'person']).s,
+  );
+  assert.equal(personOwned.approve, false);
+  const badOwner = run(['approval', '--report', file, '--head', head, '--rules', rules, '--label-owner', 'robot']);
+  assert.equal(badOwner.code, 1);
+  assert.match(badOwner.s, /usage: agent-review approval/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('status carries the human fields and requires both new inputs', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-status-'));
+  const f = (name, value) => {
+    const path = join(dir, name);
+    writeFileSync(path, JSON.stringify(value));
+    return path;
+  };
+  const base = [
+    'status',
+    '--ledger', f('ledger.json', []),
+    '--plan', f('plan.json', { risk: { level: 'LOW' } }),
+    '--safety', f('safety.json', { irreversible: false, reasons: [] }),
+  ];
+  const human = f('human.json', { required: true, reasons: ['PCI path: app/payments/a.rb'] });
+  const card = f('card.json', { cardData: true, reasons: ['stores PAN', 'PCI path: app/payments/a.rb'] });
+  const r = run([...base, '--human', human, '--card-scan', card]);
+  assert.equal(r.code, 0);
+  const json = JSON.parse(r.s);
+  assert.equal(json.humanRequired, true);
+  assert.deepEqual(json.humanReasons, ['PCI path: app/payments/a.rb', 'stores PAN']);
+  for (const extra of [[], ['--human', human], ['--card-scan', card]]) {
+    const usage = run([...base, ...extra]);
+    assert.equal(usage.code, 1);
+    assert.match(usage.s, /usage: agent-review status/);
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('help lists the approval inputs', () => {
+  const { s } = run(['help']);
+  assert.ok(
+    s.includes('  approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   '),
+    s,
+  );
+});
+
+test('help lists the required status inputs', () => {
+  const { s } = run(['help']);
+  assert.match(s, /status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f>/);
+});
+
+test('human-check prints the rules for a config file and a file list', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-human-'));
+  const cfg = join(dir, 'config.yml');
+  const files = join(dir, 'files.txt');
+  writeFileSync(cfg, 'human_approval:\n  paths: ["app/payments/**"]\n');
+  writeFileSync(files, 'app/payments/a.rb\nlib/x.rb\n');
+  const r = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(r.code, 0);
+  assert.deepEqual(JSON.parse(r.s), { required: true, reasons: ['PCI path: app/payments/a.rb'] });
+
+  writeFileSync(cfg, '');
+  const none = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(none.code, 0);
+  assert.deepEqual(JSON.parse(none.s), { required: false, reasons: [] });
+
+  for (const args of [['--files', files], ['--config', cfg]]) {
+    const usage = run(['human-check', ...args]);
+    assert.equal(usage.code, 1);
+    assert.match(usage.s, /usage: agent-review human-check/);
+  }
+
+  writeFileSync(cfg, 'a: [unclosed\n');
+  const bad = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.s, /^human-check: /);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('human-check --incomplete refuses a partial file list only when the base config sets rules', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-human-'));
+  const cfg = join(dir, 'config.yml');
+  const files = join(dir, 'files.txt');
+  writeFileSync(files, 'lib/x.rb\n');
+  const check = (config) => {
+    writeFileSync(cfg, config);
+    return run(['human-check', '--config', cfg, '--files', files, '--incomplete']);
+  };
+
+  const paths = check('human_approval:\n  paths: ["app/payments/**"]\n');
+  assert.equal(paths.code, 1);
+  assert.equal(paths.s.trim(), "human-check: the PR's file list is incomplete");
+
+  const always = check('human_approval:\n  always: true\n');
+  assert.equal(always.code, 1);
+  assert.equal(always.s.trim(), "human-check: the PR's file list is incomplete");
+
+  for (const none of ['', 'engine:\n  name: agent-review\n', 'human_approval:\n  always: false\n  paths: []\n']) {
+    const r = check(none);
+    assert.equal(r.code, 0, `no rules in ${JSON.stringify(none)}`);
+    assert.deepEqual(JSON.parse(r.s), { required: false, reasons: [] });
+  }
+
+  writeFileSync(cfg, 'human_approval:\n  paths: ["app/payments/**"]\n');
+  const complete = run(['human-check', '--config', cfg, '--files', files]);
+  assert.equal(complete.code, 0, 'without the flag nothing changes');
+  assert.deepEqual(JSON.parse(complete.s), { required: false, reasons: [] });
   rmSync(dir, { recursive: true, force: true });
 });
 

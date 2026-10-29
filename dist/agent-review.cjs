@@ -18767,7 +18767,7 @@ var require_reportState = __commonJS({
       }
       return merged;
     }
-    function buildStatus({ ledger, head, plan, safety, evidence }) {
+    function buildStatus({ ledger, head, plan, safety, evidence, human, cardScan }) {
       const clean = cleanPrevious(ledger || []);
       const risk = plan && plan.risk && plan.risk.level;
       if (!RISKS.has(risk)) throw new Error(`invalid gate-plan risk: ${risk}`);
@@ -18776,6 +18776,26 @@ var require_reportState = __commonJS({
       if (irreversible && irreversibleReasons.length === 0) {
         throw new Error("irreversible safety result requires at least one reason");
       }
+      if (!human || typeof human !== "object") throw new Error("status requires human input");
+      if (!cardScan || typeof cardScan !== "object") throw new Error("status requires cardScan input");
+      const strings = (v) => Array.isArray(v) && v.every((x) => typeof x === "string");
+      if (typeof human.required !== "boolean") throw new Error("human.required must be a boolean");
+      if (!strings(human.reasons)) throw new Error("human.reasons must be a list of strings");
+      if (typeof cardScan.cardData !== "boolean") throw new Error("cardScan.cardData must be a boolean");
+      if (!strings(cardScan.reasons)) throw new Error("cardScan.reasons must be a list of strings");
+      if (!cardScan.cardData && cardScan.reasons.length > 0) {
+        throw new Error("cardScan.cardData is false but lists reasons");
+      }
+      const humanList = human.required ? human.reasons : [];
+      const cardList = cardScan.cardData ? cardScan.reasons : [];
+      if (human.required && humanList.length === 0) {
+        throw new Error("human approval requirement requires at least one reason");
+      }
+      if (cardScan.cardData && cardList.length === 0) {
+        throw new Error("card data finding requires at least one reason");
+      }
+      const humanRequired = Boolean(human.required || cardScan.cardData);
+      const humanReasons = [.../* @__PURE__ */ new Set([...humanList, ...cardList])];
       const openBlockers = clean.filter(
         (entry) => entry.status === "open" && entry.severity >= 7
       ).length;
@@ -18792,10 +18812,60 @@ var require_reportState = __commonJS({
         pass: openBlockers === 0,
         irreversible,
         irreversibleReasons,
+        humanRequired,
+        humanReasons,
         ...ci ? { ci } : {}
       };
     }
     module2.exports = { findingList, cleanPrevious, mergeLedger, buildStatus };
+  }
+});
+
+// engine/humanApproval.cjs
+var require_humanApproval = __commonJS({
+  "engine/humanApproval.cjs"(exports2, module2) {
+    "use strict";
+    var { parse } = require_dist();
+    var { minimatch } = require_commonjs3();
+    var LABEL = "needs-human-approval";
+    var CONFIG_PATH = ".claude/review/config.yml";
+    var OPTS = { dot: true };
+    function readBlock(configText) {
+      if (configText === null || configText === void 0 || configText.trim() === "") return null;
+      const doc = parse(configText);
+      if (doc === null || doc === void 0) return null;
+      if (typeof doc !== "object" || Array.isArray(doc)) throw new Error("config must be a mapping");
+      const block = doc.human_approval;
+      if (block === void 0) return null;
+      if (block === null || typeof block !== "object" || Array.isArray(block)) {
+        throw new Error("human_approval must be a mapping");
+      }
+      for (const key of Object.keys(block)) {
+        if (key !== "always" && key !== "paths") throw new Error(`human_approval has unknown key: ${key}`);
+      }
+      if (block.always !== void 0 && typeof block.always !== "boolean") {
+        throw new Error("human_approval.always must be a boolean");
+      }
+      if (block.paths !== void 0 && !(Array.isArray(block.paths) && block.paths.every((p) => typeof p === "string"))) {
+        throw new Error("human_approval.paths must be an array of strings");
+      }
+      return { always: block.always === true, paths: block.paths || [] };
+    }
+    function humanRules(configText, files, { incomplete = false } = {}) {
+      const rules = readBlock(configText);
+      if (!rules) return { required: false, reasons: [] };
+      const hasRules = rules.always || rules.paths.length > 0;
+      if (incomplete && hasRules) throw new Error("the PR's file list is incomplete");
+      const reasons = [];
+      if (rules.always) reasons.push("every PR in this repo needs a person (human_approval.always)");
+      const hits = [...new Set(files)].filter((f) => rules.paths.some((g) => minimatch(f, g, OPTS))).sort();
+      for (const f of hits) reasons.push(`PCI path: ${f}`);
+      if (files.includes(CONFIG_PATH) && hasRules) {
+        reasons.push("changes the human_approval config");
+      }
+      return { required: reasons.length > 0, reasons };
+    }
+    module2.exports = { humanRules, LABEL };
   }
 });
 
@@ -18804,6 +18874,7 @@ var require_approval = __commonJS({
   "engine/approval.cjs"(exports2, module2) {
     "use strict";
     var MARKER = "<!-- agent-review -->";
+    var { LABEL } = require_humanApproval();
     var ROLLOUTS_THAT_APPROVE = /* @__PURE__ */ new Set(["advisory", "enforce"]);
     function headerBlock(text) {
       const lines = [];
@@ -18820,46 +18891,113 @@ var require_approval = __commonJS({
     function no(reason) {
       return { approve: false, reason };
     }
-    function evaluateApproval(body, { head } = {}) {
+    function unjudged(reason) {
+      return { result: no(reason), judged: false };
+    }
+    function statusFields(status) {
+      const strings = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+      return {
+        irreversible: status.irreversible === true,
+        irreversibleReasons: strings(status.irreversibleReasons),
+        humanRequired: status.humanRequired === true,
+        humanReasons: strings(status.humanReasons)
+      };
+    }
+    function judge(body, { head } = {}) {
       const expected = String(head || "").trim().toLowerCase();
-      if (!expected) return no("no expected head SHA supplied");
+      if (!expected) return unjudged("no expected head SHA supplied");
       const text = String(body || "").replace(/\r/g, "");
-      if (!text.startsWith(MARKER)) return no("not an agent-review report");
+      if (!text.startsWith(MARKER)) return unjudged("not an agent-review report");
       const header = headerBlock(text);
       const rollout = markerLine(header, "rollout");
-      if (!rollout) return no("report carries no rollout marker");
-      if (rollout === "shadow") return no("shadow reports never approve");
-      if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return no(`unknown rollout mode "${rollout}"`);
+      if (!rollout) return unjudged("report carries no rollout marker");
+      if (rollout === "shadow") return unjudged("shadow reports never approve");
+      if (!ROLLOUTS_THAT_APPROVE.has(rollout)) return unjudged(`unknown rollout mode "${rollout}"`);
       const reportHead = markerLine(header, "head");
-      if (!reportHead) return no("report carries no reviewed-head marker");
+      if (!reportHead) return unjudged("report carries no reviewed-head marker");
       if (reportHead.toLowerCase() !== expected) {
-        return no(`report covers ${reportHead} but the PR head is ${expected}`);
+        return unjudged(`report covers ${reportHead} but the PR head is ${expected}`);
       }
       const statusRaw = markerLine(header, "status");
-      if (!statusRaw) return no("report carries no status marker");
+      if (!statusRaw) return unjudged("report carries no status marker");
       let status;
       try {
         status = JSON.parse(statusRaw);
       } catch {
-        return no("status marker is not valid JSON");
+        return unjudged("status marker is not valid JSON");
       }
       if (!status || typeof status !== "object" || Array.isArray(status)) {
-        return no("status marker is not an object");
+        return unjudged("status marker is not an object");
+      }
+      if (status.humanRequired !== void 0 && typeof status.humanRequired !== "boolean") {
+        return unjudged("status humanRequired is not a boolean");
       }
       if (status.head !== void 0 && String(status.head).toLowerCase() !== expected) {
-        return no(`status head ${status.head} disagrees with the PR head ${expected}`);
+        return { result: { ...no(`status head ${status.head} disagrees with the PR head ${expected}`), ...statusFields(status) }, judged: false };
       }
+      const fields = statusFields(status);
       if (status.pass !== true) {
         const open = Number.isInteger(status.openBlockers) ? status.openBlockers : "unknown";
-        return no(`status is not passing (${open} open blockers)`);
+        return { result: { ...no(`status is not passing (${open} open blockers)`), ...fields }, judged: true };
       }
-      if (status.irreversible === true) return no("change is irreversible; a human must approve");
+      if (fields.humanRequired) {
+        return {
+          result: { ...no(`a person must approve: ${fields.humanReasons.join("; ")}`), ...fields },
+          judged: true
+        };
+      }
       return {
-        approve: true,
-        reason: `report for ${expected} passes with no open blockers and the change is reversible`
+        result: { approve: true, reason: `report for ${expected} passes with no open blockers`, ...fields },
+        judged: true
       };
     }
-    module2.exports = { evaluateApproval, MARKER };
+    function evaluateApproval(body, opts) {
+      return judge(body, opts).result;
+    }
+    function cautionFor(result) {
+      if (!result.irreversible) return null;
+      const reasons = result.irreversibleReasons.length ? result.irreversibleReasons.join("; ") : "no reason recorded";
+      return `Caution: this change is irreversible (${reasons}). A revert will not undo it. Check backups and the deploy plan before you merge.`;
+    }
+    function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
+      const { result, judged } = judge(report, { head });
+      const caution = cautionFor(result);
+      const out = (approve, reason, label, dismissBotApprovals) => ({
+        approve,
+        reason,
+        label,
+        dismissBotApprovals,
+        caution
+      });
+      const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === "string");
+      const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
+      const plain = rules !== null && typeof rules === "object" && !Array.isArray(rules);
+      const ruleOk = plain && !("error" in rules) && typeof rules.required === "boolean" && Array.isArray(rules.reasons) && rules.reasons.every((r) => typeof r === "string");
+      const byPerson = present && labelOwner !== "bot" ? out(false, `a person added the ${LABEL} label`, "keep", "all") : null;
+      const rulesUnread = () => {
+        const why = plain && "error" in rules && rules.error ? String(rules.error) : "rules are missing or malformed";
+        return out(false, `could not check the human approval rules: ${why}`, "keep", "stale");
+      };
+      if (!judged) {
+        if (ruleOk && rules.required) {
+          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, present ? "keep" : "add", "all");
+        }
+        if (byPerson) return byPerson;
+        return ruleOk ? out(false, result.reason, "keep", "none") : rulesUnread();
+      }
+      const reasons = [...result.humanReasons];
+      if (ruleOk && rules.required) {
+        for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
+      }
+      if (result.humanRequired || ruleOk && rules.required) {
+        return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", "all");
+      }
+      if (byPerson) return byPerson;
+      if (!ruleOk) return rulesUnread();
+      if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", "none");
+      return out(result.approve, result.reason, present ? "remove" : "keep", "none");
+    }
+    module2.exports = { evaluateApproval, decideApproval, MARKER };
   }
 });
 
@@ -20003,7 +20141,8 @@ var require_addressState = __commonJS({
       ).replace(/^🤖 agent-review · .*$/m, () => {
         const blockersText = nextStatus.pass ? "\u2705 no blockers" : `\u274C ${nextStatus.openBlockers} blockers open`;
         const irreversibleText = nextStatus.irreversible ? " \xB7 \u26A0\uFE0F irreversible" : "";
-        return `\u{1F916} agent-review \xB7 ${blockersText} \xB7 risk ${nextStatus.risk}${irreversibleText}`;
+        const humanText = nextStatus.humanRequired ? " \xB7 \u{1F464} needs a person" : "";
+        return `\u{1F916} agent-review \xB7 ${blockersText} \xB7 risk ${nextStatus.risk}${irreversibleText}${humanText}`;
       });
       if (Buffer.byteLength(updatedReport) > 65500) throw new Error("updated report exceeds GitHub comment limit");
       const lines = [];
@@ -20026,10 +20165,15 @@ var require_addressState = __commonJS({
       lines.push(
         nextStatus.pass ? "The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review." : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`
       );
+      const reasonsText = (reasons) => Array.isArray(reasons) && reasons.length ? ` (${reasons.map((reason) => String(reason).replace(/[\r\n]/g, " ")).join("; ")})` : "";
       if (status.irreversible) {
-        const why = Array.isArray(status.irreversibleReasons) && status.irreversibleReasons.length ? ` (${status.irreversibleReasons.map((reason) => String(reason).replace(/[\r\n]/g, " ")).join("; ")})` : "";
         lines.push(
-          `\u26A0\uFE0F This change is marked irreversible${why} \u2014 auto-approval stays off and a human approval is required regardless of the ledger.`
+          `\u26A0\uFE0F This change is marked irreversible${reasonsText(status.irreversibleReasons)}. A revert will not undo it. Check backups and the deploy plan before you merge.`
+        );
+      }
+      if (status.humanRequired === true) {
+        lines.push(
+          `\u{1F464} A person must approve this PR${reasonsText(status.humanReasons)}. The bot will not approve it.`
         );
       }
       return {
@@ -20611,7 +20755,8 @@ var require_cli = __commonJS({
     } = require_learningsStore();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
     var { mergeLedger, buildStatus } = require_reportState();
-    var { evaluateApproval } = require_approval();
+    var { evaluateApproval, decideApproval } = require_approval();
+    var { humanRules } = require_humanApproval();
     var {
       CAPTURE_LIMIT_MINUTES,
       checkCodeReviewRun,
@@ -21079,8 +21224,9 @@ var require_cli = __commonJS({
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
   ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
-  status --ledger <f> --plan <f> --safety <f> [--head <sha>] [--evidence <f>]   compute approval status
-  approval --report <f> --head <sha>   decide whether a published report authorizes approving its PR
+  status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
+  approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
+  human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
   capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
@@ -21438,8 +21584,12 @@ var require_cli = __commonJS({
           const ledgerPath = flag(rest, "--ledger");
           const planPath = flag(rest, "--plan");
           const safetyPath = flag(rest, "--safety");
-          if (!ledgerPath || !planPath || !safetyPath) {
-            out("usage: agent-review status --ledger <f> --plan <f> --safety <f> [--head <sha>]");
+          const humanPath = flag(rest, "--human");
+          const cardScanPath = flag(rest, "--card-scan");
+          if (!ledgerPath || !planPath || !safetyPath || !humanPath || !cardScanPath) {
+            out(
+              "usage: agent-review status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>]"
+            );
             return 1;
           }
           out(
@@ -21448,6 +21598,8 @@ var require_cli = __commonJS({
                 ledger: JSON.parse(readFileSync(ledgerPath, "utf8")),
                 plan: JSON.parse(readFileSync(planPath, "utf8")),
                 safety: JSON.parse(readFileSync(safetyPath, "utf8")),
+                human: JSON.parse(readFileSync(humanPath, "utf8")),
+                cardScan: JSON.parse(readFileSync(cardScanPath, "utf8")),
                 head: flag(rest, "--head"),
                 evidence: flag(rest, "--evidence") ? JSON.parse(readFileSync(flag(rest, "--evidence"), "utf8")) : null
               }),
@@ -21460,12 +21612,49 @@ var require_cli = __commonJS({
         case "approval": {
           const reportPath = flag(rest, "--report");
           const head = flag(rest, "--head");
-          if (!reportPath || !head) {
-            out("usage: agent-review approval --report <f> --head <sha>");
+          const rulesPath = flag(rest, "--rules");
+          const labelsPath = flag(rest, "--labels");
+          const labelOwner = flag(rest, "--label-owner") || "none";
+          if (!reportPath || !head || !["bot", "person", "none"].includes(labelOwner)) {
+            out(
+              "usage: agent-review approval --report <f> --head <sha> [--rules <f>] [--labels <f>] [--label-owner bot|person|none]"
+            );
             return 1;
           }
-          out(JSON.stringify(evaluateApproval(readFileSync(reportPath, "utf8"), { head })));
+          const report = readFileSync(reportPath, "utf8");
+          if (!rulesPath) {
+            out(JSON.stringify(evaluateApproval(report, { head })));
+            return 0;
+          }
+          out(
+            JSON.stringify(
+              decideApproval({
+                report,
+                head,
+                rules: JSON.parse(readFileSync(rulesPath, "utf8")),
+                labels: labelsPath ? JSON.parse(readFileSync(labelsPath, "utf8")) : [],
+                labelOwner
+              })
+            )
+          );
           return 0;
+        }
+        case "human-check": {
+          const configPath = flag(rest, "--config");
+          const filesPath = flag(rest, "--files");
+          if (!configPath || !filesPath) {
+            out("usage: agent-review human-check --config <file> --files <file> [--incomplete]");
+            return 1;
+          }
+          try {
+            const files = readFileSync(filesPath, "utf8").split("\n").filter(Boolean);
+            const incomplete = rest.includes("--incomplete");
+            out(JSON.stringify(humanRules(readFileSync(configPath, "utf8"), files, { incomplete })));
+            return 0;
+          } catch (e) {
+            out(`human-check: ${e.message}`);
+            return 1;
+          }
         }
         case "code-review-proof": {
           const rawPath = flag(rest, "--raw");

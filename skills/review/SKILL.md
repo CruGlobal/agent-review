@@ -173,6 +173,7 @@ echo ""
 # this run.
 rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
 rm -f /tmp/agent_findings/*.json 2>/dev/null || true
+rm -f /tmp/agent_review_card_scan.json /tmp/agent_review_human_rules.json
 # No earlier run's /code-review files or armed capture may carry into this run. Under zsh a glob
 # with no match fails its whole command and prints an error, so each glob gets its own quiet line.
 { rm -f /tmp/code_review_raw.*.json; } 2>/dev/null || true
@@ -340,6 +341,14 @@ else
   git diff "$FULL_RANGE" --name-only > /tmp/full_changed_files.txt
   git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
   git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
+fi
+# The card scan reads only the PR's own changes: a two-dot diff also shows, reversed, the base
+# branch's commits after the fork. With no merge base, it falls back to the full diff.
+if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+  git diff "${BASE_REF}...${HEAD_REF}" > /tmp/pr_card_scan_diff.txt 2>/dev/null \
+    || cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
+else
+  cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
 fi
 
 if [ ! -s /tmp/changed_files.txt ]; then
@@ -633,12 +642,48 @@ if [ "$MODE" = "auto" ]; then
   STATIC_FINDINGS=$(node -e 'const e=require("/tmp/review_evidence.json"); console.log((e.staticFindings||[]).length)' 2>/dev/null || echo 0)
   if [ "$RESOLVED" = "skip" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
+    # A skipped review still checks the repo's human approval rules. The rules come from the base
+    # commit, the one the approve action reads, never from the PR's own changes. FULL_RANGE starts
+    # at that commit on a PR, and at the range's start otherwise.
+    RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
+    RULES_ERROR=""
+    [ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
+    # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
+    # keeps every path from the repo root, whatever the user's git config says.
+    if [ -z "$RULES_ERROR" ]; then
+      git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
+        && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
+        || RULES_ERROR="could not list the changed files"
+    fi
+    # Only a path missing from the base tree means no config. A listed config that will not show,
+    # as in a partial clone that cannot fetch it, is unreadable.
+    if [ -z "$RULES_ERROR" ]; then
+      if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
+        RULES_ERROR="could not read the base tree"
+      elif [ -z "$CONFIG_ENTRY" ]; then
+        : > /tmp/agent_review_base_config.yml
+      elif ! git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null; then
+        RULES_ERROR="could not read the base config"
+      fi
+    fi
+    if [ -z "$RULES_ERROR" ]; then
+      if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
+        printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json
+      else
+        RULES_ERROR="${HUMAN_CHECK#human-check: }"
+        RULES_ERROR="${RULES_ERROR:-human-check failed}"
+      fi
+    fi
+    if [ -n "$RULES_ERROR" ]; then
+      node -e 'process.stdout.write(JSON.stringify({ required: true, reasons: ["could not read the human approval rules: " + process.argv[1].split("\n")[0]] }) + "\n")' "$RULES_ERROR" > /tmp/agent_review_human_rules.json
+    fi
     if [ -n "$CI_MODE" ]; then
-      # A zero-risk incremental delta must not erase earlier open findings or
-      # irreversible state when the canonical comment is updated.
+      # A zero-risk incremental delta must not erase earlier open findings, irreversible
+      # state, or needs-a-person state when the canonical comment is updated.
       echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
       echo '[]' > /tmp/previous_agent_review_ledger.json
       echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
+      echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json
       if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
         tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
           | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
@@ -651,6 +696,8 @@ if [ "$MODE" = "auto" ]; then
         if [ -s /tmp/previous_agent_review_status.json ]; then
           node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' \
             > /tmp/agent_review_safety.json
+          node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]}))' \
+            > /tmp/agent_review_card_scan.json
         fi
       fi
       agent-review ledger --findings /tmp/review_filtered.json \
@@ -660,6 +707,7 @@ if [ "$MODE" = "auto" ]; then
       # still report pass:false. Only a truly clean carried-forward ledger yields pass:true.
       agent-review status --ledger /tmp/agent_review_ledger.json \
         --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
+        --human /tmp/agent_review_human_rules.json --card-scan /tmp/agent_review_card_scan.json \
         --evidence /tmp/review_evidence.json \
         "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
       # Post a minimal skip note. The CI posting step prepends the comment markers
@@ -674,11 +722,13 @@ if [ "$MODE" = "auto" ]; then
       } > /tmp/agent_review_report.md
       echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
     elif [ -n "$INCREMENTAL_REQUESTED" ]; then
-      # Same carry-forward as CI: keep the previous ledger and reversibility, recompute status,
-      # and post a skip note so the head marker advances and the next re-review stays small.
+      # Same carry-forward as CI: keep the previous ledger, reversibility, and needs-a-person
+      # state, recompute status, and post a skip note so the head marker advances and the next
+      # re-review stays small.
       echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
       echo '[]' > /tmp/previous_agent_review_ledger.json
       echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
+      echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
       # Local canonical comment: this user's own marked comment when one exists, else the oldest.
       ME=$(gh api user --jq .login 2>/dev/null || echo "")
@@ -689,8 +739,9 @@ if [ "$MODE" = "auto" ]; then
       [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
       sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_status.json
       [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' > /tmp/agent_review_safety.json
+      [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]}))' > /tmp/agent_review_card_scan.json
       agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
-      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --evidence /tmp/review_evidence.json "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
+      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --human /tmp/agent_review_human_rules.json --card-scan /tmp/agent_review_card_scan.json --evidence /tmp/review_evidence.json "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
       OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
       { echo "🎚️ **agent-review: skipped** — no reviewable risk in the delta since the last review."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
@@ -1686,13 +1737,36 @@ can we get back to the previous state?" — not how risky the change is. Classif
   can't be rebuilt, deleting files)
 
 Purely additive changes (new column, new table, new index, new code paths, config) are
-**reversible**. When genuinely uncertain, classify irreversible — the only cost is a human
-look. List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
+**reversible**. When genuinely uncertain, classify irreversible: the only cost is a caution line.
+List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
 
-A lane that failed its Stage 2 cross-check twice never reaches this point — the run already
-stopped with no report at all (see Stage 2). Reversibility judges the diff itself; it is never
-used to signal incomplete review coverage.
+**Card data.** Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the
+merge base (never the incremental-only `/tmp/pr_diff.txt`), whether the PR touches payment card
+handling. Read all of `/tmp/pr_card_scan_diff.txt`, in parts if it is long. Lockfiles cannot
+carry card handling, so skip them. Run this scan on every review, in every repo, whether or not
+the repo's config sets `human_approval`: a repo with no card code today may add some later. Flag
+the PR when the diff adds or changes code that does any of these:
+
+- reads, stores, logs, sends or displays payment card data: card number (PAN), CVV/CVC, card
+  expiry date (MM/YY), or cardholder name together with card data
+- handles a processor-issued card token or vault id (for example a TSYS or Stripe
+  payment-method token)
+- calls a payment processor or gateway to charge, authorize, refund or store a card (TSYS,
+  cru-payments, Stripe and similar)
+- changes a payment form's card fields, or how card data moves to or from the browser
+- changes logging or error reporting in code that handles card data
+
+Do not flag code that only shows amounts, totals, invoices, donations or receipts, with no card
+data and no processor call. Card data in tests and fixtures does not count, unless the test
+helper ships to production. When unsure, flag it: the only cost is a person's look, and the
+narrow list above keeps false alarms rare. List concrete reasons that name the file and the
+hunk, the way reversibility reasons do
+(`"adds cvv2 to the TSYS sale request in app/models/charge.rb"`).
+
+A lane that failed its Stage 2 cross-check twice never reaches this point: the run already
+stopped with no report at all (see Stage 2). Reversibility and the card-data scan judge the
+diff itself; neither is ever used to signal incomplete review coverage.
 
 **Status JSON.** Write the safety judgment first as `/tmp/agent_review_safety.json`:
 
@@ -1700,11 +1774,60 @@ used to signal incomplete review coverage.
 { "irreversible": false, "reasons": [] }
 ```
 
-Then have the engine compute `/tmp/agent_review_status.json` from the ledger and the **full-PR**
-gate plan. Never hand-author `openBlockers`, `pass`, or `risk`:
+Write the card-data judgment as `/tmp/agent_review_card_scan.json`. A `true` needs at least one
+reason, and a `false` takes an empty list. `agent-review status` fails on anything else,
+including a misnamed key:
+
+```json
+{ "cardData": false, "reasons": [] }
+```
+
+Then run the block below. It first checks the repo's own human approval rules: it reads
+`human_approval` from `.claude/review/config.yml` at the PR's base commit (the commit the approve
+action reads), never from the PR's own changes, and matches it against every file the whole PR
+changes, even on an incremental run. A local review with no PR uses the start of its full
+range. Only the block writes the result: never write `/tmp/agent_review_human_rules.json` by
+hand. When the rules cannot be read, the result is `required: true` with a `could not read the
+human approval rules` reason, so the PR needs a person. The engine then computes
+`/tmp/agent_review_status.json` from the ledger, the **full-PR** gate plan, and these three
+files. Never hand-author `openBlockers`, `pass`, `risk`, or `humanRequired`:
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
+# The rules come from the base commit, the one the approve action reads, never from the PR's own
+# changes. FULL_RANGE starts at that commit on a PR, and at the range's start otherwise.
+RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
+RULES_ERROR=""
+[ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
+# --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
+# keeps every path from the repo root, whatever the user's git config says.
+if [ -z "$RULES_ERROR" ]; then
+  git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
+    && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
+    || RULES_ERROR="could not list the changed files"
+fi
+# Only a path missing from the base tree means no config. A listed config that will not show,
+# as in a partial clone that cannot fetch it, is unreadable.
+if [ -z "$RULES_ERROR" ]; then
+  if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
+    RULES_ERROR="could not read the base tree"
+  elif [ -z "$CONFIG_ENTRY" ]; then
+    : > /tmp/agent_review_base_config.yml
+  elif ! git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null; then
+    RULES_ERROR="could not read the base config"
+  fi
+fi
+if [ -z "$RULES_ERROR" ]; then
+  if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
+    printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json
+  else
+    RULES_ERROR="${HUMAN_CHECK#human-check: }"
+    RULES_ERROR="${RULES_ERROR:-human-check failed}"
+  fi
+fi
+if [ -n "$RULES_ERROR" ]; then
+  node -e 'process.stdout.write(JSON.stringify({ required: true, reasons: ["could not read the human approval rules: " + process.argv[1].split("\n")[0]] }) + "\n")' "$RULES_ERROR" > /tmp/agent_review_human_rules.json
+fi
 # A flag and its value go in an array: zsh never splits a ${X:+...} expansion into words.
 HEAD_ARGS=()
 if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi
@@ -1712,6 +1835,8 @@ agent-review status \
   --ledger /tmp/agent_review_ledger.json \
   --plan /tmp/review_gate_plan.json \
   --safety /tmp/agent_review_safety.json \
+  --human /tmp/agent_review_human_rules.json \
+  --card-scan /tmp/agent_review_card_scan.json \
   --evidence /tmp/review_evidence.json \
   "${HEAD_ARGS[@]}" \
   > /tmp/agent_review_status.json
@@ -1728,6 +1853,8 @@ The resulting object is:
   "pass": true,
   "irreversible": false,
   "irreversibleReasons": [],
+  "humanRequired": false,
+  "humanReasons": [],
   "ci": { "total": 4, "success": 2, "failed": 0, "pending": 2, "neutral": 0 }
 }
 ```
@@ -1736,7 +1863,9 @@ The resulting object is:
 `openBlockers == 0`. The posting steps embed this as a `<!-- agent-review-status: … -->` line;
 `/agent-review:address` recomputes `openBlockers`/`pass` whenever it mutates the ledger.
 `irreversible` is a property of the reviewed diff, so address never changes it — only a
-re-review does.
+re-review does. `humanRequired` is true when the repo rules or the card-data scan say a person
+must approve, and `humanReasons` says why; the bot never approves such a PR. Like
+`irreversible`, both change only on a re-review.
 
 ### Write the report
 
@@ -1750,6 +1879,8 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
 - Set Rollout from `$AGENT_REVIEW_ROLLOUT_MODE` (default `advisory`). In `shadow`, say plainly that
   the report cannot approve or block the PR. Fill deterministic evidence from
   `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
+- The header's ` · ⚠️ irreversible` tag shows only when `status.irreversible` is true, and its
+  ` · 👤 needs a person` tag only when `status.humanRequired` is true.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
 - When $ENGINE is code-review, read code-review-engine.md, section "Stage 6: the engine block", and follow it.
   Fill `[IF any options notes]` from `notes` in the options file and omit it when empty. It does not

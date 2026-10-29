@@ -476,7 +476,8 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
         ? '✅ no blockers'
         : `❌ ${nextStatus.openBlockers} blockers open`;
       const irreversibleText = nextStatus.irreversible ? ' · ⚠️ irreversible' : '';
-      return `🤖 agent-review · ${blockersText} · risk ${nextStatus.risk}${irreversibleText}`;
+      const humanText = nextStatus.humanRequired ? ' · 👤 needs a person' : '';
+      return `🤖 agent-review · ${blockersText} · risk ${nextStatus.risk}${irreversibleText}${humanText}`;
     });
   if (Buffer.byteLength(updatedReport) > 65500) throw new Error('updated report exceeds GitHub comment limit');
 
@@ -502,14 +503,17 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       ? 'The findings ledger has no open blocking items. Any pushed commit still requires incremental re-review.'
       : `The findings ledger still has ${nextStatus.openBlockers} open blocking item(s).`,
   );
-  // Reversibility is a property of the reviewed diff, so an irreversible change
-  // never auto-approves however the ledger ends up.
+  const reasonsText = (reasons) => (Array.isArray(reasons) && reasons.length
+    ? ` (${reasons.map((reason) => String(reason).replace(/[\r\n]/g, ' ')).join('; ')})`
+    : '');
   if (status.irreversible) {
-    const why = Array.isArray(status.irreversibleReasons) && status.irreversibleReasons.length
-      ? ` (${status.irreversibleReasons.map((reason) => String(reason).replace(/[\r\n]/g, ' ')).join('; ')})`
-      : '';
     lines.push(
-      `⚠️ This change is marked irreversible${why} — auto-approval stays off and a human approval is required regardless of the ledger.`,
+      `⚠️ This change is marked irreversible${reasonsText(status.irreversibleReasons)}. A revert will not undo it. Check backups and the deploy plan before you merge.`,
+    );
+  }
+  if (status.humanRequired === true) {
+    lines.push(
+      `👤 A person must approve this PR${reasonsText(status.humanReasons)}. The bot will not approve it.`,
     );
   }
   return {
