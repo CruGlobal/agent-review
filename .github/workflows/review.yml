@@ -129,7 +129,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           echo '[]' > /tmp/agent_review_ast_grep.json
-          git diff "$BASE_SHA..$HEAD_SHA" > /tmp/agent_review_full_diff.txt
+          DIFF_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA") || DIFF_BASE="$BASE_SHA"
+          git diff "$DIFF_BASE" "$HEAD_SHA" > /tmp/agent_review_full_diff.txt
           if [ ! -f "$TRUSTED_REVIEW_DIR/config.yml" ]; then
             echo "No trusted base review config; structural analysis is unavailable on the bootstrap PR."
             exit 0

@@ -76,7 +76,8 @@ HEAD=$(git rev-parse HEAD)
 # ── Trusted artifacts, exactly as review.yml's steps produce them ────────────
 mkdir -p "$(dirname "$TRUSTED")"
 cp -R "$CONSUMER/.claude" "$SCRATCH/trusted/"
-git diff "$BASE..$HEAD" > /tmp/agent_review_full_diff.txt
+DIFF_BASE=$(git merge-base "$BASE" "$HEAD") || DIFF_BASE="$BASE"
+git diff "$DIFF_BASE" "$HEAD" > /tmp/agent_review_full_diff.txt
 echo '[]' > /tmp/agent_review_ast_grep.json
 echo '{"check_runs":[]}' > /tmp/agent_review_checks.json
 node "$ROOT/dist/agent-review.cjs" evidence --root "$CONSUMER" --review-dir "$TRUSTED" \

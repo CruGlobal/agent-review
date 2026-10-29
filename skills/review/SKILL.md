@@ -294,11 +294,18 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
   fi
 fi
 
+# On a PR, BASE_REF is the base branch's tip. A diff from the tip also shows, reversed, every
+# base-branch commit after the fork, so PR diffs start at the merge base. With no merge base
+# they fall back to the tip.
+if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
+  PR_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF" 2>/dev/null) || PR_BASE="$BASE_REF"
+fi
+
 if [ -n "$INCREMENTAL" ]; then
   RANGE="$LAST_REVIEWED..$HEAD_REF"
   echo "♻️  INCREMENTAL REVIEW — commits since previously reviewed $LAST_REVIEWED"
 elif [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
-  RANGE="$BASE_REF..$HEAD_REF"
+  RANGE="$PR_BASE..$HEAD_REF"
 else
   # Fallback: merge-base against the repo's configured base branch.
   # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
@@ -323,7 +330,7 @@ fi
 # the entire current PR. Otherwise a small follow-up commit can erase an earlier
 # destructive migration or downgrade the PR-wide required-reviewer level.
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
-  FULL_RANGE="$BASE_REF..$HEAD_REF"
+  FULL_RANGE="$PR_BASE..$HEAD_REF"
 else
   FULL_RANGE="$MERGE_BASE..HEAD"
 fi
@@ -342,14 +349,8 @@ else
   git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
   git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
 fi
-# The card scan reads only the PR's own changes: a two-dot diff also shows, reversed, the base
-# branch's commits after the fork. With no merge base, it falls back to the full diff.
-if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
-  git diff "${BASE_REF}...${HEAD_REF}" > /tmp/pr_card_scan_diff.txt 2>/dev/null \
-    || cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
-else
-  cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
-fi
+# The card scan reads the whole PR, never just an incremental delta.
+cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
 
 if [ ! -s /tmp/changed_files.txt ]; then
   if [ -n "$INCREMENTAL" ]; then
@@ -643,9 +644,9 @@ if [ "$MODE" = "auto" ]; then
   if [ "$RESOLVED" = "skip" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
     # A skipped review still checks the repo's human approval rules. The rules come from the base
-    # commit, the one the approve action reads, never from the PR's own changes. FULL_RANGE starts
-    # at that commit on a PR, and at the range's start otherwise.
-    RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
+    # commit, the one the approve action reads, never from the PR's own changes: BASE_REF on a PR,
+    # and the range's start otherwise.
+    RULES_BASE="${BASE_REF:-${FULL_RANGE%%..*}}" RULES_HEAD="${FULL_RANGE#*..}"
     RULES_ERROR=""
     [ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
     # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
@@ -1795,8 +1796,8 @@ files. Never hand-author `openBlockers`, `pass`, `risk`, or `humanRequired`:
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true
 # The rules come from the base commit, the one the approve action reads, never from the PR's own
-# changes. FULL_RANGE starts at that commit on a PR, and at the range's start otherwise.
-RULES_BASE="${FULL_RANGE%%..*}" RULES_HEAD="${FULL_RANGE#*..}"
+# changes: BASE_REF on a PR, and the range's start otherwise.
+RULES_BASE="${BASE_REF:-${FULL_RANGE%%..*}}" RULES_HEAD="${FULL_RANGE#*..}"
 RULES_ERROR=""
 [ -n "$RULES_BASE" ] || RULES_ERROR="no base commit"
 # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
