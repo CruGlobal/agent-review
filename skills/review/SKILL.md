@@ -247,6 +247,10 @@ EOF
 # --- Build the diff manifest the whole review runs on ---
 BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
 HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
+if [ -n "$BASE_REF" ] && ! git cat-file -e "$BASE_REF^{commit}" 2>/dev/null; then
+  echo "❌ The PR's base commit $BASE_REF is not in this clone. Fetch the base branch (git fetch origin), then re-run."
+  exit 1
+fi
 
 # Incremental re-review (CI, or the local `incremental` argument): a previous run recorded the
 # head SHA it reviewed inside the posted report comment (`<!-- agent-review-head: <sha> -->`).
@@ -265,18 +269,22 @@ if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
   fi
   [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty — only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
 fi
+PREV_COMMENT=""
 if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
-    LAST_REVIEWED=$(tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
-      | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+    PREV_COMMENT="$AGENT_REVIEW_PREVIOUS_COMMENT"
   else
+    PREV_COMMENT=/tmp/agent_review_previous_report.md
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+    # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+    # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
-    LAST_REVIEWED=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
-      | tr -d '\r' | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
+      | tr -d '\r' > "$PREV_COMMENT" || true
   fi
+  LAST_REVIEWED=$(tr -d '\r' < "$PREV_COMMENT" \
+    | sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' | head -1)
   if [ -n "$LAST_REVIEWED" ] \
      && git cat-file -e "$LAST_REVIEWED^{commit}" 2>/dev/null \
      && git merge-base --is-ancestor "$LAST_REVIEWED" "$HEAD_REF" 2>/dev/null; then
@@ -297,8 +305,100 @@ fi
 # On a PR, BASE_REF is the base branch's tip. A diff from the tip also shows, reversed, every
 # base-branch commit after the fork, so PR diffs start at the merge base. With no merge base
 # they fall back to the tip.
+PR_BASE=""
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   PR_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF" 2>/dev/null) || PR_BASE="$BASE_REF"
+fi
+
+# move_report <message>: for a head the last review still covers, moves the last report to
+# HEAD_REF and prints <message>. Only the head markers change; the findings and safety state stay.
+# CI hands the moved comment to the publish step, and only when it lists every static finding,
+# as that step requires. A local run writes the files Stage 7's Post and print block posts from,
+# never leaves an earlier run's files in their place, and keeps a shadow report shadow.
+move_report() {
+  if [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
+    if [ -s "${AGENT_REVIEW_EVIDENCE:-}" ]; then
+      node -e '
+const { readFileSync } = require("fs");
+const m = readFileSync(process.argv[1], "utf8").replace(/\r/g, "").match(/^<!-- agent-review-ledger: (.*) -->$/m);
+const listed = new Set((m ? JSON.parse(m[1]) : []).map((entry) => entry.signature));
+const evidence = JSON.parse(readFileSync(process.argv[2], "utf8"));
+process.exit((evidence.staticFindings || []).every((finding) => listed.has(finding.signature)) ? 0 : 1);
+' "$PREV_COMMENT" "$AGENT_REVIEW_EVIDENCE" || return 1
+    fi
+    sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
+      -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
+      -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
+      "$PREV_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
+    echo "$1"
+    return 0
+  fi
+  rm -f /tmp/agent_review_ledger.json /tmp/agent_review_status.json /tmp/agent_review_report.md
+  node -e '
+const { readFileSync, writeFileSync } = require("fs");
+const [file, head] = process.argv.slice(1);
+const lines = readFileSync(file, "utf8").replace(/\r/g, "").split("\n");
+const markers = {};
+let i = 0;
+for (; i < lines.length; i++) {
+  const m = lines[i].match(/^<!-- agent-review(?:-([a-z]+): (.*))? -->$/);
+  if (!m) break;
+  if (m[1]) markers[m[1]] = m[2];
+}
+if (lines[i] === "") i++;
+// gh runs --jq once per page, so a second page can add another comment after this one.
+const body = lines.slice(i);
+const next = body.indexOf("<!-- agent-review -->");
+const ledger = "ledger" in markers ? JSON.parse(markers.ledger) : null;
+const status = "status" in markers ? { ...JSON.parse(markers.status), head } : null;
+if (ledger) writeFileSync("/tmp/agent_review_ledger.json", JSON.stringify(ledger) + "\n");
+if (status) writeFileSync("/tmp/agent_review_status.json", JSON.stringify(status) + "\n");
+writeFileSync("/tmp/agent_review_report.md", (next === -1 ? body : body.slice(0, next)).join("\n").replace(/\n*$/, "\n"));
+' "$PREV_COMMENT" "$HEAD_REF" || return 1
+  echo "export HEAD_REF=\"$HEAD_REF\"" >> /tmp/review_env.sh
+  if [ "$(sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' "$PREV_COMMENT" | head -1)" = shadow ]; then
+    echo 'export AGENT_REVIEW_ROLLOUT_MODE="shadow"' >> /tmp/review_env.sh
+  fi
+  echo "${1% Exiting.}"
+  echo "Next, run only Stage 7's Post and print block, which posts the moved report."
+}
+
+# An incremental run whose new head adds nothing to the PR's own changes moves the last report
+# instead of reviewing. With the fork point unchanged, the head's tree must be the last reviewed
+# tree (the commits cancel out); after a merge of the base branch, it must be the last reviewed
+# head merged with the base. Both need exactly one merge base: with two, a merge can drop
+# base-branch changes that no one merge base shows, and with none the fork point is unknown. A
+# moved fork point, or two merge bases, otherwise gets a full review that keeps the findings ledger.
+CARRY_LEDGER=""
+if [ -n "$INCREMENTAL" ]; then
+  ALL_BASES=$(git merge-base --all "$BASE_REF" "$HEAD_REF" 2>/dev/null) || ALL_BASES=""
+  LAST_FORK=$(git merge-base "$BASE_REF" "$LAST_REVIEWED" 2>/dev/null) || LAST_FORK=""
+  KEPT_TREE="" NOTE=""
+  if [ -n "$ALL_BASES" ] && [ "$ALL_BASES" = "$PR_BASE" ] && [ "$LAST_FORK" = "$PR_BASE" ]; then
+    KEPT_TREE=$(git rev-parse "$LAST_REVIEWED^{tree}")
+    NOTE="✅ No net changes since the last reviewed head — nothing to review. Exiting."
+  elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ]; then
+    # merge-tree writes the trees it builds. A throwaway object store under /tmp, the only place
+    # the CI sandbox can write, keeps them out of .git. A conflict or any error leaves no tree.
+    if MERGE_OBJECTS=$(mktemp -d /tmp/agent_review_merge_tree.XXXXXX) \
+       && REPO_OBJECTS=$(git rev-parse --path-format=absolute --git-path objects); then
+      KEPT_TREE=$(GIT_OBJECT_DIRECTORY="$MERGE_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$REPO_OBJECTS" \
+        git merge-tree --write-tree "$LAST_REVIEWED" "$PR_BASE" 2>/dev/null) || KEPT_TREE=""
+      rm -rf "$MERGE_OBJECTS"
+    fi
+    NOTE="✅ No net changes since the last reviewed head except a merge of the base branch, so the last review still holds. Exiting."
+  fi
+  if [ -n "$KEPT_TREE" ] && [ "$KEPT_TREE" = "$(git rev-parse "$HEAD_REF^{tree}")" ]; then
+    move_report "$NOTE" && exit 0
+    echo "⚠️  Could not move the last report to $HEAD_REF, so this is a full review."
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
+  elif [ -n "$ALL_BASES" ] && [ "$ALL_BASES" != "$PR_BASE" ]; then
+    echo "⚠️  The PR has more than one merge base with its base branch, so this is a full review. Merging the base branch again makes later reviews incremental."
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
+  elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ]; then
+    echo "⚠️  The PR merged its base branch since $LAST_REVIEWED along with other changes, so this is a full review."
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
+  fi
 fi
 
 if [ -n "$INCREMENTAL" ]; then
@@ -352,19 +452,9 @@ fi
 # The card scan reads the whole PR, never just an incremental delta.
 cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
 
+# An incremental run with an unchanged tree stopped above, so an empty diff here means a bad base
+# ref or a change git config hides from the diff.
 if [ ! -s /tmp/changed_files.txt ]; then
-  if [ -n "$INCREMENTAL" ]; then
-    if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-      # The commits cancel out to the already-reviewed tree. Advance only the
-      # reviewed-head marker; all findings and safety state remain valid.
-      sed -e "s/^<!-- agent-review-head: [0-9a-f]\{7,40\} -->$/<!-- agent-review-head: $HEAD_REF -->/" \
-        -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
-        -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
-        "$AGENT_REVIEW_PREVIOUS_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
-    fi
-    echo "✅ No net changes since the last reviewed head — nothing to review. Exiting."
-    exit 0
-  fi
   echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
   exit 1
 fi
@@ -372,9 +462,13 @@ wc -l < /tmp/changed_files.txt
 
 cat >> /tmp/review_env.sh <<EOF
 export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FULL_RANGE"
-export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED"
+export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED" CARRY_LEDGER="$CARRY_LEDGER"
 EOF
 ```
+
+**When the block says `Next, run only Stage 7's Post and print block`**, the last review still
+covers the new head and the block has moved that report to it. Run that one block now, then stop.
+Skip every other stage.
 
 **Checkpoint — set REVIEW_SCOPE (not a bash turn; a decision).** Read the changed-file list and
 diff stat from the previous block's output (`/tmp/changed_files.txt`, `/tmp/diff_stat.txt`) and
@@ -731,10 +825,11 @@ if [ "$MODE" = "auto" ]; then
       echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
       echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-      # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+      # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+      # Anyone else's could be a forged report.
       ME=$(gh api user --jq .login 2>/dev/null || echo "")
       gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" 2>/dev/null \
+        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
         | tr -d '\r' > /tmp/previous_agent_review_comment.md
       sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
       [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
@@ -1640,17 +1735,18 @@ fi
 
 # --- Build the findings ledger ---
 echo '[]' > /tmp/previous_agent_review_ledger.json
-if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then
+if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] || [ -z "$CI_MODE" ]; }; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
   else
     REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
-    # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+    # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+    # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
     gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" \
       2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
