@@ -137,13 +137,18 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   // A person's label takes back bot approvals even when the report or the
   // rules cannot be read.
   const byPerson = present && labelOwner !== 'bot' ? out(false, `a person added the ${LABEL} label`, 'keep', 'all') : null;
+  const rulesUnread = () => {
+    const why = plain && 'error' in rules && rules.error ? String(rules.error) : 'rules are missing or malformed';
+    return out(false, `could not check the human approval rules: ${why}`, 'keep', 'stale');
+  };
   // The rules re-check reads the base commit and the PR's current files, not
   // the report, so it holds even when the report cannot be judged.
   if (!judged) {
     if (ruleOk && rules.required) {
       return out(false, `a person must approve: ${rules.reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
     }
-    return byPerson || out(false, result.reason, 'keep', 'none');
+    if (byPerson) return byPerson;
+    return ruleOk ? out(false, result.reason, 'keep', 'none') : rulesUnread();
   }
 
   const reasons = [...result.humanReasons];
@@ -154,10 +159,7 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     return out(false, `a person must approve: ${reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
   }
   if (byPerson) return byPerson;
-  if (!ruleOk) {
-    const why = plain && 'error' in rules && rules.error ? String(rules.error) : 'rules are missing or malformed';
-    return out(false, `could not check the human approval rules: ${why}`, 'keep', 'stale');
-  }
+  if (!ruleOk) return rulesUnread();
   if (!labelsOk) return out(false, 'could not read the PR labels: expected a list of names', 'keep', 'none');
   return out(result.approve, result.reason, present ? 'remove' : 'keep', 'none');
 }

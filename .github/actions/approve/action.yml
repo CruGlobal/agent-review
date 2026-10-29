@@ -159,7 +159,9 @@ runs:
         fi
 
         # The engine refuses to approve on a labels value that is not a list, so
-        # an unreadable label or owner is written as null rather than guessed.
+        # an unreadable label list is written as null rather than guessed. A
+        # label whose owner cannot be read stays owner none, which counts as a
+        # person's.
         LABELS="$RUNNER_TEMP/agent-review-approve-labels.json"
         TIMELINE="$RUNNER_TEMP/agent-review-approve-timeline.json"
         LABEL_OWNER=none
@@ -176,8 +178,7 @@ runs:
               ' "$TIMELINE"); then
               LABEL_OWNER=$OWNER
             else
-              note "Could not read who added the $LABEL label to PR #$PR."
-              echo null > "$LABELS"
+              note "Could not read who added the $LABEL label to PR #$PR, so it counts as a person's."
             fi
           fi
         else

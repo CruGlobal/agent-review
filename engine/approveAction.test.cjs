@@ -127,14 +127,13 @@ function defaults() {
   };
 }
 
-// A runtime from another version: the real engine, with dismissBotApprovals replaced.
-function fakeRuntime(dismiss) {
+// A runtime from another version: the real engine, with some decision fields replaced.
+function fakeRuntime(patch) {
   return `const { spawnSync } = require('node:child_process');
 const r = spawnSync(process.execPath, [${JSON.stringify(DIST)}, ...process.argv.slice(2)], { encoding: 'utf8' });
 let out = r.stdout;
 if (process.argv[2] === 'approval' && r.status === 0) {
-  const d = JSON.parse(out);
-  d.dismissBotApprovals = ${JSON.stringify(dismiss)};
+  const d = Object.assign(JSON.parse(out), ${JSON.stringify(patch)});
   out = JSON.stringify(d);
 }
 process.stdout.write(out);
@@ -175,7 +174,7 @@ function setup() {
   fs.symlinkSync(process.execPath, path.join(BIN, 'node'));
 }
 
-function run(name, overrides = {}, { dismiss, approveAllowed = 'true' } = {}) {
+function run(name, overrides = {}, { patch, approveAllowed = 'true' } = {}) {
   const dir = path.join(TMP, name);
   const fix = path.join(dir, 'fix');
   const ws = path.join(dir, 'ws');
@@ -183,8 +182,8 @@ function run(name, overrides = {}, { dismiss, approveAllowed = 'true' } = {}) {
   const runtime = path.join(ws, '.agent-review-approve-runtime/dist');
   for (const d of [fix, runner, runtime]) fs.mkdirSync(d, { recursive: true });
   const target = path.join(runtime, 'agent-review.cjs');
-  if (dismiss === undefined) fs.copyFileSync(DIST, target);
-  else fs.writeFileSync(target, fakeRuntime(dismiss));
+  if (patch === undefined) fs.copyFileSync(DIST, target);
+  else fs.writeFileSync(target, fakeRuntime(patch));
   const { config, ...rest } = overrides;
   const files = { ...defaults(), ...rest };
   if (config !== undefined) {
@@ -311,21 +310,31 @@ const SCENARIOS = {
       assert.match(o.summary, /Not approving PR #7: could not read the PR labels/);
     },
   ],
-  'an unreadable label owner never approves': [
-    { 'labels.json': JSON.stringify([{ name: LABEL }]), 'fail-timeline': '' },
+  'a label whose owner cannot be read counts as a person\'s: no approval, it stays, and every bot approval is taken back': [
+    { 'labels.json': JSON.stringify([{ name: LABEL }]), 'fail-timeline': '', 'reviews.json': REVIEWS },
     (o) => {
       notApproved(o);
       noLabelWrites(o);
+      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.match(o.summary, /label=keep, dismiss bot approvals=all\. a person added the needs-human-approval label/);
     },
   ],
-  'a label already on the PR is not added again when its owner is unreadable': [
+  'a label whose owner cannot be read is not added again when a PCI path needs a person': [
     { config: PCI, 'labels.json': JSON.stringify([{ name: 'Needs-Human-Approval' }]), 'fail-timeline': '', 'reviews.json': REVIEWS },
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.match(o.summary, /label=add/);
-      assert.match(o.summary, /The needs-human-approval label is already on PR #7/);
+      assert.match(o.summary, /label=keep, dismiss bot approvals=all\./);
       assert.deepEqual(o.dismissed, [11, 14]);
+    },
+  ],
+  'a report for an older head with unreadable rules dismisses only bot approvals of other heads': [
+    { 'comments.json': JSON.stringify([{ user: { login: BOT }, body: report({ head: OLD }) }]), 'config-status': '500', 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      noLabelWrites(o);
+      assert.deepEqual(o.dismissed, [11]);
+      assert.match(o.summary, /label=keep, dismiss bot approvals=stale\. could not check the human approval rules/);
     },
   ],
   'label add: a PCI path adds the label and dismisses every bot approval': [
@@ -519,9 +528,19 @@ for (const value of [true, '', 'bogus']) {
       notApproved(o);
       assert.deepEqual(o.dismissed, [11, 14]);
     },
-    { dismiss: value },
+    { patch: { dismissBotApprovals: value } },
   ];
 }
+SCENARIOS['a runtime from another version that asks to add a label already on the PR never adds it again'] = [
+  { config: PCI, 'labels.json': JSON.stringify([{ name: LABEL }]), 'timeline.json': JSON.stringify([labeled('alice')]) },
+  (o) => {
+    notApproved(o);
+    noLabelWrites(o);
+    assert.match(o.summary, /label=add/);
+    assert.match(o.summary, /The needs-human-approval label is already on PR #7/);
+  },
+  { patch: { label: 'add' } },
+];
 
 test('the approve action script, run against a fake gh', { skip: SKIP, concurrency: true }, async (t) => {
   setup();

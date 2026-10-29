@@ -187,7 +187,7 @@ Merge order: this PR is stacked on #33, so it merges after #33. Retarget it to `
 **Amendment, 2026-10-28 (build).** These changes were made during the build. Where they disagree with the text above, they win.
 - **Dismissals.** `dismissBotApprovals` is `all`, `stale` or `none`.
   - `all` dismisses every approval the bot gave the PR. It applies when the report or the repo rules say a person is needed. That includes a report for another head when the action's own rules re-check says so; the label is added then too. This replaces "When it can't judge ... it leaves the label alone" in section 6 for that case.
-  - `all` also applies when a person added the label, even when the report can't be judged or the rules can't be read.
+  - `all` also applies when a person added the label, even when the report can't be judged or the rules can't be read. A label whose adder can't be read counts as a person's.
   - `stale` applies when the rules can't be read, nothing says a person is needed, and no person added the label. Only bot approvals of other commits are dismissed.
   - `none` applies in every other case.
   - An unknown value counts as `all`.

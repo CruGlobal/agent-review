@@ -172,12 +172,22 @@ test('decide: not judged, with rules that need a person, adds the label and dism
 
 const NO_PERSON_RULES = [NONE, { error: 'boom' }, undefined, { required: 'true', reasons: ['x'] }, { required: true, reasons: [1] }];
 
-test('decide: not judged, with rules that need no person or cannot be read, keeps the bot label and dismisses nothing', () => {
+test('decide: not judged, with rules that need no person, keeps the bot label and dismisses nothing', () => {
   for (const o of NOT_JUDGED) {
-    for (const rules of NO_PERSON_RULES) {
+    for (const labels of [[], [LABEL]]) {
+      const d = decide({ ...o, rules: NONE, labels, labelOwner: 'bot' });
+      assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none'], JSON.stringify(o));
+    }
+  }
+});
+
+test('decide: not judged, with rules that cannot be read, keeps the bot label and dismisses bot approvals of other commits', () => {
+  for (const o of NOT_JUDGED) {
+    for (const rules of NO_PERSON_RULES.slice(1)) {
       for (const labels of [[], [LABEL]]) {
         const d = decide({ ...o, rules, labels, labelOwner: 'bot' });
-        assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none'], JSON.stringify([o, rules]));
+        assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'stale'], JSON.stringify([o, rules]));
+        assert.match(d.reason, /^could not check the human approval rules: /, JSON.stringify([o, rules]));
       }
     }
   }
@@ -211,11 +221,11 @@ test('decide: a label not owned by the bot wins over unreadable rules', () => {
   }
 });
 
-test('decide: a wrong-head report changes nothing unless the rules need a person (Review Focus 4)', () => {
+test('decide: a wrong-head report dismisses nothing unless the rules need a person or cannot be read (Review Focus 4)', () => {
   const stale = report({ head: 'ffff' + HEAD.slice(4) });
-  for (const rules of [NONE, { error: 'boom' }]) {
+  for (const [rules, dismiss] of [[NONE, 'none'], [{ error: 'boom' }, 'stale']]) {
     const d = decide({ report: stale, rules, labels: [LABEL], labelOwner: 'bot' });
-    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none'], JSON.stringify(rules));
+    assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', dismiss], JSON.stringify(rules));
   }
   const needed = decide({ report: stale, rules: PCI_RULES });
   assert.deepEqual([needed.approve, needed.label, needed.dismissBotApprovals], [false, 'add', 'all']);
@@ -339,7 +349,8 @@ test('decide: dismissBotApprovals is all when a person is needed or added the la
     ['a person added the label', { labels: [LABEL], labelOwner: 'person' }, 'all'],
     ['a person added the label to a failing report', { report: failing, labels: [LABEL], labelOwner: 'person' }, 'all'],
     ['approves', {}, 'none'],
-    ['not judged', { report: report({ head: 'ffff' + HEAD.slice(4) }), rules: { error: 'boom' } }, 'none'],
+    ['not judged', { report: report({ head: 'ffff' + HEAD.slice(4) }) }, 'none'],
+    ['not judged, rules unreadable', { report: report({ head: 'ffff' + HEAD.slice(4) }), rules: { error: 'boom' } }, 'stale'],
     ['not judged, rules need a person', { report: report({ head: 'ffff' + HEAD.slice(4) }), rules: { required: true, reasons: ['r'] } }, 'all'],
   ];
   for (const [name, o, want] of cases) assert.equal(decide(o).dismissBotApprovals, want, name);
