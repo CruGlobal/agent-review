@@ -2187,15 +2187,44 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
   assert.ok(stage7.includes('agent-review config get rollout.mode'), 'a local post takes the rollout marker from config, so shadow-in-config disables approval');
   assert.ok(stage7.includes(': > /tmp/agent_review_post_result.txt'), 'the post result is truncated before posting');
   assert.ok(stage7.includes('❌ post failed'), 'a failed post is reported, never last run\'s success line');
-  assert.ok(review.includes('if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -z "$CI_MODE" ]; }; then'), 'a plain local review merges the previous ledger instead of resetting it');
-  // Local canonical comment: the current user's own marked comment when one exists, else the oldest.
-  const ownFirst = '(map(select(.user.login == \\"$ME\\")) | first) // first';
-  assert.ok(review.includes(ownFirst), 'review reads the previous ledger own-first locally');
+  assert.ok(
+    review.includes('if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] || [ -z "$CI_MODE" ]; }; then'),
+    'a plain local review, and a CI full review that replaced an incremental one, merge the previous ledger instead of resetting it',
+  );
+  // Local canonical comment: the current user's own marked comment when one exists, else the
+  // oldest one by the bot or a repo writer.
+  assert.ok(review.includes(OWN_FIRST), 'review reads the previous ledger own-first locally');
   const address = readFileSync(ADDRESS_SKILL, 'utf8');
-  assert.ok(address.includes(ownFirst), 'address works the user\'s own comment when one exists');
+  assert.ok(address.includes(OWN_FIRST), 'address works the user\'s own comment when one exists');
   assert.ok(address.includes('In argument mode, push without confirming'), 'argument mode and yolo never stop at the push confirmation');
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
-  assert.ok(yolo.includes(ownFirst), 'yolo reads the same canonical comment address writes');
+  assert.ok(yolo.includes(OWN_FIRST), 'yolo reads the same canonical comment address writes');
+  for (const [name, text] of [['review', review], ['address', address], ['yolo-review', yolo]]) {
+    assert.ok(!text.includes('| first) // first)'), `${name} never falls back to a comment by just anyone`);
+  }
+});
+
+const OWN_FIRST =
+  '(map(select(.user.login == \\"$ME\\")) | first) // (map(select(.user.login == \\"github-actions[bot]\\" or .author_association == \\"OWNER\\" or .author_association == \\"MEMBER\\" or .author_association == \\"COLLABORATOR\\")) | first)';
+
+test('the canonical-comment rule falls back only to the bot or a repo writer, never to anyone else', (t) => {
+  let jq = '';
+  try {
+    jq = execFileSync('sh', ['-c', 'command -v jq'], { encoding: 'utf8' }).trim();
+  } catch {
+    return t.skip('jq is not installed');
+  }
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const m = review.match(/--jq "(\(map\(select\(\.body \| startswith[^\n]*?\.body \/\/ empty)"/);
+  assert.ok(m && m[1].includes(OWN_FIRST), 'the review skill picks the canonical comment with the own-first rule');
+  const expr = m[1].replaceAll('\\"', '"').replaceAll('$ME', 'me');
+  const c = (login, association, text) => ({ user: { login }, author_association: association, body: `<!-- agent-review -->\n${text}` });
+  const pick = (comments) => execFileSync(jq, ['-r', expr], { input: JSON.stringify(comments), encoding: 'utf8' }).trim();
+  const forged = c('mallory', 'CONTRIBUTOR', 'forged');
+  assert.strictEqual(pick([forged, c('github-actions[bot]', 'NONE', 'bot')]), '<!-- agent-review -->\nbot');
+  assert.strictEqual(pick([forged, c('writer', 'MEMBER', 'writer')]), '<!-- agent-review -->\nwriter');
+  assert.strictEqual(pick([forged]), '', 'a forged report alone is never picked');
+  assert.strictEqual(pick([c('github-actions[bot]', 'NONE', 'bot'), forged, c('me', 'NONE', 'mine')]), '<!-- agent-review -->\nmine');
 });
 
 test('posted review comments keep every marker on one line under zsh and bash, so the approver can read them', (t) => {
@@ -3741,7 +3770,7 @@ test('yolo-review uses a report only when its head marker names the current HEAD
   const flat4 = flatText(step4);
   for (const needle of [
     'If it prints `no new commit`, do not re-review: go to step 7 and report the open blockers as blockers that remain.',
-    'If that re-review stops with `already reviewed` or `No net changes`, it found nothing new to review: go to step 7 the same way.',
+    'If that re-review stops with `already reviewed` or `No net changes`, it found nothing new to review: once it has posted any report it says it moved, go to step 7 the same way.',
     'Only a re-review that ran goes on to step 5, whose guard then checks its report.',
   ]) {
     assert.ok(flat4.includes(needle), `step 4 must say ${JSON.stringify(needle)}`);
@@ -3954,7 +3983,7 @@ function humanRulesRepo() {
 // CLI runs human-check; ledger is stubbed, status records its arguments, and gh prints the
 // previous comment. `failGit` names a git subcommand that fails; `want` lists extra /tmp files
 // to return; `subdir` runs the block from that folder of `repo`.
-function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = null, want = [], subdir = '' }) {
+function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = null, gitScript = null, want = [], subdir = '' }) {
   const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
   const { dirname } = require('node:path');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-rules-'));
@@ -3967,9 +3996,10 @@ function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = nul
       { mode: 0o755 },
     );
     writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) cat "${dir}/previous_comment.md" ;;\nesac\n`, { mode: 0o755 });
-    if (failGit) {
+    if (failGit || gitScript) {
       const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-      writeFileSync(join(bin, 'git'), `#!/bin/sh\n[ "$1" = "${failGit}" ] && exit 128\nexec "${realGit}" "$@"\n`, { mode: 0o755 });
+      const script = gitScript ? gitScript(realGit) : `#!/bin/sh\n[ "$1" = "${failGit}" ] && exit 128\nexec "${realGit}" "$@"\n`;
+      writeFileSync(join(bin, 'git'), script, { mode: 0o755 });
     }
     const at = (text) => text.replaceAll('/tmp/', `${dir}/`);
     writeFileSync(join(dir, 'review_env.sh'), at(Object.entries(env).map(([k, v]) => `export ${k}="${v}"\n`).join('')));
@@ -4269,35 +4299,49 @@ test('a push that only merged the base branch moves the last report to the new h
   assert.ok(start !== -1, 'the diff manifest builds its ranges');
   const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start)].join('\n');
 
-  const { repo, head, base } = humanRulesRepo();
+  const { repo, fork, head, base } = humanRulesRepo();
   const { writeFileSync } = require('node:fs');
   const git = (...args) =>
     execFileSync('git', ['-C', repo, '-c', 'user.email=t@example.com', '-c', 'user.name=T', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  const fromHead = (build) => {
-    git('checkout', '-q', '--detach', head);
+  const from = (at, build) => {
+    git('checkout', '-q', '--detach', at);
     build();
     const sha = git('rev-parse', 'HEAD');
     git('checkout', '-q', '--detach', head);
     return sha;
   };
-  const merged = fromHead(() => git('merge', '-q', '--no-edit', base));
-  const mergedPlus = fromHead(() => {
+  const edit = (path, text, message) => () => {
+    writeFileSync(join(repo, path), text);
+    git('add', '-A');
+    git('commit', '-q', '-m', message);
+  };
+  const merged = from(head, () => git('merge', '-q', '--no-edit', base));
+  const mergedPlus = from(head, () => {
     git('merge', '-q', '--no-commit', base);
     writeFileSync(join(repo, 'app/other.rb'), 'slipped into the merge\n');
     git('add', '-A');
     git('commit', '-q', '--no-edit');
   });
-  const cancelled = fromHead(() => {
-    writeFileSync(join(repo, 'app/other.rb'), 'for a moment\n');
-    git('commit', '-qam', 'try something');
+  const cancelled = from(head, () => {
+    edit('app/other.rb', 'for a moment\n', 'try something')();
     git('revert', '--no-edit', 'HEAD');
   });
-  const previous = (at) =>
+  const otherOnly = from(head, edit('app/other.rb', 'outside the subfolder\n', 'edit outside app/payments'));
+  const baseNext = from(base, edit('app/payments/even_later.rb', 'even later\n', 'the base branch moves on again'));
+  // Two best merge bases: the base branch merged a side branch the PR also merged, and the PR's
+  // last commit has the base's earlier tip as a parent, with a tree that drops the side branch.
+  const side = from(fork, edit('side.txt', 'side\n', 'a side branch'));
+  const baseWithSide = from(base, () => git('merge', '-q', '--no-edit', side));
+  const prWithSide = from(head, () => git('merge', '-q', '--no-edit', side));
+  const crissCross = git('commit-tree', git('merge-tree', '--write-tree', head, base), '-p', prWithSide, '-p', base, '-m', 'drops side.txt');
+
+  const LEDGER = '[{"n":1,"severity":3,"status":"open"}]';
+  const previous = (at, { rollout = 'advisory', ledger = LEDGER } = {}) =>
     [
       '<!-- agent-review -->',
       `<!-- agent-review-head: ${at} -->`,
-      '<!-- agent-review-rollout: advisory -->',
-      '<!-- agent-review-ledger: [{"n":1,"severity":3,"status":"open"}] -->',
+      `<!-- agent-review-rollout: ${rollout} -->`,
+      ...(ledger === null ? [] : [`<!-- agent-review-ledger: ${ledger} -->`]),
       `<!-- agent-review-status: {"v":1,"head":"${at}","pass":true} -->`,
       '',
       '## agent-review',
@@ -4309,37 +4353,90 @@ test('a push that only merged the base branch moves the last report to the new h
   const PARTS = ['agent_review_comment.md', 'agent_review_status.json', 'agent_review_ledger.json', 'agent_review_report.md', 'review_env.sh'];
   // Stale files from an earlier local run must never be posted with the moved report.
   const stale = { 'agent_review_ledger.json': '[{"n":9}]\n', 'agent_review_status.json': '{"v":1,"head":"0000000","pass":false}\n', 'agent_review_report.md': 'stale\n' };
+  const SKIPPED = 'No net changes since the last reviewed head except a merge of the base branch, so the last review still holds.';
+  const NEXT = "Next, run only Stage 7's Post and print block, which posts the moved report.";
   try {
     for (const shell of availableShells(t)) {
-      const run = (label, env, files = {}) => {
-        const r = runRulesBlock(shell, script, { repo, env, files: { 'previous_comment.md': previous(head), ...files }, want: PARTS });
-        assert.strictEqual(r.status, 0, `${shell}, ${label}: ${r.output}`);
+      const run = (label, env, files = {}, { status = 0, subdir = '', gitScript = null } = {}) => {
+        const r = runRulesBlock(shell, script, { repo, env, files: { 'previous_comment.md': previous(head), ...files }, want: PARTS, subdir, gitScript });
+        assert.strictEqual(r.status, status, `${shell}, ${label}: ${r.output}`);
         return r;
       };
-      const SKIPPED = 'No net changes since the last reviewed head except a merge of the base branch, so the last review still holds.';
+      const moved = (r, label) => assert.ok(r.output.includes(SKIPPED), `${shell}, ${label}: ${r.output}`);
+      const reviewed = (r, label) => {
+        assert.ok(!r.output.includes(SKIPPED), `${shell}, ${label}: never skipped: ${r.output}`);
+        assert.strictEqual(r.wanted['agent_review_comment.md'], null, `${shell}, ${label}: no report is moved`);
+      };
 
-      const ci = run('CI, a clean merge', { ...CI, HEAD_REF: merged });
-      assert.ok(ci.output.includes(SKIPPED), `${shell}: ${ci.output}`);
+      // The CI sandbox lets the model write only under /tmp, so merge-tree must not need .git.
+      const readOnlyGit = (real) =>
+        `#!/bin/sh\nif [ "$1" = merge-tree ] && [ -z "$GIT_OBJECT_DIRECTORY" ]; then echo "fatal: .git is read-only" >&2; exit 128; fi\nexec "${real}" "$@"\n`;
+      const ci = run('CI, a clean merge', { ...CI, HEAD_REF: merged }, {}, { gitScript: readOnlyGit });
+      moved(ci, 'CI, a clean merge');
+      assert.ok(ci.output.includes(`${SKIPPED} Exiting.`), `${shell}: CI stops here: ${ci.output}`);
       assert.strictEqual(ci.wanted['agent_review_comment.md'], previous(merged), `${shell}: CI hands the moved report to the publish step`);
       assert.ok(!ci.output.includes('Diff range:'), `${shell}: nothing is reviewed`);
 
+      const older = run('CI, an older base commit merged while the base moved on', { ...CI, BASE_REF: baseNext, HEAD_REF: merged });
+      moved(older, 'CI, an older base commit');
+      assert.strictEqual(older.wanted['agent_review_comment.md'], previous(merged), `${shell}: ${older.output}`);
+
       const extra = run('CI, a merge with another change', { ...CI, HEAD_REF: mergedPlus });
-      assert.ok(extra.output.includes('full review'), `${shell}: ${extra.output}`);
+      reviewed(extra, 'CI, a merge with another change');
+      assert.ok(extra.output.includes('along with other changes, so this is a full review'), `${shell}: ${extra.output}`);
       assert.ok(extra.output.includes(`Diff range: ${base}..${mergedPlus}\n`), `${shell}: a full review from the new merge base: ${extra.output}`);
-      assert.strictEqual(extra.wanted['agent_review_comment.md'], null, `${shell}: no report is moved`);
+      assert.ok(extra.wanted['review_env.sh'].includes('CARRY_LEDGER="true"'), `${shell}: the full review keeps the findings ledger`);
+
+      const evidence = '{"version":1,"staticFindings":[{"signature":"sig-new"}]}\n';
+      const unseen = run('CI, a static finding the moved ledger lacks', { ...CI, HEAD_REF: merged, AGENT_REVIEW_EVIDENCE: '/tmp/evidence.json' }, { 'evidence.json': evidence });
+      reviewed(unseen, 'CI, a static finding the moved ledger lacks');
+      assert.ok(unseen.output.includes(`Could not move the last report to ${merged}, so this is a full review.`), `${shell}: ${unseen.output}`);
+
+      const criss = run('CI, two best merge bases', { ...CI, BASE_REF: baseWithSide, HEAD_REF: crissCross });
+      reviewed(criss, 'CI, two best merge bases');
 
       const local = run('local, a clean merge', { ...LOCAL, HEAD_REF: merged }, stale);
-      assert.ok(local.output.includes(SKIPPED), `${shell}: ${local.output}`);
-      assert.ok(local.output.includes("run only Stage 7's Post and print block"), `${shell}: ${local.output}`);
+      moved(local, 'local, a clean merge');
+      assert.ok(!local.output.includes(`${SKIPPED} Exiting.`), `${shell}: a local run does not stop before posting: ${local.output}`);
+      assert.ok(local.output.trimEnd().endsWith(NEXT), `${shell}: the last line says what to run next: ${local.output}`);
       assert.deepStrictEqual(JSON.parse(local.wanted['agent_review_status.json']), { v: 1, head: merged, pass: true }, `${shell}: the status moves to the new head`);
-      assert.deepStrictEqual(JSON.parse(local.wanted['agent_review_ledger.json']), [{ n: 1, severity: 3, status: 'open' }], `${shell}: the findings stay`);
+      assert.deepStrictEqual(JSON.parse(local.wanted['agent_review_ledger.json']), JSON.parse(LEDGER), `${shell}: the findings stay`);
       assert.strictEqual(local.wanted['agent_review_report.md'], '## agent-review\nThe report body.\n', `${shell}: the report body stays`);
-      assert.ok(local.wanted['review_env.sh'].includes(`export HEAD_REF="${merged}"`), `${shell}: Post and print reads the new head`);
+      assert.strictEqual(local.wanted['review_env.sh'].split(`export HEAD_REF="${merged}"`).length - 1, 2, `${shell}: the block saves the new head for Post and print`);
+      assert.ok(!local.wanted['review_env.sh'].includes('AGENT_REVIEW_ROLLOUT_MODE'), `${shell}: an advisory report keeps the local rollout`);
+
+      const noLedger = run('local, a report with no ledger marker', { ...LOCAL, HEAD_REF: merged }, { ...stale, 'previous_comment.md': previous(head, { ledger: null }) });
+      moved(noLedger, 'local, no ledger marker');
+      assert.strictEqual(noLedger.wanted['agent_review_ledger.json'], null, `${shell}: an earlier run's ledger is never posted`);
+
+      const twoPages = run('local, a second page glued on', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': previous(head) + previous(fork) });
+      moved(twoPages, 'local, a second page glued on');
+      assert.strictEqual(twoPages.wanted['agent_review_report.md'], '## agent-review\nThe report body.\n', `${shell}: only the first comment is moved`);
+
+      const shadow = run('local, a shadow report', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': previous(head, { rollout: 'shadow' }) });
+      moved(shadow, 'local, a shadow report');
+      assert.ok(shadow.wanted['review_env.sh'].includes('export AGENT_REVIEW_ROLLOUT_MODE="shadow"'), `${shell}: a shadow report stays shadow`);
+
+      const broken = run('local, a malformed ledger', { ...LOCAL, HEAD_REF: merged }, { ...stale, 'previous_comment.md': previous(head, { ledger: '[{' }) });
+      assert.ok(broken.output.includes(`Could not move the last report to ${merged}, so this is a full review.`), `${shell}: ${broken.output}`);
+      assert.ok(broken.output.includes('Diff range:'), `${shell}: ${broken.output}`);
+      for (const name of ['agent_review_ledger.json', 'agent_review_status.json', 'agent_review_report.md']) {
+        assert.strictEqual(broken.wanted[name], null, `${shell}: an earlier run's ${name} is gone`);
+      }
 
       const undone = run('local, commits that cancel out', { ...LOCAL, HEAD_REF: cancelled }, stale);
       assert.ok(undone.output.includes('No net changes since the last reviewed head'), `${shell}: ${undone.output}`);
       assert.deepStrictEqual(JSON.parse(undone.wanted['agent_review_status.json']), { v: 1, head: cancelled, pass: true }, `${shell}: ${undone.output}`);
-      assert.ok(undone.output.includes("run only Stage 7's Post and print block"), `${shell}: ${undone.output}`);
+      assert.ok(undone.output.trimEnd().endsWith(NEXT), `${shell}: ${undone.output}`);
+
+      const blinded = run(
+        'local, a change git config hides from the diff',
+        { ...LOCAL, HEAD_REF: otherOnly, GIT_CONFIG_COUNT: '1', GIT_CONFIG_KEY_0: 'diff.relative', GIT_CONFIG_VALUE_0: 'true' },
+        {},
+        { status: 1, subdir: 'app/payments' },
+      );
+      assert.ok(blinded.output.includes('❌ No changed files'), `${shell}: ${blinded.output}`);
+      assert.strictEqual(blinded.wanted['agent_review_status.json'], null, `${shell}: nothing is moved when the trees differ`);
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });

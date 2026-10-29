@@ -124,10 +124,11 @@ REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner
 
 # Canonical report: this user's own marked comment when one exists (a local review or
 # re-review writes it), else the oldest marked comment (same rule as the review skill).
-# Local canonical comment: this user's own marked comment when one exists, else the oldest.
+# Local canonical comment: this user's own marked comment when one exists, else the oldest
+# one by the bot or a repo writer. Anyone else's could be a forged report.
 ME=$(gh api user --jq .login 2>/dev/null || echo "")
 COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-  --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .id // empty" | head -n1)
+  --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | first)) | .id // empty" | head -n1)
 [ -n "$COMMENT_ID" ] || { echo "❌ No marked review report on PR #$PR_NUMBER."; exit 1; }
 
 gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > /tmp/address_comment.md
