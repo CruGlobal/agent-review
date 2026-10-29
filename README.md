@@ -116,10 +116,11 @@ bot gave the PR when:
 - the report for the PR's newest commit says a person is needed;
 - the repo rules say so, even when the report covers an older commit or the CI review failed,
   because the job checks the rules itself;
-- a person added the `needs-human-approval` label.
+- a person added the `needs-human-approval` label, even when the report covers an older commit
+  or the job cannot read the rules.
 
-If the job cannot read the rules and nothing says a person is needed, it takes back only the
-bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's
+If the job cannot read the rules and none of the above applies, it takes back only the bot's
+approvals of older commits. Otherwise it takes back nothing. It never touches a person's
 review. It approves only the exact commit it judged, and checks that the head did not move first.
 
 **Irreversible changes.** A change that drops a column, deletes data or sends email is now a

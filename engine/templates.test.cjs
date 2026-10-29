@@ -4356,8 +4356,8 @@ test('the human approval spec records the build amendment before Left to the bui
   for (const needle of [
     '`dismissBotApprovals` is `all`, `stale` or `none`.',
     'That includes a report for another head when the action\'s own rules re-check says so',
-    '`all` also applies when a person added the label.',
-    '`stale` applies when the rules can\'t be read and nothing says a person is needed. Only bot approvals of other commits are dismissed.',
+    '`all` also applies when a person added the label, even when the report can\'t be judged or the rules can\'t be read.',
+    '`stale` applies when the rules can\'t be read, nothing says a person is needed, and no person added the label. Only bot approvals of other commits are dismissed.',
     'An unknown value counts as `all`.',
     'blocks approval only in repos with rules, through `human-check --incomplete`',
     'with a head re-check just before approving',
@@ -4398,8 +4398,8 @@ test('README lists the person-must-approve rule, drops irreversible from the sto
     'Each time the approval job runs, it takes back (dismisses) every approval the bot gave the PR when:',
     "- the report for the PR's newest commit says a person is needed;",
     '- the repo rules say so, even when the report covers an older commit or the CI review failed, because the job checks the rules itself;',
-    '- a person added the `needs-human-approval` label.',
-    "If the job cannot read the rules and nothing says a person is needed, it takes back only the bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's review.",
+    '- a person added the `needs-human-approval` label, even when the report covers an older commit or the job cannot read the rules.',
+    "If the job cannot read the rules and none of the above applies, it takes back only the bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's review.",
   ]) {
     assert.ok(sec.includes(part), `the README says ${JSON.stringify(part)}`);
   }

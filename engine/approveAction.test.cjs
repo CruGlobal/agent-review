@@ -370,6 +370,34 @@ const SCENARIOS = {
       assert.match(o.summary, /a person added the needs-human-approval label/);
     },
   ],
+  'a label a person added takes back every bot approval even when the report covers an older head': [
+    {
+      'comments.json': JSON.stringify([{ user: { login: BOT }, body: report({ head: OLD }) }]),
+      'labels.json': JSON.stringify([{ name: LABEL }]),
+      'timeline.json': JSON.stringify([labeled('alice')]),
+      'reviews.json': REVIEWS,
+    },
+    (o) => {
+      notApproved(o);
+      noLabelWrites(o);
+      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.match(o.summary, /label=keep, dismiss bot approvals=all\. a person added the needs-human-approval label/);
+    },
+  ],
+  'a label a person added takes back every bot approval even when the rules cannot be read': [
+    {
+      'config-status': '500',
+      'labels.json': JSON.stringify([{ name: LABEL }]),
+      'timeline.json': JSON.stringify([labeled('alice')]),
+      'reviews.json': REVIEWS,
+    },
+    (o) => {
+      notApproved(o);
+      noLabelWrites(o);
+      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.match(o.summary, /label=keep, dismiss bot approvals=all\. a person added the needs-human-approval label/);
+    },
+  ],
   'label remove: a bot-owned label comes off and the PR is approved': [
     {
       'labels.json': JSON.stringify([{ name: 'bug' }, { name: LABEL }]),

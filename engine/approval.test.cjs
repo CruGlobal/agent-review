@@ -170,13 +170,43 @@ test('decide: not judged, with rules that need a person, adds the label and dism
   }
 });
 
-test('decide: not judged, with rules that need no person or cannot be read, keeps the label and dismisses nothing', () => {
+const NO_PERSON_RULES = [NONE, { error: 'boom' }, undefined, { required: 'true', reasons: ['x'] }, { required: true, reasons: [1] }];
+
+test('decide: not judged, with rules that need no person or cannot be read, keeps the bot label and dismisses nothing', () => {
   for (const o of NOT_JUDGED) {
-    for (const rules of [NONE, { error: 'boom' }, undefined, { required: 'true', reasons: ['x'] }, { required: true, reasons: [1] }]) {
-      for (const labelOwner of ['bot', 'person']) {
-        const d = decide({ ...o, rules, labels: [LABEL], labelOwner });
+    for (const rules of NO_PERSON_RULES) {
+      for (const labels of [[], [LABEL]]) {
+        const d = decide({ ...o, rules, labels, labelOwner: 'bot' });
         assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'none'], JSON.stringify([o, rules]));
       }
+    }
+  }
+});
+
+test('decide: not judged, a label not owned by the bot takes back every bot approval', () => {
+  for (const o of NOT_JUDGED) {
+    for (const rules of NO_PERSON_RULES) {
+      for (const labelOwner of ['person', 'none']) {
+        const d = decide({ ...o, rules, labels: [LABEL], labelOwner });
+        assert.deepEqual(
+          [d.approve, d.label, d.dismissBotApprovals, d.reason],
+          [false, 'keep', 'all', `a person added the ${LABEL} label`],
+          JSON.stringify([o, rules, labelOwner]),
+        );
+      }
+    }
+  }
+});
+
+test('decide: a label not owned by the bot wins over unreadable rules', () => {
+  for (const rules of NO_PERSON_RULES.slice(1)) {
+    for (const labelOwner of ['person', 'none']) {
+      const d = decide({ rules, labels: [LABEL], labelOwner });
+      assert.deepEqual(
+        [d.approve, d.label, d.dismissBotApprovals, d.reason],
+        [false, 'keep', 'all', `a person added the ${LABEL} label`],
+        JSON.stringify([rules, labelOwner]),
+      );
     }
   }
 });
