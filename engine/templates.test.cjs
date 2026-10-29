@@ -3925,10 +3925,11 @@ function humanRulesRepo() {
   write('app/payments/caf\u00e9.rb', 'card\n');
   write('app/other.rb', 'other\n');
   const fork = commit('base');
+  write('app/other.rb', 'other 2\n');
+  const mid = commit('the PR, first commit');
   mkdirSync(join(repo, 'lib'));
   git('mv', 'app/payments/charge.rb', 'lib/charge.rb');
   write('app/payments/caf\u00e9.rb', 'card 2\n');
-  write('app/other.rb', 'other 2\n');
   write('.claude/review/config.yml', 'human_approval:\n  paths: []\n');
   const head = commit('the PR');
   const offFork = (message, edit) => {
@@ -3946,7 +3947,7 @@ function humanRulesRepo() {
   git('checkout', '-q', head);
   const blob = git('rev-parse', `${blobGone}:.claude/review/config.yml`);
   unlinkSync(join(repo, '.git/objects', blob.slice(0, 2), blob.slice(2)));
-  return { repo, fork, head, base, badConfig, noConfig, blobGone, lonely };
+  return { repo, fork, mid, head, base, badConfig, noConfig, blobGone, lonely };
 }
 
 // Runs a review-skill block in `repo` with its /tmp files moved to a private directory. The real
@@ -4113,6 +4114,7 @@ test("the status block checks the base commit's human approval rules against the
   const pr = (from) => ({ BASE_REF: from, HEAD_REF: head, FULL_RANGE: `${from}..${head}` });
   const cases = [
     ['a PR', pr(base), PCI_RULES],
+    ['a PR range from the merge base reads the rules at the base commit', { ...pr(noConfig), FULL_RANGE: `${fork}..${head}` }, { required: false, reasons: [] }],
     ['a local range review', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: `${fork}..HEAD` }, PCI_RULES],
     ['no base commit', { BASE_REF: '', HEAD_REF: '', FULL_RANGE: '..HEAD' }, unread('no base commit')],
     ['no saved range', {}, unread('no base commit')],
@@ -4209,32 +4211,75 @@ test('both zero-risk skip paths check the repo rules and carry the needs-a-perso
   }
 });
 
-test("the card scan reads the PR's own changes from the merge base under bash and zsh", (t) => {
+test("PR diffs start at the merge base, not the base branch's tip, under bash and zsh", (t) => {
   const blocks = bashBlockList(stageSlice(readFileSync(REVIEW_SKILL, 'utf8'), '### Gather PR Context & Diff Manifest', '### Build the Review Plan & Load Evidence'));
   assert.strictEqual(blocks.length, 1, 'the diff manifest is one block');
   const lines = blocks[0].split('\n');
-  const start = lines.findIndex((l) => l.startsWith('# The card scan reads'));
-  const end = lines.findIndex((l, i) => i > start && l === 'fi');
-  const fullDiff = lines.findIndex((l) => l.includes('> /tmp/pr_full_diff.txt'));
-  assert.ok(start !== -1 && end > start, 'the diff-manifest block writes the card-scan diff');
-  assert.ok(fullDiff !== -1 && fullDiff < start, 'the card-scan diff follows the full diff it falls back to');
-  const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start, end + 1)].join('\n');
+  const start = lines.indexOf('# --- Build the diff manifest the whole review runs on ---');
+  const end = lines.indexOf('if [ ! -s /tmp/changed_files.txt ]; then');
+  assert.ok(start !== -1 && end > start, 'the diff manifest writes every diff before its empty-diff check');
+  const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start, end)].join('\n');
+  const DIFFS = ['changed_files.txt', 'pr_diff.txt', 'full_changed_files.txt', 'pr_full_diff.txt', 'pr_card_scan_diff.txt'];
 
-  const { repo, head, base, lonely } = humanRulesRepo();
-  const full = 'the two-dot full diff\n';
+  const { repo, fork, mid, head, base, lonely } = humanRulesRepo();
+  const names = (from) => execFileSync('git', ['-C', repo, 'diff', '--name-only', from, head], { encoding: 'utf8' });
   try {
     for (const shell of availableShells(t)) {
-      const scanDiff = (env) => {
-        const run = runRulesBlock(shell, script, { repo, env, files: { 'pr_full_diff.txt': full }, want: ['pr_card_scan_diff.txt'] });
-        assert.strictEqual(run.status, 0, `${shell}: ${run.output}`);
-        return run.wanted['pr_card_scan_diff.txt'];
+      const run = (label, env, files = {}) => {
+        const r = runRulesBlock(shell, script, { repo, env, files, want: DIFFS });
+        assert.strictEqual(r.status, 0, `${shell}, ${label}: ${r.output}`);
+        return r;
       };
-      const pr = scanDiff({ BASE_REF: base, HEAD_REF: head });
-      assert.ok(pr.includes('lib/charge.rb') && pr.includes('app/other.rb'), `${shell}: the PR's own changes: ${pr}`);
-      assert.ok(!pr.includes('later.rb'), `${shell}: no base-branch commit after the fork: ${pr}`);
-      assert.strictEqual(scanDiff({ BASE_REF: '', HEAD_REF: '' }), full, `${shell}: a range review already diffs from the merge base`);
-      assert.strictEqual(scanDiff({ BASE_REF: lonely, HEAD_REF: head }), full, `${shell}: no merge base falls back to the full diff`);
+      const ownChanges = (r, label, diffs) => {
+        for (const name of diffs) {
+          const text = r.wanted[name];
+          assert.ok(text.includes('lib/charge.rb') && text.includes('app/other.rb'), `${shell}, ${label}: ${name} has the PR's own changes`);
+          assert.ok(!text.includes('later.rb'), `${shell}, ${label}: ${name} has no base-branch commit after the fork`);
+        }
+      };
+
+      const full = run('a full review', { BASE_REF: base, HEAD_REF: head });
+      assert.ok(full.output.includes(`Diff range: ${fork}..${head}\n`), `${shell}: ${full.output}`);
+      assert.ok(full.output.includes(`Full PR range: ${fork}..${head}\n`), `${shell}: ${full.output}`);
+      ownChanges(full, 'a full review', DIFFS);
+
+      const incremental = run(
+        'an incremental review',
+        { BASE_REF: base, HEAD_REF: head, CI_MODE: '1', PR_NUMBER: '7', AGENT_REVIEW_PREVIOUS_COMMENT: '/tmp/previous_comment.md' },
+        { 'previous_comment.md': `<!-- agent-review-head: ${mid} -->\n` },
+      );
+      assert.ok(incremental.output.includes(`Diff range: ${mid}..${head}\n`), `${shell}: ${incremental.output}`);
+      assert.ok(incremental.output.includes(`Full PR range: ${fork}..${head}\n`), `${shell}: ${incremental.output}`);
+      assert.strictEqual(incremental.wanted['changed_files.txt'], names(mid), `${shell}: the delta covers only the commits since the last review`);
+      ownChanges(incremental, 'an incremental review', DIFFS.slice(2));
+
+      const noForkPoint = run('no merge base', { BASE_REF: lonely, HEAD_REF: head });
+      assert.ok(noForkPoint.output.includes(`Full PR range: ${lonely}..${head}\n`), `${shell}: ${noForkPoint.output}`);
+      assert.strictEqual(noForkPoint.wanted['full_changed_files.txt'], names(lonely), `${shell}: no merge base diffs from the base commit`);
     }
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("the CI evidence diff covers only the PR's own changes, and falls back to the base commit with no merge base", () => {
+  const review = readFileSync(join(ROOT, '.github/workflows/review.yml'), 'utf8');
+  const lines = review.split('\n').map((l) => l.trim());
+  const start = lines.findIndex((l) => l.startsWith('DIFF_BASE='));
+  assert.ok(start !== -1 && lines[start + 1] === 'git diff "$DIFF_BASE" "$HEAD_SHA" > /tmp/agent_review_full_diff.txt', 'the evidence diff starts at DIFF_BASE');
+  assert.ok(!review.includes('git diff "$BASE_SHA..$HEAD_SHA"'), 'no two-dot diff from the base branch tip');
+  const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start, start + 2)].join('\n');
+
+  const { repo, fork, head, base, lonely } = humanRulesRepo();
+  const diff = (from) => execFileSync('git', ['-C', repo, 'diff', from, head], { encoding: 'utf8' });
+  try {
+    const evidence = (from) => {
+      const r = runRulesBlock('bash', script, { repo, env: { BASE_SHA: from, HEAD_SHA: head }, want: ['agent_review_full_diff.txt'] });
+      assert.strictEqual(r.status, 0, r.output);
+      return r.wanted['agent_review_full_diff.txt'];
+    };
+    assert.strictEqual(evidence(base), diff(fork), 'a PR behind its base diffs from the merge base');
+    assert.strictEqual(evidence(lonely), diff(lonely), 'no merge base diffs from the base commit');
   } finally {
     rmSync(repo, { recursive: true, force: true });
   }

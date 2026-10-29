@@ -202,6 +202,8 @@ Merge order: this PR is stacked on #33, so it merges after #33. Retarget it to `
 - **Dry run.** The dry run found 0 false flags in 30 recent PRs. The token and expiry wording was tightened.
 - **Init.** Init names no consuming repo. It creates the label when the bot may approve, and it says so when the card-code search can't run.
 
+**Amendment, 2026-10-29.** PR diffs now start at the merge base: the review's `RANGE` and `FULL_RANGE`, and CI's evidence diff. So the full diff is no longer two-dot, and the card scan reads a copy of it. The rules still read their config at `BASE_REF`, the commit the approve action reads.
+
 ## Left to the builder
 
 - exact function names, file layout, and test layout, following the repo's patterns;
