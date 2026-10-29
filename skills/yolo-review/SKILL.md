@@ -43,11 +43,11 @@ re-reviews cheap.
    ```bash
    . /tmp/yolo_env.sh
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-   # Local canonical comment: this user's own marked comment when one exists, else the oldest
-   # one by the bot or a repo writer. Anyone else's could be a forged report.
+   # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+   # Anyone else's could be a forged report.
    ME=$(gh api user --jq .login 2>/dev/null || echo "")
    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | first)) | .body // empty" \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" \
      | tr -d '\r' > /tmp/yolo_report.md
    sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/yolo_report.md | head -1 > /tmp/yolo_ledger.json
    REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' /tmp/yolo_report.md | head -1)
@@ -97,11 +97,11 @@ re-reviews cheap.
    ```bash
    . /tmp/yolo_env.sh
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-   # Local canonical comment: this user's own marked comment when one exists, else the oldest
-   # one by the bot or a repo writer. Anyone else's could be a forged report.
+   # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+   # Anyone else's could be a forged report.
    ME=$(gh api user --jq .login 2>/dev/null || echo "")
    STATUS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | first)) | .body // empty" | tr -d '\r' \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" | tr -d '\r' \
      | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
    PASS=$(printf '%s' "$STATUS" | jq -r '.pass // false'); IRREVERSIBLE=$(printf '%s' "$STATUS" | jq -r '.irreversible // false')
    HUMAN=$(printf '%s' "$STATUS" | jq -r '.humanRequired // false')

@@ -272,11 +272,11 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
   else
     PREV_COMMENT=/tmp/agent_review_previous_report.md
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
-    # Local canonical comment: this user's own marked comment when one exists, else the oldest
-    # one by the bot or a repo writer. Anyone else's could be a forged report.
+    # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+    # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
     gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | first)) | .body // empty" 2>/dev/null \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
       | tr -d '\r' > "$PREV_COMMENT" || true
   fi
   LAST_REVIEWED=$(tr -d '\r' < "$PREV_COMMENT" \
@@ -359,31 +359,42 @@ writeFileSync("/tmp/agent_review_report.md", (next === -1 ? body : body.slice(0,
   echo "Next, run only Stage 7's Post and print block, which posts the moved report."
 }
 
-# A push that only merged the base branch leaves the PR's own changes as they were reviewed: the
-# new head's tree is exactly the reviewed head merged with the base. That holds only with a single
-# merge base; with two, a merge can quietly drop base-branch changes. Any other change since the
-# last review, a conflict fix included, gets a full review that keeps the findings ledger.
+# An incremental run whose new head adds nothing to the PR's own changes moves the last report
+# instead of reviewing. With the fork point unchanged, the head's tree must be the last reviewed
+# tree (the commits cancel out); after a merge of the base branch, it must be the last reviewed
+# head merged with the base. Both need a single merge base, since with two a merge can drop
+# base-branch changes that no one merge base shows. A moved fork point, or two merge bases,
+# otherwise gets a full review that keeps the findings ledger.
 CARRY_LEDGER=""
-if [ -n "$INCREMENTAL" ] && [ -n "$PR_BASE" ] \
-   && [ "$(git merge-base --all "$BASE_REF" "$HEAD_REF" 2>/dev/null)" = "$PR_BASE" ] \
-   && LAST_FORK=$(git merge-base "$BASE_REF" "$LAST_REVIEWED" 2>/dev/null) \
-   && [ "$LAST_FORK" != "$PR_BASE" ]; then
-  # merge-tree writes the trees it builds. A throwaway object store under /tmp, the only place
-  # the CI sandbox can write, keeps them out of .git. A conflict or any error leaves no tree.
-  MERGED_TREE=""
-  if MERGE_OBJECTS=$(mktemp -d /tmp/agent_review_merge_tree.XXXXXX) \
-     && REPO_OBJECTS=$(git rev-parse --path-format=absolute --git-path objects); then
-    MERGED_TREE=$(GIT_OBJECT_DIRECTORY="$MERGE_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$REPO_OBJECTS" \
-      git merge-tree --write-tree "$LAST_REVIEWED" "$PR_BASE" 2>/dev/null) || MERGED_TREE=""
-    rm -rf "$MERGE_OBJECTS"
+if [ -n "$INCREMENTAL" ]; then
+  ALL_BASES=$(git merge-base --all "$BASE_REF" "$HEAD_REF" 2>/dev/null) || ALL_BASES=""
+  LAST_FORK=$(git merge-base "$BASE_REF" "$LAST_REVIEWED" 2>/dev/null) || LAST_FORK=""
+  KEPT_TREE="" NOTE=""
+  if [ -z "$ALL_BASES" ] || { [ "$ALL_BASES" = "$PR_BASE" ] && [ "$LAST_FORK" = "$PR_BASE" ]; }; then
+    KEPT_TREE=$(git rev-parse "$LAST_REVIEWED^{tree}")
+    NOTE="✅ No net changes since the last reviewed head — nothing to review. Exiting."
+  elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ]; then
+    # merge-tree writes the trees it builds. A throwaway object store under /tmp, the only place
+    # the CI sandbox can write, keeps them out of .git. A conflict or any error leaves no tree.
+    if MERGE_OBJECTS=$(mktemp -d /tmp/agent_review_merge_tree.XXXXXX) \
+       && REPO_OBJECTS=$(git rev-parse --path-format=absolute --git-path objects); then
+      KEPT_TREE=$(GIT_OBJECT_DIRECTORY="$MERGE_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$REPO_OBJECTS" \
+        git merge-tree --write-tree "$LAST_REVIEWED" "$PR_BASE" 2>/dev/null) || KEPT_TREE=""
+      rm -rf "$MERGE_OBJECTS"
+    fi
+    NOTE="✅ No net changes since the last reviewed head except a merge of the base branch, so the last review still holds. Exiting."
   fi
-  if [ -n "$MERGED_TREE" ] && [ "$MERGED_TREE" = "$(git rev-parse "$HEAD_REF^{tree}")" ]; then
-    move_report "✅ No net changes since the last reviewed head except a merge of the base branch, so the last review still holds. Exiting." && exit 0
+  if [ -n "$KEPT_TREE" ] && [ "$KEPT_TREE" = "$(git rev-parse "$HEAD_REF^{tree}")" ]; then
+    move_report "$NOTE" && exit 0
     echo "⚠️  Could not move the last report to $HEAD_REF, so this is a full review."
-  else
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
+  elif [ -n "$ALL_BASES" ] && [ "$ALL_BASES" != "$PR_BASE" ]; then
+    echo "⚠️  The PR has more than one merge base with its base branch, so this is a full review."
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
+  elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ]; then
     echo "⚠️  The PR merged its base branch since $LAST_REVIEWED along with other changes, so this is a full review."
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   fi
-  INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
 fi
 
 if [ -n "$INCREMENTAL" ]; then
@@ -437,13 +448,9 @@ fi
 # The card scan reads the whole PR, never just an incremental delta.
 cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
 
+# An incremental run with an unchanged tree stopped above, so an empty diff here means a bad base
+# ref or a change git config hides from the diff.
 if [ ! -s /tmp/changed_files.txt ]; then
-  # Only an identical tree means the commits cancel out: git config can hide a change from a diff.
-  if [ -n "$INCREMENTAL" ] && [ "$(git rev-parse "$LAST_REVIEWED^{tree}")" = "$(git rev-parse "$HEAD_REF^{tree}")" ]; then
-    NO_NET="✅ No net changes since the last reviewed head — nothing to review. Exiting."
-    move_report "$NO_NET" || echo "$NO_NET"
-    exit 0
-  fi
   echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
   exit 1
 fi
@@ -814,11 +821,11 @@ if [ "$MODE" = "auto" ]; then
       echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
       echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
-      # Local canonical comment: this user's own marked comment when one exists, else the oldest
-      # one by the bot or a repo writer. Anyone else's could be a forged report.
+      # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+      # Anyone else's could be a forged report.
       ME=$(gh api user --jq .login 2>/dev/null || echo "")
       gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | first)) | .body // empty" 2>/dev/null \
+        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
         | tr -d '\r' > /tmp/previous_agent_review_comment.md
       sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
       [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
@@ -1731,11 +1738,11 @@ if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] 
       > /tmp/previous_agent_review_ledger.json
   else
     REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
-    # Local canonical comment: this user's own marked comment when one exists, else the oldest
-    # one by the bot or a repo writer. Anyone else's could be a forged report.
+    # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+    # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
     gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\" or .author_association == \"OWNER\" or .author_association == \"MEMBER\" or .author_association == \"COLLABORATOR\")) | first)) | .body // empty" \
+      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" \
       2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json

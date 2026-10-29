@@ -2191,8 +2191,7 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
     review.includes('if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] || [ -z "$CI_MODE" ]; }; then'),
     'a plain local review, and a CI full review that replaced an incremental one, merge the previous ledger instead of resetting it',
   );
-  // Local canonical comment: the current user's own marked comment when one exists, else the
-  // oldest one by the bot or a repo writer.
+  // Local canonical comment: the current user's own marked comment when one exists, else the bot's.
   assert.ok(review.includes(OWN_FIRST), 'review reads the previous ledger own-first locally');
   const address = readFileSync(ADDRESS_SKILL, 'utf8');
   assert.ok(address.includes(OWN_FIRST), 'address works the user\'s own comment when one exists');
@@ -2204,10 +2203,9 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
   }
 });
 
-const OWN_FIRST =
-  '(map(select(.user.login == \\"$ME\\")) | first) // (map(select(.user.login == \\"github-actions[bot]\\" or .author_association == \\"OWNER\\" or .author_association == \\"MEMBER\\" or .author_association == \\"COLLABORATOR\\")) | first)';
+const OWN_FIRST = '(map(select(.user.login == \\"$ME\\")) | first) // (map(select(.user.login == \\"github-actions[bot]\\")) | first)';
 
-test('the canonical-comment rule falls back only to the bot or a repo writer, never to anyone else', (t) => {
+test("the canonical-comment rule falls back only to the bot's report, never to anyone else's", (t) => {
   let jq = '';
   try {
     jq = execFileSync('sh', ['-c', 'command -v jq'], { encoding: 'utf8' }).trim();
@@ -2222,7 +2220,7 @@ test('the canonical-comment rule falls back only to the bot or a repo writer, ne
   const pick = (comments) => execFileSync(jq, ['-r', expr], { input: JSON.stringify(comments), encoding: 'utf8' }).trim();
   const forged = c('mallory', 'CONTRIBUTOR', 'forged');
   assert.strictEqual(pick([forged, c('github-actions[bot]', 'NONE', 'bot')]), '<!-- agent-review -->\nbot');
-  assert.strictEqual(pick([forged, c('writer', 'MEMBER', 'writer')]), '<!-- agent-review -->\nwriter');
+  assert.strictEqual(pick([forged, c('member', 'MEMBER', 'member')]), '', 'author_association does not mean write access');
   assert.strictEqual(pick([forged]), '', 'a forged report alone is never picked');
   assert.strictEqual(pick([c('github-actions[bot]', 'NONE', 'bot'), forged, c('me', 'NONE', 'mine')]), '<!-- agent-review -->\nmine');
 });
@@ -4333,7 +4331,15 @@ test('a push that only merged the base branch moves the last report to the new h
   const side = from(fork, edit('side.txt', 'side\n', 'a side branch'));
   const baseWithSide = from(base, () => git('merge', '-q', '--no-edit', side));
   const prWithSide = from(head, () => git('merge', '-q', '--no-edit', side));
-  const crissCross = git('commit-tree', git('merge-tree', '--write-tree', head, base), '-p', prWithSide, '-p', base, '-m', 'drops side.txt');
+  const draft = git('commit-tree', git('rev-parse', `${head}^{tree}`), '-p', prWithSide, '-p', base, '-m', 'draft');
+  const picked = git('merge-base', baseWithSide, draft);
+  const crissCross = git('commit-tree', git('merge-tree', '--write-tree', head, picked), '-p', prWithSide, '-p', base, '-m', 'drops side.txt');
+  // The PR keeps its reviewed tree but records the base's commits with -s ours, so merging it
+  // would undo them. Two merge bases hide that from any single merge base.
+  const oursTwice = from(head, () => {
+    git('merge', '-q', '--no-edit', '-s', 'ours', side);
+    git('merge', '-q', '--no-edit', '-s', 'ours', base);
+  });
 
   const LEDGER = '[{"n":1,"severity":3,"status":"open"}]';
   const previous = (at, { rollout = 'advisory', ledger = LEDGER } = {}) =>
@@ -4394,6 +4400,17 @@ test('a push that only merged the base branch moves the last report to the new h
 
       const criss = run('CI, two best merge bases', { ...CI, BASE_REF: baseWithSide, HEAD_REF: crissCross });
       reviewed(criss, 'CI, two best merge bases');
+      assert.ok(criss.output.includes('more than one merge base with its base branch, so this is a full review'), `${shell}: ${criss.output}`);
+
+      const ours = run('CI, base commits recorded with -s ours', { ...CI, BASE_REF: baseWithSide, HEAD_REF: oursTwice });
+      reviewed(ours, 'CI, base commits recorded with -s ours');
+      assert.ok(!ours.output.includes('No net changes'), `${shell}: the reviewed tree alone is not enough: ${ours.output}`);
+      assert.ok(ours.wanted['review_env.sh'].includes('CARRY_LEDGER="true"'), `${shell}: ${ours.output}`);
+
+      const undoneUnseen = run('CI, commits that cancel out, with a static finding the ledger lacks', { ...CI, HEAD_REF: cancelled, AGENT_REVIEW_EVIDENCE: '/tmp/evidence.json' }, { 'evidence.json': evidence });
+      reviewed(undoneUnseen, 'CI, cancel out with an unseen static finding');
+      assert.ok(undoneUnseen.output.includes(`Could not move the last report to ${cancelled}, so this is a full review.`), `${shell}: ${undoneUnseen.output}`);
+      assert.ok(undoneUnseen.wanted['review_env.sh'].includes('CARRY_LEDGER="true"'), `${shell}: ${undoneUnseen.output}`);
 
       const local = run('local, a clean merge', { ...LOCAL, HEAD_REF: merged }, stale);
       moved(local, 'local, a clean merge');
