@@ -2199,7 +2199,9 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
   assert.ok(yolo.includes(OWN_FIRST), 'yolo reads the same canonical comment address writes');
   for (const [name, text] of [['review', review], ['address', address], ['yolo-review', yolo]]) {
-    assert.ok(!text.includes('| first) // first)'), `${name} never falls back to a comment by just anyone`);
+    const selectors = text.split('\n').filter((line) => line.includes('--jq') && line.includes('startswith(\\"<!-- agent-review -->\\")'));
+    assert.ok(selectors.length > 0, `${name} reads the canonical comment`);
+    for (const line of selectors) assert.ok(line.includes(OWN_FIRST), `${name}: every canonical-comment read uses the own-first rule: ${line.trim()}`);
   }
 });
 
@@ -4297,7 +4299,7 @@ test('a push that only merged the base branch moves the last report to the new h
   assert.ok(start !== -1, 'the diff manifest builds its ranges');
   const script = ['. /tmp/review_env.sh', 'set -e', ...lines.slice(start)].join('\n');
 
-  const { repo, fork, head, base } = humanRulesRepo();
+  const { repo, fork, head, base, lonely } = humanRulesRepo();
   const { writeFileSync } = require('node:fs');
   const git = (...args) =>
     execFileSync('git', ['-C', repo, '-c', 'user.email=t@example.com', '-c', 'user.name=T', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -4336,6 +4338,27 @@ test('a push that only merged the base branch moves the last report to the new h
   const crissCross = git('commit-tree', git('merge-tree', '--write-tree', head, picked), '-p', prWithSide, '-p', base, '-m', 'drops side.txt');
   // The PR keeps its reviewed tree but records the base's commits with -s ours, so merging it
   // would undo them. Two merge bases hide that from any single merge base.
+  // A dated history where git's single merge base is the PR's old fork point, though the head
+  // also records an older base commit with -s ours.
+  const gitAt = (date, ...args) =>
+    execFileSync('git', ['-C', repo, '-c', 'user.email=t@example.com', '-c', 'user.name=T', ...args], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date },
+    }).trim();
+  const datedFrom = (at, date, build) => from(at, () => build((...args) => gitAt(date, ...args)));
+  const newerSide = datedFrom(fork, '2030-01-01T00:00:00Z', (g) => {
+    writeFileSync(join(repo, 'newer_side.txt'), 'newer side\n');
+    g('add', '-A');
+    g('commit', '-q', '-m', 'a newer side branch');
+  });
+  const baseWithNewerSide = datedFrom(base, '2030-01-02T00:00:00Z', (g) => g('merge', '-q', '--no-edit', newerSide));
+  const reviewedOnSide = datedFrom(newerSide, '2030-01-03T00:00:00Z', (g) => {
+    writeFileSync(join(repo, 'app/other.rb'), 'the PR, forked from the side branch\n');
+    g('add', '-A');
+    g('commit', '-q', '-m', 'the PR');
+  });
+  const oursOlderBase = datedFrom(reviewedOnSide, '2030-01-04T00:00:00Z', (g) => g('merge', '-q', '--no-edit', '-s', 'ours', base));
   const oursTwice = from(head, () => {
     git('merge', '-q', '--no-edit', '-s', 'ours', side);
     git('merge', '-q', '--no-edit', '-s', 'ours', base);
@@ -4411,6 +4434,19 @@ test('a push that only merged the base branch moves the last report to the new h
       reviewed(undoneUnseen, 'CI, cancel out with an unseen static finding');
       assert.ok(undoneUnseen.output.includes(`Could not move the last report to ${cancelled}, so this is a full review.`), `${shell}: ${undoneUnseen.output}`);
       assert.ok(undoneUnseen.wanted['review_env.sh'].includes('CARRY_LEDGER="true"'), `${shell}: ${undoneUnseen.output}`);
+
+      assert.strictEqual(git('merge-base', baseWithNewerSide, oursOlderBase), newerSide, 'git picks the old fork point, hiding the second merge base');
+      const hidden = run('CI, a second merge base that git does not pick', { ...CI, BASE_REF: baseWithNewerSide, HEAD_REF: oursOlderBase }, { 'previous_comment.md': previous(reviewedOnSide) });
+      reviewed(hidden, 'CI, a second merge base that git does not pick');
+      assert.ok(hidden.output.includes('more than one merge base'), `${shell}: ${hidden.output}`);
+
+      const unrelated = run('CI, histories with no merge base and the same tree', { ...CI, BASE_REF: lonely, HEAD_REF: cancelled }, {}, { status: 1 });
+      reviewed(unrelated, 'CI, no merge base');
+      assert.ok(unrelated.output.includes('❌ No changed files'), `${shell}: without a merge base nothing is skipped: ${unrelated.output}`);
+
+      const unfetched = run('local, a base commit this clone lacks', { ...LOCAL, BASE_REF: '0123456789abcdef0123456789abcdef01234567', HEAD_REF: oursTwice }, {}, { status: 1 });
+      assert.ok(unfetched.output.includes('is not in this clone'), `${shell}: ${unfetched.output}`);
+      assert.strictEqual(unfetched.wanted['agent_review_status.json'], null, `${shell}: nothing is moved`);
 
       const local = run('local, a clean merge', { ...LOCAL, HEAD_REF: merged }, stale);
       moved(local, 'local, a clean merge');

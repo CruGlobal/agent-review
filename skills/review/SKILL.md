@@ -247,6 +247,10 @@ EOF
 # --- Build the diff manifest the whole review runs on ---
 BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
 HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
+if [ -n "$BASE_REF" ] && ! git cat-file -e "$BASE_REF^{commit}" 2>/dev/null; then
+  echo "❌ The PR's base commit $BASE_REF is not in this clone. Fetch the base branch (git fetch origin), then re-run."
+  exit 1
+fi
 
 # Incremental re-review (CI, or the local `incremental` argument): a previous run recorded the
 # head SHA it reviewed inside the posted report comment (`<!-- agent-review-head: <sha> -->`).
@@ -362,15 +366,15 @@ writeFileSync("/tmp/agent_review_report.md", (next === -1 ? body : body.slice(0,
 # An incremental run whose new head adds nothing to the PR's own changes moves the last report
 # instead of reviewing. With the fork point unchanged, the head's tree must be the last reviewed
 # tree (the commits cancel out); after a merge of the base branch, it must be the last reviewed
-# head merged with the base. Both need a single merge base, since with two a merge can drop
-# base-branch changes that no one merge base shows. A moved fork point, or two merge bases,
-# otherwise gets a full review that keeps the findings ledger.
+# head merged with the base. Both need exactly one merge base: with two, a merge can drop
+# base-branch changes that no one merge base shows, and with none the fork point is unknown. A
+# moved fork point, or two merge bases, otherwise gets a full review that keeps the findings ledger.
 CARRY_LEDGER=""
 if [ -n "$INCREMENTAL" ]; then
   ALL_BASES=$(git merge-base --all "$BASE_REF" "$HEAD_REF" 2>/dev/null) || ALL_BASES=""
   LAST_FORK=$(git merge-base "$BASE_REF" "$LAST_REVIEWED" 2>/dev/null) || LAST_FORK=""
   KEPT_TREE="" NOTE=""
-  if [ -z "$ALL_BASES" ] || { [ "$ALL_BASES" = "$PR_BASE" ] && [ "$LAST_FORK" = "$PR_BASE" ]; }; then
+  if [ -n "$ALL_BASES" ] && [ "$ALL_BASES" = "$PR_BASE" ] && [ "$LAST_FORK" = "$PR_BASE" ]; then
     KEPT_TREE=$(git rev-parse "$LAST_REVIEWED^{tree}")
     NOTE="✅ No net changes since the last reviewed head — nothing to review. Exiting."
   elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ]; then
@@ -389,7 +393,7 @@ if [ -n "$INCREMENTAL" ]; then
     echo "⚠️  Could not move the last report to $HEAD_REF, so this is a full review."
     INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   elif [ -n "$ALL_BASES" ] && [ "$ALL_BASES" != "$PR_BASE" ]; then
-    echo "⚠️  The PR has more than one merge base with its base branch, so this is a full review."
+    echo "⚠️  The PR has more than one merge base with its base branch, so this is a full review. Merging the base branch again makes later reviews incremental."
     INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ]; then
     echo "⚠️  The PR merged its base branch since $LAST_REVIEWED along with other changes, so this is a full review."
