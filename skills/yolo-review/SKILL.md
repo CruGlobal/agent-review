@@ -43,10 +43,11 @@ re-reviews cheap.
    ```bash
    . /tmp/yolo_env.sh
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-   # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+   # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+   # Anyone else's could be a forged report.
    ME=$(gh api user --jq .login 2>/dev/null || echo "")
    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" \
      | tr -d '\r' > /tmp/yolo_report.md
    sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/yolo_report.md | head -1 > /tmp/yolo_ledger.json
    REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' /tmp/yolo_report.md | head -1)
@@ -81,8 +82,9 @@ re-reviews cheap.
    If it prints `no new commit`, do not re-review: go to step 7 and report the open blockers as
    blockers that remain. Otherwise invoke `agent-review:review` with the arguments `auto incremental`, plus the
    user's `engine=` and `effort=` tokens, if any. If that re-review stops with `already reviewed`
-   or `No net changes`, it posted nothing: go to step 7 the same way. Only a re-review that ran
-   goes on to step 5, whose guard then checks its report.
+   or `No net changes`, it found nothing new to review: once it has posted any report it says it
+   moved, go to step 7 the same way. Only a re-review that ran goes on to step 5, whose guard then
+   checks its report.
 
 5. **Bounded loop** — recompute `OPEN` as in step 3. If it is greater than 0 and any open
    blocker is one this run has not yet tried to fix, repeat steps 3-4, at most two more times
@@ -95,10 +97,11 @@ re-reviews cheap.
    ```bash
    . /tmp/yolo_env.sh
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-   # Local canonical comment: this user's own marked comment when one exists, else the oldest.
+   # Local canonical comment: this user's own marked comment when one exists, else the bot's.
+   # Anyone else's could be a forged report.
    ME=$(gh api user --jq .login 2>/dev/null || echo "")
    STATUS=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // first) | .body // empty" | tr -d '\r' \
+     --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" | tr -d '\r' \
      | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1)
    PASS=$(printf '%s' "$STATUS" | jq -r '.pass // false'); IRREVERSIBLE=$(printf '%s' "$STATUS" | jq -r '.irreversible // false')
    HUMAN=$(printf '%s' "$STATUS" | jq -r '.humanRequired // false')
