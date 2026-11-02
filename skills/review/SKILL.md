@@ -1394,8 +1394,10 @@ named pairs. Write the decisions to `/tmp/consensus_decisions.json`:
 ```
 
 `merge` combines the pair into one entry per the engine's documented merge rules (severity =
-rounded mean, line/message/fix = the higher-severity member's, evidence/recommendation =
-whichever is longer); `keep` is a no-op kept for auditability. Skip writing
+rounded mean, or the highest member's when any member is 7+; line/message/fix = the
+higher-severity member's, evidence = for a 7+ entry the primary member's, trimmed, else the
+longest trimmed, and below 7 the longest trimmed, recommendation = the longest trimmed); `keep` is
+a no-op kept for auditability. Skip writing
 `/tmp/consensus_decisions.json` entirely when `candidates` was empty — the first invocation's
 output is already final. Either way, this block re-runs the command when decisions exist and then
 extracts the plain findings array Stage 6 expects:
@@ -1642,6 +1644,8 @@ the feedback store):
   on incremental runs, then call `agent-review ledger`. It preserves prior numbers/statuses,
   appends only new signatures, and fails closed on malformed state. A finding's absence from an
   incremental review does **not** prove it was fixed; only `/agent-review:address` may close it.
+- A matching open entry whose finding comes back with a higher severity is replaced by the new
+  finding under its old number, before location matching runs. Dismissed and fixed entries never change.
 - Under the `code-review` engine the call adds `--match-suggestions-by-location`, because
   `/code-review` rewords the same suggestion on every run. A new finding below 7 that sits within
   5 lines of an older open or dismissed entry from the same lane, in the same file and category,
