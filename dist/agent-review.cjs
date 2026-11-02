@@ -18450,7 +18450,7 @@ var require_consensus = __commonJS({
         _maxSeverity: m.severity
       };
     }
-    function combineMembers(members, codeReviewEngine) {
+    function combineMembers(members) {
       const ordered = [...members].sort((a, b) => a.agent.localeCompare(b.agent));
       const primary = ordered.reduce(
         (best, m) => m.severity > best.severity ? m : best,
@@ -18468,10 +18468,6 @@ var require_consensus = __commonJS({
         ordered[0]
       );
       const longestTrimmed = (field) => ordered.map((m) => String(m[field] || "").trim()).reduce((best, v) => v.length > best.length ? v : best, "");
-      const longestField = (field) => ordered.reduce(
-        (best, m) => String(m[field] || "").length > String(best[field] || "").length ? m : best,
-        ordered[0]
-      )[field];
       const corroboration = ordered.reduce(
         (sum, m) => sum + (m.corroboration || 1),
         0
@@ -18483,28 +18479,28 @@ var require_consensus = __commonJS({
         ...ordered.map((m) => m._maxSeverity != null ? m._maxSeverity : m.severity)
       );
       const weightedSum = ordered.reduce(
-        (sum, m) => sum + (m._meanSeverity !== void 0 ? m._meanSeverity : m.severity) * (m.corroboration || 1),
+        (sum, m) => sum + m.severity * (m.corroboration || 1),
         0
       );
       const meanSeverity = Math.round(weightedSum / corroboration);
-      const evidence = codeReviewEngine ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestField("evidence");
+      const severity = maxSeverity >= 7 ? maxSeverity : meanSeverity;
+      const evidence = severity >= 7 ? String(primary.evidence || "").trim() || longestTrimmed("evidence") : longestTrimmed("evidence");
       return {
         agent: primary.agent,
         agents: agents.join(","),
         category: primary.category,
-        severity: codeReviewEngine && maxSeverity >= 7 ? maxSeverity : meanSeverity,
+        severity,
         file: primary.file,
         line: primary.line,
         message: primary.message,
         confidence: bestConfidence.confidence,
         evidence,
-        recommendation: longestField("recommendation"),
+        recommendation: longestTrimmed("recommendation"),
         fix: primary.fix,
         corroboration,
         needsHumanReview: maxSeverity - minSeverity >= 4,
         _minSeverity: minSeverity,
-        _maxSeverity: maxSeverity,
-        _meanSeverity: meanSeverity
+        _maxSeverity: maxSeverity
       };
     }
     function unionFind(n) {
@@ -18552,7 +18548,7 @@ var require_consensus = __commonJS({
       }
       return candidates;
     }
-    function applyDecisions(entries, decisions, codeReviewEngine) {
+    function applyDecisions(entries, decisions) {
       if (!Array.isArray(decisions)) {
         throw new Error("consensus: decisions must be an array");
       }
@@ -18578,11 +18574,11 @@ var require_consensus = __commonJS({
         groupsByRoot.get(root).push(entries[i]);
       }
       return [...groupsByRoot.values()].map(
-        (members) => members.length === 1 ? members[0] : combineMembers(members, codeReviewEngine)
+        (members) => members.length === 1 ? members[0] : combineMembers(members)
       );
     }
     function stripInternal(entry) {
-      const { _minSeverity, _maxSeverity, _meanSeverity, ...rest } = entry;
+      const { _minSeverity, _maxSeverity, ...rest } = entry;
       return rest;
     }
     function consensusFrom({
@@ -18629,14 +18625,14 @@ var require_consensus = __commonJS({
         }
       }
       let entries = buildCliques(all).map(
-        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members, codeReviewEngine)
+        (members) => members.length === 1 ? toEntry(members[0]) : combineMembers(members)
       );
       const beforeCutoff = entries.length;
       entries = applyProfileCutoff(entries, profile);
       const droppedByProfile = beforeCutoff - entries.length;
       entries = sortEntries(entries);
       if (decisions !== void 0) {
-        entries = sortEntries(applyDecisions(entries, decisions, codeReviewEngine));
+        entries = sortEntries(applyDecisions(entries, decisions));
       }
       const candidates = buildCandidates(entries);
       const findings = entries.map(stripInternal);
@@ -18731,12 +18727,16 @@ var require_reportState = __commonJS({
     }
     var LOCATION_WINDOW = 5;
     var LOCATION_WORDING = 0.5;
+    var CANDIDATE_WINDOW = 10;
+    var PAIR_TEXT_LIMIT = 500;
+    var MatchesRejected = class extends Error {
+    };
     function sameCategory(a, b) {
       return a.trim().toLowerCase() === b.trim().toLowerCase();
     }
-    function nearLine(a, b) {
+    function nearLine(a, b, window) {
       if (a === null && b === null) return true;
-      return a !== null && b !== null && Math.abs(a - b) <= LOCATION_WINDOW;
+      return a !== null && b !== null && Math.abs(a - b) <= window;
     }
     function similarWording(a, b) {
       return jaccard(tokenize(a), tokenize(b)) >= LOCATION_WORDING;
@@ -18746,23 +18746,96 @@ var require_reportState = __commonJS({
     }
     function matchesEarlierSpot(finding, previous) {
       return finding.severity < 7 && !isStaticFinding(finding) && previous.some(
-        (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line) && similarWording(entry.message, finding.message)
+        (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && sameCategory(entry.category, finding.category) && nearLine(entry.line, finding.line, LOCATION_WINDOW) && similarWording(entry.message, finding.message)
       );
     }
-    function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false } = {}) {
+    function mergeSteps(previousInput, findingsInput, matchSuggestionsByLocation) {
       const previous = cleanPrevious(previousInput || []);
-      const seen = new Set(previous.map((entry) => entry.signature));
-      let next = previous.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
+      const bySignature = new Map(previous.map((entry, i) => [entry.signature, i]));
       const additions = findingList(findingsInput).map(
         (finding) => cleanFinding(finding, { requireBlockerEvidence: true })
       ).sort(
         (a, b) => b.severity - a.severity || a.file.localeCompare(b.file) || (a.line || 0) - (b.line || 0) || a.message.localeCompare(b.message)
       );
       const merged = [...previous];
+      const unmatched = [];
       for (const finding of additions) {
+        const at = bySignature.get(finding.signature);
+        if (at === void 0) {
+          unmatched.push(finding);
+          continue;
+        }
+        if (merged[at].status === "open" && finding.severity > merged[at].severity) {
+          merged[at] = { n: merged[at].n, ...finding, status: "open" };
+        }
+      }
+      const seen = new Set(bySignature.keys());
+      const fresh = [];
+      for (const finding of unmatched) {
         if (seen.has(finding.signature)) continue;
-        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, previous)) continue;
+        if (matchSuggestionsByLocation && matchesEarlierSpot(finding, merged)) continue;
         seen.add(finding.signature);
+        fresh.push(finding);
+      }
+      return { earlier: merged, fresh };
+    }
+    function candidatePairs(earlier, fresh) {
+      const pairs = [];
+      for (const finding of fresh) {
+        if (finding.severity >= 7 || isStaticFinding(finding)) continue;
+        const near = earlier.filter(
+          (entry) => entry.status !== "fixed" && entry.agent === finding.agent && entry.file === finding.file && nearLine(entry.line, finding.line, CANDIDATE_WINDOW)
+        ).sort((a, b) => a.n - b.n);
+        for (const entry of near) pairs.push({ id: `${finding.signature}#${entry.n}`, finding, entry });
+      }
+      return pairs;
+    }
+    function problemFields(finding) {
+      return {
+        line: finding.line,
+        category: finding.category,
+        message: finding.message.slice(0, PAIR_TEXT_LIMIT),
+        recommendation: (finding.recommendation || "").slice(0, PAIR_TEXT_LIMIT)
+      };
+    }
+    function ledgerCandidates(previousInput, findingsInput) {
+      const { earlier, fresh } = mergeSteps(previousInput, findingsInput, true);
+      return candidatePairs(earlier, fresh).map(({ id, finding, entry }) => ({
+        id,
+        file: finding.file,
+        earlier: problemFields(entry),
+        finding: problemFields(finding)
+      }));
+    }
+    function matchedSignatures(matches, pairs) {
+      if (!Array.isArray(matches)) throw new MatchesRejected("matches must be an array");
+      const signatureOf = new Map(pairs.map((pair) => [pair.id, pair.finding.signature]));
+      const answered = /* @__PURE__ */ new Set();
+      const matched = /* @__PURE__ */ new Set();
+      matches.forEach((item, i) => {
+        const wellFormed = item !== null && typeof item === "object" && !Array.isArray(item) && Object.keys(item).length === 2 && Object.hasOwn(item, "id") && Object.hasOwn(item, "same") && typeof item.id === "string" && typeof item.same === "boolean";
+        if (!wellFormed) {
+          throw new MatchesRejected(`item ${i} must be an object with exactly "id" (a string) and "same" (a boolean)`);
+        }
+        if (!signatureOf.has(item.id)) {
+          throw new MatchesRejected(`${JSON.stringify(item.id)} is not a candidate pair for these findings`);
+        }
+        if (answered.has(item.id)) throw new MatchesRejected(`${JSON.stringify(item.id)} is answered twice`);
+        answered.add(item.id);
+        if (item.same) matched.add(signatureOf.get(item.id));
+      });
+      return matched;
+    }
+    function mergeLedger(previousInput, findingsInput, { matchSuggestionsByLocation = false, matches } = {}) {
+      if (matches !== void 0 && !matchSuggestionsByLocation) {
+        throw new MatchesRejected("matches need location matching (--match-suggestions-by-location)");
+      }
+      const { earlier, fresh } = mergeSteps(previousInput, findingsInput, matchSuggestionsByLocation);
+      const matched = matches === void 0 ? /* @__PURE__ */ new Set() : matchedSignatures(matches, candidatePairs(earlier, fresh));
+      const merged = [...earlier];
+      let next = earlier.reduce((max, entry) => Math.max(max, entry.n), 0) + 1;
+      for (const finding of fresh) {
+        if (matched.has(finding.signature)) continue;
         merged.push({ n: next++, ...finding, status: "open" });
       }
       return merged;
@@ -18817,7 +18890,7 @@ var require_reportState = __commonJS({
         ...ci ? { ci } : {}
       };
     }
-    module2.exports = { findingList, cleanPrevious, mergeLedger, buildStatus };
+    module2.exports = { findingList, cleanPrevious, mergeLedger, ledgerCandidates, MatchesRejected, buildStatus };
   }
 });
 
@@ -20754,7 +20827,7 @@ var require_cli = __commonJS({
       emitFindings
     } = require_learningsStore();
     var { filterFindings, rulesFromLearnings } = require_applyLearnings();
-    var { mergeLedger, buildStatus } = require_reportState();
+    var { mergeLedger, ledgerCandidates, MatchesRejected, buildStatus } = require_reportState();
     var { evaluateApproval, decideApproval } = require_approval();
     var { humanRules } = require_humanApproval();
     var {
@@ -21223,7 +21296,8 @@ var require_cli = __commonJS({
   emit --in <findings.json> --review <id>   emit findings + a pending outcomes file
   filter --in <findings.json>    drop findings suppressed by approved learnings
   address parse|prepare|validate|feedback|finalize   trusted fix/dismiss handoff tools (parse: lenient local grammar)
-  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording)
+  ledger --findings <f> [--previous <f>] [--match-suggestions-by-location] [--matches <f>]   merge stable incremental finding state (the flag matches suggestions to older open or dismissed entries from the same lane by file, category, nearby line, and similar wording; --matches needs that flag and leaves out each new suggestion that a ledger-candidates pair answers "same": true for, changing no earlier entry; a bad matches file prints "ledger: matches rejected: <reason>" to stderr and exits 1)
+  ledger-candidates --findings <f> [--previous <f>]   print the pairs a matcher judges: each new suggestion the ledger would add, with every older open or dismissed entry from the same lane and file within 10 lines (JSON {count, pairs}; each side has only line, category, message, and recommendation, the last two cut to 500 characters; no severity, status, agent, confidence, or evidence)
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
@@ -21569,15 +21643,48 @@ var require_cli = __commonJS({
         }
         case "ledger": {
           const findingsPath = flag(rest, "--findings");
-          if (!findingsPath) {
-            out("usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location]");
+          const matchesPath = flag(rest, "--matches");
+          if (!findingsPath || rest.includes("--matches") && !matchesPath) {
+            out("usage: agent-review ledger --findings <file> [--previous <file>] [--match-suggestions-by-location] [--matches <file>]");
             return 1;
           }
           const previousPath = flag(rest, "--previous");
           const previous = previousPath ? JSON.parse(readFileSync(previousPath, "utf8")) : [];
           const findings = JSON.parse(readFileSync(findingsPath, "utf8"));
           const matchSuggestionsByLocation = rest.includes("--match-suggestions-by-location");
-          out(JSON.stringify(mergeLedger(previous, findings, { matchSuggestionsByLocation }), null, 2));
+          const rejectMatches = (reason) => {
+            process.stderr.write(`ledger: matches rejected: ${reason}
+`);
+            return 1;
+          };
+          const options = { matchSuggestionsByLocation };
+          if (matchesPath) {
+            try {
+              options.matches = JSON.parse(readFileSync(matchesPath, "utf8"));
+            } catch (e) {
+              return rejectMatches(`could not read ${matchesPath}: ${e.message}`);
+            }
+          }
+          let ledger;
+          try {
+            ledger = mergeLedger(previous, findings, options);
+          } catch (e) {
+            if (e instanceof MatchesRejected) return rejectMatches(e.message);
+            throw e;
+          }
+          out(JSON.stringify(ledger, null, 2));
+          return 0;
+        }
+        case "ledger-candidates": {
+          const findingsPath = flag(rest, "--findings");
+          if (!findingsPath) {
+            out("usage: agent-review ledger-candidates --findings <file> [--previous <file>]");
+            return 1;
+          }
+          const previousPath = flag(rest, "--previous");
+          const previous = previousPath ? JSON.parse(readFileSync(previousPath, "utf8")) : [];
+          const pairs = ledgerCandidates(previous, JSON.parse(readFileSync(findingsPath, "utf8")));
+          out(JSON.stringify({ count: pairs.length, pairs }, null, 2));
           return 0;
         }
         case "status": {

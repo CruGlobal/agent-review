@@ -81,6 +81,17 @@ approval has to come from an account the branch rules trust. So:
 The same rules apply when the review ran in CI instead of your terminal, and when you fix or
 dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]: reason`).
 
+When reviewers flag the same spot, their findings are combined into one and the scores are
+averaged, with two exceptions. A 7 or more keeps its score when it is combined with lower scores,
+on every engine. This only counts for a score that is still 7 or more after its reviewer's caps
+and the blocker bar: a line, High confidence, and evidence. When two findings of 7 or more are
+combined, the group takes the higher score.
+
+A later review can raise an earlier finding. If the same finding comes back with a higher score
+and the earlier one is still open, the new finding replaces it and keeps only its number. The
+score, file, line, message, evidence, and everything else come from the new finding. A dismissed
+or fixed finding never changes.
+
 ## PCI and repos that always need a person
 
 Some repos need a person's approval on some or all PRs. The bot will not approve those.
@@ -263,8 +274,16 @@ same thing whichever engine found it. The rules:
 - On every review, not only re-reviews, a reworded suggestion within 5 lines of an older open or
   dismissed finding from the same reviewer, in the same file and category, that says much the
   same thing is not added again, so the PR comment stops growing.
-- If another reviewer flags the same spot with a lower score, a proven 7 or more from any
-  reviewer keeps its score through the merge instead of being averaged down.
+- Most rewordings use different words, so that check misses them. For those, the engine pairs
+  each new suggestion (below 7, not from static analysis) with every older open or dismissed
+  finding from the same reviewer and file within 10 lines. A separate, fresh agent sees only each
+  pair's lines, categories, messages, and recommendations, never a score, a status, or the
+  evidence behind a score, and says whether the two are the same problem. A new suggestion it
+  calls the same is not added. The older finding never changes, so a wrong call
+  can hide only the new wording, never the issue. If the matcher fails, the review goes on and the
+  suggestion is added, as before.
+- As on every engine, if another reviewer flags the same spot with a lower score, a proven 7 or
+  more from any reviewer keeps its score through the merge instead of being averaged down.
 
 **It stops if `/code-review` did not really run.** The check `agent-review code-review-proof`
 compares the lane's list with the text the hook captured. When the result holds a JSON findings
@@ -507,7 +526,9 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   only hides a finding from the same reviewer, in the same category, with nearly the same wording.
   So rules learned from the `architecture` or `simplification` reviewer never match a `code-review`
   finding. And `/code-review` rewords the same finding from run to run, so its findings rarely
-  match each other either. Expect dismissed findings to come back, and dismiss them again.
+  match each other either. Expect dismissed findings to come back, and dismiss them again. Under
+  the `code-review` engine, ledger matching usually catches a reworded suggestion within 10 lines
+  of a dismissed one from the same reviewer in the same file, so this mostly applies across PRs.
 - **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
   lane, and the check reads that file. But a lane runs as the same user, so it could replace the
   file. The check cannot rule that out.
@@ -544,7 +565,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
 | `schema/config.schema.json` | JSON Schema for `.claude/review/config.yml` |
-| `templates/` | Files `/agent-review:init` instantiates into a consuming repo (`config.yml` skeleton, `rules/*.md` starters, `settings-snippet.json`, `workflows/agent-review*.yml`), plus `archetype.md` and `report.md` — the agent-prompt and report skeletons ship inside the plugin and are read directly by `skills/review/SKILL.md`, never copied out |
+| `templates/` | Files `/agent-review:init` instantiates into a consuming repo (`config.yml` skeleton, `rules/*.md` starters, `settings-snippet.json`, `workflows/agent-review*.yml`), plus `archetype.md`, `code-review-lane.md`, `ledger-match.md`, and `report.md`. The agent-prompt and report skeletons ship inside the plugin and are read directly by `skills/review/SKILL.md`, never copied out |
 | `templates/evals/` | Seeded-bug suite format, example patch, and result-scoring workflow |
 | `templates/static/` | ast-grep configuration/rule starter for deterministic changed-line findings |
 | `fixtures/` | Fixture config used by engine tests |
