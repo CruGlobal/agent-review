@@ -2,7 +2,7 @@
 // Contract tests between the shipped templates/skills and the CLI surface.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { readFileSync, mkdtempSync, rmSync } = require('node:fs');
+const { readFileSync, mkdtempSync, mkdirSync, rmSync } = require('node:fs');
 const { join, relative } = require('node:path');
 const os = require('node:os');
 const { execFileSync } = require('node:child_process');
@@ -1341,12 +1341,52 @@ test('Stage 4 rebuttal prompt re-sources YOUR ORIGINAL FINDINGS from the agent\'
   );
 });
 
-test('the archetype instructs writing the findings file via node -e and JSON.stringify, never hand-escaped JSON, and caps recommendation length', () => {
+test('the archetype instructs writing the findings file via a node heredoc and JSON.stringify, never hand-escaped JSON, and caps recommendation length', () => {
   const archetype = readFileSync(join(ROOT, 'templates/archetype.md'), 'utf8');
-  assert.ok(/node -e/.test(archetype), 'archetype must show writing the findings file via node -e');
   assert.ok(/JSON\.stringify/.test(archetype), 'archetype must show JSON.stringify building the file');
   assert.ok(/never hand-escaped JSON/i.test(archetype), 'archetype must explicitly forbid hand-escaped JSON');
   assert.ok(/recommendation: ≤ ?4 lines/.test(archetype), 'archetype must cap recommendation to <=4 lines');
+});
+
+test('archetype has no node -e write recipe and uses a quoted node heredoc', () => {
+  const text = readFileSync(ARCHETYPE, 'utf8');
+  assert.ok(!text.includes("node -e '"), 'a single-quoted node -e script breaks on quoted code');
+  assert.ok(!text.includes('node -e'), 'no node -e recipe remains');
+  assert.ok(!text.includes('\\u0027'), 'no apostrophe rewrite is needed');
+  const scripts = laneHeredocs(text);
+  assert.strictEqual(scripts.length, 1, 'one heredoc writes the findings file');
+  assert.ok(scripts[0].includes('JSON.stringify'), scripts[0]);
+  assert.strictEqual(text.split('node - <<').length - 1, 2, "the heredoc is the quoted 'EOF' form (one prose mention, one example)");
+  assert.ok(!scripts[0].includes('`'), 'the example uses no backtick strings');
+});
+
+test('archetype states the double-quote rule and the backslash rule', () => {
+  const flat = flatText(readFileSync(ARCHETYPE, 'utf8'));
+  assert.ok(
+    flat.includes('inside a JS string, write a backslash as `\\\\` and a double quote as `\\"`, and a line break as `\\n`.'),
+    'the archetype tells the lane how to escape quoted code inside a JS string',
+  );
+  assert.ok(
+    flat.includes('Use double quotes for every JS string, never backticks: a backtick string runs any `${...}` in the code you quote.'),
+    'a template-literal string would run quoted code',
+  );
+  assert.ok(flat.includes('so a `\'` in your text needs no rewrite'), 'the quoted heredoc needs no apostrophe rewrite');
+});
+
+test('the archetype heredoc example runs in a shell and keeps a backslash and a quote', () => {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-arch-'));
+  try {
+    const [script] = laneHeredocs(readFileSync(ARCHETYPE, 'utf8'));
+    mkdirSync(join(dir, 'agent_findings'));
+    const body = script.replaceAll('/tmp/', `${dir}/`).replaceAll('{{AGENT_ID}}', 'security');
+    execFileSync('bash', ['-c', `node - <<'EOF'\n${body}\nEOF`]);
+    const out = JSON.parse(readFileSync(join(dir, 'agent_findings/security.json'), 'utf8'));
+    const evidence = out.findings[0].evidence;
+    assert.ok(evidence.includes('if (!/^\\d+$/.test(s))'), 'a doubled backslash reaches the file as one');
+    assert.ok(evidence.includes('save("x")'), 'an escaped double quote reaches the file as one');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // --- CI bash-block consolidation: fewer separate Bash-tool turns ---
