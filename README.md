@@ -105,6 +105,14 @@ Do these in order. Steps 5 and 6 are the ones people miss.
 
 To have CI review a PR without anyone typing anything, add the `agent-review` label to the PR.
 
+**Local-only setup.** If you do not want CI to review PRs, set `reviews_run: local` in
+`.claude/review/config.yml`. Then skip step 3 (no API key is needed) and install only
+`agent-review-approve.yml` in step 2. That one file is what lets the robot approve a review you
+ran in your terminal. Steps 4 to 6 still apply. `/agent-review:init` asks you which setup you
+want. If your repo already has the other workflow files, run `/agent-review:update-files`. It
+offers to remove them (it never removes anything without a yes) and warns you first if a branch
+rule requires a check those files produce.
+
 ## Three switches
 
 | Switch | Where | What it controls | Default |
@@ -115,6 +123,117 @@ To have CI review a PR without anyone typing anything, add the `agent-review` la
 
 The robot approves by default. To stop approvals in a repo, set `auto_approve: false` in
 `agent-review-approve.yml` (terminal reviews), `agent-review.yml` (CI reviews), or both.
+
+## Use /code-review as the engine
+
+By default, agent-review finds problems with its own team of specialist reviewers. You can
+switch to Claude Code's built-in `/code-review` as the main finder instead. Everything around
+the review stays the same: the numbered findings, the 1 to 10 severity, fix and dismiss, the
+re-review, and the approval.
+
+**Turn it on** in `.claude/review/config.yml`. This is an example of a local-only, code-review
+repo, not the defaults. `name: code-review` alone keeps CI reviews on, because `reviews_run`
+defaults to `local-and-ci`:
+
+```yaml
+engine:
+  name: code-review              # agent-review (default) | code-review
+  code_review:
+    effort: xhigh                # low | medium | high | xhigh | max
+    model: opus
+    replaces: [architecture, simplification]
+    always: [security, testing, standards]
+    # max_findings: 15           # leave out to use /code-review's own limit
+reviews_run: local               # local | local-and-ci (default: local-and-ci)
+```
+
+Repos that use the code-review engine or `reviews_run: local` need everyone on plugin 1.1.0 or
+later.
+
+Or turn it on for one run, with `review`, `re-review`, or `yolo-review`:
+
+```
+/agent-review:review engine=code-review effort=high
+```
+
+The argument wins over the config, and the config wins over the built-in default
+(`agent-review` engine, `xhigh` effort). `effort=` does nothing with the `agent-review` engine,
+and the start-up line tells you so.
+
+**Every run prints what it is using.** Before any reviewer starts, you get two lines: the
+engine, effort, mode, scope, and the reviewers that will run, each with where the setting came
+from (argument, config, or default). The same facts go into the report, so the PR shows what ran.
+
+**Who runs.** `/code-review` takes the place of the `architecture` and `simplification`
+reviewers, and the debate rounds are skipped. These keep running: `security`, `testing`, and
+`standards` on every PR, plus any other reviewer your repo has (such as `data-integrity` or a
+repo-specific one) when its own triggers match. The depth words (`quick`, `standard`, `deep`)
+do not add or remove reviewers under this engine. `/code-review` has no security pass and never
+asks for tests, which is why those reviewers stay on.
+
+**How the result is captured.** The lane does not copy `/code-review`'s answer by hand. A plugin
+hook writes it to a private directory, `/tmp/agent-review-<uid>`, which only your user can open
+(mode 0700, owned by you, checked before every read and write). The hooks act only while a
+review has armed capture, and an arm expires after 6 hours. They never touch a `/code-review` you
+run yourself in the main conversation. While a review is armed, though, a `/code-review` run in
+another subagent of yours writes a mismatch record and fails that review's wait, and the hooks
+keep the final message of every subagent that stops in your sessions (the newest 50) in that
+directory until the review disarms. The lane reads the capture with `agent-review capture show`.
+
+**The review waits for `/code-review` to finish.** The lane waits with `agent-review
+capture-wait`, up to a limit that depends on the effort: `low` 10 minutes, `medium` 15, `high`
+20, `xhigh` 40, `max` 120. If the limit passes first, the review fails closed and posts no
+report. If the hooks never run, for example because Claude Code was not restarted after the
+plugin was installed, the wait fails within a minute and gives the reason, and the lane's reply, which the
+review prints when it fails, carries it as `/code-review did not finish: <reason>`.
+
+**How findings are scored.** The lane lists the findings it read from the captured text, and then
+agent-review reads each finding, looks at the code, and scores it on its own 1 to 10 scale. A 7 means the
+same thing whichever engine found it. The rules:
+
+- Cleanups (simplification, efficiency, reuse, and similar) score 6 at most, so they never block.
+- To score 7 or more, a finding needs a changed line, High confidence, and evidence of how it
+  fails. Without those it stays as a suggestion at 6.
+- A finding is dropped only for one of two reasons. It is `excluded` because its file matches a
+  glob in your `excluded_paths` and its line in the result cites no other file, or it is
+  `disproved` by quoting the whole cited line right after its `path:line`, from the file as
+  committed at the reviewed head, never your working copy. That line must have at least 6
+  characters besides spaces, so `end` or `}` never proves anything. If the scorer just doubts it, the finding stays, at 4 or below, with a note. Dropped
+  findings are listed in the report, so you can check the work.
+- Every finding the lane listed must be scored or dropped exactly once, by its number.
+- On a re-review, a finding outside the new commits scores 6 at most. It shows up as a
+  suggestion and cannot block you.
+- On every review, not only re-reviews, a reworded suggestion within 5 lines of an older open or
+  dismissed finding from the same reviewer, in the same file and category, that says much the
+  same thing is not added again, so the PR comment stops growing.
+- If another reviewer flags the same spot with a lower score, a proven 7 or more from any
+  reviewer keeps its score through the merge instead of being averaged down.
+
+**It stops if `/code-review` did not really run.** The check `agent-review code-review-proof`
+compares the lane's list with the text the hook captured. When the result holds a JSON findings
+list, the lane's list must match it one to one. `xhigh` and `max` results usually hold one.
+Otherwise the lane's list must match the result's finding lines, one entry per line. That text
+mode has a cost, and it is usual at `low`, `medium`, and `high`: a line that cites a location
+only as context still counts as a finding. The lane must list it and score or drop it, and a
+line it leaves out fails the run. The check also holds every scored finding to the field rules:
+its raw finding's file, a whole-number severity from 1 to 10, one of the nine category names, a
+confidence of High, Medium, or Low, and the `outside_range`, `doubted`, and `recategorized_from`
+fields. If the capture is missing, or the lane's list does not match it, the review stops and
+posts nothing. It never quietly falls back to the old reviewers, and it never approves without
+its main finder. It needs a Claude Code that has the built-in `/code-review` (this was built and
+tested on 2.1.309). If you see the stop message, update Claude Code, or run again with
+`engine=agent-review`.
+
+**`effort=max` works, but it is slow and costly.** It fans out to many helper agents. On a
+15-line diff, the test run used about 20 of them and took more than 15 minutes. `xhigh` is the
+default for a reason.
+
+**CI does not use this engine.** If CI runs in a repo set to `code-review`, it ignores the
+setting, runs agent-review's own reviewers, and says so in the report. Until you post a local
+report, your next local review merges CI's findings into its own ledger. After that, local
+re-reviews read your own report's ledger, so findings from later CI runs do not carry in. CI
+never approves in that repo, and neither does `@claude fix` or `@claude dismiss`;
+only the review you run locally can approve.
 
 ## Questions people ask
 
@@ -325,6 +444,18 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **Some config keys are accepted but not yet enforced.** `learning.scope`,
   `learning.approval_required`, and `enforcement.mode` pass validation and are reserved for future
   behavior; today promotion is always approval-gated and reviews never block a merge.
+- **"Suppress" learnings mostly stop working under the `code-review` engine.** A suppress rule
+  only hides a finding from the same reviewer, in the same category, with nearly the same wording.
+  So rules learned from the `architecture` or `simplification` reviewer never match a `code-review`
+  finding. And `/code-review` rewords the same finding from run to run, so its findings rarely
+  match each other either. Expect dismissed findings to come back, and dismiss them again.
+- **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
+  lane, and the check reads that file. But a lane runs as the same user, so it could replace the
+  file. The check cannot rule that out.
+- **A lane could add a finding `/code-review` never made.** In text mode, a raw entry with no
+  line number may claim any result line that names its file and cites no location, which a line
+  of context can do. The check cannot tell such a line from a finding. This can only add a
+  finding, never hide one.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.
@@ -340,6 +471,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | Path | What it is |
 | --- | --- |
 | `.claude-plugin/` | `marketplace.json` + `plugin.json` — plugin/marketplace manifests |
+| `hooks/` | `hooks.json` - the capture hooks (`PostToolUse` on `Skill`, and `SubagentStop`). They run `bin/agent-review-hook`, which loads the engine only when a review has armed capture |
 | `skills/init/` | `/agent-review:init` — bootstrap skill (stack scan + PR-history mining) |
 | `skills/review/` | `/agent-review:review` — review orchestrator skill (also the `incremental` mode) |
 | `skills/re-review/` | `/agent-review:re-review` — thin driver: `review auto incremental` |
@@ -350,6 +482,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `agents/` | Thin per-tier subagent shells (`reviewer-opus`/`-sonnet`/`-haiku`) that the review skill's launch table selects by plan-resolved tier |
 | `engine/` | Node engine: risk scoring, agent selection, import-graph index, learnings store, approval rule, address grammar, CLI commands, unit tests (`*.test.cjs`) |
 | `bin/agent-review` | Thin shim that requires the bundled `dist/agent-review.cjs` |
+| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
 | `schema/config.schema.json` | JSON Schema for `.claude/review/config.yml` |
 | `templates/` | Files `/agent-review:init` instantiates into a consuming repo (`config.yml` skeleton, `rules/*.md` starters, `settings-snippet.json`, `workflows/agent-review*.yml`), plus `archetype.md` and `report.md` — the agent-prompt and report skeletons ship inside the plugin and are read directly by `skills/review/SKILL.md`, never copied out |
@@ -359,6 +492,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `.github/workflows/test.yml` | This repo's own CI — `npm ci && npm test && npm run check-dist` |
 | `.github/workflows/review.yml`, `interact.yml`, `approve.yml`, `readiness.yml` | Reusable workflows the consumer callers invoke |
 | `.github/actions/approve/` | Composite action shared by every approval path |
+| `.github/actions/read-engine/` | Composite action that reads the review engine from the base commit's config, so the CI approval steps run only on an exact `agent-review` |
 
 ## Development
 

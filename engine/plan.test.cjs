@@ -148,3 +148,141 @@ test('resolveMode maps risk score/level to a resolved mode under auto', () => {
   assert.equal(resolveMode('auto', { score: 8, level: 'HIGH' }), 'standard');
   assert.equal(resolveMode('auto', { score: 12, level: 'CRITICAL' }), 'deep');
 });
+
+const crConfig = {
+  ...config,
+  agents: [
+    { id: 'architecture', always: true, escalates: true, rules: ['rules/architecture.md'] },
+    { id: 'simplification', escalates: false, rules: ['rules/simplification.md', 'rules/architecture.md'] },
+    { id: 'testing', always: true, rules: ['rules/testing.md'] },
+    { id: 'security', escalates: true, triggers: {}, rules: ['rules/security.md'] },
+    { id: 'data-integrity', triggers: { paths: ['db/**'] }, rules: ['rules/data.md'] },
+    { id: 'financial', triggers: { paths: ['src/money/**'] }, rules: ['rules/fin.md'] },
+    { id: 'standards', escalates: false, rules: ['rules/standards.md'] },
+  ],
+  path_rules: [],
+};
+
+function crOptions(over = {}) {
+  return {
+    mode: { value: 'standard', source: 'default' },
+    engine: { value: 'code-review', source: 'arg' },
+    effort: { value: 'high', source: 'default' },
+    model: { value: 'opus', source: 'default' },
+    maxFindings: null,
+    replaces: ['architecture', 'simplification'],
+    always: ['security', 'testing'],
+    reviewsRun: { value: 1, source: 'default' },
+    incremental: false,
+    ci: false,
+    notes: [],
+    ...over,
+  };
+}
+
+const crInput = {
+  files: ['src/other/a.ts'],
+  diffText: '+x',
+  linesChanged: 20,
+  scope: 'single_feature',
+};
+
+test('default engine plans are unchanged', () => {
+  const base = buildPlan(crInput, crConfig);
+  const withOpts = buildPlan(
+    { ...crInput, options: crOptions({ engine: { value: 'agent-review', source: 'default' } }) },
+    crConfig,
+  );
+  assert.deepEqual(withOpts, base);
+  assert.equal('engine' in base, false);
+});
+
+test('code-review: replaced lanes never run', () => {
+  const plan = buildPlan({ ...crInput, options: crOptions() }, crConfig);
+  const ids = plan.agents.map((a) => a.id);
+  assert.ok(!ids.includes('architecture'));
+  assert.ok(!ids.includes('simplification'));
+  const noEsc = {
+    ...crConfig,
+    agents: crConfig.agents.map((a) => ({ ...a, escalates: false })),
+  };
+  const p2 = buildPlan({ ...crInput, options: crOptions() }, noEsc);
+  assert.ok(!p2.agents.some((a) => a.id === 'architecture' || a.id === 'simplification'));
+});
+
+test('code-review: always lanes are forced', () => {
+  const plan = buildPlan({ ...crInput, options: crOptions() }, crConfig);
+  const sec = plan.agents.find((a) => a.id === 'security');
+  assert.equal(sec.always, true);
+  assert.equal(sec.matchedBy, 'engine-always');
+  const testing = plan.agents.find((a) => a.id === 'testing');
+  assert.equal(testing.always, true);
+  assert.equal(testing.matchedBy, 'always');
+});
+
+test('code-review: trigger lanes keep their triggers', () => {
+  const none = buildPlan({ ...crInput, options: crOptions() }, crConfig);
+  assert.ok(!none.agents.some((a) => a.id === 'data-integrity' || a.id === 'financial'));
+  const hit = buildPlan(
+    { ...crInput, files: ['db/x.sql', 'src/money/a.ts'], options: crOptions() },
+    crConfig,
+  );
+  assert.ok(hit.agents.some((a) => a.id === 'data-integrity'));
+  assert.ok(hit.agents.some((a) => a.id === 'financial'));
+});
+
+test('code-review: synthetic lane', () => {
+  const plan = buildPlan({ ...crInput, options: crOptions() }, crConfig);
+  const lane = plan.agents[0];
+  assert.equal(lane.id, 'code-review');
+  assert.equal(lane.tier, 'opus');
+  assert.equal(lane.model, 'opus');
+  assert.equal(lane.matchedBy, 'engine');
+  assert.equal(lane.always, true);
+  assert.equal(lane.escalates, false);
+  assert.deepEqual(lane.rules, ['rules/architecture.md', 'rules/simplification.md']);
+  assert.deepEqual(plan.engine, {
+    name: 'code-review',
+    effort: 'high',
+    model: 'opus',
+    maxFindings: null,
+    replaces: ['architecture', 'simplification'],
+    always: ['security', 'testing'],
+  });
+});
+
+test('code-review: quick mode keeps the lane list', () => {
+  const std = buildPlan({ ...crInput, options: crOptions() }, crConfig);
+  const quick = buildPlan({ ...crInput, mode: 'quick', options: crOptions() }, crConfig);
+  assert.deepEqual(quick.agents.map((a) => a.id), std.agents.map((a) => a.id));
+  assert.equal(quick.agents[0].tier, 'opus');
+  for (const a of quick.agents.slice(1)) {
+    if (!a.escalates && a.model === 'smart') assert.equal(a.tier, 'haiku');
+  }
+});
+
+test('code-review: path_rules reach the lane, even with nothing replaced', () => {
+  const cfg = { ...crConfig, path_rules: [{ paths: ['src/other/**'], rules: ['rules/other.md'] }] };
+  const none = buildPlan({ ...crInput, options: crOptions({ replaces: [] }) }, cfg);
+  assert.equal(none.agents[0].id, 'code-review');
+  assert.deepEqual(none.agents[0].rules, ['rules/other.md']);
+
+  const replaced = buildPlan({ ...crInput, options: crOptions() }, cfg);
+  assert.deepEqual(
+    replaced.agents[0].rules,
+    ['rules/other.md', 'rules/architecture.md', 'rules/simplification.md'],
+    'deduplicated, in first-seen order',
+  );
+
+  const unmatched = buildPlan({ ...crInput, files: ['lib/a.ts'], options: crOptions({ replaces: [] }) }, cfg);
+  assert.deepEqual(unmatched.agents[0].rules, [], 'a path rule applies only when a changed file matches');
+});
+
+test('code-review: a disabled replaced lane lends the lane no rules', () => {
+  const cfg = {
+    ...crConfig,
+    agents: crConfig.agents.map((a) => (a.id === 'simplification' ? { ...a, enabled: false } : a)),
+  };
+  const plan = buildPlan({ ...crInput, options: crOptions() }, cfg);
+  assert.deepEqual(plan.agents[0].rules, ['rules/architecture.md']);
+});

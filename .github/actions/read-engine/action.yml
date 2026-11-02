@@ -1,0 +1,60 @@
+name: agent-review read engine
+description: >-
+  Read the review engine from the trusted base commit's agent-review config.
+  Outputs agent-review when the base commit has no config or the config sets no
+  engine, the configured engine name otherwise, and unknown when the base commit
+  or the config cannot be read. Never fails the job.
+inputs:
+  base_sha:
+    description: The pull request's base commit, which must exist in the workspace checkout
+    required: true
+  runtime_dir:
+    description: The trusted agent-review runtime checkout
+    required: true
+  trusted_dir:
+    description: An empty scratch directory to extract the base commit's .claude/review into
+    required: true
+  extracted_review_dir:
+    description: >-
+      A .claude/review directory the caller already extracted from the base commit. When set,
+      the engine is read from it instead of archiving the base commit again.
+    required: false
+outputs:
+  name:
+    description: agent-review, code-review, or unknown; approve only on an exact agent-review
+    value: ${{ steps.read.outputs.name }}
+runs:
+  using: composite
+  steps:
+    - name: Read the engine from the base commit
+      id: read
+      shell: bash
+      env:
+        BASE_SHA: ${{ inputs.base_sha }}
+        RUNTIME_DIR: ${{ inputs.runtime_dir }}
+        TRUSTED_DIR: ${{ inputs.trusted_dir }}
+        EXTRACTED_REVIEW_DIR: ${{ inputs.extracted_review_dir }}
+      run: |
+        set -uo pipefail
+        # Callers approve only on an exact agent-review, so every failure must leave a value
+        # other than agent-review, and none may fail the job.
+        ENGINE=unknown
+        if [ -n "$BASE_SHA" ] && git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+          if ! git cat-file -e "$BASE_SHA:.claude/review/config.yml" 2>/dev/null; then
+            ENGINE=agent-review
+          else
+            REVIEW_DIR=""
+            if [ -n "${EXTRACTED_REVIEW_DIR:-}" ]; then
+              REVIEW_DIR=$EXTRACTED_REVIEW_DIR
+            elif mkdir -p "$TRUSTED_DIR" && git archive "$BASE_SHA" .claude/review | tar -x -C "$TRUSTED_DIR"; then
+              REVIEW_DIR=$TRUSTED_DIR/.claude/review
+            fi
+            if [ -n "$REVIEW_DIR" ]; then
+              CONFIGURED=$(node "$RUNTIME_DIR/dist/agent-review.cjs" \
+                --root "$GITHUB_WORKSPACE" --review-dir "$REVIEW_DIR" \
+                config get engine.name) || CONFIGURED=unknown
+              if [ "$CONFIGURED" = "undefined" ]; then ENGINE=agent-review; else ENGINE=$CONFIGURED; fi
+            fi
+          fi
+        fi
+        echo "name=$ENGINE" >> "$GITHUB_OUTPUT"

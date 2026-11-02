@@ -76,8 +76,8 @@ test('selected agents carry their config triggers verbatim', () => {
   assert.equal(architecture.triggers, undefined);
 });
 
-// Task 2 (slice) reads `always` off the plan agent directly — it sits beside
-// `triggers` in config, not inside it — to decide the full-diff rule.
+// Slicing reads `always` off the plan agent directly; it sits beside
+// `triggers` in config, not inside it; to decide the full-diff rule.
 test('selected agents carry the config always flag beside triggers', () => {
   const sel = selectAgents(
     { files: ['pages/api/foo.ts'], diffText: '' },
@@ -196,9 +196,9 @@ test('falls back to the first escalating agent in config order when there is no 
   assert.equal(forced.id, 'data-integrity', 'first escalates:true agent in config order wins');
 });
 
-// I4a (final review, belt-and-suspenders): an operator explicitly de-escalating
+// An operator explicitly de-escalating
 // the security lane must not silently defeat the coverage guarantee when a
-// genuinely escalating lane is available — prefer it over an id-only match.
+// genuinely escalating lane is available; prefer it over an id-only match.
 test('coverage guarantee prefers a genuinely escalating lane over a de-escalated security lane', () => {
   const cfg = {
     ...coverageConfig,
@@ -256,4 +256,14 @@ test('identifier content triggers do not match inside larger identifiers', () =>
   assert.equal(contentMatches('+ currency = donation.currency\n', 'currency'), true);
   assert.equal(contentMatches('+ process.env.SECRET\n', 'process.env'), true);
   assert.equal(contentMatches('+ total.round(2)\n', '.round('), true);
+});
+
+test('engine: replaced lanes are skipped and always lanes forced', () => {
+  const engine = { name: 'code-review', replaces: ['architecture'], always: ['security'] };
+  const sel = selectAgents({ files: ['src/x.ts'], diffText: '+x' }, config, engine);
+  const ids = sel.map((a) => a.id);
+  assert.ok(!ids.includes('architecture'));
+  const sec = sel.find((a) => a.id === 'security');
+  assert.equal(sec.matchedBy, 'engine-always');
+  assert.equal(sec.always, true);
 });

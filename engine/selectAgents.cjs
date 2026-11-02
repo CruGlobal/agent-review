@@ -1,6 +1,7 @@
 'use strict';
 const { minimatch } = require('minimatch');
 const { matchingPattern } = require('./scoreRisk.cjs');
+const { ENGINE_CODE_REVIEW } = require('./vocabulary.cjs');
 
 const OPTS = { dot: true };
 
@@ -82,19 +83,28 @@ function hasUnmatchedReviewableFile(reviewed, config) {
   return reviewed.some((f) => !matchingPattern(f, config).matched);
 }
 
-function selectAgents({ files, diffText, reviewDirRel }, config) {
+function selectAgents({ files, diffText, reviewDirRel }, config, engine = null) {
+  const external = engine && engine.name === ENGINE_CODE_REVIEW;
+  const replaced = new Set(external ? engine.replaces || [] : []);
+  const forcedIds = new Set(external ? engine.always || [] : []);
+  const candidates = config.agents.filter((a) => !replaced.has(a.id));
   const reviewed = files.filter((f) => !isExcluded(f, config));
   const contentText = codeDiff(diffText, config, reviewDirRel);
   const out = [];
-  for (const a of config.agents) {
+  for (const a of candidates) {
     if (a.enabled === false) continue;
-    const matchedBy = agentMatches(a, reviewed, contentText);
+    const forced = forcedIds.has(a.id);
+    const matchedBy = forced
+      ? a.always
+        ? 'always'
+        : 'engine-always'
+      : agentMatches(a, reviewed, contentText);
     if (matchedBy)
       out.push({
         id: a.id,
         model: a.model || 'smart',
         escalates: a.escalates || false,
-        always: a.always || false,
+        always: forced || a.always || false,
         triggers: a.triggers,
         matchedBy,
       });
@@ -109,7 +119,7 @@ function selectAgents({ files, diffText, reviewDirRel }, config) {
   // already selected normally is not duplicated.
   const hasEscalating = out.some((a) => a.escalates);
   if (!hasEscalating && hasUnmatchedReviewableFile(reviewed, config)) {
-    const eligible = config.agents.filter((a) => a.enabled !== false);
+    const eligible = candidates.filter((a) => a.enabled !== false);
     // Belt-and-suspenders (final review I4a): prefer a lane that genuinely
     // escalates — an operator explicitly de-escalating `security`
     // (`escalates: false`) must not silently outrank a lane that actually

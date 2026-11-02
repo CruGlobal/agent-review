@@ -1,0 +1,59 @@
+I reviewed `7cef894..16910c5`. The range has one commit (`16910c5`, "displayName: prefer profile nickname") that touches only `app.js`.
+
+- **Main problem:** The commit message says "prefer" the nickname, but the code only reads `user.profile.nickname` and never falls back to `user.name`. Any user without a profile or nickname now throws an error, and a blank nickname gives an empty name.
+- **Older bug:** `firstN` has an off-by-one bug. It came from the base commit, so it is outside this range. I listed it lower down so it doesn't get lost.
+- **No repo rules apply:** The repo has no `CLAUDE.md` or `AGENTS.md`. The diff adds no comments, so the rules in `~/.claude/CLAUDE.md` aren't broken.
+- **Callers:** Nothing in the repo calls `displayName` or `firstN`. Both are exported, so outside callers are the ones at risk.
+
+```json
+[
+  {
+    "file": "app.js",
+    "line": 13,
+    "summary": "displayName now reads user.profile.nickname with no check, so any user object without a profile throws a TypeError.",
+    "failure_scenario": "displayName({ name: 'Ann' }) used to return 'Ann'. Now user.profile is undefined, and line 13 throws 'Cannot read properties of undefined (reading nickname)'. This hits every caller that passes the old documented shape, like legacy users, API payloads, and test fixtures, since displayName is exported."
+  },
+  {
+    "file": "app.js",
+    "line": 13,
+    "summary": "The commit says 'prefer profile nickname', but there is no fallback to user.name, so a profile with no nickname set crashes.",
+    "failure_scenario": "displayName({ name: 'Ann', profile: {} }) or { profile: { nickname: null } } throws 'Cannot read properties of undefined/null (reading trim)'. The old behavior of returning user.name.trim() was removed and never put back. Something like (user.profile?.nickname ?? '').trim() || user.name.trim() was likely intended."
+  },
+  {
+    "file": "app.js",
+    "line": 13,
+    "summary": "An empty or whitespace-only nickname returns an empty string instead of falling back to the user's real name.",
+    "failure_scenario": "displayName({ name: 'Ann', profile: { nickname: '   ' } }) returns ''. The UI then shows a blank name where 'Ann' used to show. That breaks the 'prefer' meaning, where nickname should only win when it has content."
+  },
+  {
+    "file": "app.js",
+    "line": 13,
+    "summary": "If nickname is not a string, the .trim() call throws.",
+    "failure_scenario": "A profile loaded from JSON or a form with nickname: 123 or nickname: true throws 'profile.nickname.trim is not a function'. The old code read user.name, which was likely checked as a string. The new field is free-form profile data with no type guard."
+  },
+  {
+    "file": "app.js",
+    "line": 4,
+    "summary": "(Pre-existing, outside the reviewed range) firstN loops with i <= n, so it returns n+1 items instead of n.",
+    "failure_scenario": "firstN([1,2,3,4], 2) returns [1,2,3] instead of [1,2]. firstN(list, 0) returns one item instead of none. This shipped in 7cef894 and is in the same file as this change."
+  },
+  {
+    "file": "app.js",
+    "line": 5,
+    "summary": "(Pre-existing, outside the reviewed range) firstN never limits n to items.length, so it pads the result with undefined.",
+    "failure_scenario": "firstN(['a'], 3) returns ['a', undefined, undefined, undefined]. Later code that does .map(x => x.id) crashes. The built-in items.slice(0, n) fixes both firstN bugs in one call."
+  },
+  {
+    "file": "app.js",
+    "line": 13,
+    "summary": "The display name now comes only from a nickname the user picks, which can let users pose as someone else wherever displayName is shown.",
+    "failure_scenario": "A user sets their nickname to 'Admin' or to another staff member's real name. Any view, audit log, or notification that uses displayName now shows that fake name, and the real name is never shown next to it. This depends on how callers use displayName, which isn't visible in this repo."
+  },
+  {
+    "file": "app.js",
+    "line": 12,
+    "summary": "Simplification: the profile temp variable adds a line without adding safety. The missing-profile and missing-nickname cases are better handled with optional chaining in one expression.",
+    "failure_scenario": "Cost: two lines where one would do, and the split invites the next editor to add checks piece by piece. The one-line form (user.profile?.nickname ?? '').trim() || user.name.trim() covers findings 1 to 3 at once."
+  }
+]
+```

@@ -33,6 +33,8 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    outputs:
+      engine: ${{ steps.engine.outputs.name }}
     permissions:
       contents: read
       checks: read
@@ -79,6 +81,15 @@ jobs:
             echo "::error::Caller requested $REQUESTED_MODE but trusted base config requires $CONFIGURED_MODE. Merge the config policy first, then change the caller in a follow-up PR."
             exit 1
           fi
+      - name: Read the trusted review engine
+        id: engine
+        if: inputs.auto_approve
+        uses: CruGlobal/agent-review/.github/actions/read-engine@main
+        with:
+          base_sha: ${{ github.event.pull_request.base.sha }}
+          runtime_dir: ${{ runner.temp }}/agent-review-runtime
+          trusted_dir: ${{ runner.temp }}/agent-review-engine-trusted
+          extracted_review_dir: ${{ runner.temp }}/agent-review-trusted/.claude/review
       - name: Load the previous trusted report
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -425,7 +436,7 @@ jobs:
   # a plain `if:` means a failed or skipped review never reaches this job.
   approve:
     needs: review
-    if: inputs.auto_approve
+    if: inputs.auto_approve && needs.review.outputs.engine == 'agent-review'
     runs-on: ubuntu-latest
     permissions:
       contents: read

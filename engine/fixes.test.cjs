@@ -1,5 +1,5 @@
 'use strict';
-// Regression tests for the dogfood-review fixes (PR #1858).
+// Pins for review-fix behavior: fix threading, merging, and reporting.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { writeFileSync, mkdtempSync, rmSync } = require('node:fs');
@@ -12,20 +12,20 @@ const { detectSpecial } = require('./detectSpecial.cjs');
 const { loadFeedback } = require('./learningsStore.cjs');
 const { loadConfig } = require('./loadConfig.cjs');
 
-test('#6 plan.parseArgs: a boolean flag does not swallow the next token', () => {
+test('plan.parseArgs: a boolean flag does not swallow the next token', () => {
   const a = parseArgs(['--verbose', '--config', 'c.yml']);
   assert.equal(a.verbose, true);
   assert.equal(a.config, 'c.yml');
 });
 
-test('#11 impact.posInt: rejects NaN / non-positive, accepts default + valid', () => {
+test('impact.posInt: rejects NaN / non-positive, accepts default + valid', () => {
   assert.equal(posInt(undefined, 3), 3);
   assert.equal(posInt('5', 3), 5);
   assert.throws(() => posInt('abc', 3), /positive integer/);
   assert.throws(() => posInt('0', 3), /positive integer/);
 });
 
-test('#2 selectAgents: content triggers ignore keywords inside markdown/excluded files', () => {
+test('selectAgents: content triggers ignore keywords inside markdown/excluded files', () => {
   const config = {
     excluded_paths: ['.claude/review/rules/**'],
     agents: [{ id: 'financial', triggers: { content: ['amount'] } }],
@@ -56,7 +56,7 @@ test('#2 selectAgents: content triggers ignore keywords inside markdown/excluded
   );
 });
 
-test("#2 selectAgents: the reviewer's own config.yml trigger vocabulary does not self-select agents", () => {
+test("selectAgents: the reviewer's own config.yml trigger vocabulary does not self-select agents", () => {
   const config = {
     excluded_paths: [],
     agents: [{ id: 'financial', triggers: { content: ['amount'] } }],
@@ -73,7 +73,7 @@ test("#2 selectAgents: the reviewer's own config.yml trigger vocabulary does not
   );
 });
 
-test('#22 detectSpecial: negative/boundary cases do not over-flag', () => {
+test('detectSpecial: negative/boundary cases do not over-flag', () => {
   const config = {
     risk: {
       special: [{ when: 'critical_pkg_update', points: 3, packages: ['next'] }],
@@ -96,7 +96,7 @@ test('#22 detectSpecial: negative/boundary cases do not over-flag', () => {
   );
 });
 
-test('#19 learningsStore.loadFeedback: skips malformed JSONL lines', () => {
+test('learningsStore.loadFeedback: skips malformed JSONL lines', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'fb-'));
   const p = join(dir, 'feedback.jsonl');
   writeFileSync(p, '{"a":1}\nNOT JSON\n{"b":2}\n');
@@ -104,7 +104,7 @@ test('#19 learningsStore.loadFeedback: skips malformed JSONL lines', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('#12 loadConfig: throws a friendly error on an invalid config', () => {
+test('loadConfig: throws a friendly error on an invalid config', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'cfg-'));
   const cfgPath = join(dir, 'config.yml');
   const schemaPath = join(__dirname, '..', 'schema', 'config.schema.json');
@@ -116,7 +116,7 @@ test('#12 loadConfig: throws a friendly error on an invalid config', () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test('#23 resolveImport: honors config-driven aliases + extensions', () => {
+test('resolveImport: honors config-driven aliases + extensions', () => {
   const { resolveImport } = require('./resolveImport.cjs');
   const fileSet = new Set(['app/foo.mjs', 'lib/bar.ts']);
   assert.equal(
@@ -135,7 +135,7 @@ test('#23 resolveImport: honors config-driven aliases + extensions', () => {
   );
 });
 
-test('#23 indexRegex: built from config roots + extensions', () => {
+test('indexRegex: built from config roots + extensions', () => {
   const { indexRegex } = require('./indexStore.cjs');
   const re = indexRegex(['app'], ['.mjs']);
   assert.ok(re.test('app/x.mjs'));
@@ -143,7 +143,7 @@ test('#23 indexRegex: built from config roots + extensions', () => {
   assert.ok(!re.test('app/x.ts')); // .ts not a configured extension
 });
 
-test('#4 shared args.parseArgs: one parser, boolean-flag safe', () => {
+test('shared args.parseArgs: one parser, boolean-flag safe', () => {
   const { parseArgs } = require('./args.cjs');
   const a = parseArgs([
     '--build',
