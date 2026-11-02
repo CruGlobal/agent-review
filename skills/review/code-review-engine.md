@@ -242,6 +242,76 @@ Under the `code-review` engine the progress line, like every other place a lane 
 the lane `Code Review (/code-review <effort>)`, since the plan gives it no `title`. Take `<effort>`
 from `/tmp/review_options.json`.
 
+## Stage 6: the ledger matcher
+
+Under the `code-review` engine, `/code-review` rewords the same suggestion on every run, and most
+rewordings share too few words for the ledger's location match. A fresh matcher agent judges
+the rest. It is blind: for each side of a pair it sees only the line, category, message, and
+recommendation, never a score, status, lane, confidence, or evidence, and it can answer only
+whether each pair is the same problem. Scores are already final here, and a match never changes an
+earlier entry.
+
+The ledger block in `SKILL.md` printed `ledger matching: <M> pairs` and saved M as `LEDGER_PAIRS`
+in `/tmp/review_env.sh`. When M is 0, that block already built the ledger, so skip this section.
+Otherwise there is no ledger yet, and these steps build it:
+
+1. Read the plugin's `templates/ledger-match.md` (`../../templates/ledger-match.md` from this file).
+   It has no placeholders.
+2. Launch the matcher with the Task tool, in a message of its own, after the ledger block in
+   `SKILL.md` has finished:
+
+   - **description**: `"Ledger matcher"`
+   - **subagent_type**: `"agent-review:reviewer-sonnet"`, or `"general-purpose"` when the ledger
+     block printed `routing: degraded`
+   - **model**: `"sonnet"`
+   - **prompt**: the whole text of `ledger-match.md`, as written
+
+   Wait for its reply. Do not read, check, or change the file it writes; the next block does that.
+3. Build the ledger. If the Task tool errored, run this block, which ignores any answers the
+   matcher wrote:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+echo "ledger matching skipped: the matcher Task errored"
+agent-review ledger --findings /tmp/review_filtered.json \
+  --previous /tmp/previous_agent_review_ledger.json \
+  --match-suggestions-by-location > /tmp/agent_review_ledger.json
+```
+
+Otherwise run this one:
+
+```bash
+. /tmp/review_env.sh 2>/dev/null || true
+LEDGER_SKIP=""
+if [ ! -s /tmp/ledger_matches.json ]; then
+  LEDGER_SKIP="the matcher wrote no /tmp/ledger_matches.json"
+fi
+if [ -z "$LEDGER_SKIP" ]; then
+  if agent-review ledger --findings /tmp/review_filtered.json \
+      --previous /tmp/previous_agent_review_ledger.json \
+      --match-suggestions-by-location --matches /tmp/ledger_matches.json \
+      > /tmp/agent_review_ledger.json 2> /tmp/ledger_matches_error.txt; then
+    MATCHED=$(node -e 'console.log(require("/tmp/ledger_matches.json").filter((m) => m.same).length)')
+    ANSWERED=$(node -e 'console.log(require("/tmp/ledger_matches.json").length)')
+    echo "ledger matching: $MATCHED of $LEDGER_PAIRS pairs judged the same ($ANSWERED answered)"
+  else
+    LEDGER_SKIP=$(head -1 /tmp/ledger_matches_error.txt | sed 's/^ledger: //')
+    LEDGER_SKIP="${LEDGER_SKIP:-the ledger refused the matches}"
+  fi
+fi
+if [ -n "$LEDGER_SKIP" ]; then
+  echo "ledger matching skipped: $LEDGER_SKIP"
+  agent-review ledger --findings /tmp/review_filtered.json \
+    --previous /tmp/previous_agent_review_ledger.json \
+    --match-suggestions-by-location > /tmp/agent_review_ledger.json
+fi
+```
+
+A matcher failure never fails the review. When the matcher errors, writes no file, or writes
+answers the ledger refuses, these blocks build the ledger without them and print
+`ledger matching skipped: <reason>`, and the run goes on. Reworded suggestions then show up as
+new findings.
+
 ## Stage 6: the engine block
 
 - Under the `code-review` engine, the `code-review` lane has no `title` in the plan. Wherever a lane

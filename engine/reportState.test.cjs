@@ -364,3 +364,232 @@ test('location mode matches against the ledger after this merge\'s raises', () =
   const nearMoved = mergeLedger(previous, [raise, reworded(61)], BY_LOCATION);
   assert.deepEqual(nearMoved.map((entry) => [entry.n, entry.severity, entry.line]), [[1, 8, 60]], 'a suggestion near the raised entry\'s new spot matches it');
 });
+
+const { ledgerCandidates, MatchesRejected } = require('./reportState.cjs');
+
+// A rewording the automatic location match misses: its wording shares too few tokens with oldEntry's.
+function rephrased(over = {}) {
+  return reworded({
+    line: 48,
+    message: 'Writes leave stale rows behind in the lookup store.',
+    evidence: 'save() skips the expire call',
+    recommendation: 'expire the key after save',
+    ...over,
+  });
+}
+
+const blind = (f) => ({
+  line: f.line,
+  category: f.category,
+  message: f.message,
+  recommendation: f.recommendation || '',
+});
+
+test('candidates pair a reworded suggestion within 10 lines with an open or a dismissed entry of the same lane and file', () => {
+  for (const status of ['open', 'dismissed']) {
+    const entry = oldEntry({ status, recommendation: 'invalidate on write' });
+    const next = rephrased({ line: 50 });
+    assert.equal(mergeLedger([entry], [next], BY_LOCATION).length, 2, 'the premise: the automatic match misses it');
+    assert.deepEqual(ledgerCandidates([entry], [next]), [{
+      id: 'new-sig#3',
+      file: 'app/controller.rb',
+      earlier: blind(entry),
+      finding: { ...blind(next), category: ' correctness ' },
+    }], status);
+  }
+  assert.equal(ledgerCandidates([oldEntry()], [rephrased({ line: 30 })]).length, 1, 'exactly 10 lines before pairs');
+});
+
+test('candidates leave out a suggestion 11 lines away, or in another lane or file, and every fixed entry', () => {
+  const cases = {
+    '11 lines after': [oldEntry(), rephrased({ line: 51 })],
+    '11 lines before': [oldEntry(), rephrased({ line: 29 })],
+    'a fixed entry': [oldEntry({ status: 'fixed', sha: 'abc1234' }), rephrased()],
+    'another agent': [oldEntry({ agent: 'testing' }), rephrased()],
+    'only a corroborating agent': [oldEntry({ agent: 'security', agents: 'security,code-review' }), rephrased()],
+    'another file': [oldEntry(), rephrased({ file: 'app/other.rb' })],
+  };
+  for (const [label, [entry, next]] of Object.entries(cases)) {
+    assert.deepEqual(ledgerCandidates([entry], [next]), [], label);
+  }
+});
+
+test('candidates leave out a new finding of 7 or more and a static finding', () => {
+  assert.deepEqual(ledgerCandidates([oldEntry()], [rephrased({ severity: 7 })]), [], 'a 7');
+  assert.deepEqual(ledgerCandidates([oldEntry()], [rephrased({ severity: 9 })]), [], 'a 9');
+  assert.equal(ledgerCandidates([oldEntry()], [rephrased({ severity: 6 })]).length, 1, 'a 6 pairs');
+  const staticEntry = oldEntry({ agent: 'static-analysis', category: 'static-analysis/no-raw-sql' });
+  for (const next of [
+    rephrased({ agent: 'static-analysis', category: 'static-analysis/no-raw-sql' }),
+    rephrased({ category: 'static-analysis/no-raw-sql' }),
+  ]) {
+    assert.deepEqual(ledgerCandidates([staticEntry, oldEntry({ n: 4, signature: 'old-sig-2' })], [next]), [], `${next.agent} ${next.category}`);
+  }
+});
+
+test('candidates pair two unanchored findings, but not an anchored one with an unanchored one', () => {
+  assert.deepEqual(ledgerCandidates([oldEntry({ line: null })], [rephrased({ line: null })]).map((p) => p.id), ['new-sig#3']);
+  assert.deepEqual(ledgerCandidates([oldEntry({ line: null })], [rephrased()]), [], 'the entry has no line');
+  assert.deepEqual(ledgerCandidates([oldEntry()], [rephrased({ line: null })]), [], 'the finding has no line');
+});
+
+test('candidates leave out a finding the ledger already matches by signature or by location', () => {
+  const sameSignature = rephrased({ signature: 'old-sig', severity: 3 });
+  assert.deepEqual(ledgerCandidates([oldEntry()], [sameSignature]), [], 'a signature match');
+  const higher = rephrased({ signature: 'old-sig', severity: 6 });
+  assert.deepEqual(ledgerCandidates([oldEntry()], [higher]), [], 'a signature match that raises its entry');
+  assert.equal(mergeLedger([oldEntry()], [reworded()], BY_LOCATION).length, 1, 'the premise: the automatic match takes it');
+  assert.deepEqual(ledgerCandidates([oldEntry()], [reworded()]), [], 'an automatic location match');
+});
+
+test('candidates pair against a raised entry where the raise moved it', () => {
+  const previous = [oldEntry({ n: 1, signature: 'raised-sig', line: 10, severity: 4 })];
+  const raise = finding({ signature: 'raised-sig', agent: 'code-review', category: 'Correctness', severity: 8, line: 60, message: 'the cache is never invalidated after a write' });
+  const nearOld = rephrased({ signature: 'near-old', line: 12 });
+  const nearNew = rephrased({ signature: 'near-new', line: 66 });
+  const pairs = ledgerCandidates(previous, [raise, nearOld, nearNew]);
+  assert.deepEqual(pairs.map((p) => [p.id, p.earlier.line]), [['near-new#1', 60]]);
+});
+
+test('candidate order is the merge order of new findings, then entry number, whatever the input order', () => {
+  const previous = [
+    oldEntry({ n: 5, signature: 'e5', line: 20 }),
+    oldEntry({ n: 2, signature: 'e2', line: 25 }),
+  ];
+  const a = rephrased({ signature: 'a', severity: 3, line: 22 });
+  const b = rephrased({ signature: 'b', severity: 5, line: 24, message: 'Reads may return rows a write already replaced.' });
+  const twin = rephrased({ signature: 'b', severity: 2, line: 21, message: 'A later write is not seen by the lookup.' });
+  const expected = ['b#2', 'b#5', 'a#2', 'a#5'];
+  assert.deepEqual(ledgerCandidates(previous, [a, b, twin]).map((p) => p.id), expected);
+  assert.deepEqual(ledgerCandidates([...previous].reverse(), [twin, b, a]).map((p) => p.id), expected);
+});
+
+test('candidates carry only the fields that describe each problem', () => {
+  const entry = oldEntry({ status: 'dismissed', by: 'dev', reason: 'intentional', fix: 'patch', agents: 'code-review,testing', needsHumanReview: true });
+  const [pair] = ledgerCandidates([entry], [rephrased({ confidence: 'Low', fix: 'patch', agents: 'code-review' })]);
+  assert.deepEqual(Object.keys(pair).sort(), ['earlier', 'file', 'finding', 'id']);
+  for (const side of ['earlier', 'finding']) {
+    assert.deepEqual(Object.keys(pair[side]).sort(), ['category', 'line', 'message', 'recommendation'], side);
+  }
+});
+
+test('candidates cut each message and recommendation to 500 characters', () => {
+  const long = (c, n) => c.repeat(n);
+  const entry = oldEntry({ message: long('a', 600), recommendation: long('b', 700) });
+  const next = rephrased({ message: long('c', 501), recommendation: long('d', 499) });
+  const [pair] = ledgerCandidates([entry], [next]);
+  assert.deepEqual(
+    [pair.earlier.message, pair.earlier.recommendation, pair.finding.message, pair.finding.recommendation],
+    [long('a', 500), long('b', 500), long('c', 500), long('d', 499)],
+  );
+  const ledger = mergeLedger([entry], [next], BY_LOCATION);
+  assert.equal(ledger[1].message, long('c', 501), 'the ledger keeps the whole message');
+});
+
+test('seeded property: all-false answers give the location-mode ledger, and all-true answers change no earlier entry', () => {
+  let seed = 20261027;
+  const pick = (n) => {
+    seed = (seed * 1103515245 + 12345) % 2147483648;
+    return seed % n;
+  };
+  const words = ['cache', 'stale', 'write', 'read', 'lock', 'race', 'nil', 'leak', 'rows', 'key'];
+  const one = () => {
+    const severity = 1 + pick(9);
+    return finding({
+      signature: `s${pick(12)}`,
+      agent: ['code-review', 'code-review', 'testing', 'static-analysis'][pick(4)],
+      category: ['correctness', 'Correctness', 'performance'][pick(3)],
+      severity,
+      file: ['a.rb', 'a.rb', 'b.rb'][pick(3)],
+      line: severity < 7 && pick(6) === 0 ? null : 1 + pick(20),
+      message: Array.from({ length: 2 + pick(4) }, () => words[pick(words.length)]).join(' '),
+      recommendation: pick(2) ? 'change it' : undefined,
+    });
+  };
+  let pairsSeen = 0;
+  let hidden = 0;
+  for (let i = 0; i < 300; i++) {
+    const previous = [];
+    for (let k = 0, count = 1 + pick(5); k < count; k++) {
+      const entry = { n: k + 1, ...one(), signature: `p${k}`, status: ['open', 'open', 'dismissed', 'fixed'][pick(4)] };
+      previous.push(entry);
+    }
+    const findings = Array.from({ length: 1 + pick(5) }, one);
+    const byLocation = mergeLedger(previous, findings, BY_LOCATION);
+    const pairs = ledgerCandidates(previous, findings);
+    pairsSeen += pairs.length;
+    const answers = (same) => pairs.map((pair) => ({ id: pair.id, same }));
+    assert.deepEqual(mergeLedger(previous, findings, { ...BY_LOCATION, matches: answers(false) }), byLocation, `case ${i}`);
+    const allTrue = mergeLedger(previous, findings, { ...BY_LOCATION, matches: answers(true) });
+    assert.deepEqual(allTrue.slice(0, previous.length), byLocation.slice(0, previous.length), `case ${i}: earlier entries`);
+    hidden += byLocation.length - allTrue.length;
+  }
+  assert.ok(pairsSeen > 100 && hidden > 50, `the cases must exercise matching (pairs ${pairsSeen}, hidden ${hidden})`);
+});
+
+function matchCase(over = {}) {
+  const entry = oldEntry({ severity: 3, ...over });
+  const next = rephrased({ severity: 6 });
+  return { previous: [entry], findings: [next], id: 'new-sig#3' };
+}
+
+test('a same: true answer hides the new finding and leaves the entry exactly as it was, even when the new score is higher', () => {
+  const { previous, findings, id } = matchCase();
+  const ledger = mergeLedger(previous, findings, { ...BY_LOCATION, matches: [{ id, same: true }] });
+  assert.deepEqual(ledger, previous);
+});
+
+test('a same: false answer, or no answer, appends the new finding', () => {
+  const { previous, findings, id } = matchCase();
+  const plain = mergeLedger(previous, findings, BY_LOCATION);
+  assert.deepEqual(plain.map((entry) => [entry.n, entry.signature]), [[3, 'old-sig'], [4, 'new-sig']]);
+  assert.deepEqual(mergeLedger(previous, findings, { ...BY_LOCATION, matches: [{ id, same: false }] }), plain);
+  assert.deepEqual(mergeLedger(previous, findings, { ...BY_LOCATION, matches: [] }), plain);
+});
+
+test('a match keeps a dismissed entry dismissed', () => {
+  const { previous, findings, id } = matchCase({ status: 'dismissed', by: 'dev', reason: 'intentional' });
+  assert.deepEqual(mergeLedger(previous, findings, { ...BY_LOCATION, matches: [{ id, same: true }] }), previous);
+});
+
+test('one same: true pair hides a finding, and a later finding with its signature stays out too', () => {
+  const previous = [oldEntry(), oldEntry({ n: 4, signature: 'old-sig-2', line: 52 })];
+  const next = rephrased({ line: 45 });
+  const twin = rephrased({ line: 60, severity: 2, message: 'Nothing clears the stale rows later.' });
+  const pairs = ledgerCandidates(previous, [next, twin]);
+  assert.deepEqual(pairs.map((p) => p.id), ['new-sig#3', 'new-sig#4'], 'the premise: only the first finding of a signature pairs');
+  const ledger = mergeLedger(previous, [next, twin], {
+    ...BY_LOCATION,
+    matches: [{ id: 'new-sig#3', same: false }, { id: 'new-sig#4', same: true }],
+  });
+  assert.deepEqual(ledger, previous);
+  const other = rephrased({ signature: 'other-sig', line: 41, message: 'Rows outlive the record that made them.' });
+  const kept = mergeLedger(previous, [next, other], { ...BY_LOCATION, matches: [{ id: 'new-sig#3', same: true }] });
+  assert.deepEqual(kept.map((entry) => [entry.n, entry.signature]), [[3, 'old-sig'], [4, 'old-sig-2'], [5, 'other-sig']], 'a hidden finding takes no number');
+});
+
+test('matches are refused unless every item is a known, unrepeated pair with exactly id and a boolean same', () => {
+  const { previous, findings, id } = matchCase();
+  const bad = {
+    'not an array': { id, same: true },
+    'null': null,
+    'an unknown id': [{ id: 'new-sig#9', same: true }],
+    'an id for another finding': [{ id: 'old-sig#3', same: true }],
+    'an extra key': [{ id, same: true, severity: 2 }],
+    'a missing key': [{ id }],
+    'a string same': [{ id, same: 'true' }],
+    'a number id': [{ id: 3, same: true }],
+    'a non-object item': [id],
+    'an array item': [[id, true]],
+    'a repeated id': [{ id, same: false }, { id, same: false }],
+  };
+  for (const [label, matches] of Object.entries(bad)) {
+    assert.throws(() => mergeLedger(previous, findings, { ...BY_LOCATION, matches }), MatchesRejected, label);
+  }
+});
+
+test('matches are refused without location matching, because candidates assume it', () => {
+  const { previous, findings, id } = matchCase();
+  assert.throws(() => mergeLedger(previous, findings, { matches: [{ id, same: true }] }), MatchesRejected);
+  assert.throws(() => mergeLedger(previous, findings, { matchSuggestionsByLocation: false, matches: [] }), /location/);
+});
