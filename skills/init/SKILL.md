@@ -582,10 +582,12 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
   identified. Pin each to a full commit SHA and allowlist only relevant paths; never use a branch.
 - `rollout` — `advisory` (approving) with the skeleton's sample/quality thresholds; propose `shadow` only when the team asked for advice-only.
 - `learning` and `enforcement` — leave at the skeleton's defaults.
-- `engine:` and `reviews_run:` come from the three setup choices below. Write them only for a
-  non-default answer: the `engine:` block only for the code-review engine, and
+- `engine:`, `reviews_run:`, and `human_approval:` come from the four setup choices below. Write
+  them only for a non-default answer: the `engine:` block only for the code-review engine, and
   `reviews_run: local` only for local only. The skeleton shows both as commented examples;
-  uncomment the one you need and fill it in. Leave the rest commented, so a teammate on plugin
+  uncomment the one you need and fill it in. The `human_approval:` block is written only for a
+  yes on question 4 (`always: true`) or confirmed paths (`paths`); omit any key with no answer.
+  Leave the rest commented, so a teammate on plugin
   1.0.0 can still load a config that leaves them out. For example, for code-review and local
   only:
 
@@ -596,7 +598,7 @@ Read `$TPL/config.yml` and fill it in from Phases 1 and 2:
   reviews_run: local
   ```
 
-**Ask the three setup choices.** Ask them before presenting the proposal, one at a time, in this
+**Ask the four setup choices.** Ask them before presenting the proposal, one at a time, in this
 order. Each shows a one-line trade-off and a recommendation. The user picks, and may override the
 recommendation. Do not skip a question because the recommendation looks obvious.
 
@@ -617,11 +619,33 @@ recommendation. Do not skip a question because the recommendation looks obvious.
    - **Local + CI:** CI also reviews labeled PRs, so all four workflows are installed and the
      `ANTHROPIC_API_KEY` secret is needed. Costs API usage on every labeled PR. Write no
      `reviews_run:` key; `local-and-ci` is the default.
-3. **Should the bot approve PRs in this repo?** Recommended: yes, but
-   recommend no for repos your team requires human review on, such as payment or financial code;
-   say so when the repo looks like one of those. A yes means `auto_approve: true` on every installed caller,
-   a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every caller is `false`
-   whatever the answer.
+3. **Should the bot approve PRs in this repo?** Recommended: yes. Repos with payment or financial
+   code keep the bot on and use question 4: that code still gets a person's approval where it
+   matters, and the card-data check runs on every review. A yes means `auto_approve: true` on
+   every installed caller, a no means `auto_approve: false`. If `rollout.mode` is `shadow`, every
+   caller is `false` whatever the answer.
+4. **Does every PR in this repo need a person's approval?** Recommend yes for a repo your team says
+   always needs a person, such as a financial or accounting app; recommend no otherwise. A yes writes
+   `human_approval.always: true`; a no writes nothing for `always`. Then offer card paths:
+   - Scan the repo for card-handling code:
+
+     ```bash
+     HITS=$(git grep -P -l -i '\b(cvv2?|cvc|card_?number|pan|expir(y|ation)_?(date|month|year)|card_?token|tsys|cru[-_]payments|stripe|braintree)\b' -- . ':!*.md' ':!*.lock' ':!.claude/review'); RC=$?
+     if [ "$RC" -gt 1 ]; then
+       echo "card-code scan unavailable: this git has no PCRE support, or the scan failed"
+     elif [ -n "$HITS" ]; then
+       printf '%s\n' "$HITS" | sed 's|[^/]*$||' | sed 's|^$|./|' | sort | uniq -c | sort -rn
+     fi
+     ```
+
+   - If the block prints `card-code scan unavailable`, say so. Do not report "no card code found".
+     Offer to take `human_approval.paths` by hand, and go on with setup. This never stops setup.
+
+   - Turn each folder into a glob (`app/payments/` becomes `app/payments/**`; `./` means files in
+     the repo root, so list those files by name instead). Show the list with the hit counts and let
+     the user confirm, edit, or drop entries. Some hits will be noise (`pan`, `stripe`), so do not
+     accept the list for them. Write them to `human_approval.paths` only on a yes; on a no or an
+     empty scan, write no `paths`.
 
 Save the Where-reviews-run and approval answers where later blocks can read them. Each bash
 block is a separate shell, so these go in the same env file as the other cross-stage state. Use
@@ -674,10 +698,12 @@ Present the complete proposal:
    team is least likely to have written down anywhere).
 5. **Deterministic evidence** — every proposed ast-grep rule plus its tests, CI ingestion, and any
    related repositories with pinned SHAs/path budgets.
-   Also show the three setup choices again, each with its answer, the recommendation, and what it
+   Also show the four setup choices again, each with its answer, the recommendation, and what it
    will write: the **Review engine** (`engine.name`, plus effort, `always`, the lanes it replaces and
-   the lanes that keep running), **Where reviews run** (`reviews_run`), and **Should the bot
-   approve PRs in this repo?** (`auto_approve`). The user can change any of them at this gate
+   the lanes that keep running), **Where reviews run** (`reviews_run`), **Should the bot
+   approve PRs in this repo?** (`auto_approve`), and **Does every PR need a person?**
+   (`human_approval.always`), with the suggested card paths and which ones the user kept
+   (`human_approval.paths`). The user can change any of them at this gate
    with `edit`.
 6. **Evaluation + rollout** — all seeded/clean cases, threshold values, and that reports approve
    by default (`advisory`) unless the approval answer was no; how to change that (`auto_approve`
@@ -754,6 +780,19 @@ if [ "$BOT_APPROVES" = "no" ]; then
     sed 's/auto_approve: true/auto_approve: false/' "$w" > "$tmp" && cat "$tmp" > "$w"
     rm -f "$tmp"
   done
+fi
+```
+
+- Create the approval label once, with the user's own token, so the approve action can label PRs
+  even if its token cannot create labels. Do it only when the bot may approve here (the approval
+  answer was yes and rollout is not shadow; `BOT_APPROVES` is `no` in shadow). `--force` makes a
+  re-run safe. A failure (no permission, offline) only prints a warning and setup continues:
+
+```bash
+. /tmp/agent_review_init.sh 2>/dev/null || true
+if [ "$BOT_APPROVES" = "yes" ]; then
+  gh label create needs-human-approval --color B60205 --description "agent-review: a person must approve this PR" --force \
+    || echo "⚠️ Could not create the needs-human-approval label. Run it by hand: gh label create needs-human-approval --color B60205 --description \"agent-review: a person must approve this PR\" --force"
 fi
 ```
 

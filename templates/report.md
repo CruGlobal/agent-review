@@ -9,7 +9,7 @@ agent-review-status HTML comment lines anywhere in the filled report body — th
 prepends its own single copy of each after this skeleton is filled, and a duplicate line breaks
 address parsing ("report must contain exactly one findings ledger/status marker").]
 
-🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL][ · ⚠️ irreversible]
+🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL][ · ⚠️ irreversible][ · 👤 needs a person]
 [one-line: rollout mode ($AGENT_REVIEW_ROLLOUT_MODE, default advisory — in shadow, say plainly
 this report cannot approve or block the PR) · [N] agents run ([list of launched agent titles])
 · incremental since [short SHA] if scoped · [N] debate rounds if run]
@@ -35,7 +35,10 @@ NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve the wrong
 [IF no severity ≥7 entries exist at all:] ✅ No blockers.
 
 [IF status.irreversible:]
-⚠️ **Irreversible**: [semicolon-joined irreversibleReasons] → auto-approval stays off; a human must approve.
+⚠️ **Irreversible**: [semicolon-joined irreversibleReasons]. A revert will not undo this. Check backups and the deploy plan before you merge.
+
+[IF status.humanRequired:]
+👤 **Needs a person's approval**: [semicolon-joined humanReasons]. The bot will not approve this PR.
 
 ## OTHER FINDINGS ([N])
 

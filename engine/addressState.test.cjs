@@ -334,7 +334,8 @@ test('the published summary carries the irreversible reminder and a revert hint'
   });
   assert.match(finalized.summary, /git revert ccccccc/);
   assert.match(finalized.summary, /irreversible \(drops a column\)/);
-  assert.match(finalized.summary, /human approval is required/);
+  assert.match(finalized.summary, /A revert will not undo it\. Check backups and the deploy plan before you merge\./);
+  assert.ok(!finalized.summary.includes("human approval is required"));
   // Reversibility belongs to the reviewed diff — addressing findings never clears it.
   assert.equal(finalized.status.irreversible, true);
   assert.deepEqual(finalized.status.irreversibleReasons, ['drops a column']);
@@ -417,4 +418,44 @@ test('parseCommand lenient keeps keyword words inside a dismissal reason', () =>
   assert.deepEqual(semi.map((o) => [o.n, o.action]), [[2, 'dismiss'], [3, 'fix']]);
   // Compact mixed clauses without a reason still split on the keyword.
   assert.deepEqual(parseCommand('fix 1 dismiss 2 [other]: x', { lenient: true }).map((o) => o.action), ['fix', 'dismiss']);
+});
+
+function humanReport(statusExtra) {
+  const base = report();
+  const status = { v: 1, head: 'a'.repeat(40), risk: 'HIGH', openBlockers: 2, pass: false, irreversible: false, irreversibleReasons: [], ...statusExtra };
+  return base.replace(/^<!-- agent-review-status: .* -->$/m, () => `<!-- agent-review-status: ${JSON.stringify(status)} -->`);
+}
+
+function finalizeWith(statusExtra) {
+  const text = humanReport(statusExtra);
+  return finalizeAddress({
+    request: prepareAddressRequest({
+      command: '@claude dismiss 1 [intentional]: known; dismiss 2 [intentional]: known',
+      actor: 'dr-bizz', pr: 42, commentId: 100, reportCommentId: 200, expectedHead: 'a'.repeat(40), report: text,
+    }),
+    result: { version: 1, expectedHead: 'a'.repeat(40), fixes: [], tests: [] },
+    report: text,
+    fixSha: '',
+  });
+}
+
+test('finalizeAddress carries humanRequired and humanReasons through unchanged and tags the header', () => {
+  const finalized = finalizeWith({ humanRequired: true, humanReasons: ['PCI path: app/payments/x.rb'] });
+  assert.equal(finalized.status.humanRequired, true);
+  assert.deepEqual(finalized.status.humanReasons, ['PCI path: app/payments/x.rb']);
+  assert.match(finalized.report, /^🤖 agent-review · ✅ no blockers · risk HIGH · 👤 needs a person$/m);
+  assert.ok(finalized.summary.includes("👤 A person must approve this PR (PCI path: app/payments/x.rb). The bot will not approve it."));
+});
+
+test('finalizeAddress treats missing human fields as false and adds no human tag or note', () => {
+  const finalized = finalizeWith({});
+  assert.ok(!finalized.report.includes('needs a person'));
+  assert.ok(!finalized.summary.includes('A person must approve'));
+});
+
+test('finalizeAddress words the irreversible note as a caution', () => {
+  const finalized = finalizeWith({ irreversible: true, irreversibleReasons: ['drops a column', 'deletes data'] });
+  assert.match(finalized.report, /^🤖 agent-review · ✅ no blockers · risk HIGH · ⚠️ irreversible$/m);
+  assert.ok(finalized.summary.includes('⚠️ This change is marked irreversible (drops a column; deletes data). A revert will not undo it. Check backups and the deploy plan before you merge.'));
+  assert.ok(!finalized.summary.includes('auto-approval stays off'));
 });
