@@ -18947,6 +18947,10 @@ var require_humanApproval = __commonJS({
       }
       return { always: block.always === true, paths: block.paths || [] };
     }
+    function pathMatches(file, pattern) {
+      const folder = pattern.replace(/\/+$/, "");
+      return minimatch(file, pattern, OPTS) || folder !== "" && minimatch(file, `${folder}/**`, OPTS);
+    }
     function humanRules(configText, files, { incomplete = false } = {}) {
       const rules = readBlock(configText);
       if (!rules) return { required: false, reasons: [] };
@@ -18954,7 +18958,7 @@ var require_humanApproval = __commonJS({
       if (incomplete && hasRules) throw new Error("the PR's file list is incomplete");
       const reasons = [];
       if (rules.always) reasons.push("every PR in this repo needs a person (human_approval.always)");
-      const hits = [...new Set(files)].filter((f) => rules.paths.some((g) => minimatch(f, g, OPTS))).sort();
+      const hits = [...new Set(files)].filter((f) => rules.paths.some((g) => pathMatches(f, g))).sort();
       for (const f of hits) reasons.push(`PCI path: ${f}`);
       if (files.includes(CONFIG_PATH) && hasRules) {
         reasons.push("changes the human_approval config");

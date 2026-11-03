@@ -110,6 +110,9 @@ human_approval:
   paths: ['app/payments/**'] # a PR that touches one of these needs a person
 ```
 
+Each entry is a glob, and a folder name alone (`app/payments/` or `app/payments`) covers
+everything under it.
+
 The approval job reads these rules from the PR's base commit, so a PR cannot loosen its own
 rules. A PR that edits this config file needs a person when the base sets rules. If the job
 cannot read the rules, it does not approve.

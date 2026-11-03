@@ -36,6 +36,20 @@ test('a rename out of a PCI path still requires a person', () => {
   assert.deepEqual(r.reasons, ['PCI path: app/payments/old.rb']);
 });
 
+test('a bare folder in paths covers everything under it, with or without a trailing slash', () => {
+  for (const glob of ['app/payments/', 'app/payments', 'app/payments//']) {
+    const config = `human_approval:\n  paths:\n    - "${glob}"\n`;
+    assert.deepEqual(humanRules(config, ['app/payments/charge.rb', 'app/payments/tsys/sale.rb', 'lib/x.rb']).reasons, [
+      'PCI path: app/payments/charge.rb',
+      'PCI path: app/payments/tsys/sale.rb',
+    ], glob);
+    assert.equal(humanRules(config, ['app/payments_report.rb', 'app/paymentsx/a.rb']).required, false, `${glob}: a sibling with the same prefix is not inside`);
+  }
+  const files = humanRules('human_approval:\n  paths:\n    - "app/*.rb"\n    - "Gemfile"\n', ['app/a.rb', 'Gemfile', 'app/b/c.rb']);
+  assert.deepEqual(files.reasons, ['PCI path: Gemfile', 'PCI path: app/a.rb'], 'file globs and file names keep matching as before');
+  assert.equal(humanRules('human_approval:\n  paths:\n    - "/"\n', ['a.rb']).required, false, 'a lone slash is not every file');
+});
+
 test('dotfiles match a PCI glob', () => {
   assert.deepEqual(humanRules(PCI, ['app/payments/.secret.rb']).reasons, [
     'PCI path: app/payments/.secret.rb',
