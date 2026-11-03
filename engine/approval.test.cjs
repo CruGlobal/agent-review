@@ -277,7 +277,21 @@ test('decide: a bot-owned label comes off and a passing report approves', () => 
 
 test('decide: a bot-owned label comes off even when the report does not pass', () => {
   const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } }), labels: [LABEL], labelOwner: 'bot' });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', 'none']);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', 'all']);
+});
+
+test('decide: a report for this head that does not pass takes back every bot approval', () => {
+  const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } });
+  const d = decide({ report: failing });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'all']);
+  assert.equal(d.reason, 'status is not passing (2 open blockers)');
+  // Unreadable rules or labels never soften it to stale or none, and never move the label.
+  for (const o of [{ rules: { error: 'boom' } }, { labels: null }, { rules: { error: 'boom' }, labels: [LABEL], labelOwner: 'bot' }]) {
+    const u = decide({ report: failing, ...o });
+    assert.deepEqual([u.approve, u.label, u.dismissBotApprovals], [false, 'keep', 'all'], JSON.stringify(o));
+  }
+  // A status with no pass field is not passing either.
+  assert.equal(decide({ report: report({ status: { v: 1, head: HEAD } }) }).dismissBotApprovals, 'all');
 });
 
 test('decide: no label and no person needed approves and keeps', () => {
@@ -336,15 +350,16 @@ test('decide: an irreversible status with no reasons gives a caution saying no r
   assert.match(d.caution, /\(no reason recorded\)/);
 });
 
-test('decide: dismissBotApprovals is all when a person is needed or added the label, stale only when the rules cannot be read, and none otherwise', () => {
+test('decide: dismissBotApprovals is all when a person is needed, added the label, or the report for this head fails, stale only when the rules cannot be read, and none otherwise', () => {
   const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } });
   const cases = [
     ['a person is needed', { rules: { required: true, reasons: ['r'] } }, 'all'],
     ['a person is needed and the label is already on', { rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'bot' }, 'all'],
     ['rules unreadable', { rules: { error: 'boom' } }, 'stale'],
-    ['rules unreadable on a failing report', { report: failing, rules: { error: 'boom' } }, 'stale'],
+    ['rules unreadable on a failing report', { report: failing, rules: { error: 'boom' } }, 'all'],
     ['rules unreadable and labels unreadable', { rules: { error: 'boom' }, labels: null }, 'stale'],
-    ['open blockers with readable rules', { report: failing }, 'none'],
+    ['open blockers with readable rules', { report: failing }, 'all'],
+    ['open blockers with unreadable labels', { report: failing, labels: null }, 'all'],
     ['labels unreadable', { labels: null }, 'none'],
     ['a person added the label', { labels: [LABEL], labelOwner: 'person' }, 'all'],
     ['a person added the label to a failing report', { report: failing, labels: [LABEL], labelOwner: 'person' }, 'all'],

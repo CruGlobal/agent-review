@@ -125,6 +125,9 @@ allows.
 bot gave the PR when:
 
 - the report for the PR's newest commit says a person is needed;
+- the report for the PR's newest commit does not pass, say a re-review after a push found a
+  blocker. Many repos keep an approval after new commits, so the bot's approval of an earlier
+  commit would otherwise still count;
 - the repo rules say so, even when the report covers an older commit or the CI review failed,
   because the job checks the rules itself;
 - a person added the `needs-human-approval` label, even when the report covers an older commit
@@ -133,6 +136,10 @@ bot gave the PR when:
 If the job cannot read the rules and none of the above applies, it takes back only the bot's
 approvals of older commits. Otherwise it takes back nothing. It never touches a person's
 review. It approves only the exact commit it judged, and checks that the head did not move first.
+
+Taking back an approval uses GitHub's dismiss-review API, which the job's token can do with no
+extra setting. A branch rule that limits who may dismiss reviews blocks it: the job then shows a
+warning that a person must dismiss the approval, and it still never approves.
 
 **Irreversible changes.** A change that drops a column, deletes data or sends email is now a
 caution, not a stop. The report shows `⚠️ Irreversible`, and the approval message repeats it.

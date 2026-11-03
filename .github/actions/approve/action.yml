@@ -3,8 +3,9 @@ description: >-
   Approve a pull request when its published agent-review report passes for the
   PR's current head and no person needs to approve it. Re-checks the base
   commit's human_approval rules, owns the needs-human-approval label, and
-  dismisses the bot's own earlier approvals when a person must approve, or its
-  approvals of other heads when the rules cannot be read. The approval is pinned
+  dismisses the bot's own earlier approvals when a person must approve or the
+  report for the PR's head does not pass, or its approvals of other heads when
+  the rules cannot be read. The approval is pinned
   to the judged commit, and is never posted unless approve_allowed is 'true'. Fails closed on any missing or disagreeing marker, never
   requests changes, never fails the job, and downgrades a label, dismissal, or
   approval API failure to a warning.

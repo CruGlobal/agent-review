@@ -111,10 +111,11 @@ function cautionFor(result) {
 // label: 'add' | 'remove' | 'keep'. Only a judged report, or readable rules that
 // need a person, may change the label, and a label a person added is never
 // removed by the bot.
-// dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed
-// or a person's label is on the PR. 'stale' means the bot's approvals of other
-// heads; only unreadable rules dismiss those, since stale approvals are kept on
-// purpose everywhere else.
+// dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed,
+// a person's label is on the PR, or the report for the PR's head does not pass:
+// with stale-review dismissal off, an approval of an earlier head still counts
+// toward merging. 'stale' means the bot's approvals of other heads; only
+// unreadable rules dismiss those.
 function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   const { result, judged } = judge(report, { head });
   const caution = cautionFor(result);
@@ -159,9 +160,10 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     return out(false, `a person must approve: ${reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
   }
   if (byPerson) return byPerson;
+  if (!result.approve) return out(false, result.reason, ruleOk && present ? 'remove' : 'keep', 'all');
   if (!ruleOk) return rulesUnread();
   if (!labelsOk) return out(false, 'could not read the PR labels: expected a list of names', 'keep', 'none');
-  return out(result.approve, result.reason, present ? 'remove' : 'keep', 'none');
+  return out(true, result.reason, present ? 'remove' : 'keep', 'none');
 }
 
 module.exports = { evaluateApproval, decideApproval, MARKER };

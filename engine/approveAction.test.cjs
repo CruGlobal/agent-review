@@ -435,10 +435,37 @@ const SCENARIOS = {
       assert.deepEqual(o.dismissed, [11]);
     },
   ],
-  'dismiss none: open blockers leave every review alone': [
+  'dismiss all: open blockers for this head take back every bot approval and leave a person\'s alone': [
     { 'comments.json': comments({ pass: false, openBlockers: 2 }), 'reviews.json': REVIEWS },
     (o) => {
       notApproved(o);
+      assert.deepEqual(o.writes, [
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/11/dismissals ¦ -f ¦ message=agent-review: status is not passing (2 open blockers) ¦ -f ¦ event=DISMISS ¦ ',
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/14/dismissals ¦ -f ¦ message=agent-review: status is not passing (2 open blockers) ¦ -f ¦ event=DISMISS ¦ ',
+      ]);
+      assert.match(o.summary, /approve=false, label=keep, dismiss bot approvals=all\. status is not passing \(2 open blockers\)/);
+    },
+  ],
+  'open blockers whose dismissal is refused warn that a person must dismiss it, and never approve': [
+    { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'reviews.json': REVIEWS, 'fail-dismiss': '' },
+    (o) => {
+      notApproved(o);
+      assert.match(o.stdout, /^::warning::could not dismiss the bot's earlier approval on PR #7 \(review 11\)\. A person must dismiss it\.$/m);
+      assert.match(o.stdout, /^::warning::could not dismiss the bot's earlier approval on PR #7 \(review 14\)\. A person must dismiss it\.$/m);
+    },
+  ],
+  'open blockers with a review list that cannot be read warn and never approve': [
+    { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'fail-reviews': '' },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, []);
+      assert.match(o.stdout, /^::warning::could not list the reviews on PR #7, so the bot's earlier approvals were not dismissed\.$/m);
+    },
+  ],
+  'a passing report dismisses nothing and reads no reviews': [
+    { 'reviews.json': REVIEWS },
+    (o) => {
+      assert.equal(o.approved, BODY);
       assert.deepEqual(o.writes, []);
       assert.ok(!o.lines.some((l) => l.includes('pulls/7/reviews?per_page=100')));
     },

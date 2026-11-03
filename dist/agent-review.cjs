@@ -19066,9 +19066,10 @@ var require_approval = __commonJS({
         return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", "all");
       }
       if (byPerson) return byPerson;
+      if (!result.approve) return out(false, result.reason, ruleOk && present ? "remove" : "keep", "all");
       if (!ruleOk) return rulesUnread();
       if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", "none");
-      return out(result.approve, result.reason, present ? "remove" : "keep", "none");
+      return out(true, result.reason, present ? "remove" : "keep", "none");
     }
     module2.exports = { evaluateApproval, decideApproval, MARKER };
   }
