@@ -272,9 +272,12 @@ API layer style, CI system. Note the evidence for each (which file, which depend
 
 **Risk `patterns`** — build the list from what actually exists; every glob must match real paths.
 Per file, the highest-scoring matching pattern wins — patterns do **not** stack on one file, and
-the per-file scores sum across the diff. A `0`-point entry never changes the score (the per-file
-max starts at 0), so it is documentation of intent — a record that the path was considered and
-deemed no-risk. To actually keep a path out of scoring, put it in `excluded_paths`.
+the per-file scores sum across the diff. A file that matches no pattern gets
+`unmatched_file_points` (1 by default), so a `0`-point entry lowers its files to 0. A push that
+touches only 0-point and excluded paths, in a small diff, scores 0, and auto mode skips its review
+and keeps the earlier report. So give 0 points only to files no review needs to see. Tests are not
+among them: a push that weakens a test should still get a quick review. To keep a path out of
+review entirely, such as snapshots and generated files, put it in `excluded_paths`.
 
 | Kind of path                                     | points | tier     |
 | ------------------------------------------------ | ------ | -------- |
@@ -286,7 +289,7 @@ deemed no-risk. To actually keep a path out of scoring, put it in `excluded_path
 | payment / billing / money code                    | 2      | high     |
 | shared cross-feature code and components          | 2      | high     |
 | ordinary source                                   | 1      | medium   |
-| tests, fixtures, snapshots                        | 0      | low      |
+| tests and fixtures                                | 1      | low      |
 
 Also treat the review harness itself as sensitive: the config, ratified learnings, and settings
 that gate review (`.claude/review/config.yml`, `.claude/review/learnings/learnings.yml`,
