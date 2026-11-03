@@ -55,6 +55,8 @@ emit() { if [ -n "$JQ" ]; then jq -r "$JQ" < "$1" || exit 1; else cat "$1"; fi; 
 serve() { has "fail-$1" && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }; emit "$FIX/$2"; }
 case "$METHOD $URL" in
   "GET repos/o/r/issues/7/comments") serve comments comments.json ;;
+  "GET repos/o/r/issues/comments/99") serve comment comment.json ;;
+  "GET repos/o/r/collaborators/"*"/permission") serve permission permission.json ;;
   "GET repos/o/r/pulls/7")
     N=$(( $(cat "$FIX/../pr-reads" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$FIX/../pr-reads"
@@ -99,6 +101,10 @@ function report({ head = HEAD, status = {} } = {}) {
   ].join('\n');
 }
 const comments = (status) => JSON.stringify([{ user: { login: BOT }, body: report({ status }) }]);
+// A report a person posted from a terminal review, judged by comment id (the approve.yml path).
+const posted = ({ login = 'alice', pr = 7, status } = {}) =>
+  JSON.stringify({ user: { login }, issue_url: `https://api.github.com/repos/o/r/issues/${pr}`, body: report({ status }) });
+const permission = (p) => JSON.stringify({ permission: p });
 const prJson = (extra = {}) => JSON.stringify({ head: { sha: HEAD }, base: { sha: BASE }, changed_files: 2, ...extra });
 const labeled = (login, name = LABEL) => ({ event: 'labeled', label: { name }, actor: { login } });
 const REVIEWS =
@@ -174,7 +180,7 @@ function setup() {
   fs.symlinkSync(process.execPath, path.join(BIN, 'node'));
 }
 
-function run(name, overrides = {}, { patch, approveAllowed = 'true' } = {}) {
+function run(name, overrides = {}, { patch, approveAllowed = 'true', commentId = '' } = {}) {
   const dir = path.join(TMP, name);
   const fix = path.join(dir, 'fix');
   const ws = path.join(dir, 'ws');
@@ -201,7 +207,7 @@ function run(name, overrides = {}, { patch, approveAllowed = 'true' } = {}) {
     GITHUB_STEP_SUMMARY: path.join(dir, 'summary.md'),
     REPO: 'o/r',
     PR: '7',
-    REPORT_COMMENT_ID: '',
+    REPORT_COMMENT_ID: commentId,
     APPROVAL_BODY: BODY,
     APPROVE_ALLOWED: approveAllowed,
   };
@@ -558,6 +564,50 @@ for (const value of [true, '', 'bogus']) {
     { patch: { dismissBotApprovals: value } },
   ];
 }
+// approve.yml passes the comment id, so a report a person posted approves only when that person
+// can write to the repo. author_association admits every org member, even without write access.
+for (const level of ['admin', 'maintain', 'write']) {
+  SCENARIOS[`a posted report from a user with ${level} permission approves`] = [
+    { 'comment.json': posted(), 'permission.json': permission(level) },
+    (o) => {
+      assert.equal(o.approved, BODY);
+      assert.ok(o.lines.some((l) => l.startsWith('api ¦ repos/o/r/collaborators/alice/permission ¦ ')));
+    },
+    { commentId: '99' },
+  ];
+}
+for (const level of ['read', 'triage', 'none', '']) {
+  SCENARIOS[`a posted report from a user with ${JSON.stringify(level)} permission changes nothing and says why`] = [
+    { 'comment.json': posted({ login: 'mallory', status: { pass: false, openBlockers: 1 } }), 'permission.json': permission(level), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.writes, [], 'no label, dismissal, or approval');
+      assert.match(o.summary, /^Not approving PR #7: mallory does not hold repository write permission\.$/m);
+      assert.ok(!o.lines.some((l) => l.includes('pulls/7/reviews?per_page=100')), 'stops before reading anything else');
+    },
+    { commentId: '99' },
+  ];
+}
+SCENARIOS['a posted report whose author\'s permission cannot be read never approves'] = [
+  { 'comment.json': posted(), 'fail-permission': '' },
+  (o) => {
+    notApproved(o);
+    assert.deepEqual(o.writes, []);
+    assert.match(o.summary, /could not judge PR #7/);
+  },
+  { commentId: '99' },
+];
+SCENARIOS['a posted report from another PR never approves'] = [
+  { 'comment.json': posted({ pr: 8 }), 'permission.json': permission('admin') },
+  (o) => {
+    notApproved(o);
+    assert.deepEqual(o.writes, []);
+    assert.match(o.summary, /Not approving PR #7: comment 99 does not belong to it\./);
+    assert.ok(!o.lines.some((l) => l.includes('/permission')), 'the PR check runs first');
+  },
+  { commentId: '99' },
+];
+
 SCENARIOS['a runtime from another version that asks to add a label already on the PR never adds it again'] = [
   { config: PCI, 'labels.json': JSON.stringify([{ name: LABEL }]), 'timeline.json': JSON.stringify([labeled('alice')]) },
   (o) => {
