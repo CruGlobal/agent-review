@@ -280,8 +280,8 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
     # Local canonical comment: this user's own marked comment when one exists, else the bot's.
     # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
+      | agent-review report-comment --me "$ME" 2>/dev/null \
       | tr -d '\r' > "$PREV_COMMENT" || true
   fi
   LAST_REVIEWED=$(tr -d '\r' < "$PREV_COMMENT" \
@@ -347,7 +347,7 @@ for (; i < lines.length; i++) {
   if (m[1]) markers[m[1]] = m[2];
 }
 if (lines[i] === "") i++;
-// gh runs --jq once per page, so a second page can add another comment after this one.
+// A second report marker starts another comment glued on after this one; it never moves.
 const body = lines.slice(i);
 const next = body.indexOf("<!-- agent-review -->");
 const ledger = "ledger" in markers ? JSON.parse(markers.ledger) : null;
@@ -829,8 +829,8 @@ if [ "$MODE" = "auto" ]; then
       # Local canonical comment: this user's own marked comment when one exists, else the bot's.
       # Anyone else's could be a forged report.
       ME=$(gh api user --jq .login 2>/dev/null || echo "")
-      gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
+      gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
+        | agent-review report-comment --me "$ME" 2>/dev/null \
         | tr -d '\r' > /tmp/previous_agent_review_comment.md
       sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
       [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
@@ -1748,9 +1748,8 @@ if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] 
     # Local canonical comment: this user's own marked comment when one exists, else the bot's.
     # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" \
-      2>/dev/null | tr -d '\r' \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
+      | agent-review report-comment --me "$ME" 2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
   fi

@@ -42,6 +42,7 @@ const { filterFindings, rulesFromLearnings } = require('./applyLearnings.cjs');
 const { mergeLedger, ledgerCandidates, MatchesRejected, buildStatus } = require('./reportState.cjs');
 const { evaluateApproval, decideApproval } = require('./approval.cjs');
 const { humanRules } = require('./humanApproval.cjs');
+const { readPages, canonicalComment } = require('./canonicalComment.cjs');
 const {
   CAPTURE_LIMIT_MINUTES,
   checkCodeReviewRun,
@@ -520,6 +521,7 @@ function blobLines(root, commit, path) {
 
 const CODE_REVIEW_PROOF_USAGE =
   'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]';
+const REPORT_COMMENT_USAGE = 'usage: agent-review report-comment --me <login> [--field body|id]';
 const DIFF_FOR_USAGE = 'usage: agent-review diff-for --diff <f> --raw <f>';
 
 function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -583,6 +585,7 @@ const USAGE = `usage: agent-review <command>
   ledger-candidates --findings <f> [--previous <f>]   print the pairs a matcher judges: each new suggestion the ledger would add, with every older open or dismissed entry from the same lane and file within 10 lines (JSON {count, pairs}; each side has only line, category, message, and recommendation, the last two cut to 500 characters; no severity, status, agent, confidence, or evidence)
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
+  report-comment --me <login> [--field body|id]   read every page of a PR's comments (gh api --paginate output) on stdin and print the body or id of the canonical report: the user's own marked comment, else github-actions[bot]'s (nothing when there is none; exit 1 on unreadable input)
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
@@ -1071,6 +1074,24 @@ function main(rawArgv) {
         out(`human-check: ${e.message}`);
         return 1;
       }
+    }
+    case 'report-comment': {
+      const me = flag(rest, '--me');
+      const field = flag(rest, '--field') || 'body';
+      if (me === undefined || !['body', 'id'].includes(field)) {
+        out(REPORT_COMMENT_USAGE);
+        return 1;
+      }
+      let comments;
+      try {
+        comments = readPages(readFileSync(0, 'utf8'));
+      } catch (e) {
+        process.stderr.write(`report-comment: ${e.message}\n`);
+        return 1;
+      }
+      const pick = canonicalComment(comments, me);
+      if (pick && pick[field] !== undefined && pick[field] !== null) out(String(pick[field]));
+      return 0;
     }
     case 'code-review-proof': {
       const rawPath = flag(rest, '--raw');

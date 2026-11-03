@@ -2238,33 +2238,49 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
   assert.ok(address.includes('In argument mode, push without confirming'), 'argument mode and yolo never stop at the push confirmation');
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
   assert.ok(yolo.includes(OWN_FIRST), 'yolo reads the same canonical comment address writes');
-  for (const [name, text] of [['review', review], ['address', address], ['yolo-review', yolo]]) {
-    const selectors = text.split('\n').filter((line) => line.includes('--jq') && line.includes('startswith(\\"<!-- agent-review -->\\")'));
-    assert.ok(selectors.length > 0, `${name} reads the canonical comment`);
-    for (const line of selectors) assert.ok(line.includes(OWN_FIRST), `${name}: every canonical-comment read uses the own-first rule: ${line.trim()}`);
+  for (const [name, text, count] of [['review', review, 3], ['address', address, 1], ['yolo-review', yolo, 2]]) {
+    const lines = text.split('\n');
+    assert.ok(!text.includes('startswith(\\"<!-- agent-review -->\\")'), `${name}: no per-page jq pick is left`);
+    const picks = lines.flatMap((line, i) => (line.includes(OWN_FIRST) ? [i] : []));
+    assert.equal(picks.length, count, `${name} reads the canonical comment ${count} time(s)`);
+    for (const i of picks) {
+      assert.match(
+        lines[i - 1],
+        /gh api "repos\/\$REPO\/issues\/\$PR_NUMBER\/comments\?per_page=100" --paginate( 2>\/dev\/null)? \\$/,
+        `${name}: every canonical-comment pick reads every page first: ${lines[i - 1].trim()}`,
+      );
+    }
   }
 });
 
-const OWN_FIRST = '(map(select(.user.login == \\"$ME\\")) | first) // (map(select(.user.login == \\"github-actions[bot]\\")) | first)';
+const OWN_FIRST = '| agent-review report-comment --me "$ME"';
 
-test("the canonical-comment rule falls back only to the bot's report, never to anyone else's", (t) => {
-  let jq = '';
-  try {
-    jq = execFileSync('sh', ['-c', 'command -v jq'], { encoding: 'utf8' }).trim();
-  } catch {
-    return t.skip('jq is not installed');
+test("address's canonical-comment pick reads every page and falls back only to the bot's report", (t) => {
+  const { mkdirSync, writeFileSync, rmSync } = require('node:fs');
+  const address = readFileSync(ADDRESS_SKILL, 'utf8');
+  const m = address.match(/^COMMENT_ID=\$\(gh api [^\n]*\n[^\n]*\)$/m);
+  assert.ok(m, 'address picks its comment id in one two-line command');
+  const c = (id, login, text) => ({ id, user: { login }, body: `<!-- agent-review -->\n${text}` });
+  const filler = Array.from({ length: 29 }, (_, i) => ({ id: 100 + i, user: { login: 'someone' }, body: 'chat' }));
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-pick-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncat "${dir}/pages"\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, 'bin/agent-review')}" "$@"\n`, { mode: 0o755 });
+      const pick = (...pages) => {
+        writeFileSync(join(dir, 'pages'), pages.map((p) => JSON.stringify(p)).join(''));
+        const script = `ME=me REPO=o/r PR_NUMBER=7\n${m[0]}\nprintf '%s' "$COMMENT_ID"`;
+        return execFileSync(shell, ['-c', script], { encoding: 'utf8', env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir } });
+      };
+      const forged = c(9, 'mallory', 'forged');
+      assert.equal(pick([c(1, 'github-actions[bot]', 'bot'), ...filler], [c(2, 'me', 'mine')]), '2', `${shell}: page 2 holds the user's own report`);
+      assert.equal(pick([forged, ...filler], [c(1, 'github-actions[bot]', 'bot')]), '1', `${shell}: else the bot's`);
+      assert.equal(pick([forged, c(3, 'member', 'org member')]), '', `${shell}: author_association does not mean write access`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
-  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const m = review.match(/--jq "(\(map\(select\(\.body \| startswith[^\n]*?\.body \/\/ empty)"/);
-  assert.ok(m && m[1].includes(OWN_FIRST), 'the review skill picks the canonical comment with the own-first rule');
-  const expr = m[1].replaceAll('\\"', '"').replaceAll('$ME', 'me');
-  const c = (login, association, text) => ({ user: { login }, author_association: association, body: `<!-- agent-review -->\n${text}` });
-  const pick = (comments) => execFileSync(jq, ['-r', expr], { input: JSON.stringify(comments), encoding: 'utf8' }).trim();
-  const forged = c('mallory', 'CONTRIBUTOR', 'forged');
-  assert.strictEqual(pick([forged, c('github-actions[bot]', 'NONE', 'bot')]), '<!-- agent-review -->\nbot');
-  assert.strictEqual(pick([forged, c('member', 'MEMBER', 'member')]), '', 'author_association does not mean write access');
-  assert.strictEqual(pick([forged]), '', 'a forged report alone is never picked');
-  assert.strictEqual(pick([c('github-actions[bot]', 'NONE', 'bot'), forged, c('me', 'NONE', 'mine')]), '<!-- agent-review -->\nmine');
 });
 
 test('posted review comments keep every marker on one line under zsh and bash, so the approver can read them', (t) => {
@@ -3893,7 +3909,8 @@ test('yolo-review uses a report only when its head marker names the current HEAD
       const head = 'aaaa111122223333444455556666777788889999';
       writeFileSync(join(dir, 'head'), `${head}\n`);
       writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && cat "${dir}/head"\n`, { mode: 0o755 });
-      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncase "$*" in\n  *.body*) cat "${dir}/body" ;;\n  *) echo x ;;\nesac\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) ${commentsPage(join(dir, 'body'))} ;;\n  *) echo x ;;\nesac\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, 'bin/agent-review')}" "$@"\n`, { mode: 0o755 });
       const stubComment = (marker) =>
         writeFileSync(
           join(dir, 'body'),
@@ -4068,6 +4085,12 @@ function humanRulesRepo() {
   return { repo, fork, mid, head, base, badConfig, noConfig, blobGone, lonely };
 }
 
+// The sh command a fake gh runs for a comments read: one page holding <bodyFile> as the
+// comment of the user "me", printed the way `gh api --paginate` prints a page. No file, no page.
+function commentsPage(bodyFile) {
+  return `"${process.execPath}" -e 'const fs = require("fs"); const f = process.argv[1]; process.stdout.write(JSON.stringify(fs.existsSync(f) ? [{ id: 1, user: { login: "me" }, body: fs.readFileSync(f, "utf8") }] : []))' "${bodyFile}"`;
+}
+
 // Runs a review-skill block in `repo` with its /tmp files moved to a private directory. The real
 // CLI runs human-check; ledger is stubbed, status records its arguments, and gh prints the
 // previous comment. `failGit` names a git subcommand that fails; `want` lists extra /tmp files
@@ -4084,7 +4107,7 @@ function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = nul
       `#!/bin/sh\ncase "$1" in\n  status) printf '%s\\n' "$@" > "${dir}/status.args"; echo '{}' ;;\n  ledger) echo '[]' ;;\n  *) exec node "${join(ROOT, 'bin/agent-review')}" "$@" ;;\nesac\n`,
       { mode: 0o755 },
     );
-    writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) cat "${dir}/previous_comment.md" ;;\nesac\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) ${commentsPage(join(dir, 'previous_comment.md'))} ;;\nesac\n`, { mode: 0o755 });
     if (failGit || gitScript) {
       const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
       const script = gitScript ? gitScript(realGit) : `#!/bin/sh\n[ "$1" = "${failGit}" ] && exit 128\nexec "${realGit}" "$@"\n`;

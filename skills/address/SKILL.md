@@ -125,8 +125,8 @@ REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner
 # Local canonical comment: this user's own marked comment when one exists, else the bot's.
 # Anyone else's could be a forged report.
 ME=$(gh api user --jq .login 2>/dev/null || echo "")
-COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-  --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .id // empty" | head -n1)
+COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate \
+  | agent-review report-comment --me "$ME" --field id)
 [ -n "$COMMENT_ID" ] || { echo "❌ No marked review report on PR #$PR_NUMBER."; exit 1; }
 
 gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > /tmp/address_comment.md
