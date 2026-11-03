@@ -183,6 +183,11 @@ excluded_paths:
   - '**/*.generated.*'
   - 'docs/**'
   - '.claude/review/rules/**' # prose rule docs — config/guidance, not reviewable code
+  # agent-review's own bookkeeping, never reviewed or scored: /agent-review:address commits
+  # feedback.jsonl to PRs, and reviews write metrics/ and the index cache.
+  - '.claude/review/learnings/feedback.jsonl'
+  - '.claude/review/metrics/**'
+  - '.claude/review/index/**'
   # Package-manager artifacts — generated/vendored, never reviewable
   - 'yarn.lock'
   - 'package-lock.json'

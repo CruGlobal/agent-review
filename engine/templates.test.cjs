@@ -2663,6 +2663,43 @@ test('init writes engine and reviews_run only for a non-default answer', () => {
   );
 });
 
+test("init ignores the review's metrics and index, and merges feedback.jsonl with union, once each, under bash and zsh", (t) => {
+  const { writeFileSync } = require('node:fs');
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
+  assert.ok(block, 'init has the .gitignore and .gitattributes block');
+  const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
+  assert.ok(commit.includes(' .gitignore .gitattributes\n'), 'the bootstrap commit stages both files');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-ignore-'));
+    try {
+      writeFileSync(join(dir, '.gitignore'), 'node_modules/'); // no trailing newline
+      execFileSync(shell, ['-c', block], { cwd: dir });
+      execFileSync(shell, ['-c', block], { cwd: dir });
+      assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), 'node_modules/\n/.claude/review/metrics/\n/.claude/review/index/\n', shell);
+      assert.equal(readFileSync(join(dir, '.gitattributes'), 'utf8'), '.claude/review/learnings/feedback.jsonl merge=union\n', shell);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("address stages only the files its fixes changed, never the review's bookkeeping", () => {
+  const address = readFileSync(ADDRESS_SKILL, 'utf8');
+  for (const block of bashBlockList(address)) {
+    assert.ok(!/git add (-A|--all|\.)(\s|$)/m.test(block), `address never stages the whole tree:\n${block}`);
+  }
+  const commit = bashBlockList(address).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
+  assert.ok(commit.includes('git add -- <each file you changed for these fixes>'), 'the fix commit names its files');
+  assert.ok(commit.includes('git diff --cached --name-only'), 'and shows what is staged before committing');
+});
+
+test('a review never commits a git-ignored metrics dashboard', () => {
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const block = bashBlockList(review).find((b) => b.includes('Committing quality metrics dashboard'));
+  assert.ok(block.indexOf('git check-ignore -q') < block.indexOf('git add'), 'the ignore check comes before any git add');
+});
+
 test('init never copies or stages the CI workflows outside a local-and-ci guard', () => {
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const blocks = [...init.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);

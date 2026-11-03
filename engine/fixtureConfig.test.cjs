@@ -59,3 +59,24 @@ test('the config template loads with its human_approval example uncommented', ()
   assert.equal(typeof cfg.human_approval.always, 'boolean');
   assert.ok(Array.isArray(cfg.human_approval.paths) && cfg.human_approval.paths.length > 0);
 });
+
+test("the config template keeps agent-review's bookkeeping out of the risk score", () => {
+  const { scoreRisk } = require('./scoreRisk.cjs');
+  const cfg = parse(readFileSync(path.join(__dirname, '../templates/config.yml'), 'utf8'));
+  // A repo that scores its whole review harness, as init may propose.
+  cfg.risk.patterns.unshift({ glob: '.claude/review/**', points: 3, tier: 'critical' });
+  const score = (files) => scoreRisk({ files, linesChanged: 10 }, cfg).factors.patternScore;
+  assert.equal(
+    score([
+      '.claude/review/learnings/feedback.jsonl',
+      '.claude/review/metrics/PR_12_metrics.md',
+      '.claude/review/metrics/severity_history.txt',
+      '.claude/review/metrics/history/2026-11-03_12.json',
+      '.claude/review/index/graph.json',
+    ]),
+    0,
+    'feedback.jsonl, metrics and the index cache are excluded',
+  );
+  assert.equal(score(['.claude/review/config.yml']), 3, 'the config still scores');
+  assert.equal(score(['.claude/review/learnings/learnings.yml']), 3, 'ratified learnings still score');
+});

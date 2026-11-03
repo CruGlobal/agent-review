@@ -288,8 +288,13 @@ deemed no-risk. To actually keep a path out of scoring, put it in `excluded_path
 | ordinary source                                   | 1      | medium   |
 | tests, fixtures, snapshots                        | 0      | low      |
 
-Also treat the review harness itself as sensitive: the config, rule docs, and settings that gate
-review are worth `2`-`3` points, because weakening them weakens every future review.
+Also treat the review harness itself as sensitive: the config, ratified learnings, and settings
+that gate review (`.claude/review/config.yml`, `.claude/review/learnings/learnings.yml`,
+`.claude/settings.json`) are worth `2`-`3` points, because weakening them weakens every future
+review. A `.claude/review/**` glob is fine too, but only because the skeleton's `excluded_paths`
+keep out the bookkeeping files: `learnings/feedback.jsonl`, which `/agent-review:address` commits
+to PRs, and the `metrics/` and `index/` files reviews write. Keep those exclusions; without them a
+small fix scores as critical.
 
 **`manifests` / `lockfiles`** — the detected pair(s). Keep them accurate: they drive the
 `new_dependency`, `critical_pkg_update`, and `lockfile_only_change` detections.
@@ -717,7 +722,9 @@ Present the complete proposal:
    than the bot's.
 8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
-9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`.
+9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`,
+   the `.gitignore` lines for `.claude/review/metrics/` and `.claude/review/index/`, and the
+   `.gitattributes` line that merges `feedback.jsonl` with `merge=union`.
 
 Then ask, plainly: *"Approve writing these files? (yes / edit <what> / no)"*
 
@@ -747,6 +754,23 @@ cp "$TPL/workflows/agent-review-approve.yml" .github/workflows/agent-review-appr
 printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/learnings/feedback.jsonl
 : > .claude/review/evals/results/.gitkeep
+```
+
+Keep the review's bookkeeping out of git. Reviews write `.claude/review/metrics/` and the
+`.claude/review/index/` cache on every run, so both are ignored. `feedback.jsonl` is committed and
+only ever appended to, so `merge=union` keeps both sides' lines when a branch merges the base
+branch locally. GitHub's web merge and "Update branch" ignore `.gitattributes`, so a conflict there
+is still fixed by merging locally. Each line is added once, on its own line:
+
+```bash
+add_line() {
+  [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
+  [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
+  printf '%s\n' "$2" >> "$1"
+}
+add_line .gitignore '/.claude/review/metrics/'
+add_line .gitignore '/.claude/review/index/'
+add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
 ```
 
 Then the CI workflows. The copies run only when the `REVIEWS_RUN` answer saved in 3A is
@@ -838,13 +862,13 @@ Optionally warm the import-graph cache so the first review is fast:
 agent-review index
 ```
 
-The cache regenerates on demand, so leave it out of the commit unless the team wants it committed.
+The cache regenerates on demand and is git-ignored, so it stays out of the commit.
 
 ### 3E — Commit
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
-git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
+git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml .gitignore .gitattributes
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

@@ -224,9 +224,16 @@ For each finding to fix (work in severity order):
 
 Then commit and push once for the batch:
 
+Stage only the files you changed for these fixes, by name. Never `git add -A` or `git add .`: they
+also take the review's own files (`.claude/review/metrics/`, `.claude/review/index/`) and anything
+else left in the tree, which inflates the next review's risk score. Before committing, check that
+`git diff --cached --name-only` lists only those files, and unstage anything else with
+`git restore --staged <file>`.
+
 ```bash
 . /tmp/address_env.sh
-git add -A
+git add -- <each file you changed for these fixes>
+git diff --cached --name-only
 git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}"   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
 git push
 FIX_SHA=$(git rev-parse --short HEAD)
@@ -288,7 +295,9 @@ git add .claude/review/learnings/feedback.jsonl && git commit -m "chore(review):
 ```
 
 (The feedback store is repo-tracked; committing it to the PR branch is what persists the signal —
-it merges with the PR. Skip the commit if nothing was dismissed and no fix was applied.)
+it merges with the PR. Skip the commit if nothing was dismissed and no fix was applied. It is
+excluded from review and scoring, and repos set up by init mark it `merge=union`, so a local merge
+of the base branch keeps both sides' lines.)
 
 ## Stage 5 — Report back
 

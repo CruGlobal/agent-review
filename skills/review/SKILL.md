@@ -2108,7 +2108,9 @@ straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
-if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
+if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ] && git check-ignore -q "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"; then
+  echo "📊 Metrics dashboard: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md (git-ignored here, so not committed)"
+elif [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
   echo "📊 Committing quality metrics dashboard..."
   git add "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" \
           "$REVIEW_DIR/metrics/severity_history.txt" \
