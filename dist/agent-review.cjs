@@ -17146,8 +17146,8 @@ var require_selectAgents = __commonJS({
       const raw = String(trigger || "");
       if (!raw) return false;
       const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const left = /^[A-Za-z0-9_]/.test(raw) ? "(?:^|[^A-Za-z0-9_])" : "";
-      const right = /[A-Za-z0-9_]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
+      const left = /^[A-Za-z0-9]/.test(raw) ? "(?:^|[^A-Za-z0-9_])" : "";
+      const right = /[A-Za-z0-9]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
       return new RegExp(left + escaped + right, "m").test(contentText);
     }
     function hasUnmatchedReviewableFile(reviewed, config) {
