@@ -17814,7 +17814,8 @@ var require_evalSuite = __commonJS({
         "blocker_precision",
         "clean_false_blocker_rate",
         "false_positive_dismissal_rate",
-        "category_recall"
+        "category_recall",
+        "suggestion_recall"
       ]) {
         if (thresholds[key] != null) finiteRate(thresholds[key], `thresholds.${key}`);
       }
@@ -17898,6 +17899,8 @@ var require_evalSuite = __commonJS({
       const totals = {
         expectedBlockers: 0,
         truePositiveBlockers: 0,
+        expectedSuggestions: 0,
+        detectedSuggestions: 0,
         validBlockerFindings: 0,
         falsePositiveBlockers: 0,
         cleanRuns: 0,
@@ -17917,6 +17920,7 @@ var require_evalSuite = __commonJS({
         if (seenRuns.has(key)) throw new Error(`duplicate result run: ${key}`);
         seenRuns.add(key);
         const expected = (c.expected || []).filter((e) => e.must_block !== false);
+        const suggestions = (c.expected || []).filter((e) => e.must_block === false);
         const unmatchedActual = new Set(run.findings.map((_, i) => i));
         const matched = [];
         for (const e of expected) {
@@ -17935,6 +17939,18 @@ var require_evalSuite = __commonJS({
           }
           category.set(cat, cs);
         }
+        const matchedSuggestions = [];
+        for (const e of suggestions) {
+          totals.expectedSuggestions++;
+          const index = run.findings.findIndex(
+            (f, i) => unmatchedActual.has(i) && f.verdict !== "false_positive" && f.severity < blockerThreshold && matchesExpected(f, e, 1)
+          );
+          if (index >= 0) {
+            totals.detectedSuggestions++;
+            unmatchedActual.delete(index);
+            matchedSuggestions.push({ expected: e.id, finding: index });
+          }
+        }
         let falseBlockers = 0;
         run.findings.forEach((finding, i) => {
           if (finding.outcome === "accepted") totals.accepted++;
@@ -17950,13 +17966,14 @@ var require_evalSuite = __commonJS({
           else falseBlockers++;
         });
         totals.falsePositiveBlockers += falseBlockers;
-        if (c.kind === "clean_control") {
+        const expectsNoBlocker = expected.length === 0;
+        if (expectsNoBlocker) {
           totals.cleanRuns++;
           if (run.findings.some((f) => f.severity >= blockerThreshold && f.verdict !== "duplicate")) {
             totals.cleanRunsWithBlocker++;
           }
         }
-        const detected = c.kind === "clean_control" ? falseBlockers === 0 : matched.length === expected.length;
+        const detected = matched.length === expected.length && matchedSuggestions.length === suggestions.length && (!expectsNoBlocker || falseBlockers === 0);
         const cr = caseRuns.get(c.id) || { kind: c.kind, runs: 0, detected: 0 };
         cr.runs++;
         if (detected) cr.detected++;
@@ -17966,8 +17983,11 @@ var require_evalSuite = __commonJS({
           runId: run.run_id,
           expectedBlockers: expected.length,
           detectedBlockers: matched.length,
+          expectedSuggestions: suggestions.length,
+          detectedSuggestions: matchedSuggestions.length,
           falsePositiveBlockers: falseBlockers,
-          matched
+          matched,
+          matchedSuggestions
         });
       }
       const precisionDen = totals.validBlockerFindings + totals.falsePositiveBlockers;
@@ -17976,6 +17996,7 @@ var require_evalSuite = __commonJS({
         blockerRecall: ratio(totals.truePositiveBlockers, totals.expectedBlockers),
         blockerPrecision: ratio(totals.validBlockerFindings, precisionDen),
         cleanFalseBlockerRate: ratio(totals.cleanRunsWithBlocker, totals.cleanRuns),
+        suggestionRecall: ratio(totals.detectedSuggestions, totals.expectedSuggestions),
         dismissalRate: ratio(totals.dismissed, dispositioned),
         falsePositiveDismissalRate: ratio(totals.falsePositiveDismissals, dispositioned)
       };
@@ -17994,6 +18015,7 @@ var require_evalSuite = __commonJS({
         blockerPrecision: t.blocker_precision == null || metrics.blockerPrecision != null && metrics.blockerPrecision >= t.blocker_precision,
         cleanFalseBlockerRate: t.clean_false_blocker_rate == null || metrics.cleanFalseBlockerRate != null && metrics.cleanFalseBlockerRate <= t.clean_false_blocker_rate,
         falsePositiveDismissalRate: t.false_positive_dismissal_rate == null || metrics.falsePositiveDismissalRate != null && metrics.falsePositiveDismissalRate <= t.false_positive_dismissal_rate,
+        suggestionRecall: t.suggestion_recall == null || metrics.suggestionRecall != null && metrics.suggestionRecall >= t.suggestion_recall,
         categoryRecall: t.category_recall == null || Object.keys(categories).length > 0 && Object.values(categories).every((v) => v.recall != null && v.recall >= t.category_recall),
         minimumRuns: runsInput.length >= Number(t.minimum_runs || 1),
         everyCaseCovered: suite.cases.every((c) => caseRuns.has(c.id))

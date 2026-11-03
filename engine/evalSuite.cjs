@@ -85,6 +85,7 @@ function validateSuite(raw, { suitePath } = {}) {
     'clean_false_blocker_rate',
     'false_positive_dismissal_rate',
     'category_recall',
+    'suggestion_recall',
   ]) {
     if (thresholds[key] != null) finiteRate(thresholds[key], `thresholds.${key}`);
   }
@@ -182,6 +183,8 @@ function scoreSuite(suiteInput, runsInput) {
   const totals = {
     expectedBlockers: 0,
     truePositiveBlockers: 0,
+    expectedSuggestions: 0,
+    detectedSuggestions: 0,
     validBlockerFindings: 0,
     falsePositiveBlockers: 0,
     cleanRuns: 0,
@@ -203,6 +206,8 @@ function scoreSuite(suiteInput, runsInput) {
     seenRuns.add(key);
 
     const expected = (c.expected || []).filter((e) => e.must_block !== false);
+    // must_block: false is a real finding the review should raise below the blocker bar.
+    const suggestions = (c.expected || []).filter((e) => e.must_block === false);
     const unmatchedActual = new Set(run.findings.map((_, i) => i));
     const matched = [];
     for (const e of expected) {
@@ -220,6 +225,23 @@ function scoreSuite(suiteInput, runsInput) {
         matched.push({ expected: e.id, finding: index });
       }
       category.set(cat, cs);
+    }
+    // A suggestion matches only below the blocker bar, so blocking on it stays a false blocker.
+    const matchedSuggestions = [];
+    for (const e of suggestions) {
+      totals.expectedSuggestions++;
+      const index = run.findings.findIndex(
+        (f, i) =>
+          unmatchedActual.has(i) &&
+          f.verdict !== 'false_positive' &&
+          f.severity < blockerThreshold &&
+          matchesExpected(f, e, 1),
+      );
+      if (index >= 0) {
+        totals.detectedSuggestions++;
+        unmatchedActual.delete(index);
+        matchedSuggestions.push({ expected: e.id, finding: index });
+      }
     }
 
     let falseBlockers = 0;
@@ -240,13 +262,18 @@ function scoreSuite(suiteInput, runsInput) {
       else falseBlockers++;
     });
     totals.falsePositiveBlockers += falseBlockers;
-    if (c.kind === 'clean_control') {
+    // Clean controls and seeded cases that expect no blocker must both pass review.
+    const expectsNoBlocker = expected.length === 0;
+    if (expectsNoBlocker) {
       totals.cleanRuns++;
       if (run.findings.some((f) => f.severity >= blockerThreshold && f.verdict !== 'duplicate')) {
         totals.cleanRunsWithBlocker++;
       }
     }
-    const detected = c.kind === 'clean_control' ? falseBlockers === 0 : matched.length === expected.length;
+    const detected =
+      matched.length === expected.length &&
+      matchedSuggestions.length === suggestions.length &&
+      (!expectsNoBlocker || falseBlockers === 0);
     const cr = caseRuns.get(c.id) || { kind: c.kind, runs: 0, detected: 0 };
     cr.runs++;
     if (detected) cr.detected++;
@@ -256,8 +283,11 @@ function scoreSuite(suiteInput, runsInput) {
       runId: run.run_id,
       expectedBlockers: expected.length,
       detectedBlockers: matched.length,
+      expectedSuggestions: suggestions.length,
+      detectedSuggestions: matchedSuggestions.length,
       falsePositiveBlockers: falseBlockers,
       matched,
+      matchedSuggestions,
     });
   }
 
@@ -267,6 +297,7 @@ function scoreSuite(suiteInput, runsInput) {
     blockerRecall: ratio(totals.truePositiveBlockers, totals.expectedBlockers),
     blockerPrecision: ratio(totals.validBlockerFindings, precisionDen),
     cleanFalseBlockerRate: ratio(totals.cleanRunsWithBlocker, totals.cleanRuns),
+    suggestionRecall: ratio(totals.detectedSuggestions, totals.expectedSuggestions),
     dismissalRate: ratio(totals.dismissed, dispositioned),
     falsePositiveDismissalRate: ratio(totals.falsePositiveDismissals, dispositioned),
   };
@@ -287,6 +318,7 @@ function scoreSuite(suiteInput, runsInput) {
     blockerPrecision: t.blocker_precision == null || (metrics.blockerPrecision != null && metrics.blockerPrecision >= t.blocker_precision),
     cleanFalseBlockerRate: t.clean_false_blocker_rate == null || (metrics.cleanFalseBlockerRate != null && metrics.cleanFalseBlockerRate <= t.clean_false_blocker_rate),
     falsePositiveDismissalRate: t.false_positive_dismissal_rate == null || (metrics.falsePositiveDismissalRate != null && metrics.falsePositiveDismissalRate <= t.false_positive_dismissal_rate),
+    suggestionRecall: t.suggestion_recall == null || (metrics.suggestionRecall != null && metrics.suggestionRecall >= t.suggestion_recall),
     categoryRecall:
       t.category_recall == null ||
       (Object.keys(categories).length > 0 &&
