@@ -649,7 +649,7 @@ test('the skill says how to fill the capture, attempt, retry, diff, and profile 
   );
   assert.strictEqual(
     rows.get('DIFF_PATH'),
-    'The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$BASE_REF...$HEAD_REF"`, the merge base) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews',
+    'The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$REVIEWED_BASE" "$HEAD_REF"`, from the merge base, or from `BASE_REF` when there is none) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews',
   );
   const profile = rows.get('PROFILE_INSTRUCTION');
   assert.ok(
@@ -3252,7 +3252,7 @@ function armBlock() {
 
 // Runs Stage 1's arm block with stub agent-review and git commands, its /tmp files moved to a
 // private directory, and returns what it called and wrote.
-function runArmBlock(shell, env, plan) {
+function runArmBlock(shell, env, plan, { noMergeBase = false } = {}) {
   const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
   const { dirname } = require('node:path');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-arm-'));
@@ -3266,7 +3266,7 @@ function runArmBlock(shell, env, plan) {
     );
     writeFileSync(
       join(bin, 'git'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\ncase "$1" in\n  diff) echo "merge-base diff" ;;\n  merge-base) echo "mergebase90" ;;\n  rev-parse) echo "localhead1234" ;;\nesac\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\ncase "$1" in\n  diff) echo "merge-base diff" ;;\n  merge-base) ${noMergeBase ? 'exit 1' : 'echo "mergebase90"'} ;;\n  rev-parse) echo "localhead1234" ;;\nesac\n`,
       { mode: 0o755 },
     );
     writeFileSync(join(dir, 'review_env.sh'), Object.entries(env).map(([k, v]) => `export ${k}="${v}"`).join('\n') + '\n');
@@ -3379,10 +3379,15 @@ test('code-review-engine.md arms capture with the composed args and fills SKILL_
 });
 
 test('full PR reviews give the lane a merge-base diff', (t) => {
-  assert.ok(armBlock().includes('  git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt\n'));
+  assert.ok(armBlock().includes('  git diff "$REVIEWED_BASE" "$HEAD_REF" > /tmp/code_review_diff.txt\n'));
   for (const shell of availableShells(t)) {
     const full = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } });
-    assert.strictEqual(full.git, 'diff aaa111...bbb222\nmerge-base aaa111 bbb222\n', `${shell}: three dots diff against the merge base`);
+    assert.strictEqual(full.git, 'merge-base aaa111 bbb222\ndiff mergebase90 bbb222\n', `${shell}: the diff starts at the merge base`);
+
+    const unrelated = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } }, { noMergeBase: true });
+    assert.strictEqual(unrelated.status, 0, `${shell}: no merge base does not stop the review: ${unrelated.stdout}`);
+    assert.strictEqual(unrelated.git, 'merge-base aaa111 bbb222\ndiff aaa111 bbb222\n', `${shell}: with no merge base the diff starts at the base tip, as RANGE does`);
+    assert.ok(unrelated.stdout.includes('code-review base: aaa111\n'), `${shell}: ${unrelated.stdout}`);
     assert.strictEqual(full.diff, 'merge-base diff\n', `${shell}: the merge-base diff is written`);
     assert.ok(full.stdout.includes(`code-review diff: ${full.dir}/code_review_diff.txt\n`), `${shell}: ${full.stdout}`);
     assert.ok(full.env.includes(`CODE_REVIEW_DIFF="${full.dir}/code_review_diff.txt"`), `${shell}: the diff path is kept`);
