@@ -100,9 +100,10 @@ runs:
             | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .body // empty' \
             > "$REPORT"
         fi
+        # No report never approves, but the rules re-check, the label and the
+        # dismissals below still run, as they do for a report that cannot be judged.
         if [ ! -s "$REPORT" ]; then
           echo "No agent-review report found for PR #$PR — not approving." | tee -a "$GITHUB_STEP_SUMMARY"
-          exit 0
         fi
         PR_JSON="$RUNNER_TEMP/agent-review-approve-pr.json"
         gh api "repos/$REPO/pulls/$PR" > "$PR_JSON"

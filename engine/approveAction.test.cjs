@@ -262,6 +262,32 @@ const notApproved = (o) => {
 const noLabelWrites = (o) => assert.ok(!o.writes.some((w) => w.includes('/labels') || w.startsWith('label ¦')));
 
 const SCENARIOS = {
+  'no report never approves, and a PCI path still adds the label and takes back every bot approval': [
+    { 'comments.json': '[]', config: PCI, 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.match(o.summary, /^No agent-review report found for PR #7 — not approving\.$/m);
+      assert.match(o.summary, /approve=false, label=add, dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
+      assert.ok(o.writes.some((w) => w.startsWith('api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ ')));
+      assert.deepEqual(o.dismissed, [11, 14]);
+    },
+  ],
+  'no report with rules that need no person changes nothing': [
+    { 'comments.json': JSON.stringify([{ user: { login: 'alice' }, body: report() }]), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.writes, [], 'a person\'s report is not the bot\'s');
+      assert.match(o.summary, /approve=false, label=keep, dismiss bot approvals=none\. not an agent-review report/);
+    },
+  ],
+  'no report with rules that cannot be read takes back only bot approvals of other heads': [
+    { 'comments.json': '[]', 'config-status': '500', 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      noLabelWrites(o);
+      assert.deepEqual(o.dismissed, [11]);
+    },
+  ],
   'a repo with no config approves, pinned to the judged head': [
     {},
     (o) => {

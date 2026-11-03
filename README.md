@@ -140,8 +140,8 @@ bot gave the PR when:
 - the report for the PR's newest commit does not pass, say a re-review after a push found a
   blocker. Many repos keep an approval after new commits, so the bot's approval of an earlier
   commit would otherwise still count;
-- the repo rules say so, even when the report covers an older commit or the CI review failed,
-  because the job checks the rules itself;
+- the repo rules say so, even when the report covers an older commit, the PR has no report yet,
+  or the CI review failed, because the job checks the rules itself;
 - a person added the `needs-human-approval` label, even when the report covers an older commit
   or the job cannot read the rules.
 
