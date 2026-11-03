@@ -97,7 +97,9 @@ risk:
 # ── Agents ────────────────────────────────────────────────────────────────────
 # `always: true` runs the agent on every review. Otherwise the agent runs only
 # when a changed file matches `triggers.paths` or the diff contains one of
-# `triggers.content`. `rules[]` paths resolve against `.claude/review/`.
+# `triggers.content`. A content trigger matches whole identifiers only
+# (`currency` never fires on `concurrency`); a trailing `_` makes it a prefix
+# (`OKTA_`) and a leading `_` a suffix (`__c`). `rules[]` paths resolve against `.claude/review/`.
 # `triggers.specials` (optional) does NOT trigger the agent — it only records
 # which risk.special[].when detections this lane owns, so loadConfig's
 # `escalates` default can still find the right lane if you rename/remove the

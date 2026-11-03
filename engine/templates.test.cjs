@@ -2684,6 +2684,25 @@ test("init ignores the review's metrics and index, and merges feedback.jsonl wit
   }
 });
 
+test('init explains whole-token triggers with examples the engine matches, and suggests a .dockerignore', () => {
+  const { contentMatches } = require('./selectAgents.cjs');
+  const flat = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(flat.includes('**Content triggers match whole tokens.**'));
+  for (const [trigger, text, want] of [
+    ['currency', 'concurrency', false],
+    ['OKTA', 'OKTA_DOMAIN', false],
+    ['OKTA_', 'OKTA_DOMAIN', true],
+    ['tsep_', 'tsep_token', true],
+    ['_SESSION_KEY', 'APP_SESSION_KEY', true],
+    ['__c', 'Amount__c', true],
+  ]) {
+    assert.ok(flat.includes(`\`${trigger}\``) && flat.includes(`\`${text}\``), `init names ${trigger} and ${text}`);
+    assert.equal(contentMatches(`+ x = ${text}\n`, trigger), want, `${trigger} on ${text}`);
+  }
+  assert.ok(flat.includes('propose adding `/.claude` and `CLAUDE.md` to `.dockerignore`'));
+  assert.ok(flat.includes("also run `add_line .dockerignore '/.claude'` and `add_line .dockerignore 'CLAUDE.md'`"));
+});
+
 test("address stages only the files its fixes changed, never the review's bookkeeping", () => {
   const address = readFileSync(ADDRESS_SKILL, 'utf8');
   for (const block of bashBlockList(address)) {

@@ -256,7 +256,7 @@ git ls-files | sed 's|.*\.||' | sort | uniq -c | sort -rn | head -15      # file
 
 Then Read whichever of these exist: `package.json`, `tsconfig.json` (or `jsconfig.json`),
 `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `README.md`, the CI workflow files, and the
-framework config file. For non-JavaScript repos the manifest/lockfile pair is whatever the
+framework config file, and any `Dockerfile` with its `.dockerignore`. For non-JavaScript repos the manifest/lockfile pair is whatever the
 ecosystem uses — `pyproject.toml`/`poetry.lock` or `requirements.txt`, `go.mod`/`go.sum`,
 `Gemfile`/`Gemfile.lock`, `Cargo.toml`/`Cargo.lock`, `composer.json`/`composer.lock`. Detect,
 don't assume.
@@ -298,6 +298,11 @@ review. A `.claude/review/**` glob is fine too, but only because the skeleton's 
 keep out the bookkeeping files: `learnings/feedback.jsonl`, which `/agent-review:address` commits
 to PRs, and the `metrics/` and `index/` files reviews write. Keep those exclusions; without them a
 small fix scores as critical.
+
+**Docker images.** If a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`) and
+`.dockerignore` does not already leave them out, propose adding `/.claude` and `CLAUDE.md` to
+`.dockerignore`, so the rule docs and the seeded-bug eval patches do not ship in the image. Write
+them only on a yes at the 3B gate.
 
 **`manifests` / `lockfiles`** — the detected pair(s). Keep them accurate: they drive the
 `new_dependency`, `critical_pkg_update`, and `lockfile_only_change` detections.
@@ -378,6 +383,15 @@ The skeleton ships `security` and `data-integrity` with empty `triggers` — **f
 those agents never fire. Use the repo's real auth/API/migration/CI paths and real content markers
 (secret env names, raw-HTML sinks, redirect helpers, query/mutation helpers, cache-invalidation
 calls, schema parse calls) taken from the sampled files.
+
+**Content triggers match whole tokens.** A trigger made of letters, digits and `_` matches only a
+whole identifier: `currency` never fires on `concurrency`, and `OKTA` never fires on
+`OKTA_DOMAIN`. To match a family of names, end the trigger with `_` for a prefix (`OKTA_` matches
+`OKTA_DOMAIN`, `tsep_` matches `tsep_token`) or start it with `_` for a suffix (`_SESSION_KEY`
+matches `APP_SESSION_KEY`, `__c` matches `Amount__c`). A trigger that starts or ends with
+punctuation (`ENV[`, `.round(`) matches that exact spelling. Before proposing a trigger, find a
+real line in the repo that it matches. `agent-review config validate` cannot tell a whole-word
+trigger from one meant as a prefix, so it will not catch a trigger that never fires.
 
 ### Draft the rule docs (subagent)
 
@@ -727,7 +741,8 @@ Present the complete proposal:
    `enabledPlugins`), and a diff-style before/after if the file already exists.
 9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`,
    the `.gitignore` lines for `.claude/review/metrics/` and `.claude/review/index/`, and the
-   `.gitattributes` line that merges `feedback.jsonl` with `merge=union`.
+   `.gitattributes` line that merges `feedback.jsonl` with `merge=union`, and the `.dockerignore`
+   lines when the repo builds an image from the whole tree.
 
 Then ask, plainly: *"Approve writing these files? (yes / edit <what> / no)"*
 
@@ -775,6 +790,9 @@ add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
 add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
 ```
+
+If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'` and
+`add_line .dockerignore 'CLAUDE.md'` in that block.
 
 Then the CI workflows. The copies run only when the `REVIEWS_RUN` answer saved in 3A is
 `local-and-ci`; anything else, including an empty value, copies nothing. Do not read it back
@@ -872,6 +890,7 @@ The cache regenerates on demand and is git-ignored, so it stays out of the commi
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml .gitignore .gitattributes
+[ -f .dockerignore ] && git add .dockerignore
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml
