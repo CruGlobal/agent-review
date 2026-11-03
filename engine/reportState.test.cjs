@@ -33,7 +33,7 @@ test('incremental ledger preserves prior state and appends only new signatures',
     { n: 4, ...finding(), status: 'dismissed', by: 'dev', reason: 'intentional' },
   ];
   const ledger = mergeLedger(previous, [
-    finding({ severity: 10, message: 'wording changed' }),
+    finding({ severity: 8, message: 'wording changed' }),
     finding({ signature: 'sig-2', severity: 7, line: 20 }),
   ]);
   assert.equal(ledger.length, 2);
@@ -95,16 +95,35 @@ test('a raised entry keeps nothing from the old entry but its number', () => {
   }
 });
 
-test('dismissed and fixed entries never change when their finding comes back higher', () => {
-  const previous = [
-    { n: 1, ...finding({ severity: 6 }), status: 'dismissed', by: 'dev', reason: 'intentional' },
-    { n: 2, ...finding({ signature: 'sig-2', severity: 5 }), status: 'fixed', sha: 'abc1234' },
-  ];
-  const ledger = mergeLedger(previous, [
-    finding({ severity: 9, line: 30, evidence: 'new trace' }),
-    finding({ signature: 'sig-2', severity: 8, line: 31, evidence: 'new trace' }),
-  ]);
-  assert.deepEqual(ledger, previous);
+const LOW_RISK = { plan: { risk: { level: 'LOW' } }, safety: { irreversible: false, reasons: [] }, human: { required: false, reasons: [] }, cardScan: { cardData: false, reasons: [] } };
+
+test('a fixed finding that comes back reopens at any score: the fix did not hold', () => {
+  const previous = [{ n: 2, ...finding({ severity: 8 }), status: 'fixed', sha: 'abc1234' }];
+  for (const severity of [9, 8, 4]) {
+    const next = finding({ id: 'new-id', severity, line: 31, evidence: 'the check is gone again' });
+    const ledger = mergeLedger(previous, [next]);
+    assert.deepEqual(ledger, [{ ...mergeLedger([], [next])[0], n: 2 }], `severity ${severity}: the new finding under the old number, open, with no sha`);
+  }
+  const status = buildStatus({ ledger: mergeLedger(previous, [finding({ severity: 8 })]), ...LOW_RISK });
+  assert.deepEqual([status.openBlockers, status.pass], [1, false], 'a returning blocker blocks again');
+});
+
+test('a dismissed finding stays dismissed at the same or a lower score', () => {
+  const previous = [{ n: 1, ...finding({ severity: 6 }), status: 'dismissed', by: 'dev', reason: 'intentional', reasonCode: 'intentional' }];
+  for (const severity of [6, 3]) {
+    assert.deepEqual(mergeLedger(previous, [finding({ severity, line: 30, evidence: 'new trace' })]), previous, `severity ${severity}`);
+  }
+});
+
+test('a dismissed finding that comes back higher reopens as a raise, and a blocker blocks', () => {
+  const previous = [{ n: 1, ...finding({ severity: 5 }), status: 'dismissed', by: 'dev', reason: 'intentional', reasonCode: 'intentional' }];
+  const next = finding({ id: 'new-id', severity: 8, line: 30, evidence: 'reaches the action unchecked' });
+  const ledger = mergeLedger(previous, [next]);
+  assert.deepEqual(ledger, [{ ...mergeLedger([], [next])[0], n: 1 }], 'the dismissal and its reason are gone');
+  const status = buildStatus({ ledger, ...LOW_RISK });
+  assert.deepEqual([status.openBlockers, status.pass], [1, false]);
+  const suggestion = mergeLedger(previous, [finding({ severity: 6, line: 30 })]);
+  assert.deepEqual([suggestion[0].status, suggestion[0].severity], ['open', 6], 'a higher suggestion reopens too');
 });
 
 test('a finding that comes back lower or equal leaves its open entry as it was', () => {

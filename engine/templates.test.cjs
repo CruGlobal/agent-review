@@ -2898,9 +2898,12 @@ test('README states the merge scoring rule after the approval rules it follows',
     'A 7 or more keeps its score when it is combined with lower scores, on every engine.',
     "This only counts for a score that is still 7 or more after its reviewer's caps and the blocker bar: a line, High confidence, and evidence.",
     'When two findings of 7 or more are combined, the group takes the higher score.',
-    'If the same finding comes back with a higher score and the earlier one is still open, the new finding replaces it and keeps only its number.',
+    '**Open:** a higher score replaces it.',
+    '**Fixed:** it opens again at any score, because the fix did not hold.',
+    '**Dismissed:** it stays dismissed, unless the new score is higher than when it was dismissed.',
+    'A replaced or reopened finding keeps only its number.',
     'The score, file, line, message, evidence, and everything else come from the new finding.',
-    'A dismissed or fixed finding never changes.',
+    'A lower or equal score never changes an open or dismissed finding.',
   ]) {
     assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
   }
@@ -2909,6 +2912,7 @@ test('README states the merge scoring rule after the approval rules it follows',
     'a 7 or more from any reviewer keeps its score, on every engine',
     'Every 7 or more has already shown concrete evidence',
     'moves up to the new score',
+    'A dismissed or fixed finding never changes.',
   ]) {
     assert.ok(!all.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
   }

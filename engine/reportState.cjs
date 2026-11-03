@@ -159,9 +159,12 @@ function mergeSteps(previousInput, findingsInput, matchSuggestionsByLocation) {
       unmatched.push(finding);
       continue;
     }
-    // A raise never lowers an entry and never changes a dismissed or fixed one.
-    if (merged[at].status === 'open' && finding.severity > merged[at].severity) {
-      merged[at] = { n: merged[at].n, ...finding, status: 'open' };
+    // A returning finding reopens a fixed entry at any score: the fix did not hold. It raises
+    // an open entry, or reopens a dismissed one, only at a higher score than the entry has.
+    // A reopened or raised entry keeps only its number.
+    const entry = merged[at];
+    if (entry.status === 'fixed' || finding.severity > entry.severity) {
+      merged[at] = { n: entry.n, ...finding, status: 'open' };
     }
   }
   // Location matching runs after every raise, against the moved entries.

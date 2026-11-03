@@ -87,10 +87,16 @@ on every engine. This only counts for a score that is still 7 or more after its 
 and the blocker bar: a line, High confidence, and evidence. When two findings of 7 or more are
 combined, the group takes the higher score.
 
-A later review can raise an earlier finding. If the same finding comes back with a higher score
-and the earlier one is still open, the new finding replaces it and keeps only its number. The
-score, file, line, message, evidence, and everything else come from the new finding. A dismissed
-or fixed finding never changes.
+A later review can raise or reopen an earlier finding when the same finding comes back:
+
+- **Open:** a higher score replaces it.
+- **Fixed:** it opens again at any score, because the fix did not hold.
+- **Dismissed:** it stays dismissed, unless the new score is higher than when it was dismissed.
+  Then it opens again, and needs a new fix or dismissal.
+
+A replaced or reopened finding keeps only its number. The score, file, line, message, evidence,
+and everything else come from the new finding. A lower or equal score never changes an open or
+dismissed finding.
 
 ## PCI and repos that always need a person
 

@@ -18765,8 +18765,9 @@ var require_reportState = __commonJS({
           unmatched.push(finding);
           continue;
         }
-        if (merged[at].status === "open" && finding.severity > merged[at].severity) {
-          merged[at] = { n: merged[at].n, ...finding, status: "open" };
+        const entry = merged[at];
+        if (entry.status === "fixed" || finding.severity > entry.severity) {
+          merged[at] = { n: entry.n, ...finding, status: "open" };
         }
       }
       const seen = new Set(bySignature.keys());
