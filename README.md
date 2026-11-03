@@ -118,7 +118,10 @@ rules. A PR that edits this config file needs a person when the base sets rules.
 cannot read the rules, it does not approve.
 
 **The card-data check.** Every review scans the PR's own changes for card data, in every repo,
-with no off switch. It flags card numbers, CVV, card expiry, a cardholder name next to card data,
+and no setting turns it off. A push whose risk score is 0 (only excluded or 0-point paths, and a
+small diff) is not reviewed, so it is not scanned either: a re-review keeps the last scan's
+result, and a CI review of a whole PR at score 0 records no card data. The repo's
+`human_approval` rules still run on those pushes. The check flags card numbers, CVV, card expiry, a cardholder name next to card data,
 processor card tokens or vault ids, calls that charge, authorize, refund or store a card, payment
 form card fields, and logging in card-handling code. Amounts, invoices, donations and receipts
 with no card data do not count. A hit shows as `👤 Needs a person's approval` in the report.
