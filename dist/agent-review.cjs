@@ -19071,6 +19071,7 @@ var require_approval = __commonJS({
       });
       const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === "string");
       const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
+      const addLabel = labelsOk && !present ? "add" : "keep";
       const plain = rules !== null && typeof rules === "object" && !Array.isArray(rules);
       const ruleOk = plain && !("error" in rules) && typeof rules.required === "boolean" && Array.isArray(rules.reasons) && rules.reasons.every((r) => typeof r === "string");
       const byPerson = present && labelOwner !== "bot" ? out(false, `a person added the ${LABEL} label`, "keep", "all") : null;
@@ -19080,7 +19081,7 @@ var require_approval = __commonJS({
       };
       if (!judged) {
         if (ruleOk && rules.required) {
-          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, present ? "keep" : "add", "all");
+          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, addLabel, "all");
         }
         if (byPerson) return byPerson;
         return ruleOk ? out(false, result.reason, "keep", "none") : rulesUnread();
@@ -19090,7 +19091,7 @@ var require_approval = __commonJS({
         for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
       }
       if (result.humanRequired || ruleOk && rules.required) {
-        return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", "all");
+        return out(false, `a person must approve: ${reasons.join("; ")}`, addLabel, "all");
       }
       if (byPerson) return byPerson;
       if (!result.approve) return out(false, result.reason, ruleOk && present ? "remove" : "keep", "all");

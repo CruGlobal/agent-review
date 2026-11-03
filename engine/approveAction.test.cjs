@@ -608,6 +608,24 @@ SCENARIOS['a posted report from another PR never approves'] = [
   { commentId: '99' },
 ];
 
+SCENARIOS['unreadable labels never add the label when a PCI path needs a person, and every bot approval goes'] = [
+  { config: PCI, 'fail-labels': '', 'reviews.json': REVIEWS },
+  (o) => {
+    notApproved(o);
+    noLabelWrites(o);
+    assert.deepEqual(o.dismissed, [11, 14]);
+    assert.match(o.summary, /approve=false, label=keep, dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
+  },
+];
+SCENARIOS['a runtime from another version that asks to add a label after the labels read failed never adds it'] = [
+  { config: PCI, 'fail-labels': '' },
+  (o) => {
+    notApproved(o);
+    noLabelWrites(o);
+    assert.match(o.summary, /The needs-human-approval label was not added to PR #7, since its labels could not be read\./);
+  },
+  { patch: { label: 'add' } },
+];
 SCENARIOS['a runtime from another version that asks to add a label already on the PR never adds it again'] = [
   { config: PCI, 'labels.json': JSON.stringify([{ name: LABEL }]), 'timeline.json': JSON.stringify([labeled('alice')]) },
   (o) => {

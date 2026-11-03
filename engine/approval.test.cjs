@@ -239,6 +239,17 @@ test('decide: rules.required adds the label and dismisses bot approvals', () => 
   assert.equal(decide({ rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'person' }).label, 'keep');
 });
 
+test('decide: unreadable labels never add the label, but a person is still needed and every bot approval goes', () => {
+  const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
+  for (const o of [{ rules: PCI_RULES }, { report: report({ status }) }, { report: report({ head: 'ffff' + HEAD.slice(4) }), rules: PCI_RULES }]) {
+    for (const labels of [null, 'needs-human-approval', [{ name: LABEL }]]) {
+      const d = decide({ ...o, labels });
+      assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'all'], JSON.stringify([o, labels]));
+      assert.match(d.reason, /^a person must approve: /);
+    }
+  }
+});
+
 test('decide: status.humanRequired adds the label even with no rules required', () => {
   const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
   const d = decide({ report: report({ status }) });

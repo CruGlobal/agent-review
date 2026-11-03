@@ -109,8 +109,8 @@ function cautionFor(result) {
 }
 
 // label: 'add' | 'remove' | 'keep'. Only a judged report, or readable rules that
-// need a person, may change the label, and a label a person added is never
-// removed by the bot.
+// need a person, may change the label; a label a person added is never removed
+// by the bot, and an unreadable label list never adds it.
 // dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed,
 // a person's label is on the PR, or the report for the PR's head does not pass:
 // with stale-review dismissal off, an approval of an earlier head still counts
@@ -128,6 +128,9 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   });
   const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === 'string');
   const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
+  // An unreadable label list never adds the label: if a person's label is on the PR, adding it
+  // again would log a bot event and make it look like the bot's.
+  const addLabel = labelsOk && !present ? 'add' : 'keep';
   const plain = rules !== null && typeof rules === 'object' && !Array.isArray(rules);
   const ruleOk =
     plain &&
@@ -146,7 +149,7 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   // the report, so it holds even when the report cannot be judged.
   if (!judged) {
     if (ruleOk && rules.required) {
-      return out(false, `a person must approve: ${rules.reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
+      return out(false, `a person must approve: ${rules.reasons.join('; ')}`, addLabel, 'all');
     }
     if (byPerson) return byPerson;
     return ruleOk ? out(false, result.reason, 'keep', 'none') : rulesUnread();
@@ -157,7 +160,7 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
   }
   if (result.humanRequired || (ruleOk && rules.required)) {
-    return out(false, `a person must approve: ${reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
+    return out(false, `a person must approve: ${reasons.join('; ')}`, addLabel, 'all');
   }
   if (byPerson) return byPerson;
   if (!result.approve) return out(false, result.reason, ruleOk && present ? 'remove' : 'keep', 'all');

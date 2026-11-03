@@ -167,8 +167,10 @@ runs:
         TIMELINE="$RUNNER_TEMP/agent-review-approve-timeline.json"
         LABEL_OWNER=none
         LABEL_ON_PR=false
+        LABELS_READ=false
         if gh api "repos/$REPO/issues/$PR/labels?per_page=100" --paginate > "$LABELS.pages" \
           && jq -s '[.[][].name]' "$LABELS.pages" > "$LABELS"; then
+          LABELS_READ=true
           if jq -e --arg l "$LABEL" 'any(.[]; ascii_downcase == $l)' "$LABELS" > /dev/null; then
             LABEL_ON_PR=true
             if gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$TIMELINE" \
@@ -200,9 +202,12 @@ runs:
         case "$LABEL_ACTION" in
           add)
             # Adding a label that is already on the PR can log a new bot labeled
-            # event, which would make a person's label the bot's.
+            # event, which would make a person's label the bot's, so an unread
+            # label list never adds it.
             if [ "$LABEL_ON_PR" = true ]; then
               note "The $LABEL label is already on PR #$PR."
+            elif [ "$LABELS_READ" != true ]; then
+              note "The $LABEL label was not added to PR #$PR, since its labels could not be read."
             else
               gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true
               if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null; then
