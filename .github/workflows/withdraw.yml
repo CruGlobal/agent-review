@@ -1,0 +1,30 @@
+name: agent-review withdraw (reusable)
+# Takes back the bot's agent-review approval of an older commit when new
+# commits land on a PR or its base branch changes, unless the push only merged
+# in (or rebased onto) the default branch. Callers run it from
+# pull_request_target, which is safe only because nothing here checks out or
+# runs the PR's code: keep it that way.
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        type: string
+        required: true
+
+jobs:
+  withdraw:
+    # Never the approve group, where an approve run would replace a waiting
+    # withdraw run. Overlapping runs rely on the approve action's head check
+    # after approving.
+    concurrency:
+      group: agent-review-withdraw-${{ inputs.pr_number }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: CruGlobal/agent-review/.github/actions/withdraw@main
+        with:
+          pr_number: ${{ inputs.pr_number }}

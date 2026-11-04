@@ -61,7 +61,9 @@ case "$METHOD $URL" in
     N=$(( $(cat "$FIX/../pr-reads" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$FIX/../pr-reads"
     if [ "$N" -ge 2 ] && has fail-pr-later; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
-    if [ "$N" -ge 2 ] && has pr-later.json; then serve pr pr-later.json; else serve pr pr.json; fi ;;
+    if [ "$N" -ge 3 ] && has fail-pr-after; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
+    if [ "$N" -ge 3 ] && has pr-after.json; then serve pr pr-after.json
+    elif [ "$N" -ge 2 ] && has pr-later.json; then serve pr pr-later.json; else serve pr pr.json; fi ;;
   "GET repos/o/r/contents/.claude/review/config.yml?ref="*)
     case "$(cat "$FIX/config-status")" in
       404) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
@@ -73,9 +75,14 @@ case "$METHOD $URL" in
   "GET repos/o/r/issues/7/labels?per_page=100") serve labels labels.json ;;
   "GET repos/o/r/issues/7/timeline?per_page=100") serve timeline timeline.json ;;
   "GET repos/o/r/pulls/7/reviews?per_page=100") serve reviews reviews.json ;;
+  "GET repos/o/r/pulls/7/reviews/"*)
+    if has already-dismissed; then echo '{"state":"DISMISSED"}' > "$FIX/../review.json"; else echo '{"state":"APPROVED"}' > "$FIX/../review.json"; fi
+    emit "$FIX/../review.json" ;;
   "POST repos/o/r/issues/7/labels") has fail-label-add && exit 1; echo '[]' ;;
   "DELETE repos/o/r/issues/7/labels/needs-human-approval") has fail-label-remove && exit 1; echo '[]' ;;
-  "PUT repos/o/r/pulls/7/reviews/"*"/dismissals") has fail-dismiss && exit 1; echo '{}' ;;
+  "PUT repos/o/r/pulls/7/reviews/"*"/dismissals")
+    has already-dismissed && { echo "gh: Can not dismiss a dismissed pull request review (HTTP 422)" >&2; exit 1; }
+    has fail-dismiss && exit 1; echo '{}' ;;
   "POST repos/o/r/pulls/7/reviews")
     has fail-approve && { echo "gh: not permitted to approve (HTTP 422)" >&2; exit 1; }
     for f in "\${FIELDS[@]}"; do
@@ -85,7 +92,8 @@ case "$METHOD $URL" in
         event=*) printf '%s' "\${f#event=}" > "$FIX/../approved-event.txt" ;;
       esac
     done
-    echo '{}' ;;
+    printf '%s' '{"id":501}' > "$FIX/../approval.json"
+    emit "$FIX/../approval.json" ;;
   *) echo "fake gh: unhandled $METHOD $URL" >&2; exit 98 ;;
 esac
 `;
@@ -319,7 +327,40 @@ const SCENARIOS = {
     (o) => {
       assert.equal(o.approved, APPROVED);
       assert.deepEqual(o.writes, []);
-      assert.ok(o.lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length === 2, 'the head is read again');
+      assert.equal(o.lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 3, 'the head is read again before and after approving');
+    },
+  ],
+  'a head that moves while approving takes that approval back': [
+    { 'pr-after.json': prJson({ head: { sha: OLD } }) },
+    (o) => {
+      assert.equal(o.approved, APPROVED, 'it approved the judged head first');
+      assert.deepEqual(o.dismissed, [501], 'then took back exactly that approval');
+      assert.match(o.summary, /The head of PR #7 moved while it was being approved, so the bot took back its approval of a{40}\./);
+    },
+  ],
+  'a moved head whose approval a withdraw run already took back is noted, not warned about': [
+    { 'pr-after.json': prJson({ head: { sha: OLD } }), 'already-dismissed': '' },
+    (o) => {
+      assert.deepEqual(o.dismissed, [501]);
+      assert.ok(!o.stdout.includes('::warning::'), o.stdout);
+      assert.match(o.summary, /The head of PR #7 moved while it was being approved, and the bot's approval of a{40} was already taken back\./);
+    },
+  ],
+  'earlier approvals a withdraw run already dismissed are noted, not warned about': [
+    { config: PCI, 'reviews.json': REVIEWS, 'already-dismissed': '' },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
+      assert.ok(!o.stdout.includes('::warning::'), o.stdout);
+      assert.equal((o.summary.match(/The bot's earlier approval on PR #7 was already dismissed/g) || []).length, 4);
+    },
+  ],
+  'a head that cannot be read after approving keeps the approval and warns': [
+    { 'fail-pr-after': '' },
+    (o) => {
+      assert.equal(o.approved, APPROVED);
+      assert.deepEqual(o.dismissed, []);
+      assert.match(o.stdout, /^::warning::could not read the head of PR #7 after approving a{40}\. If it moved, a person must dismiss that approval\.$/m);
     },
   ],
   'an irreversible report approves with the caution after a blank line': [

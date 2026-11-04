@@ -1,0 +1,266 @@
+name: agent-review withdraw
+description: >-
+  Dismisses the bot's own agent-review approvals of commits older than the PR's
+  head, unless the PR targets the default branch, its base has not changed
+  since the approval, and the head adds nothing to the approved commit but that
+  branch. Never checks out or runs PR code: it reads the PR through the API and
+  compares commits in a fresh bare repository. Never dismisses an approval of
+  the current head, a person's approval, or another workflow's, and never fails
+  the job.
+inputs:
+  pr_number:
+    description: Pull request number
+    required: true
+  expected_head:
+    description: >-
+      The commit the caller just pushed to the PR. GitHub moves the PR's head a
+      moment after a push, so the action waits for it, and judges against this
+      commit even if the API never shows it.
+    required: false
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Withdraw the bot's approval of an older commit
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ inputs.pr_number }}
+        EXPECTED_HEAD: ${{ inputs.expected_head }}
+        SERVER_URL: ${{ github.server_url }}
+        EVENT_NAME: ${{ github.event_name }}
+        EVENT_ACTION: ${{ github.event.action }}
+      run: |
+        set -eEuo pipefail
+        # Anything unexpected is "could not check": report it and stop
+        # successfully. Under `set -E` a failure inside $(...) runs this trap in
+        # that subshell, so a subshell exits 1 and leaves the report to the
+        # top-level shell.
+        trap '[ "$BASH_SUBSHELL" -eq 0 ] || exit 1; echo "::warning::agent-review withdraw could not check PR #$PR (${BASH_COMMAND%% *} failed), so no approval was withdrawn." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
+        note() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        WORK="$RUNNER_TEMP/agent-review-withdraw"
+        rm -rf "$WORK"
+        mkdir -p "$WORK"
+        trap 'rm -rf "$WORK"' EXIT
+        # A caller may have the PR checked out in the workspace; git stays out of it.
+        cd "$WORK"
+        APPROVAL_MARKER='<!-- agent-review-approval -->'
+        if ! [[ "$PR" =~ ^[1-9][0-9]*$ ]]; then
+          warn "agent-review withdraw needs a pull request number, so no approval was withdrawn."
+          exit 0
+        fi
+        if [ -n "$EXPECTED_HEAD" ] && ! [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+          warn "agent-review withdraw got an expected head that is not a commit SHA, so no approval was withdrawn."
+          exit 0
+        fi
+
+        # gh api, tried up to three times; an error a retry cannot fix is not
+        # retried. Prints the response only on success, and leaves gh's error
+        # in $WORK/api.err.
+        api() {
+          local try=1
+          while :; do
+            if gh api "$@" > "$WORK/api.out" 2> "$WORK/api.err"; then
+              cat "$WORK/api.out"
+              return 0
+            fi
+            if [ "$try" -ge 3 ] || grep -qE 'HTTP (401|404|422)|Resource not accessible' "$WORK/api.err"; then
+              return 1
+            fi
+            sleep $((try * ${AGENT_REVIEW_RETRY_DELAY:-2}))
+            try=$((try + 1))
+          done
+        }
+
+        api "repos/$REPO/pulls/$PR" > "$WORK/pr.json"
+        # Once the API shows the pushed head, later reads of it can be trusted.
+        HEAD_SEEN=true
+        if [ -n "$EXPECTED_HEAD" ]; then
+          POLLS=0
+          while [ "$(jq -r '.head.sha // empty' "$WORK/pr.json")" != "$EXPECTED_HEAD" ] && [ "$POLLS" -lt 20 ]; do
+            sleep "${AGENT_REVIEW_POLL_DELAY:-3}"
+            POLLS=$((POLLS + 1))
+            api "repos/$REPO/pulls/$PR" > "$WORK/pr.json"
+          done
+          if [ "$(jq -r '.head.sha // empty' "$WORK/pr.json")" != "$EXPECTED_HEAD" ]; then
+            HEAD_SEEN=false
+            warn "GitHub still does not show $EXPECTED_HEAD, which was just pushed, as the head of PR #$PR. Judging against it anyway, and taking back older approvals without reading the head again."
+          fi
+        fi
+        STATE=$(jq -r '.state // empty' "$WORK/pr.json")
+        HEAD_SHA=${EXPECTED_HEAD:-$(jq -r '.head.sha // empty' "$WORK/pr.json")}
+        BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
+        DEFAULT_BRANCH=$(jq -r '.base.repo.default_branch // empty' "$WORK/pr.json")
+        if [ "$STATE" != open ]; then
+          note "PR #$PR is not open, so no approval was withdrawn."
+          exit 0
+        fi
+        if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          warn "could not read the head of PR #$PR, so no approval was withdrawn."
+          exit 0
+        fi
+
+        # Only the bot's own approvals are candidates, and never one of the
+        # current head, so a run that lands after the bot approved a newer head
+        # cannot take that approval back. `ours` must match the approve action's.
+        api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate > "$WORK/reviews.json"
+        jq -rs --arg marker "$APPROVAL_MARKER" --arg head "$HEAD_SHA" '
+          def ours:
+            contains($marker)
+            or startswith("Auto-approved: the agent-review report for this head passes")
+            or startswith("Auto-approved: the posted agent-review report covers the current head")
+            or startswith("Auto-approved: every agent-review finding is fixed or dismissed");
+          .[][]
+          | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
+          | select((.body // "") | ours and (startswith("## AI Review Auto-Approval") | not))
+          | select(.commit_id != $head)
+          | "\(.id) \(.commit_id) \(.submitted_at // "")"' "$WORK/reviews.json" > "$WORK/candidates.txt"
+        if [ ! -s "$WORK/candidates.txt" ]; then
+          note "PR #$PR has no agent-review approval of an older commit, so there is nothing to withdraw."
+          exit 0
+        fi
+
+        # When the base last changed comes from the timeline, which the author
+        # cannot edit; GitHub's own retarget after a base branch is deleted
+        # counts too. A change with no time sorts after every approval.
+        LAST_BASE_CHANGE=unread
+        if [ -n "$DEFAULT_BRANCH" ] && [ "$BASE_REF" = "$DEFAULT_BRANCH" ] \
+          && api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$WORK/timeline.json" \
+          && CHANGED=$(jq -rs '[.[][] | select(.event == "base_ref_changed" or ((.event // "") | startswith("automatic_base_change"))) | .created_at // "unknown"] | max // ""' "$WORK/timeline.json"); then
+          LAST_BASE_CHANGE=$CHANGED
+        fi
+
+        # The commits go into a fresh bare repository with no work tree, so
+        # nothing from the PR is checked out and git runs no hook, filter, or
+        # merge driver from it. The token reaches git only through the
+        # environment, never a file or an argument.
+        REPO_GIT="$WORK/repo.git"
+        AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+        echo "::add-mask::$AUTH"
+        g() {
+          GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.$SERVER_URL/.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH" \
+            git --git-dir="$REPO_GIT" "$@"
+        }
+        # git fetch, tried up to three times.
+        fetch() {
+          local try=1
+          until g fetch --quiet --no-tags --filter=blob:none origin "$@" 2>/dev/null; do
+            [ "$try" -lt 3 ] || return 1
+            sleep $((try * ${AGENT_REVIEW_RETRY_DELAY:-2}))
+            try=$((try + 1))
+          done
+        }
+        fetch_base_and_head() {
+          git check-ref-format "refs/heads/$BASE_REF" || return 1
+          git init --quiet --bare --template= "$REPO_GIT" || return 1
+          g remote add origin "$SERVER_URL/$REPO.git" || return 1
+          fetch "+refs/heads/$BASE_REF:refs/agent-review/base" "$HEAD_SHA"
+        }
+        # Succeeds only when the head adds nothing to the approved commit but
+        # the default branch. With the fork point unchanged the trees must
+        # match; after merging the branch in, or rebasing onto it, the head's
+        # tree must be the approved commit merged with the head's fork point,
+        # so a conflict fix or any other edit withdraws. Exactly one merge base
+        # is required: with two, a merge can drop base-branch changes that no
+        # single merge base shows. The fork point may only move forward: a head
+        # forked from an older or a side commit of the branch can bring back
+        # code the branch has since removed. Sets WHY.
+        only_base_merged() {
+          local approved=$1 tip bases fork last_fork kept
+          if ! [[ "$approved" =~ ^[0-9a-f]{40}$ ]] || ! fetch "$approved"; then
+            WHY="it could not fetch the approved commit"
+            return 1
+          fi
+          WHY="it could not compare the head with the approved commit"
+          tip=$(g rev-parse --verify --quiet 'refs/agent-review/base^{commit}') || return 1
+          bases=$(g merge-base --all "$tip" "$HEAD_SHA") || return 1
+          fork=$(g merge-base "$tip" "$HEAD_SHA") || return 1
+          last_fork=$(g merge-base "$tip" "$approved") || return 1
+          WHY="the PR has more than one merge base with the default branch"
+          [ -n "$fork" ] && [ "$bases" = "$fork" ] || return 1
+          WHY="the PR's fork point moved back or sideways on the default branch"
+          g merge-base --is-ancestor "$last_fork" "$fork" || return 1
+          WHY="the PR changed beyond merging in the default branch"
+          if [ "$last_fork" = "$fork" ]; then
+            kept=$(g rev-parse --verify --quiet "$approved^{tree}") || return 1
+          else
+            kept=$(g merge-tree --write-tree --no-messages "$approved" "$fork" 2>/dev/null) || return 1
+          fi
+          [ -n "$kept" ] && [ "$kept" = "$(g rev-parse --verify --quiet "$HEAD_SHA^{tree}")" ]
+        }
+
+        # Only merges of the default branch can keep an approval: the author can
+        # push to any other branch, or retarget the PR to one, and merge that in.
+        # An approval stays only while the PR's base has not changed since it was
+        # given. Sets WHY and fails when the approval must go.
+        FETCHED=untried
+        keep_approval() {
+          local approved=$1 submitted=$2
+          if [ -z "$DEFAULT_BRANCH" ] || [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+            WHY="the PR's base branch is not the repo's default branch"
+            return 1
+          fi
+          if [ "$LAST_BASE_CHANGE" = unread ]; then
+            WHY="it could not read when the PR's base branch last changed"
+            return 1
+          fi
+          if ! [[ "$submitted" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            WHY="it could not read when the approval was given"
+            return 1
+          fi
+          if [ -n "$LAST_BASE_CHANGE" ] \
+            && [ "$(jq -n --arg changed "$LAST_BASE_CHANGE" --arg approved "$submitted" '$changed < $approved')" != true ]; then
+            WHY="the PR's base branch changed after the approval"
+            return 1
+          fi
+          if [ "$FETCHED" = untried ]; then
+            if fetch_base_and_head; then FETCHED=true; else FETCHED=false; fi
+          fi
+          if [ "$FETCHED" != true ]; then
+            WHY="it could not fetch the PR's base branch and head"
+            return 1
+          fi
+          only_base_merged "$approved"
+        }
+
+        # A CI review re-runs on its own only for a push or reopen of a PR that
+        # carries the review label; a base change or a workflow-token push starts none.
+        NEXT="Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head."
+        if [ "$EVENT_NAME" = pull_request_target ] \
+          && { [ "$EVENT_ACTION" = synchronize ] || [ "$EVENT_ACTION" = reopened ]; } \
+          && jq -e 'any(.labels[]?; .name == "agent-review")' "$WORK/pr.json" > /dev/null; then
+          NEXT="The CI review runs again on its own, and the bot approves again when it passes."
+        fi
+
+        while read -r REVIEW_ID COMMIT SUBMITTED <&3; do
+          if keep_approval "$COMMIT" "${SUBMITTED:-}"; then
+            note "Kept the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID): since then the PR only merged in or rebased onto the default branch, so its own changes are the ones approved."
+            continue
+          fi
+          # The head is read again right before each dismissal, so an approval
+          # of the head as it is now is never dismissed.
+          if [ "$HEAD_SEEN" = true ]; then
+            if ! NOW_HEAD=$(api "repos/$REPO/pulls/$PR" --jq .head.sha) || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+              warn "could not read the head of PR #$PR again, so the bot's approval of $COMMIT was not withdrawn (review $REVIEW_ID). A person must dismiss it."
+              continue
+            fi
+            if [ "$NOW_HEAD" = "$COMMIT" ]; then
+              note "The head of PR #$PR is $COMMIT again, so the bot's approval of it is kept (review $REVIEW_ID)."
+              continue
+            fi
+          fi
+          MESSAGE="agent-review: the bot took back its approval of ${COMMIT:0:7} because $WHY. $NEXT"
+          if api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="$MESSAGE" -f event=DISMISS > /dev/null; then
+            note "Withdrew the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID): $WHY."
+          elif grep -qF '(HTTP 403)' "$WORK/api.err"; then
+            warn "GitHub refused to let this workflow dismiss reviews on PR #$PR (HTTP 403), so the bot's approvals of older commits stay. The token may lack pull-requests: write, a rule may limit who can dismiss reviews, or the API rate limit may be used up. A person must dismiss them."
+            break
+          elif [ "$(api "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID" --jq .state)" = DISMISSED ]; then
+            note "The bot's approval of $COMMIT on PR #$PR was already dismissed (review $REVIEW_ID)."
+          else
+            warn "could not withdraw the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+          fi
+        done 3< "$WORK/candidates.txt"

@@ -456,6 +456,15 @@ jobs:
           if [ -n "$APPLIED" ]; then FIX_SHA="$PUSHED_SHA"; else FIX_SHA=''; fi
           echo "fix_sha=$FIX_SHA" >> "$GITHUB_OUTPUT"
           echo "pushed_sha=$PUSHED_SHA" >> "$GITHUB_OUTPUT"
+      # A push with the workflow token starts no pull_request_target run, so the
+      # caller's withdraw job never sees this commit. This runs before anything
+      # else that could fail the job after the push.
+      - name: Take back the bot's approval of the commit before this push
+        if: steps.push.outputs.pushed_sha != ''
+        uses: CruGlobal/agent-review/.github/actions/withdraw@main
+        with:
+          pr_number: ${{ inputs.pr_number }}
+          expected_head: ${{ steps.push.outputs.pushed_sha }}
       - name: Finalize and publish the trusted ledger update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

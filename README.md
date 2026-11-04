@@ -81,6 +81,30 @@ approval has to come from an account the branch rules trust. So:
 The same rules apply when the review ran in CI instead of your terminal, and when you fix or
 dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]: reason`).
 
+**When you push new commits, the bot takes its approval back.** If your branch rules keep an
+approval after a push ("Dismiss stale pull request approvals" is off), new code could otherwise
+merge on an old approval. So `agent-review-approve.yml` also runs a small job on every push to
+the PR, when it is reopened, and when its base branch changes, and `@claude fix` does the same
+after it pushes. It dismisses the bot's own approval of an older commit, with a note that says
+why and what to do. On a PR with the `agent-review` label, a push or reopen starts the CI review
+again on its own. Otherwise run `/agent-review:re-review` (or `/agent-review:review`) and post the
+report. Either way, the bot approves again when the report passes for the new head.
+
+It keeps the approval only when the push merged in the repo's default branch (usually `main` or
+`master`) and nothing else, so the PR's own changes are still exactly the ones the bot approved.
+The PR must also target that branch, and its base branch must not have changed since the
+approval:
+
+- **Kept:** "Update branch", or `git merge origin/main` with no conflicts, even several in a row.
+  Also a rebase onto `main` that changes nothing else, and commits that cancel out (a change and
+  its revert).
+- **Taken back:** any new change, a conflict you fixed by hand, an extra edit slipped into a
+  merge, a merge of any other branch, a rebase that changes code, a change of the PR's base
+  branch, and any push to a PR whose base is not the default branch.
+
+It never touches a person's approval, another workflow's approval (like Dependabot's), or the
+bot's approval of the PR's newest commit.
+
 When reviewers flag the same spot, their findings are combined into one and the scores are
 averaged, with two exceptions. A 7 or more keeps its score when it is combined with lower scores,
 on every engine. This only counts for a score that is still 7 or more after its reviewer's caps
@@ -445,9 +469,9 @@ this repo at `@main`.
 
 | Caller in the consumer repo | Reusable workflow here | Trigger | What it does |
 | --- | --- | --- | --- |
-| `agent-review.yml` | `review.yml` | PR opened/pushed, with the `agent-review` label | Runs `/agent-review:review auto ci`, publishes the report, then (with `auto_approve`) approves a passing report. Later pushes review only the new commits. A push that only merges the base branch in, with no conflict fixes, is not reviewed: the last report moves to the new head. |
-| `agent-review-interact.yml` | `interact.yml` | `@claude fix …` / `@claude dismiss … [code]: reason` comment from a writer | Applies fixes in a read-only, credential-scrubbed model job; a separate trusted job validates and publishes them, updates the ledger, and (with `auto_approve`) approves once the ledger passes. |
-| `agent-review-approve.yml` | `approve.yml` | A PR comment starting with the report marker, created or edited by a writer | Judges a report a person posted from a terminal review and (with `auto_approve`) approves it. |
+| `agent-review.yml` | `review.yml` | PR opened/pushed, with the `agent-review` label | Runs `/agent-review:review auto ci`, publishes the report, then (with `auto_approve`) approves a passing report. Later pushes review only the new commits. A push that only merges the base branch in, with no conflict fixes, is not reviewed when the base is the repo's default branch: the last report moves to the new head. |
+| `agent-review-interact.yml` | `interact.yml` | `@claude fix …` / `@claude dismiss … [code]: reason` comment from a writer | Applies fixes in a read-only, credential-scrubbed model job; a separate trusted job validates and publishes them, takes back the bot's approval of the commit before its push, updates the ledger, and (with `auto_approve`) approves once the ledger passes. |
+| `agent-review-approve.yml` | `approve.yml`, `withdraw.yml` | A PR comment starting with the report marker, created or edited by a writer; new commits, a reopen, or a base change on the PR (`pull_request_target`: `synchronize`, `reopened`, `edited`) | Judges a report a person posted from a terminal review and (with `auto_approve`) approves it. On new commits or a base change, takes back the bot's approval of an older commit unless the push only merged in the default branch. |
 | `agent-review-readiness.yml` | `readiness.yml` | Manual | Scores the seeded suite and telemetry against the rollout gates. |
 
 All three approval paths share one rule (`agent-review approval`, `engine/approval.cjs`) and one
@@ -459,6 +483,82 @@ the calling job, and report an approval API failure as a warning. The terminal p
 additionally requires the poster to hold repository write access (the same bar interact applies
 to `@claude fix`); it is a stronger trust grant than the CI path. In every path the bot approves
 regardless of who authored the PR.
+
+### Taking back an approval after new commits
+
+The `withdraw` job in `agent-review-approve.yml` runs on `pull_request_target` and calls
+`withdraw.yml`, which runs the composite action `.github/actions/withdraw`. No AI runs in it. It
+runs on `synchronize`, on `reopened` (a push while the PR was closed moves its head with no
+`synchronize`), and on `edited` only when `changes.base` is set. An edit to the title or body
+alone runs nothing.
+
+**Which approvals.** Only the bot's own approvals pinned to a commit other than the PR's current
+head: those that carry the `<!-- agent-review-approval -->` marker, and older ones that open
+with one of the approve action's fixed "Auto-approved: ..." lines. A person's approval,
+Dependabot's (no body), and an `## AI Review Auto-Approval` body are never touched.
+
+**The keep rule.** An approval stays only when all of these hold:
+
+1. The PR's base is the repo's default branch (`base.repo.default_branch`). The author can push
+   to any other branch, or retarget the PR to one and merge that in, so no other base counts.
+2. The PR's base has not changed since the approval: the PR's timeline has no `base_ref_changed`
+   or `automatic_base_change_*` event at or after the approval's `submitted_at`. The timeline is
+   GitHub's record, which the author cannot edit. A base change with no time, an unreadable
+   timeline, or an approval with no time takes the approval back.
+3. The default branch tip and the head have exactly one merge base. With two, a merge can drop
+   base-branch changes that no single merge base shows.
+4. The fork point only moves forward: the approved commit's merge base with the default branch
+   is an ancestor of the head's. A head forked from an older or a side commit of the branch can
+   bring back code the branch has since removed, even with the approved commit's tree.
+5. The new head adds nothing to the approved commit but the default branch. If the head's merge
+   base is the approved commit's merge base, the head's tree must equal the approved commit's
+   tree (commits that cancel out). Otherwise the head's tree must equal the tree
+   `git merge-tree --write-tree <approved> <head's merge base>` builds, which is the approved
+   commit with the default branch merged in cleanly.
+
+Steps 3 and 5 are the check the review skill uses to skip a review after a base-branch merge.
+
+Several merges in a row pass, because the check always compares against the approved commit. A
+conflict fixed by hand fails, since `merge-tree` reports the conflict. A no-change rebase onto the
+default branch passes too: the rebased head has the same tree as that clean merge. This needs the
+approved commit, which a force push leaves on no branch, but GitHub still serves it by SHA.
+Anything the check cannot prove, including a fetch error, takes the approval back.
+
+**No PR code runs.** The action reads the PR through the API. It then fetches the default branch, the
+head, and each approved commit into a fresh bare repository (blobless, no work tree, no hooks) and
+runs only `merge-base`, `merge-tree`, and `rev-parse`. The token reaches git through environment
+variables, never a file or an argument. That is what makes `pull_request_target` safe here, and
+that trigger is the right one for two reasons. It runs the default branch's copy of the caller, so
+a PR cannot delete its own withdraw job. And its token can dismiss reviews on fork and Dependabot
+PRs. A `pull_request` caller would run the PR's own copy of the file and get a read-only token on
+forks. API errors are tried up to three times. If GitHub still refuses a dismissal (HTTP 403: a
+token without `pull-requests: write`, a rule that limits who can dismiss reviews, or a used-up
+rate limit), the job warns once and passes. It never fails red.
+
+**`@claude fix` pushes.** `interact.yml` pushes with the workflow token, which starts no
+`pull_request_target` run. So its `publish` job runs the same withdraw action right after it
+pushes, before any later step can fail the job. It passes the pushed commit as `expected_head`.
+GitHub moves the PR's head a moment after a push, so the action waits up to a minute for the API
+to show it, and judges against that commit either way. If the API never shows it, the action
+warns, and takes back older approvals without reading the head again.
+
+**Race safety.** The withdraw job has its own concurrency group, `agent-review-withdraw-<PR>`, so
+a new approve run can never replace a waiting withdraw run. It never dismisses an approval of the
+head it read first, and it reads the head again right before each dismissal and keeps an
+approval of that head. Withdraw and approve runs can overlap, which leaves one gap: a push
+between the approve action's last head check and its approval could start a withdraw run that
+reads the reviews before that approval exists. So the approve action reads the head once more
+after approving, and takes back an approval of a head that moved. An approval that is already
+dismissed when withdraw reaches it is noted, not warned about.
+
+**With CI reviews.** A repo that also runs `agent-review.yml` starts both on a push. The withdraw
+job runs at once and takes back the stale approval. The CI review takes minutes, then its approve
+job approves the new head if the report passes. After a base-branch merge, the review is skipped
+and the moved report approves again. The two never undo each other: withdraw never touches an
+approval of the current head, and the CI approve job only lists approvals that are still
+`APPROVED`. Without the withdraw job, the CI path leaves the old approval in place until its
+review finishes, and keeps it if the review job fails, because a report for an older head
+dismisses nothing.
 
 Address runs split authority across two fresh jobs: Claude receives a read-only,
 credential-scrubbed workspace and produces a validated patch/result handoff; only the trusted
@@ -570,6 +670,21 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   line number may claim any result line that names its file and cites no location, which a line
   of context can do. The check cannot tell such a line from a finding. This can only add a
   finding, never hide one.
+- **A fast merge can land before the withdraw job finishes.** The job starts on the push and
+  takes up to a minute or so, most of it fetching commits. A merge in that window still uses
+  the old approval.
+- **A base change leaves the bot's approval of the PR's current head.** The withdraw job never
+  dismisses an approval of the current head. After a retarget with no new commits, that
+  approval stays and still counts for merging. Only a later push takes it back, because the base
+  changed after it. Reports do not record the base they were reviewed against, so the approve
+  job would also approve a re-posted report for the same head after a retarget.
+- **Recording `@claude dismiss` outcomes takes back the approval.** A dismissal that records
+  learning feedback pushes a bookkeeping commit, and like any push it withdraws the bot's
+  approval of the commit before it.
+- **Other workflow-token pushes never take back an approval.** A push made with a workflow's
+  `GITHUB_TOKEN`, such as a repo's autofix or formatter bot, starts no `pull_request_target`
+  run. Only `@claude fix` runs the withdraw action itself. Such a push still lands on an approved
+  PR without a withdrawal until a person pushes again.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.
@@ -604,8 +719,9 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `templates/static/` | ast-grep configuration/rule starter for deterministic changed-line findings |
 | `fixtures/` | Fixture config used by engine tests |
 | `.github/workflows/test.yml` | This repo's own CI — `npm ci && npm test && npm run check-dist` |
-| `.github/workflows/review.yml`, `interact.yml`, `approve.yml`, `readiness.yml` | Reusable workflows the consumer callers invoke |
+| `.github/workflows/review.yml`, `interact.yml`, `approve.yml`, `withdraw.yml`, `readiness.yml` | Reusable workflows the consumer callers invoke |
 | `.github/actions/approve/` | Composite action shared by every approval path |
+| `.github/actions/withdraw/` | Composite action that takes back the bot's approval of an older commit after new commits |
 | `.github/actions/read-engine/` | Composite action that reads the review engine from the base commit's config, so the CI approval steps run only on an exact `agent-review` |
 
 ## Development

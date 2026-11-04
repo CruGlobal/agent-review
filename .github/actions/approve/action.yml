@@ -69,6 +69,8 @@ runs:
           printf '::stop-commands::%s\n%s\n::%s::\n' "$STOP_TOKEN" "$1" "$STOP_TOKEN"
         }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        # A withdraw run may have dismissed the review first.
+        already_dismissed() { [ "$(gh api "repos/$REPO/pulls/$PR/reviews/$1" --jq .state 2>/dev/null)" = DISMISSED ]; }
         LABEL=needs-human-approval
         APPROVAL_MARKER='<!-- agent-review-approval -->'
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
@@ -251,14 +253,14 @@ runs:
           if [ "$LIST_REVIEWS" = true ]; then
             if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
               | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" \
-                  --arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY" '
+                  --arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" '
                 # third_party: Dependabot auto-merge (no body) and ai-review-auto-approve.
+                # `ours` must match the one in the withdraw action.
                 def ours:
                   contains($marker)
                   or startswith("Auto-approved: the agent-review report for this head passes")
                   or startswith("Auto-approved: the posted agent-review report covers the current head")
-                  or startswith("Auto-approved: every agent-review finding is fixed or dismissed")
-                  or ($configured != "" and startswith($configured));
+                  or startswith("Auto-approved: every agent-review finding is fixed or dismissed");
                 def third_party: . == "" or startswith("## AI Review Auto-Approval");
                 .[][]
                 | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
@@ -269,6 +271,8 @@ runs:
               for REVIEW_ID in $BOT_APPROVALS; do
                 if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
                   note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
+                elif already_dismissed "$REVIEW_ID"; then
+                  note "The bot's earlier approval on PR #$PR was already dismissed (review $REVIEW_ID)."
                 else
                   warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
                 fi
@@ -309,9 +313,23 @@ runs:
         # Needs the repo/org setting "Allow GitHub Actions to create and approve
         # pull requests" (off by GitHub default). A 422 here means it is disabled:
         # warn instead of failing, so a passing review never shows as a red check.
-        if gh api -X POST "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=APPROVE -f body="$BODY" > /dev/null; then
+        if APPROVAL_ID=$(gh api -X POST "repos/$REPO/pulls/$PR/reviews" -f commit_id="$HEAD_SHA" -f event=APPROVE -f body="$BODY" --jq .id); then
           note "Approved PR #$PR: $REASON"
           if [ -n "$CAUTION" ]; then note "$CAUTION"; fi
         else
           warn "Review passed but approval failed. Enable 'Allow GitHub Actions to create and approve pull requests' in repo/org Actions settings."
+          exit 0
+        fi
+        # Withdraw runs may overlap this one, so an approval of a head that
+        # moved is taken back here.
+        if ! AFTER_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) || ! [[ "$AFTER_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+          warn "could not read the head of PR #$PR after approving $HEAD_SHA. If it moved, a person must dismiss that approval."
+        elif [ "$AFTER_HEAD" != "$HEAD_SHA" ]; then
+          if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$APPROVAL_ID/dismissals" -f message="agent-review: new commits landed while the bot approved ${HEAD_SHA:0:7}, so it took that approval back. Run /agent-review:re-review (or /agent-review:review) and post the report." -f event=DISMISS > /dev/null; then
+            note "The head of PR #$PR moved while it was being approved, so the bot took back its approval of $HEAD_SHA."
+          elif already_dismissed "$APPROVAL_ID"; then
+            note "The head of PR #$PR moved while it was being approved, and the bot's approval of $HEAD_SHA was already taken back."
+          else
+            warn "the head of PR #$PR moved while it was being approved, and the bot could not take back its approval of $HEAD_SHA (review $APPROVAL_ID). A person must dismiss it."
+          fi
         fi
