@@ -439,6 +439,9 @@ jobs:
   approve:
     needs: review
     if: "!cancelled() && inputs.auto_approve && needs.review.outputs.engine == 'agent-review'"
+    concurrency:
+      group: agent-review-approve-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read

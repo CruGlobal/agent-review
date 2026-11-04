@@ -1730,6 +1730,13 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
 });
 
+test('approve jobs for one PR run one at a time, across the terminal and CI paths', () => {
+  const { parse } = require('yaml');
+  const job = (file, id) => parse(readFileSync(join(ROOT, '.github/workflows', file), 'utf8')).jobs[id];
+  assert.deepEqual(job('approve.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ inputs.pr_number }}', 'cancel-in-progress': false });
+  assert.deepEqual(job('review.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ github.event.pull_request.number }}', 'cancel-in-progress': false });
+});
+
 test('the approve action re-checks the base commit rules, owns the label, and takes back bot approvals', () => {
   const { parse } = require('yaml');
   const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
