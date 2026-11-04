@@ -224,15 +224,22 @@ For each finding to fix (work in severity order):
 
 Then commit and push once for the batch:
 
-Stage only the files you changed for these fixes, by name. Never `git add -A` or `git add .`: they
-also take the review's own files (`.claude/review/metrics/`, `.claude/review/index/`) and anything
-else left in the tree, which inflates the next review's risk score. Before committing, check that
-`git diff --cached --name-only` lists only those files, and unstage anything else with
+Stage the files you changed or created for these fixes, by name. The block lists the tree first:
+a file a fix created, such as a new spec, shows as `??` and must be staged too. Leave out
+everything that is not part of the fixes: the review's own files (`.claude/review/metrics/`,
+`.claude/review/index/`) and any other change you did not make for these findings. Never
+`git add -A` or `git add .`: they take all of that, which inflates the next review's risk score.
+The block stops if a review file is staged; unstage anything else that is not yours with
 `git restore --staged <file>`.
 
 ```bash
 . /tmp/address_env.sh
-git add -- <each file you changed for these fixes>
+git status --porcelain --untracked-files=all
+git add -- <each file you changed or created for these fixes>
+if git diff --cached --name-only | grep -E '^\.claude/review/(metrics|index)/'; then
+  echo "❌ Review files are staged. Unstage them with git restore --staged, then commit."
+  exit 1
+fi
 git diff --cached --name-only
 git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}"   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
 git push

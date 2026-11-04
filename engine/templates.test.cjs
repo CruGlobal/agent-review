@@ -2716,8 +2716,34 @@ test("address stages only the files its fixes changed, never the review's bookke
     assert.ok(!/git add (-A|--all|\.)(\s|$)/m.test(block), `address never stages the whole tree:\n${block}`);
   }
   const commit = bashBlockList(address).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
-  assert.ok(commit.includes('git add -- <each file you changed for these fixes>'), 'the fix commit names its files');
-  assert.ok(commit.includes('git diff --cached --name-only'), 'and shows what is staged before committing');
+  const at = (s) => commit.indexOf(s);
+  assert.ok(at('git status --porcelain --untracked-files=all') >= 0, 'new files a fix created are listed one by one');
+  assert.ok(at('git add -- <each file you changed or created for these fixes>') > at('git status --porcelain'), 'then the fix commit names its files');
+  assert.ok(at("grep -E '^\\.claude/review/(metrics|index)/'") > at('git add --'), 'a staged review file stops the commit');
+  assert.ok(at('git diff --cached --name-only\ngit commit') > 0, 'and what is staged is shown before committing');
+});
+
+test("address's staged-file guard stops on review files and lets a new spec through, under bash and zsh", (t) => {
+  const { writeFileSync } = require('node:fs');
+  const commit = bashBlockList(readFileSync(ADDRESS_SKILL, 'utf8')).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
+  const guard = commit.slice(commit.indexOf('if git diff --cached'), commit.indexOf('fi\n') + 2);
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-stage-'));
+    try {
+      const git = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+      git('init', '-q');
+      mkdirSync(join(dir, 'spec'));
+      mkdirSync(join(dir, '.claude/review/metrics'), { recursive: true });
+      writeFileSync(join(dir, 'spec/new_spec.rb'), 'it works\n');
+      writeFileSync(join(dir, '.claude/review/metrics/PR_1_metrics.md'), 'score\n');
+      git('add', '--', 'spec/new_spec.rb');
+      execFileSync(shell, ['-c', guard], { cwd: dir });
+      git('add', '--', '.claude/review/metrics/PR_1_metrics.md');
+      assert.throws(() => execFileSync(shell, ['-c', guard], { cwd: dir, stdio: 'pipe' }), `${shell}: a staged metrics file stops it`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test('a review never commits a git-ignored metrics dashboard', () => {
