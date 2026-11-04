@@ -1,0 +1,153 @@
+name: agent-review withdraw
+description: >-
+  Dismisses the bot's own agent-review approvals (those that carry the
+  agent-review-approval marker) of commits older than the PR's head, unless the
+  head adds nothing to the approved commit but the PR's base branch. Never
+  checks out or runs PR code: it reads the PR through the API and compares
+  commits in a fresh bare repository. Never dismisses an approval of the current
+  head, a person's approval, or another workflow's, and never fails the job.
+inputs:
+  pr_number:
+    description: Pull request number
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Withdraw the bot's approval of an older commit
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        PR: ${{ inputs.pr_number }}
+        SERVER_URL: ${{ github.server_url }}
+      run: |
+        set -eEuo pipefail
+        # Anything unexpected is "could not check": report it and stop
+        # successfully. Under `set -E` a failure inside $(...) runs this trap in
+        # that subshell, so a subshell exits 1 and leaves the report to the
+        # top-level shell.
+        trap '[ "$BASH_SUBSHELL" -eq 0 ] || exit 1; echo "::warning::agent-review withdraw could not check PR #$PR (${BASH_COMMAND%% *} failed), so no approval was withdrawn." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
+        note() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        WORK="$RUNNER_TEMP/agent-review-withdraw"
+        rm -rf "$WORK"
+        mkdir -p "$WORK"
+        trap 'rm -rf "$WORK"' EXIT
+        APPROVAL_MARKER='<!-- agent-review-approval -->'
+        if ! [[ "$PR" =~ ^[1-9][0-9]*$ ]]; then
+          warn "agent-review withdraw needs a pull request number, so no approval was withdrawn."
+          exit 0
+        fi
+
+        gh api "repos/$REPO/pulls/$PR" > "$WORK/pr.json"
+        STATE=$(jq -r '.state // empty' "$WORK/pr.json")
+        HEAD_SHA=$(jq -r '.head.sha // empty' "$WORK/pr.json")
+        BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
+        if [ "$STATE" != open ]; then
+          note "PR #$PR is not open, so no approval was withdrawn."
+          exit 0
+        fi
+        if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+          warn "could not read the head of PR #$PR, so no approval was withdrawn."
+          exit 0
+        fi
+
+        # Only the bot's own marked approvals are candidates, and never one of
+        # the current head, so a run that lands after the bot approved a newer
+        # head cannot take that approval back.
+        gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+          | jq -rs --arg marker "$APPROVAL_MARKER" --arg head "$HEAD_SHA" '
+              .[][]
+              | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
+              | select((.body // "") | contains($marker) and (startswith("## AI Review Auto-Approval") | not))
+              | select(.commit_id != $head)
+              | "\(.id) \(.commit_id)"' > "$WORK/candidates.txt"
+        if [ ! -s "$WORK/candidates.txt" ]; then
+          note "PR #$PR has no agent-review approval of an older commit, so there is nothing to withdraw."
+          exit 0
+        fi
+
+        # The commits go into a fresh bare repository with no work tree, so
+        # nothing from the PR is checked out and git runs no hook, filter, or
+        # merge driver from it. The token reaches git only through the
+        # environment, never a file or an argument.
+        REPO_GIT="$WORK/repo.git"
+        AUTH=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')
+        echo "::add-mask::$AUTH"
+        g() {
+          GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0="http.$SERVER_URL/.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH" \
+            git --git-dir="$REPO_GIT" "$@"
+        }
+        fetch_base_and_head() {
+          git check-ref-format "refs/heads/$BASE_REF" || return 1
+          git init --quiet --bare --template= "$REPO_GIT" || return 1
+          g remote add origin "$SERVER_URL/$REPO.git" || return 1
+          g fetch --quiet --no-tags --filter=blob:none origin "+refs/heads/$BASE_REF:refs/agent-review/base" "$HEAD_SHA" 2>/dev/null
+        }
+        # Succeeds only when the head adds nothing to the approved commit but
+        # the base branch. With the fork point unchanged the trees must match;
+        # after merging the base branch in, or rebasing onto it, the head's
+        # tree must be the approved commit merged with the head's fork point,
+        # so a conflict fix or any other edit withdraws. Exactly one merge base
+        # is required: with two, a merge can drop base-branch changes that no
+        # single merge base shows.
+        only_base_merged() {
+          local approved=$1 tip bases fork last_fork kept
+          [[ "$approved" =~ ^[0-9a-f]{40}$ ]] || return 1
+          g fetch --quiet --no-tags --filter=blob:none origin "$approved" 2>/dev/null || return 1
+          tip=$(g rev-parse --verify --quiet 'refs/agent-review/base^{commit}') || return 1
+          bases=$(g merge-base --all "$tip" "$HEAD_SHA") || return 1
+          fork=$(g merge-base "$tip" "$HEAD_SHA") || return 1
+          [ -n "$fork" ] && [ "$bases" = "$fork" ] || return 1
+          last_fork=$(g merge-base "$tip" "$approved") || return 1
+          if [ "$last_fork" = "$fork" ]; then
+            kept=$(g rev-parse --verify --quiet "$approved^{tree}") || return 1
+          else
+            kept=$(g merge-tree --write-tree --no-messages "$approved" "$fork" 2>/dev/null) || return 1
+          fi
+          [ -n "$kept" ] && [ "$kept" = "$(g rev-parse --verify --quiet "$HEAD_SHA^{tree}")" ]
+        }
+
+        FETCHED=false
+        if fetch_base_and_head; then
+          FETCHED=true
+        else
+          note "Could not fetch the base branch and head of PR #$PR, so every bot approval of an older commit is withdrawn."
+        fi
+        WITHDRAW=""
+        cut -d' ' -f2 "$WORK/candidates.txt" | sort -u > "$WORK/commits.txt"
+        while read -r COMMIT <&4; do
+          if [ "$FETCHED" = true ] && only_base_merged "$COMMIT"; then
+            note "Kept the bot's approval of $COMMIT on PR #$PR: since then the PR only merged in or rebased onto its base branch, so its own changes are the ones approved."
+          else
+            WITHDRAW="$WITHDRAW $COMMIT"
+          fi
+        done 4< "$WORK/commits.txt"
+        [ -n "$WITHDRAW" ] || exit 0
+
+        while read -r REVIEW_ID COMMIT <&3; do
+          case " $WITHDRAW " in
+            *" $COMMIT "*) ;;
+            *) continue ;;
+          esac
+          # The head is read again right before each dismissal, so an approval
+          # of the head as it is now is never dismissed.
+          if ! NOW_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            warn "could not read the head of PR #$PR again, so the bot's approval of $COMMIT was not withdrawn (review $REVIEW_ID). A person must dismiss it."
+            continue
+          fi
+          if [ "$NOW_HEAD" = "$COMMIT" ]; then
+            note "The head of PR #$PR is $COMMIT again, so the bot's approval of it is kept (review $REVIEW_ID)."
+            continue
+          fi
+          MESSAGE="agent-review: new commits landed after the bot approved ${COMMIT:0:7}, so the bot took back its approval. Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head."
+          if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="$MESSAGE" -f event=DISMISS > /dev/null 2> "$WORK/dismiss.err"; then
+            note "Withdrew the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID)."
+          elif grep -qF '(HTTP 403)' "$WORK/dismiss.err"; then
+            warn "this workflow's token may not dismiss reviews on PR #$PR, so the bot's approvals of older commits stay. A read-only token, which GitHub gives a pull_request run from a fork, does this. A person must dismiss them."
+            break
+          else
+            warn "could not withdraw the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+          fi
+        done 3< "$WORK/candidates.txt"

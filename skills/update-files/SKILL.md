@@ -66,7 +66,9 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   user whether to add it, and default to skipping `agent-review-readiness.yml` (the rollout
   gate) and, in a CI repo, `agent-review-approve.yml` (approval of locally posted reports; a
   stronger trust grant than the CI path) unless they want them. In a local-only repo the approve
-  file is the default yes, as above.
+  file is the default yes, as above. When offering the approve file in a CI repo, say it also
+  carries the `withdraw` job, which takes back the bot's approval when new commits land. A CI
+  repo that wants only that can install it with `auto_approve: false`.
 
 If every file is current, say so and stop here. In a local-only repo, do not stop before the
 removal check in Stage 4 if any CI file is still installed.
@@ -90,6 +92,9 @@ only. Read each from the existing file and apply it into the fresh copy:
   `rollout_mode`, keep the repo's version of those lines.
 - **Pinned refs**: if the repo pinned `uses: CruGlobal/agent-review/...@<ref>` to something
   other than `@main`, keep their ref and mention it — pinning is a deliberate consumer choice.
+  The approve file's `withdraw` job calls `withdraw.yml`, which exists only from v1.1.2 on. A
+  ref older than that would break the whole file on every event, so ask which ref the
+  `withdraw` job should use instead of copying the old pin onto it.
 
 Everything else — job structure, permissions blocks, inputs like `comment_id`, and the
 `# agent-review-template-version:` marker — comes from the fresh template unchanged. Never
@@ -144,7 +149,11 @@ git diff HEAD -- .github/workflows/
 ```
 
 Walk the user through what changed and why (new inputs, permissions, version marker), and name
-any removed CI files. Then ask
+any removed CI files. An approve file updated from before 1.1.2 gains a `pull_request_target`
+trigger and a `withdraw` job: on new commits, the bot takes back its approval of an older commit
+unless the push only merged in the base branch. Say so, and that the job never checks out or runs
+the PR's code. It runs from the default branch, so it starts working once the update PR merges.
+Then ask
 before touching git history: offer to create a branch, commit with
 `chore: update agent-review workflows to v<LATEST>`, push, and open a PR. If the PR only removes
 CI files from a local-only repo, with no template updates, commit with

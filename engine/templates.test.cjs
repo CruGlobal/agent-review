@@ -1730,11 +1730,12 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
 });
 
-test('approve jobs for one PR run one at a time, across the terminal and CI paths', () => {
+test('approve and withdraw jobs for one PR run one at a time, across the terminal and CI paths', () => {
   const { parse } = require('yaml');
   const job = (file, id) => parse(readFileSync(join(ROOT, '.github/workflows', file), 'utf8')).jobs[id];
   assert.deepEqual(job('approve.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ inputs.pr_number }}', 'cancel-in-progress': false });
   assert.deepEqual(job('review.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ github.event.pull_request.number }}', 'cancel-in-progress': false });
+  assert.deepEqual(job('withdraw.yml', 'withdraw').concurrency, { group: 'agent-review-approve-${{ inputs.pr_number }}', 'cancel-in-progress': false });
 });
 
 test('the approve action re-checks the base commit rules, owns the label, and takes back bot approvals', () => {
@@ -1860,6 +1861,10 @@ test('no shared workflow or action asks for a token permission its callers do no
     contents: 'read',
     'pull-requests': 'write',
   });
+  assert.deepEqual(job('.github/workflows/withdraw.yml', 'withdraw').permissions, {
+    contents: 'read',
+    'pull-requests': 'write',
+  });
   assert.deepEqual(job('.github/workflows/interact.yml', 'publish').permissions, {
     actions: 'write',
     contents: 'write',
@@ -1966,6 +1971,80 @@ test('the approve template is on by default, fires on created or edited, is coll
   assert.ok(review.includes('auto_approve: true'), 'the review caller approves by default');
 });
 
+test('a 1.1.1 approve caller keeps working: approve.yml keeps its inputs and runs only on comments', () => {
+  const { parse } = require('yaml');
+  const doc = parse(readFileSync(join(ROOT, '.github/workflows/approve.yml'), 'utf8'));
+  const on = doc.on || doc[true];
+  assert.deepEqual(Object.keys(on.workflow_call.inputs).sort(), ['auto_approve', 'comment_id', 'pr_number']);
+  assert.deepEqual(Object.keys(doc.jobs), ['approve'], 'the withdraw job lives in withdraw.yml, so comment callers see no new job');
+});
+
+test('the approve template withdraws on new commits from pull_request_target and never runs PR code', () => {
+  const { parse } = require('yaml');
+  const text = readFileSync(join(ROOT, 'templates/workflows/agent-review-approve.yml'), 'utf8');
+  const doc = parse(text);
+  const on = doc.on || doc[true];
+  assert.deepEqual(on.issue_comment, { types: ['created', 'edited'] });
+  // pull_request_target runs the default branch's copy of this file, so a PR
+  // cannot drop the withdraw job, and fork and Dependabot PRs get a token that
+  // can dismiss. pull_request would run the PR's own copy.
+  assert.deepEqual(on.pull_request_target, { types: ['synchronize'] });
+  assert.equal(on.pull_request, undefined);
+  assert.deepEqual(Object.keys(doc.jobs), ['approve', 'withdraw']);
+  assert.ok(doc.jobs.approve.if.startsWith("github.event_name == 'issue_comment' &&"), 'a push never reaches the approve job');
+  const withdraw = doc.jobs.withdraw;
+  assert.equal(withdraw.if, "github.event_name == 'pull_request_target'");
+  assert.equal(withdraw.uses, 'CruGlobal/agent-review/.github/workflows/withdraw.yml@main');
+  assert.deepEqual(withdraw.with, { pr_number: '${{ github.event.pull_request.number }}' });
+  assert.deepEqual(withdraw.permissions, { contents: 'read', 'pull-requests': 'write' });
+  for (const unsafe of ['actions/checkout', 'head.ref', 'head_ref', 'head.sha', 'run:', 'secrets']) {
+    assert.ok(!text.includes(unsafe), `the pull_request_target caller must not use ${unsafe}`);
+  }
+});
+
+test('withdraw.yml and its action read the PR through the API and never check out its code', () => {
+  const { parse } = require('yaml');
+  const wf = parse(readFileSync(join(ROOT, '.github/workflows/withdraw.yml'), 'utf8'));
+  const on = wf.on || wf[true];
+  assert.deepEqual(on.workflow_call.inputs, { pr_number: { type: 'string', required: true } });
+  assert.deepEqual(Object.keys(wf.jobs), ['withdraw']);
+  assert.deepEqual(wf.jobs.withdraw.steps, [
+    { uses: 'CruGlobal/agent-review/.github/actions/withdraw@main', with: { pr_number: '${{ inputs.pr_number }}' } },
+  ]);
+
+  const action = parse(readFileSync(join(ROOT, '.github/actions/withdraw/action.yml'), 'utf8'));
+  assert.equal(action.runs.using, 'composite');
+  assert.deepEqual(Object.keys(action.inputs), ['pr_number']);
+  assert.deepEqual(action.runs.steps.map((s) => s.uses).filter(Boolean), [], 'no checkout, of the PR or anything else');
+  const step = action.runs.steps.find((s) => s.run);
+  assert.deepEqual(Object.keys(step.env).sort(), ['GH_TOKEN', 'PR', 'REPO', 'SERVER_URL']);
+  assert.equal(step.env.PR, '${{ inputs.pr_number }}');
+  const run = step.run;
+  assert.ok(!run.includes('${{'), 'every value reaches the script through env');
+  for (const [part, why] of [
+    ['git init --quiet --bare --template= "$REPO_GIT"', 'a bare repository with no work tree and no hooks'],
+    ['--filter=blob:none', 'only the blobs a merge needs are fetched'],
+    ['GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH"', 'the token reaches git through the environment'],
+    ['GIT_TERMINAL_PROMPT=0', 'a refused fetch never waits for a password'],
+    ["APPROVAL_MARKER='<!-- agent-review-approval -->'", 'the marker is the one the approve action writes'],
+    ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals'],
+    ['contains($marker) and (startswith("## AI Review Auto-Approval") | not)', 'only agent-review\'s own approvals'],
+    ['select(.commit_id != $head)', 'never an approval of the head'],
+    ['git merge-tree --write-tree', 'the base-merge check from the review skill'],
+    ['[ "$NOW_HEAD" = "$COMMIT" ]', 'the head is read again before each dismissal'],
+    ['/agent-review:re-review', 'the dismissal says what to run next'],
+  ]) {
+    assert.ok(run.includes(part) || run.includes(part.replace('git ', 'g ')), why);
+  }
+  for (const banned of ['git checkout', 'g checkout', 'worktree', 'git clone', '-c http', 'git config', 'g config', 'gh pr ']) {
+    assert.ok(!run.includes(banned), `the action must not use ${banned}`);
+  }
+  assert.ok(!/\b[A-Z_]+=\(/.test(run), 'no array assignments, for bash 3.2');
+  const writes = run.split('\n').filter((line) => /gh api -X /.test(line));
+  assert.equal(writes.length, 1, 'the dismissal is the only API write');
+  assert.match(writes[0].trim(), /^if gh api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
+});
+
 test('the docs and skills know the approve template and the review-side auto_approve knob', () => {
   const update = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
   assert.ok(update.includes('agent-review-approve.yml'), 'update-files must fetch and offer the approve template');
@@ -1984,6 +2063,11 @@ test('the docs and skills know the approve template and the review-side auto_app
   assert.ok(readme.includes('agent-review-approve.yml'));
   assert.ok(readme.includes('stronger trust grant'), 'README must state the local-post trust boundary');
   assert.ok(readme.includes('repository write access'), 'README must say only writers can trigger the local-post approval');
+  assert.ok(readme.includes('### Taking back an approval after new commits'), 'README must state the withdraw rule');
+  assert.ok(readme.includes("git merge-tree --write-tree <approved> <head's merge base>"), 'README must give the exact keep rule');
+  assert.ok(readme.includes('`pull_request_target`'), 'README must name the withdraw trigger and why');
+  assert.ok(update.includes('`withdraw` job'), 'update-files must explain the new job when it updates the approve file');
+  assert.ok(update.includes('v1.1.2'), 'update-files must not copy a pin older than withdraw.yml onto the withdraw job');
 });
 
 test('the review skill runs the incremental path locally on the `incremental` argument', () => {

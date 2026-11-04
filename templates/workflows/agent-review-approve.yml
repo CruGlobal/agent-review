@@ -3,6 +3,12 @@ name: agent-review approve
 on:
   issue_comment:
     types: [created, edited]
+  # pull_request_target runs this file as it is on the default branch, so a PR
+  # cannot remove the withdraw job, and its token can dismiss reviews on fork
+  # and Dependabot PRs. It is safe only while no job here checks out or runs
+  # the PR's code.
+  pull_request_target:
+    types: [synchronize]
 jobs:
   approve:
     # A review run locally and posted with "Post review to GitHub" starts with
@@ -13,6 +19,7 @@ jobs:
     # auto_approve here trusts a writer's posted report — a stronger
     # grant than the CI path, which judges only the bot's own report.
     if: >-
+      github.event_name == 'issue_comment' &&
       github.event.issue.pull_request != null &&
       startsWith(github.event.comment.body, '<!-- agent-review -->') &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
@@ -24,3 +31,13 @@ jobs:
       pr_number: ${{ github.event.issue.number }}
       comment_id: ${{ github.event.comment.id }}
       auto_approve: true
+  withdraw:
+    # New commits take back the bot's approval of an older commit, unless the
+    # push only merged in (or rebased onto) the base branch.
+    if: github.event_name == 'pull_request_target'
+    permissions:
+      contents: read
+      pull-requests: write
+    uses: CruGlobal/agent-review/.github/workflows/withdraw.yml@main
+    with:
+      pr_number: ${{ github.event.pull_request.number }}
