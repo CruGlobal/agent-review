@@ -7,8 +7,10 @@ on:
   # cannot remove the withdraw job, and its token can dismiss reviews on fork
   # and Dependabot PRs. It is safe only while no job here checks out or runs
   # the PR's code.
+  # reopened: a push while the PR was closed moves its head with no
+  # synchronize. edited: a new base branch changes what the approval covered.
   pull_request_target:
-    types: [synchronize]
+    types: [synchronize, reopened, edited]
 jobs:
   approve:
     # A review run locally and posted with "Post review to GitHub" starts with
@@ -33,8 +35,11 @@ jobs:
       auto_approve: true
   withdraw:
     # New commits take back the bot's approval of an older commit, unless the
-    # push only merged in (or rebased onto) the base branch.
-    if: github.event_name == 'pull_request_target'
+    # push only merged in (or rebased onto) the default branch. An edit that
+    # leaves the base branch alone (title, body) runs nothing.
+    if: >-
+      github.event_name == 'pull_request_target' &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
     permissions:
       contents: read
       pull-requests: write

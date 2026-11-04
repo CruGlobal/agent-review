@@ -150,8 +150,9 @@ git diff HEAD -- .github/workflows/
 
 Walk the user through what changed and why (new inputs, permissions, version marker), and name
 any removed CI files. An approve file updated from before 1.1.2 gains a `pull_request_target`
-trigger and a `withdraw` job: on new commits, the bot takes back its approval of an older commit
-unless the push only merged in the base branch. Say so, and that the job never checks out or runs
+trigger and a `withdraw` job: on new commits, a reopen, or a base change, the bot takes back its
+approval of an older commit unless the push only merged in the default branch. Say so, and that
+the job never checks out or runs
 the PR's code. It runs from the default branch, so it starts working once the update PR merges.
 Then ask
 before touching git history: offer to create a branch, commit with

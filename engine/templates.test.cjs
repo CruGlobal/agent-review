@@ -1988,12 +1988,18 @@ test('the approve template withdraws on new commits from pull_request_target and
   // pull_request_target runs the default branch's copy of this file, so a PR
   // cannot drop the withdraw job, and fork and Dependabot PRs get a token that
   // can dismiss. pull_request would run the PR's own copy.
-  assert.deepEqual(on.pull_request_target, { types: ['synchronize'] });
+  // reopened: a push while the PR was closed moves its head with no
+  // synchronize. edited: a base change. Both can leave a stale approval.
+  assert.deepEqual(on.pull_request_target, { types: ['synchronize', 'reopened', 'edited'] });
   assert.equal(on.pull_request, undefined);
   assert.deepEqual(Object.keys(doc.jobs), ['approve', 'withdraw']);
   assert.ok(doc.jobs.approve.if.startsWith("github.event_name == 'issue_comment' &&"), 'a push never reaches the approve job');
   const withdraw = doc.jobs.withdraw;
-  assert.equal(withdraw.if, "github.event_name == 'pull_request_target'");
+  assert.equal(
+    withdraw.if,
+    "github.event_name == 'pull_request_target' && (github.event.action != 'edited' || github.event.changes.base != null)",
+    'an edit to the title or body alone runs nothing',
+  );
   assert.equal(withdraw.uses, 'CruGlobal/agent-review/.github/workflows/withdraw.yml@main');
   assert.deepEqual(withdraw.with, { pr_number: '${{ github.event.pull_request.number }}' });
   assert.deepEqual(withdraw.permissions, { contents: 'read', 'pull-requests': 'write' });
@@ -2030,6 +2036,10 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals'],
     ['contains($marker) and (startswith("## AI Review Auto-Approval") | not)', 'only agent-review\'s own approvals'],
     ['select(.commit_id != $head)', 'never an approval of the head'],
+    ['DEFAULT_BRANCH=$(jq -r \'.base.repo.default_branch // empty\' "$WORK/pr.json")', 'the default branch comes from the repo, not the PR'],
+    ['[ "$BASE_REF" != "$DEFAULT_BRANCH" ]', 'only merges of the default branch can keep an approval'],
+    ['select(.event == "base_ref_changed")', 'a base change is read from the timeline'],
+    ["'$changed < $approved'", 'a base change at or after the approval takes it back'],
     ['git merge-tree --write-tree', 'the base-merge check from the review skill'],
     ['[ "$NOW_HEAD" = "$COMMIT" ]', 'the head is read again before each dismissal'],
     ['/agent-review:re-review', 'the dismissal says what to run next'],

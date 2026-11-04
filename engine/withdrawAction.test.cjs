@@ -66,6 +66,9 @@ case "$METHOD $URL" in
   "GET repos/o/r/pulls/7/reviews?per_page=100")
     has fail-reviews && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     emit "$FIX/reviews.json" ;;
+  "GET repos/o/r/issues/7/timeline?per_page=100")
+    has fail-timeline && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    emit "$FIX/timeline.json" ;;
   "PUT repos/o/r/pulls/7/reviews/"*"/dismissals")
     has fail-dismiss-403 && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
     has fail-dismiss && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
@@ -163,6 +166,16 @@ function buildOrigin() {
   git(w, 'merge', '-q', '--no-edit', C.SIDE);
   C.MERGE_SIDE = git(w, 'rev-parse', 'HEAD');
 
+  // A branch the author pushed unreviewed code to, retargeted the PR onto, and merged in.
+  at(C.F0);
+  write('evil.txt', 'unreviewed\n');
+  git(w, 'add', '-A');
+  git(w, 'commit', '-q', '-m', 'unreviewed code');
+  git(w, 'branch', 'evil', 'HEAD');
+  at(C.X);
+  git(w, 'merge', '-q', '--no-edit', 'evil');
+  C.MERGE_EVIL = git(w, 'rev-parse', 'HEAD');
+
   // A base that edits the PR's own line: the merge conflicts and is fixed by hand.
   at(C.F0);
   edit('f.txt', 'b\n', 'B-main\n');
@@ -222,25 +235,31 @@ function setup() {
   buildOrigin();
 }
 
-const pr = ({ head, base = 'main', state = 'open' }) => JSON.stringify({ state, head: { sha: head }, base: { ref: base } });
-const review = (id, commit, { login = BOT, state = 'APPROVED', body = BODY } = {}) => ({
+// The fixture's default branch is the PR's base unless a scenario says otherwise.
+const pr = ({ head, base = 'main', state = 'open', defaultBranch = base }) =>
+  JSON.stringify({ state, head: { sha: head }, base: { ref: base, repo: { default_branch: defaultBranch } } });
+const APPROVED_AT = '2026-11-02T12:00:00Z';
+const review = (id, commit, { login = BOT, state = 'APPROVED', body = BODY, submitted = APPROVED_AT } = {}) => ({
   id,
   user: login === null ? null : { login },
   state,
   commit_id: commit,
   body,
+  submitted_at: submitted,
 });
+const baseChanged = (at) => ({ event: 'base_ref_changed', created_at: at, actor: { login: 'alice' } });
 
-function run(name, { head, base, state, reviews = [], later, files = {}, prNumber = '7' }) {
+function run(name, { head, base, defaultBranch, state, reviews = [], timeline = [], later, files = {}, prNumber = '7' }) {
   const dir = path.join(TMP, 'runs', name.replace(/[^a-z0-9]+/gi, '-').slice(0, 60));
   const fix = path.join(dir, 'fix');
   const runner = path.join(dir, 'tmp');
   for (const d of [fix, runner]) fs.mkdirSync(d, { recursive: true });
   const all = {
-    'pr.json': pr({ head, base, state }),
+    'pr.json': pr({ head, base, state, defaultBranch }),
     // Two pages, as gh --paginate prints them.
     'reviews.json': JSON.stringify(reviews.slice(0, 1)) + JSON.stringify(reviews.slice(1)),
-    ...(later ? { 'pr-later.json': pr({ head: later, base }) } : {}),
+    'timeline.json': JSON.stringify([{ event: 'commented' }]) + JSON.stringify(timeline),
+    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch }) } : {}),
     ...files,
   };
   for (const [f, v] of Object.entries(all)) fs.writeFileSync(path.join(fix, f), v);
@@ -307,7 +326,7 @@ const SCENARIOS = {
     () => ({ head: C.MERGE1, reviews: [review(21, C.X)] }),
     (o) => {
       kept(o);
-      assert.match(o.summary, new RegExp(`Kept the bot's approval of ${C.X} on PR #7: since then the PR only merged in or rebased onto its base branch`));
+      assert.match(o.summary, new RegExp(`Kept the bot's approval of ${C.X} on PR #7 \\(review 21\\): since then the PR only merged in or rebased onto the default branch`));
       assert.ok(o.gitCalls.some((c) => c.startsWith('init --quiet --bare --template= ')), 'a bare repository with no hooks');
       assert.ok(o.gitCalls.some((c) => c.startsWith('--git-dir=') && c.includes(' merge-tree --write-tree --no-messages ')));
     },
@@ -334,10 +353,13 @@ const SCENARIOS = {
       assert.deepEqual(o.dismissed, [21]);
       assert.equal(o.messages.length, 1);
       const [m] = o.messages;
-      assert.ok(m.startsWith(`agent-review: new commits landed after the bot approved ${C.X.slice(0, 7)}, so the bot took back its approval.`), m);
+      assert.ok(
+        m.startsWith(`agent-review: this PR changed after the bot approved ${C.X.slice(0, 7)} (new commits, or a new base branch), so the bot took back its approval.`),
+        m,
+      );
       assert.ok(m.includes('Run /agent-review:re-review (or /agent-review:review) and post the report.'), m);
       assert.ok(m.includes('The bot approves again when the report passes for the new head.'), m);
-      assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\)`));
+      assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\): the PR changed beyond merging in its base branch\\.`));
     },
   ],
   'a merge of the base branch with an extra change withdraws': [
@@ -372,7 +394,52 @@ const SCENARIOS = {
     () => ({ head: C.MERGE1, base: 'gone', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /Could not fetch the base branch and head of PR #7, so every bot approval of an older commit is withdrawn\./);
+      assert.match(o.summary, /\(review 21\): could not fetch the PR's base branch and head\./);
+    },
+  ],
+  'a PR retargeted onto a branch the author pushed to, which it then merged in, withdraws': [
+    () => ({ head: C.MERGE_EVIL, base: 'evil', defaultBranch: 'main', reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): the PR's base branch is not the repo's default branch\./);
+      noGit(o);
+    },
+  ],
+  'a clean merge of a base that is not the default branch withdraws': [
+    () => ({ head: C.MERGE1, defaultBranch: 'trunk', reviews: [review(21, C.X)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a base change after the approval withdraws, even with a clean merge of the default branch': [
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [baseChanged('2026-11-03T08:00:00Z')] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): the PR's base branch changed after it was approved\./);
+    },
+  ],
+  'a base change in the same second as the approval withdraws': [
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [baseChanged(APPROVED_AT)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a base change with no time withdraws': [
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [{ event: 'base_ref_changed' }] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a base change before the approval keeps it': [
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [baseChanged('2026-11-01T08:00:00Z')] }),
+    kept,
+  ],
+  'an unreadable timeline withdraws': [
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X)], files: { 'fail-timeline': '' } }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): could not read when the PR's base branch last changed\./);
+    },
+  ],
+  'an approval with no time withdraws': [
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X, { submitted: null })] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): could not read when it was approved\./);
     },
   ],
   'each approved commit is judged on its own': [
@@ -456,7 +523,7 @@ const SCENARIOS = {
   ],
 };
 
-test('withdraw action: keeps the approval only when the push merged in or rebased onto the base branch', { skip: SKIP }, async (t) => {
+test('withdraw action: keeps the approval only when the push merged in or rebased onto the default branch', { skip: SKIP }, async (t) => {
   setup();
   try {
     for (const [name, [scenario, check]] of Object.entries(SCENARIOS)) {

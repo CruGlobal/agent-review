@@ -84,18 +84,22 @@ dismiss from a PR comment (`@claude fix 1, 3` / `@claude dismiss 2 [intentional]
 **When you push new commits, the bot takes its approval back.** If your branch rules keep an
 approval after a push ("Dismiss stale pull request approvals" is off), new code could otherwise
 merge on an old approval. So `agent-review-approve.yml` also runs a small job on every push to
-the PR. It dismisses the bot's own approval of an older commit, with a note that says what to do:
-run `/agent-review:re-review` (or `/agent-review:review`) and post the report. The bot approves
-again when the report passes for the new head.
+the PR, when it is reopened, and when its base branch changes. It dismisses the bot's own
+approval of an older commit, with a note that says what to do: run `/agent-review:re-review` (or
+`/agent-review:review`) and post the report. The bot approves again when the report passes for
+the new head.
 
-It keeps the approval only when the push merged in the base branch (`main` or `master`) and
-nothing else, so the PR's own changes are still exactly the ones the bot approved:
+It keeps the approval only when the push merged in the repo's default branch (usually `main` or
+`master`) and nothing else, so the PR's own changes are still exactly the ones the bot approved.
+The PR must also target that branch, and its base branch must not have changed since the
+approval:
 
 - **Kept:** "Update branch", or `git merge origin/main` with no conflicts, even several in a row.
   Also a rebase onto `main` that changes nothing else, and commits that cancel out (a change and
   its revert).
 - **Taken back:** any new change, a conflict you fixed by hand, an extra edit slipped into a
-  merge, a merge of any other branch, or a rebase that changes code.
+  merge, a merge of any other branch, a rebase that changes code, a change of the PR's base
+  branch, and any push to a PR whose base is not the default branch.
 
 It never touches a person's approval, another workflow's approval (like Dependabot's), or the
 bot's approval of the PR's newest commit.
@@ -466,7 +470,7 @@ this repo at `@main`.
 | --- | --- | --- | --- |
 | `agent-review.yml` | `review.yml` | PR opened/pushed, with the `agent-review` label | Runs `/agent-review:review auto ci`, publishes the report, then (with `auto_approve`) approves a passing report. Later pushes review only the new commits. A push that only merges the base branch in, with no conflict fixes, is not reviewed: the last report moves to the new head. |
 | `agent-review-interact.yml` | `interact.yml` | `@claude fix …` / `@claude dismiss … [code]: reason` comment from a writer | Applies fixes in a read-only, credential-scrubbed model job; a separate trusted job validates and publishes them, updates the ledger, and (with `auto_approve`) approves once the ledger passes. |
-| `agent-review-approve.yml` | `approve.yml`, `withdraw.yml` | A PR comment starting with the report marker, created or edited by a writer; new commits on the PR (`pull_request_target`, `synchronize`) | Judges a report a person posted from a terminal review and (with `auto_approve`) approves it. On new commits, takes back the bot's approval of an older commit unless the push only merged in the base branch. |
+| `agent-review-approve.yml` | `approve.yml`, `withdraw.yml` | A PR comment starting with the report marker, created or edited by a writer; new commits, a reopen, or a base change on the PR (`pull_request_target`: `synchronize`, `reopened`, `edited`) | Judges a report a person posted from a terminal review and (with `auto_approve`) approves it. On new commits or a base change, takes back the bot's approval of an older commit unless the push only merged in the default branch. |
 | `agent-review-readiness.yml` | `readiness.yml` | Manual | Scores the seeded suite and telemetry against the rollout gates. |
 
 All three approval paths share one rule (`agent-review approval`, `engine/approval.cjs`) and one
@@ -481,33 +485,42 @@ regardless of who authored the PR.
 
 ### Taking back an approval after new commits
 
-The `withdraw` job in `agent-review-approve.yml` runs on `pull_request_target` (`synchronize`)
-and calls `withdraw.yml`, which runs the composite action `.github/actions/withdraw`. No AI runs
-in it.
+The `withdraw` job in `agent-review-approve.yml` runs on `pull_request_target` and calls
+`withdraw.yml`, which runs the composite action `.github/actions/withdraw`. No AI runs in it. It
+runs on `synchronize`, on `reopened` (a push while the PR was closed moves its head with no
+`synchronize`), and on `edited` only when `changes.base` is set. An edit to the title or body
+alone runs nothing.
 
 **Which approvals.** Only the bot's approvals that carry the `<!-- agent-review-approval -->`
 marker and are pinned to a commit other than the PR's current head. A person's approval,
 Dependabot's (no body), an `## AI Review Auto-Approval` body, and bot approvals posted before
 1.1.1 (no marker) are never touched.
 
-**The keep rule.** For each approved commit, the approval stays only when the new head adds
-nothing to it but the base branch. This is the check the review skill uses to skip a review after
-a base-branch merge:
+**The keep rule.** An approval stays only when all of these hold:
 
-1. The base branch tip and the head have exactly one merge base. With two, a merge can drop
+1. The PR's base is the repo's default branch (`base.repo.default_branch`). The author can push
+   to any other branch, or retarget the PR to one and merge that in, so no other base counts.
+2. The PR's base has not changed since the approval: the PR's timeline has no `base_ref_changed`
+   event at or after the approval's `submitted_at`. The timeline is GitHub's record, which the
+   author cannot edit. A base change with no time, an unreadable timeline, or an approval with
+   no time takes the approval back.
+3. The default branch tip and the head have exactly one merge base. With two, a merge can drop
    base-branch changes that no single merge base shows.
-2. If the head's merge base is the approved commit's merge base, the head's tree must equal the
-   approved commit's tree (commits that cancel out). Otherwise the head's tree must equal the
-   tree `git merge-tree --write-tree <approved> <head's merge base>` builds, which is the approved
-   commit with the base branch merged in cleanly.
+4. The new head adds nothing to the approved commit but the default branch. If the head's merge
+   base is the approved commit's merge base, the head's tree must equal the approved commit's
+   tree (commits that cancel out). Otherwise the head's tree must equal the tree
+   `git merge-tree --write-tree <approved> <head's merge base>` builds, which is the approved
+   commit with the default branch merged in cleanly.
+
+Steps 3 and 4 are the check the review skill uses to skip a review after a base-branch merge.
 
 Several merges in a row pass, because the check always compares against the approved commit. A
 conflict fixed by hand fails, since `merge-tree` reports the conflict. A no-change rebase onto the
-base branch passes too: the rebased head has the same tree as that clean merge. This needs the
+default branch passes too: the rebased head has the same tree as that clean merge. This needs the
 approved commit, which a force push leaves on no branch, but GitHub still serves it by SHA.
 Anything the check cannot prove, including a fetch error, takes the approval back.
 
-**No PR code runs.** The action reads the PR through the API. It then fetches the base branch, the
+**No PR code runs.** The action reads the PR through the API. It then fetches the default branch, the
 head, and each approved commit into a fresh bare repository (blobless, no work tree, no hooks) and
 runs only `merge-base`, `merge-tree`, and `rev-parse`. The token reaches git through environment
 variables, never a file or an argument. That is what makes `pull_request_target` safe here, and
@@ -644,8 +657,11 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   concurrency group. If an approve run is going, a push queues a withdraw run, and a report is
   posted before it starts, the new approve run replaces the waiting withdraw run. An old approval
   can then stay until the next push.
-- **Changing a PR's base branch does not take back an approval.** Only new commits trigger the
-  withdraw job.
+- **A base change leaves the bot's approval of the PR's current head.** The withdraw job never
+  dismisses an approval of the current head, so after a retarget with no new commits that
+  approval stays until the next push, which takes it back because the base changed after it.
+  Reports do not record the base they were reviewed against, so the approve job would also
+  approve a re-posted report for the same head after a retarget.
 - **Consumer workflows track `@main`.** The generated callers use the reusable workflows at
   `@main`, so consuming repos pick up changes as they land. There is no release-tag or
   SHA-pinning story yet — pin the `uses:` ref yourself if you need a frozen version.

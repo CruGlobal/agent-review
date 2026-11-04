@@ -2,7 +2,8 @@ name: agent-review withdraw
 description: >-
   Dismisses the bot's own agent-review approvals (those that carry the
   agent-review-approval marker) of commits older than the PR's head, unless the
-  head adds nothing to the approved commit but the PR's base branch. Never
+  PR targets the default branch, its base has not changed since the approval,
+  and the head adds nothing to the approved commit but that branch. Never
   checks out or runs PR code: it reads the PR through the API and compares
   commits in a fresh bare repository. Never dismisses an approval of the current
   head, a person's approval, or another workflow's, and never fails the job.
@@ -43,6 +44,7 @@ runs:
         STATE=$(jq -r '.state // empty' "$WORK/pr.json")
         HEAD_SHA=$(jq -r '.head.sha // empty' "$WORK/pr.json")
         BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
+        DEFAULT_BRANCH=$(jq -r '.base.repo.default_branch // empty' "$WORK/pr.json")
         if [ "$STATE" != open ]; then
           note "PR #$PR is not open, so no approval was withdrawn."
           exit 0
@@ -61,10 +63,18 @@ runs:
               | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
               | select((.body // "") | contains($marker) and (startswith("## AI Review Auto-Approval") | not))
               | select(.commit_id != $head)
-              | "\(.id) \(.commit_id)"' > "$WORK/candidates.txt"
+              | "\(.id) \(.commit_id) \(.submitted_at // "")"' > "$WORK/candidates.txt"
         if [ ! -s "$WORK/candidates.txt" ]; then
           note "PR #$PR has no agent-review approval of an older commit, so there is nothing to withdraw."
           exit 0
+        fi
+
+        # When the base last changed comes from the timeline, which the author
+        # cannot edit. A change with no time sorts after every approval.
+        LAST_BASE_CHANGE=unread
+        if gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$WORK/timeline.json" 2>/dev/null \
+          && CHANGED=$(jq -rs '[.[][] | select(.event == "base_ref_changed") | .created_at // "unknown"] | max // ""' "$WORK/timeline.json"); then
+          LAST_BASE_CHANGE=$CHANGED
         fi
 
         # The commits go into a fresh bare repository with no work tree, so
@@ -109,28 +119,46 @@ runs:
           [ -n "$kept" ] && [ "$kept" = "$(g rev-parse --verify --quiet "$HEAD_SHA^{tree}")" ]
         }
 
-        FETCHED=false
-        if fetch_base_and_head; then
-          FETCHED=true
-        else
-          note "Could not fetch the base branch and head of PR #$PR, so every bot approval of an older commit is withdrawn."
-        fi
-        WITHDRAW=""
-        cut -d' ' -f2 "$WORK/candidates.txt" | sort -u > "$WORK/commits.txt"
-        while read -r COMMIT <&4; do
-          if [ "$FETCHED" = true ] && only_base_merged "$COMMIT"; then
-            note "Kept the bot's approval of $COMMIT on PR #$PR: since then the PR only merged in or rebased onto its base branch, so its own changes are the ones approved."
-          else
-            WITHDRAW="$WITHDRAW $COMMIT"
+        # Only merges of the default branch can keep an approval: the author can
+        # push to any other branch, or retarget the PR to one, and merge that in.
+        # An approval stays only while the PR's base has not changed since it was
+        # given. Sets WHY and fails when the approval must go.
+        FETCHED=untried
+        keep_approval() {
+          local approved=$1 submitted=$2
+          if [ -z "$DEFAULT_BRANCH" ] || [ "$BASE_REF" != "$DEFAULT_BRANCH" ]; then
+            WHY="the PR's base branch is not the repo's default branch"
+            return 1
           fi
-        done 4< "$WORK/commits.txt"
-        [ -n "$WITHDRAW" ] || exit 0
+          if [ "$LAST_BASE_CHANGE" = unread ]; then
+            WHY="could not read when the PR's base branch last changed"
+            return 1
+          fi
+          if ! [[ "$submitted" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+            WHY="could not read when it was approved"
+            return 1
+          fi
+          if [ -n "$LAST_BASE_CHANGE" ] \
+            && [ "$(jq -n --arg changed "$LAST_BASE_CHANGE" --arg approved "$submitted" '$changed < $approved')" != true ]; then
+            WHY="the PR's base branch changed after it was approved"
+            return 1
+          fi
+          if [ "$FETCHED" = untried ]; then
+            if fetch_base_and_head; then FETCHED=true; else FETCHED=false; fi
+          fi
+          if [ "$FETCHED" != true ]; then
+            WHY="could not fetch the PR's base branch and head"
+            return 1
+          fi
+          WHY="the PR changed beyond merging in its base branch"
+          only_base_merged "$approved"
+        }
 
-        while read -r REVIEW_ID COMMIT <&3; do
-          case " $WITHDRAW " in
-            *" $COMMIT "*) ;;
-            *) continue ;;
-          esac
+        while read -r REVIEW_ID COMMIT SUBMITTED <&3; do
+          if keep_approval "$COMMIT" "${SUBMITTED:-}"; then
+            note "Kept the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID): since then the PR only merged in or rebased onto the default branch, so its own changes are the ones approved."
+            continue
+          fi
           # The head is read again right before each dismissal, so an approval
           # of the head as it is now is never dismissed.
           if ! NOW_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
@@ -141,9 +169,9 @@ runs:
             note "The head of PR #$PR is $COMMIT again, so the bot's approval of it is kept (review $REVIEW_ID)."
             continue
           fi
-          MESSAGE="agent-review: new commits landed after the bot approved ${COMMIT:0:7}, so the bot took back its approval. Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head."
+          MESSAGE="agent-review: this PR changed after the bot approved ${COMMIT:0:7} (new commits, or a new base branch), so the bot took back its approval. Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head."
           if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="$MESSAGE" -f event=DISMISS > /dev/null 2> "$WORK/dismiss.err"; then
-            note "Withdrew the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID)."
+            note "Withdrew the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID): $WHY."
           elif grep -qF '(HTTP 403)' "$WORK/dismiss.err"; then
             warn "this workflow's token may not dismiss reviews on PR #$PR, so the bot's approvals of older commits stay. A read-only token, which GitHub gives a pull_request run from a fork, does this. A person must dismiss them."
             break

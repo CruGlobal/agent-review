@@ -1,8 +1,9 @@
 name: agent-review withdraw (reusable)
 # Takes back the bot's agent-review approval of an older commit when new
-# commits land on a PR, unless the push only merged in (or rebased onto) the
-# base branch. Callers run it from pull_request_target, which is safe only
-# because nothing here checks out or runs the PR's code: keep it that way.
+# commits land on a PR or its base branch changes, unless the push only merged
+# in (or rebased onto) the default branch. Callers run it from
+# pull_request_target, which is safe only because nothing here checks out or
+# runs the PR's code: keep it that way.
 on:
   workflow_call:
     inputs:
