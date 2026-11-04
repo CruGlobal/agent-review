@@ -347,14 +347,12 @@ for (; i < lines.length; i++) {
   if (m[1]) markers[m[1]] = m[2];
 }
 if (lines[i] === "") i++;
-// A second report marker starts another comment glued on after this one; it never moves.
 const body = lines.slice(i);
-const next = body.indexOf("<!-- agent-review -->");
 const ledger = "ledger" in markers ? JSON.parse(markers.ledger) : null;
 const status = "status" in markers ? { ...JSON.parse(markers.status), head } : null;
 if (ledger) writeFileSync("/tmp/agent_review_ledger.json", JSON.stringify(ledger) + "\n");
 if (status) writeFileSync("/tmp/agent_review_status.json", JSON.stringify(status) + "\n");
-writeFileSync("/tmp/agent_review_report.md", (next === -1 ? body : body.slice(0, next)).join("\n").replace(/\n*$/, "\n"));
+writeFileSync("/tmp/agent_review_report.md", body.join("\n").replace(/\n*$/, "\n"));
 ' "$PREV_COMMENT" "$HEAD_REF" || return 1
   echo "export HEAD_REF=\"$HEAD_REF\"" >> /tmp/review_env.sh
   if [ "$(sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' "$PREV_COMMENT" | head -1)" = shadow ]; then

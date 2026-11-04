@@ -4694,9 +4694,14 @@ test('a push that only merged the base branch moves the last report to the new h
       moved(noLedger, 'local, no ledger marker');
       assert.strictEqual(noLedger.wanted['agent_review_ledger.json'], null, `${shell}: an earlier run's ledger is never posted`);
 
-      const twoPages = run('local, a second page glued on', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': previous(head) + previous(fork) });
-      moved(twoPages, 'local, a second page glued on');
-      assert.strictEqual(twoPages.wanted['agent_review_report.md'], '## agent-review\nThe report body.\n', `${shell}: only the first comment is moved`);
+      // The report is one comment's body (report-comment picks one), so nothing in it is cut.
+      const quoted = run('local, a body that quotes the marker line', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': `${previous(head)}A finding quotes it:\n<!-- agent-review -->\n` });
+      moved(quoted, 'local, a body that quotes the marker line');
+      assert.strictEqual(
+        quoted.wanted['agent_review_report.md'],
+        '## agent-review\nThe report body.\nA finding quotes it:\n<!-- agent-review -->\n',
+        `${shell}: the whole body moves`,
+      );
 
       const shadow = run('local, a shadow report', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': previous(head, { rollout: 'shadow' }) });
       moved(shadow, 'local, a shadow report');
