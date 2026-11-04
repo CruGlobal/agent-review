@@ -712,6 +712,7 @@ test('approval subcommand judges a report file against a head SHA', () => {
     reason: `report for ${head} passes with no open blockers`,
     label: 'keep',
     dismissBotApprovals: 'none',
+    dismissFor: 'none',
     caution: null,
   });
   const errorRules = join(dir, 'error-rules.json');

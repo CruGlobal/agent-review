@@ -62,12 +62,9 @@ function contentMatches(contentText, trigger) {
   const raw = String(trigger || '');
   if (!raw) return false;
   const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Identifier-like triggers match whole language tokens. Plain substring
-  // matching made `currency` fire on YAML's `concurrency`, wasting an entire
-  // specialist pass. Punctuation-bearing triggers (ENV[, .round(, field :)
-  // still match their exact source spelling.
-  const left = /^[A-Za-z0-9_]/.test(raw) ? '(?:^|[^A-Za-z0-9_])' : '';
-  const right = /[A-Za-z0-9_]$/.test(raw) ? '(?![A-Za-z0-9_])' : '';
+  // A letter or digit edge needs a token boundary; a `_` or punctuation edge is open.
+  const left = /^[A-Za-z0-9]/.test(raw) ? '(?:^|[^A-Za-z0-9_])' : '';
+  const right = /[A-Za-z0-9]$/.test(raw) ? '(?![A-Za-z0-9_])' : '';
   return new RegExp(left + escaped + right, 'm').test(contentText);
 }
 

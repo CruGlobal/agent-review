@@ -109,24 +109,27 @@ function cautionFor(result) {
 }
 
 // label: 'add' | 'remove' | 'keep'. Only a judged report, or readable rules that
-// need a person, may change the label, and a label a person added is never
-// removed by the bot.
-// dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed
-// or a person's label is on the PR. 'stale' means the bot's approvals of other
-// heads; only unreadable rules dismiss those, since stale approvals are kept on
-// purpose everywhere else.
+// need a person, may change the label; a label a person added is never removed
+// by the bot, and an unreadable label list never adds it.
+// dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed,
+// a person's label is on the PR, or the report for the PR's head does not pass.
+// 'stale' means the bot's approvals of other heads; only unreadable rules dismiss those.
+// dismissFor: 'person' | 'failing-report' | 'unchecked' | 'none'; the action keeps
+// third-party bot approvals only for 'failing-report'.
 function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   const { result, judged } = judge(report, { head });
   const caution = cautionFor(result);
-  const out = (approve, reason, label, dismissBotApprovals) => ({
+  const out = (approve, reason, label, dismissBotApprovals, dismissFor = 'none') => ({
     approve,
     reason,
     label,
     dismissBotApprovals,
+    dismissFor,
     caution,
   });
   const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === 'string');
   const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
+  const addLabel = labelsOk && !present ? 'add' : 'keep';
   const plain = rules !== null && typeof rules === 'object' && !Array.isArray(rules);
   const ruleOk =
     plain &&
@@ -136,16 +139,16 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     rules.reasons.every((r) => typeof r === 'string');
   // A person's label takes back bot approvals even when the report or the
   // rules cannot be read.
-  const byPerson = present && labelOwner !== 'bot' ? out(false, `a person added the ${LABEL} label`, 'keep', 'all') : null;
+  const byPerson = present && labelOwner !== 'bot' ? out(false, `a person added the ${LABEL} label`, 'keep', 'all', 'person') : null;
   const rulesUnread = () => {
     const why = plain && 'error' in rules && rules.error ? String(rules.error) : 'rules are missing or malformed';
-    return out(false, `could not check the human approval rules: ${why}`, 'keep', 'stale');
+    return out(false, `could not check the human approval rules: ${why}`, 'keep', 'stale', 'unchecked');
   };
   // The rules re-check reads the base commit and the PR's current files, not
   // the report, so it holds even when the report cannot be judged.
   if (!judged) {
     if (ruleOk && rules.required) {
-      return out(false, `a person must approve: ${rules.reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
+      return out(false, `a person must approve: ${rules.reasons.join('; ')}`, addLabel, 'all', 'person');
     }
     if (byPerson) return byPerson;
     return ruleOk ? out(false, result.reason, 'keep', 'none') : rulesUnread();
@@ -156,12 +159,15 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
     for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
   }
   if (result.humanRequired || (ruleOk && rules.required)) {
-    return out(false, `a person must approve: ${reasons.join('; ')}`, present ? 'keep' : 'add', 'all');
+    return out(false, `a person must approve: ${reasons.join('; ')}`, addLabel, 'all', 'person');
   }
   if (byPerson) return byPerson;
+  if (!result.approve) {
+    return out(false, result.reason, ruleOk && present ? 'remove' : 'keep', 'all', ruleOk && labelsOk ? 'failing-report' : 'unchecked');
+  }
   if (!ruleOk) return rulesUnread();
   if (!labelsOk) return out(false, 'could not read the PR labels: expected a list of names', 'keep', 'none');
-  return out(result.approve, result.reason, present ? 'remove' : 'keep', 'none');
+  return out(true, result.reason, present ? 'remove' : 'keep', 'none');
 }
 
 module.exports = { evaluateApproval, decideApproval, MARKER };

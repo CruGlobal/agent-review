@@ -3,8 +3,9 @@ description: >-
   Approve a pull request when its published agent-review report passes for the
   PR's current head and no person needs to approve it. Re-checks the base
   commit's human_approval rules, owns the needs-human-approval label, and
-  dismisses the bot's own earlier approvals when a person must approve, or its
-  approvals of other heads when the rules cannot be read. The approval is pinned
+  dismisses every bot approval when a person must approve, all but known
+  third-party ones when only the report for the PR's head fails, and those of
+  other heads when the rules cannot be read. The approval is pinned
   to the judged commit, and is never posted unless approve_allowed is 'true'. Fails closed on any missing or disagreeing marker, never
   requests changes, never fails the job, and downgrades a label, dismissal, or
   approval API failure to a warning.
@@ -69,6 +70,7 @@ runs:
         }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
         LABEL=needs-human-approval
+        APPROVAL_MARKER='<!-- agent-review-approval -->'
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
         rm -rf "$RUNTIME_DIR"
         mv .agent-review-approve-runtime "$RUNTIME_DIR"
@@ -101,7 +103,6 @@ runs:
         fi
         if [ ! -s "$REPORT" ]; then
           echo "No agent-review report found for PR #$PR — not approving." | tee -a "$GITHUB_STEP_SUMMARY"
-          exit 0
         fi
         PR_JSON="$RUNNER_TEMP/agent-review-approve-pr.json"
         gh api "repos/$REPO/pulls/$PR" > "$PR_JSON"
@@ -166,8 +167,10 @@ runs:
         TIMELINE="$RUNNER_TEMP/agent-review-approve-timeline.json"
         LABEL_OWNER=none
         LABEL_ON_PR=false
+        LABELS_READ=false
         if gh api "repos/$REPO/issues/$PR/labels?per_page=100" --paginate > "$LABELS.pages" \
           && jq -s '[.[][].name]' "$LABELS.pages" > "$LABELS"; then
+          LABELS_READ=true
           if jq -e --arg l "$LABEL" 'any(.[]; ascii_downcase == $l)' "$LABELS" > /dev/null; then
             LABEL_ON_PR=true
             if gh api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$TIMELINE" \
@@ -191,6 +194,7 @@ runs:
         REASON=$(printf '%s' "$DECISION" | jq -r '.reason')
         LABEL_ACTION=$(printf '%s' "$DECISION" | jq -r '.label')
         DISMISS=$(printf '%s' "$DECISION" | jq -r '.dismissBotApprovals')
+        DISMISS_FOR=$(printf '%s' "$DECISION" | jq -r '.dismissFor // "unchecked"')
         CAUTION=$(printf '%s' "$DECISION" | jq -r '.caution // empty')
         note "Decision for PR #$PR: approve=$APPROVE, label=$LABEL_ACTION, dismiss bot approvals=$DISMISS. $REASON"
 
@@ -202,6 +206,8 @@ runs:
             # event, which would make a person's label the bot's.
             if [ "$LABEL_ON_PR" = true ]; then
               note "The $LABEL label is already on PR #$PR."
+            elif [ "$LABELS_READ" != true ]; then
+              note "The $LABEL label was not added to PR #$PR, since its labels could not be read."
             else
               gh label create "$LABEL" --repo "$REPO" --color B60205 --description "agent-review: a person must approve this PR" 2>/dev/null || true
               if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL" > /dev/null; then
@@ -228,18 +234,48 @@ runs:
           *) DISMISS_MODE=all ;;
         esac
         if [ -n "$DISMISS_MODE" ]; then
-          if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" \
-              '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head)) | .id'); then
-            for REVIEW_ID in $BOT_APPROVALS; do
-              if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
-                note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
-              else
-                warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
-              fi
-            done
+          OWN_ONLY=false
+          if [ "$DISMISS_FOR" = failing-report ]; then OWN_ONLY=true; fi
+          LIST_REVIEWS=true
+          if NOW_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) && [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            if [ "$NOW_HEAD" != "$HEAD_SHA" ]; then
+              note "The head of PR #$PR moved to $NOW_HEAD while it was being judged, so a bot approval of that head is kept."
+            fi
+          elif [ "$OWN_ONLY" = true ]; then
+            warn "could not read the head of PR #$PR again, so the bot's earlier approvals were not dismissed."
+            LIST_REVIEWS=false
           else
-            warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+            warn "could not read the head of PR #$PR again, so every bot approval is dismissed, including one of a newer head."
+            NOW_HEAD=$HEAD_SHA
+          fi
+          if [ "$LIST_REVIEWS" = true ]; then
+            if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+              | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" \
+                  --arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY" '
+                # third_party: Dependabot auto-merge (no body) and ai-review-auto-approve.
+                def ours:
+                  contains($marker)
+                  or startswith("Auto-approved: the agent-review report for this head passes")
+                  or startswith("Auto-approved: the posted agent-review report covers the current head")
+                  or startswith("Auto-approved: every agent-review finding is fixed or dismissed")
+                  or ($configured != "" and startswith($configured));
+                def third_party: . == "" or startswith("## AI Review Auto-Approval");
+                .[][]
+                | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
+                | select($own_only != "true" or ((.body // "") | ours or (third_party | not)))
+                | select($mode == "all" or .commit_id != $head)
+                | select($now == $head or .commit_id != $now)
+                | .id'); then
+              for REVIEW_ID in $BOT_APPROVALS; do
+                if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
+                  note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
+                else
+                  warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+                fi
+              done
+            else
+              warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+            fi
           fi
         fi
 
@@ -266,6 +302,10 @@ runs:
         if [ -n "$CAUTION" ]; then
           BODY="$APPROVAL_BODY"$'\n\n'"$CAUTION"
         fi
+        case "$BODY" in
+          *"$APPROVAL_MARKER"*) ;;
+          *) BODY="$BODY"$'\n\n'"$APPROVAL_MARKER" ;;
+        esac
         # Needs the repo/org setting "Allow GitHub Actions to create and approve
         # pull requests" (off by GitHub default). A 422 here means it is disabled:
         # warn instead of failing, so a passing review never shows as a red check.

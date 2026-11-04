@@ -62,6 +62,71 @@ test('unmatched blockers count against precision and clean controls', () => {
   assert.equal(result.gate.pass, false);
 });
 
+function suggestionSuite(thresholds = {}) {
+  const raw = suite();
+  raw.thresholds = { ...raw.thresholds, minimum_runs: 1, ...thresholds };
+  raw.cases.push({
+    id: 'seed-i18n', kind: 'seeded_bug', category: 'i18n',
+    expected: [{
+      id: 'missing-msgid', must_block: false, min_severity: 3, category: 'i18n',
+      match: { paths: ['app/**'], message_any: ['catalog'] },
+    }],
+  });
+  return raw;
+}
+const passing = [
+  { case_id: 'seed-auth', run_id: 'one', findings: [{ severity: 8, file: 'app/x.rb', category: 'security', message: 'Missing authorize call' }] },
+  { case_id: 'clean', run_id: 'one', findings: [] },
+];
+const i18nRun = (findings) => ({ case_id: 'seed-i18n', run_id: 'one', findings });
+
+test('a must_block false case found below the blocker bar counts as detected', () => {
+  const result = scoreSuite(suggestionSuite(), [...passing, i18nRun([{ severity: 5, file: 'app/y.rb', category: 'i18n', message: 'msgid missing from the catalog' }])]);
+  assert.deepEqual([result.totals.expectedSuggestions, result.totals.detectedSuggestions], [1, 1]);
+  assert.equal(result.metrics.suggestionRecall, 1);
+  assert.equal(result.stability['seed-i18n'].detectionRate, 1);
+  assert.deepEqual([result.totals.cleanRuns, result.metrics.cleanFalseBlockerRate], [2, 0], 'a case that expects no blocker counts as a clean run');
+  assert.equal(result.metrics.blockerRecall, 1, 'suggestions never enter blocker recall');
+  assert.equal(result.gate.pass, true);
+});
+
+test('a must_block false case the review blocks fails: a false blocker on a run that must pass', () => {
+  const result = scoreSuite(suggestionSuite(), [...passing, i18nRun([{ severity: 8, file: 'app/y.rb', category: 'i18n', message: 'msgid missing from the catalog' }])]);
+  assert.equal(result.totals.detectedSuggestions, 0, 'a blocker never matches a suggestion');
+  assert.equal(result.totals.falsePositiveBlockers, 1);
+  assert.equal(result.metrics.cleanFalseBlockerRate, 0.5);
+  assert.equal(result.stability['seed-i18n'].detectionRate, 0);
+  assert.equal(result.gate.pass, false);
+  assert.equal(result.gate.checks.cleanFalseBlockerRate, false);
+});
+
+test('a missed must_block false case fails its run, and fails the gate only with suggestion_recall set', () => {
+  const runs = [...passing, i18nRun([{ severity: 2, file: 'app/y.rb', category: 'i18n', message: 'msgid missing from the catalog' }])];
+  const plain = scoreSuite(suggestionSuite(), runs);
+  assert.equal(plain.metrics.suggestionRecall, 0, 'below min_severity does not count');
+  assert.equal(plain.stability['seed-i18n'].detectionRate, 0);
+  assert.equal(plain.gate.pass, true);
+  const gated = scoreSuite(suggestionSuite({ suggestion_recall: 0.5 }), runs);
+  assert.deepEqual([gated.gate.pass, gated.gate.checks.suggestionRecall], [false, false]);
+  assert.throws(() => validateSuite(suggestionSuite({ suggestion_recall: 2 })), /suggestion_recall/);
+});
+
+test('suite validation rejects a must_block false finding that could never match', () => {
+  const at = (min, threshold) => {
+    const raw = suggestionSuite();
+    raw.cases[2].expected[0].min_severity = min;
+    if (threshold !== undefined) raw.blocker_threshold = threshold;
+    return raw;
+  };
+  assert.throws(() => validateSuite(at(7)), /must_block: false with min_severity 7, which is not below blocker_threshold 7, so it can never match/);
+  assert.throws(() => validateSuite(at(5, 5)), /not below blocker_threshold 5/);
+  assert.doesNotThrow(() => validateSuite(at(6)));
+  assert.doesNotThrow(() => validateSuite(at(7, 8)), 'a higher threshold leaves room');
+  const unset = suggestionSuite();
+  delete unset.cases[2].expected[0].min_severity;
+  assert.doesNotThrow(() => validateSuite(unset), 'with no min_severity a suggestion matches from 1');
+});
+
 test('suite validation rejects clean controls that require blockers', () => {
   const raw = suite();
   raw.cases[1].expected = [{ id: 'bad', match: { paths: ['**'] } }];

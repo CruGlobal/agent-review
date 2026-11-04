@@ -239,6 +239,17 @@ test('decide: rules.required adds the label and dismisses bot approvals', () => 
   assert.equal(decide({ rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'person' }).label, 'keep');
 });
 
+test('decide: unreadable labels never add the label, but a person is still needed and every bot approval goes', () => {
+  const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
+  for (const o of [{ rules: PCI_RULES }, { report: report({ status }) }, { report: report({ head: 'ffff' + HEAD.slice(4) }), rules: PCI_RULES }]) {
+    for (const labels of [null, 'needs-human-approval', [{ name: LABEL }]]) {
+      const d = decide({ ...o, labels });
+      assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'all'], JSON.stringify([o, labels]));
+      assert.match(d.reason, /^a person must approve: /);
+    }
+  }
+});
+
 test('decide: status.humanRequired adds the label even with no rules required', () => {
   const status = { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] };
   const d = decide({ report: report({ status }) });
@@ -277,7 +288,21 @@ test('decide: a bot-owned label comes off and a passing report approves', () => 
 
 test('decide: a bot-owned label comes off even when the report does not pass', () => {
   const d = decide({ report: report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } }), labels: [LABEL], labelOwner: 'bot' });
-  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', 'none']);
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'remove', 'all']);
+});
+
+test('decide: a report for this head that does not pass takes back every bot approval', () => {
+  const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } });
+  const d = decide({ report: failing });
+  assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'all']);
+  assert.equal(d.reason, 'status is not passing (2 open blockers)');
+  // Unreadable rules or labels never soften it to stale or none, and never move the label.
+  for (const o of [{ rules: { error: 'boom' } }, { labels: null }, { rules: { error: 'boom' }, labels: [LABEL], labelOwner: 'bot' }]) {
+    const u = decide({ report: failing, ...o });
+    assert.deepEqual([u.approve, u.label, u.dismissBotApprovals], [false, 'keep', 'all'], JSON.stringify(o));
+  }
+  // A status with no pass field is not passing either.
+  assert.equal(decide({ report: report({ status: { v: 1, head: HEAD } }) }).dismissBotApprovals, 'all');
 });
 
 test('decide: no label and no person needed approves and keeps', () => {
@@ -336,15 +361,16 @@ test('decide: an irreversible status with no reasons gives a caution saying no r
   assert.match(d.caution, /\(no reason recorded\)/);
 });
 
-test('decide: dismissBotApprovals is all when a person is needed or added the label, stale only when the rules cannot be read, and none otherwise', () => {
+test('decide: dismissBotApprovals is all when a person is needed, added the label, or the report for this head fails, stale only when the rules cannot be read, and none otherwise', () => {
   const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 2 } });
   const cases = [
     ['a person is needed', { rules: { required: true, reasons: ['r'] } }, 'all'],
     ['a person is needed and the label is already on', { rules: { required: true, reasons: ['r'] }, labels: [LABEL], labelOwner: 'bot' }, 'all'],
     ['rules unreadable', { rules: { error: 'boom' } }, 'stale'],
-    ['rules unreadable on a failing report', { report: failing, rules: { error: 'boom' } }, 'stale'],
+    ['rules unreadable on a failing report', { report: failing, rules: { error: 'boom' } }, 'all'],
     ['rules unreadable and labels unreadable', { rules: { error: 'boom' }, labels: null }, 'stale'],
-    ['open blockers with readable rules', { report: failing }, 'none'],
+    ['open blockers with readable rules', { report: failing }, 'all'],
+    ['open blockers with unreadable labels', { report: failing, labels: null }, 'all'],
     ['labels unreadable', { labels: null }, 'none'],
     ['a person added the label', { labels: [LABEL], labelOwner: 'person' }, 'all'],
     ['a person added the label to a failing report', { report: failing, labels: [LABEL], labelOwner: 'person' }, 'all'],
@@ -359,4 +385,29 @@ test('decide: dismissBotApprovals is all when a person is needed or added the la
 test('decide: a rules error keeps a label the bot added and never approves', () => {
   const d = decide({ rules: { error: 'boom' }, labels: [LABEL], labelOwner: 'bot' });
   assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'stale']);
+});
+
+test('decide: dismissFor is failing-report only when the report alone fails and the rules and labels were read', () => {
+  const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 1 } });
+  const cases = [
+    ['a failing report', { report: failing }, 'failing-report'],
+    ['a failing report with a bot-owned label', { report: failing, labels: [LABEL], labelOwner: 'bot' }, 'failing-report'],
+    ['a failing report with unreadable rules', { report: failing, rules: { error: 'boom' } }, 'unchecked'],
+    ['a failing report with unreadable labels', { report: failing, labels: null }, 'unchecked'],
+    ['a failing report on a PCI path', { report: failing, rules: PCI_RULES }, 'person'],
+    ['a failing report with a person\'s label', { report: failing, labels: [LABEL], labelOwner: 'person' }, 'person'],
+    ['a passing report on a PCI path', { rules: PCI_RULES }, 'person'],
+    ['a report that says a person is needed', { report: report({ status: { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] } }) }, 'person'],
+    ['no report on a PCI path', { report: '', rules: PCI_RULES }, 'person'],
+    ['no report with a person\'s label', { report: '', labels: [LABEL], labelOwner: 'none' }, 'person'],
+    ['no report with unreadable rules', { report: '', rules: { error: 'boom' } }, 'unchecked'],
+    ['a passing report with unreadable rules', { rules: { error: 'boom' } }, 'unchecked'],
+    ['approves', {}, 'none'],
+    ['no report', { report: '' }, 'none'],
+  ];
+  for (const [name, o, want] of cases) {
+    const d = decide(o);
+    assert.equal(d.dismissFor, want, name);
+    assert.equal(d.dismissFor === 'none', d.dismissBotApprovals === 'none', `${name}: dismissFor names a reason exactly when something is dismissed`);
+  }
 });

@@ -21,13 +21,16 @@ base_branch: main
 risk:
   # File-pattern contributions. `tier` is descriptive; `points` drives the score.
   # Per file, the highest-scoring matching pattern wins (patterns don't stack on
-  # one file; files sum across the diff). A 0-point entry never changes the score
-  # (max starts at 0) — it documents that a path was considered and deemed
-  # no-risk; use `excluded_paths` to actually exclude.
+  # one file; files sum across the diff). A file that matches no pattern gets
+  # `unmatched_file_points` (below), so a 0-point entry lowers its files to 0.
+  # A push that touches only 0-point and excluded paths, in a small diff, scores
+  # 0: auto mode skips its review and the earlier report stands. Give 0 points
+  # only to files no review needs to see; `excluded_paths` keeps a path out
+  # entirely.
   patterns:
     - { glob: '.github/workflows/**', points: 3, tier: critical }
-    # Explicit 0-point entries: documentation of intent, not scoring behavior.
-    - { glob: '**/*.test.*', points: 0, tier: low }
+    # Tests score 1, so a push that only changes tests still gets a quick review.
+    - { glob: '**/*.test.*', points: 1, tier: low }
     - { glob: '**/*.snap', points: 0, tier: low }
     # Examples — uncomment and adapt to this repo's layout:
     # - { glob: '<auth-and-session-code>/**', points: 3, tier: critical }
@@ -94,7 +97,9 @@ risk:
 # ── Agents ────────────────────────────────────────────────────────────────────
 # `always: true` runs the agent on every review. Otherwise the agent runs only
 # when a changed file matches `triggers.paths` or the diff contains one of
-# `triggers.content`. `rules[]` paths resolve against `.claude/review/`.
+# `triggers.content`. A content trigger matches whole identifiers only
+# (`currency` never fires on `concurrency`); a trailing `_` makes it a prefix
+# (`OKTA_`) and a leading `_` a suffix (`__c`). `rules[]` paths resolve against `.claude/review/`.
 # `triggers.specials` (optional) does NOT trigger the agent — it only records
 # which risk.special[].when detections this lane owns, so loadConfig's
 # `escalates` default can still find the right lane if you rename/remove the
@@ -183,6 +188,11 @@ excluded_paths:
   - '**/*.generated.*'
   - 'docs/**'
   - '.claude/review/rules/**' # prose rule docs — config/guidance, not reviewable code
+  # agent-review's own bookkeeping, never reviewed or scored: /agent-review:address commits
+  # feedback.jsonl to PRs, and reviews write metrics/ and the index cache.
+  - '.claude/review/learnings/feedback.jsonl'
+  - '.claude/review/metrics/**'
+  - '.claude/review/index/**'
   # Package-manager artifacts — generated/vendored, never reviewable
   - 'yarn.lock'
   - 'package-lock.json'

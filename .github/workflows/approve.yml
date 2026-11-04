@@ -23,6 +23,9 @@ jobs:
       inputs.auto_approve &&
       github.event_name == 'issue_comment' &&
       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    concurrency:
+      group: agent-review-approve-${{ inputs.pr_number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read

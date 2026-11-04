@@ -33,6 +33,11 @@ function readBlock(configText) {
   return { always: block.always === true, paths: block.paths || [] };
 }
 
+function pathMatches(file, pattern) {
+  const folder = pattern.replace(/\/+$/, '');
+  return minimatch(file, pattern, OPTS) || (folder !== '' && minimatch(file, `${folder}/**`, OPTS));
+}
+
 // `files` must hold both sides of a rename so a move out of a PCI path still matches.
 // `incomplete` marks a partial list, which cannot prove that no rule matches, so it
 // throws when the config sets any rule; with no rules the list does not matter.
@@ -44,7 +49,7 @@ function humanRules(configText, files, { incomplete = false } = {}) {
   const reasons = [];
   if (rules.always) reasons.push('every PR in this repo needs a person (human_approval.always)');
   const hits = [...new Set(files)]
-    .filter((f) => rules.paths.some((g) => minimatch(f, g, OPTS)))
+    .filter((f) => rules.paths.some((g) => pathMatches(f, g)))
     .sort();
   for (const f of hits) reasons.push(`PCI path: ${f}`);
   if (files.includes(CONFIG_PATH) && hasRules) {

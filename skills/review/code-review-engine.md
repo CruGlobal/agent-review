@@ -52,9 +52,10 @@ MAX_FINDINGS_FLAG=" --max-findings ${MAX_FINDINGS:-default}"
 CODE_REVIEW_ARGS="$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"
 REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"
 if [ -z "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ] && [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
-  git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt
+  # The merge base, or the base branch's tip when there is none, as RANGE in SKILL.md.
+  REVIEWED_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF" 2>/dev/null) || REVIEWED_BASE="$BASE_REF"
+  git diff "$REVIEWED_BASE" "$HEAD_REF" > /tmp/code_review_diff.txt
   CODE_REVIEW_DIFF=/tmp/code_review_diff.txt
-  REVIEWED_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF")
 else
   CODE_REVIEW_DIFF=/tmp/pr_diff.txt
   REVIEWED_BASE="${RANGE%%..*}"
@@ -97,7 +98,7 @@ this file) and fill its fourteen placeholders:
 | `{{RETRY_NOTE}}`          | Empty on the first launch and on a relaunch with a new capture; the note from Stage 2 on a relaunch with the same capture |
 | `{{PROFILE_INSTRUCTION}}` | For `chill`: "This repository uses the chill profile, so the report hides findings below 4 that no other lane backs up. Score every finding honestly anyway; never drop or lower one for the profile." For `standard` and `assertive`: "Score every finding honestly." |
 | `{{RISK_CONTEXT}}`        | The same bullet block as the archetype's `{{RISK_CONTEXT}}`, for this lane (`Selected because: engine`, `Model tier: <its tier>`).                                                               |
-| `{{DIFF_PATH}}`           | The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$BASE_REF...$HEAD_REF"`, the merge base) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews |
+| `{{DIFF_PATH}}`           | The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$REVIEWED_BASE" "$HEAD_REF"`, from the merge base, or from `BASE_REF` when there is none) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews |
 | `{{SCORING_RULES}}`       | The lane's `rules[]` (the `path_rules` this diff matches, then each enabled replaced lane's rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.       |
 | `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** in `SKILL.md`'s Stage 1), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |

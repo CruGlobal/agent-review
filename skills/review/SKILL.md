@@ -280,8 +280,8 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
     # Local canonical comment: this user's own marked comment when one exists, else the bot's.
     # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
+      | agent-review report-comment --me "$ME" 2>/dev/null \
       | tr -d '\r' > "$PREV_COMMENT" || true
   fi
   LAST_REVIEWED=$(tr -d '\r' < "$PREV_COMMENT" \
@@ -347,14 +347,12 @@ for (; i < lines.length; i++) {
   if (m[1]) markers[m[1]] = m[2];
 }
 if (lines[i] === "") i++;
-// gh runs --jq once per page, so a second page can add another comment after this one.
 const body = lines.slice(i);
-const next = body.indexOf("<!-- agent-review -->");
 const ledger = "ledger" in markers ? JSON.parse(markers.ledger) : null;
 const status = "status" in markers ? { ...JSON.parse(markers.status), head } : null;
 if (ledger) writeFileSync("/tmp/agent_review_ledger.json", JSON.stringify(ledger) + "\n");
 if (status) writeFileSync("/tmp/agent_review_status.json", JSON.stringify(status) + "\n");
-writeFileSync("/tmp/agent_review_report.md", (next === -1 ? body : body.slice(0, next)).join("\n").replace(/\n*$/, "\n"));
+writeFileSync("/tmp/agent_review_report.md", body.join("\n").replace(/\n*$/, "\n"));
 ' "$PREV_COMMENT" "$HEAD_REF" || return 1
   echo "export HEAD_REF=\"$HEAD_REF\"" >> /tmp/review_env.sh
   if [ "$(sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' "$PREV_COMMENT" | head -1)" = shadow ]; then
@@ -829,8 +827,8 @@ if [ "$MODE" = "auto" ]; then
       # Local canonical comment: this user's own marked comment when one exists, else the bot's.
       # Anyone else's could be a forged report.
       ME=$(gh api user --jq .login 2>/dev/null || echo "")
-      gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-        --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" 2>/dev/null \
+      gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
+        | agent-review report-comment --me "$ME" 2>/dev/null \
         | tr -d '\r' > /tmp/previous_agent_review_comment.md
       sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
       [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
@@ -1748,9 +1746,8 @@ if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] 
     # Local canonical comment: this user's own marked comment when one exists, else the bot's.
     # Anyone else's could be a forged report.
     ME=$(gh api user --jq .login 2>/dev/null || echo "")
-    gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-      --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .body // empty" \
-      2>/dev/null | tr -d '\r' \
+    gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
+      | agent-review report-comment --me "$ME" 2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
       > /tmp/previous_agent_review_ledger.json
   fi
@@ -2109,7 +2106,9 @@ straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
 
 ```bash
 . /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
-if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
+if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ] && git check-ignore -q "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"; then
+  echo "📊 Metrics dashboard: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md (git-ignored here, so not committed)"
+elif [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
   echo "📊 Committing quality metrics dashboard..."
   git add "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" \
           "$REVIEW_DIR/metrics/severity_history.txt" \

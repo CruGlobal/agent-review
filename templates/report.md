@@ -18,9 +18,10 @@ this report cannot approve or block the PR) · [N] agents run ([list of launched
 
 [FOR EACH severity ≥7 ledger entry, ordered by severity descending — use the ledger's own `n`,
 NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve the wrong finding:]
-[IF status open:]
+[IF status open — add the ↩️ part only when the entry has `previousDismissal`, leaving out any
+of its parts that are missing:]
 
-- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]
+- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]
       ↳ evidence: [≤8 lines/600 chars, may include one hunk excerpt]
       ↳ fix: [≤2 lines or unified diff ≤10 lines]
 
@@ -45,9 +46,9 @@ NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve the wrong
 [FOR EACH severity <7 ledger entry, ordered by severity descending, ONE line, no sub-bullets —
 use the ledger's own `n`, NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve
 the wrong finding:]
-[IF status open:]
+[IF status open — the ↩️ part as above:]
 
-- **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]
+- **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]
 
 [IF status fixed:]
 

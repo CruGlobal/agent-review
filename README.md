@@ -87,10 +87,17 @@ on every engine. This only counts for a score that is still 7 or more after its 
 and the blocker bar: a line, High confidence, and evidence. When two findings of 7 or more are
 combined, the group takes the higher score.
 
-A later review can raise an earlier finding. If the same finding comes back with a higher score
-and the earlier one is still open, the new finding replaces it and keeps only its number. The
-score, file, line, message, evidence, and everything else come from the new finding. A dismissed
-or fixed finding never changes.
+A later review can raise or reopen an earlier finding when the same finding comes back:
+
+- **Open:** a higher score replaces it.
+- **Fixed:** it opens again at any score, because the fix did not hold.
+- **Dismissed:** it stays dismissed, unless the new score is higher than when it was dismissed.
+  Then it opens again, and needs a new fix or dismissal. Its line in the report shows who
+  dismissed it before and why.
+
+A replaced or reopened finding keeps only its number. The score, file, line, message, evidence,
+and everything else come from the new finding. A lower or equal score never changes an open or
+dismissed finding.
 
 ## PCI and repos that always need a person
 
@@ -104,12 +111,18 @@ human_approval:
   paths: ['app/payments/**'] # a PR that touches one of these needs a person
 ```
 
+Each entry is a glob, and a folder name alone (`app/payments/` or `app/payments`) covers
+everything under it.
+
 The approval job reads these rules from the PR's base commit, so a PR cannot loosen its own
 rules. A PR that edits this config file needs a person when the base sets rules. If the job
 cannot read the rules, it does not approve.
 
 **The card-data check.** Every review scans the PR's own changes for card data, in every repo,
-with no off switch. It flags card numbers, CVV, card expiry, a cardholder name next to card data,
+and no setting turns it off. A push whose risk score is 0 (only excluded or 0-point paths, and a
+small diff) is not reviewed, so it is not scanned either: a re-review keeps the last scan's
+result, and a CI review of a whole PR at score 0 records no card data. The repo's
+`human_approval` rules still run on those pushes. The check flags card numbers, CVV, card expiry, a cardholder name next to card data,
 processor card tokens or vault ids, calls that charge, authorize, refund or store a card, payment
 form card fields, and logging in card-handling code. Amounts, invoices, donations and receipts
 with no card data do not count. A hit shows as `👤 Needs a person's approval` in the report.
@@ -125,14 +138,31 @@ allows.
 bot gave the PR when:
 
 - the report for the PR's newest commit says a person is needed;
-- the repo rules say so, even when the report covers an older commit or the CI review failed,
-  because the job checks the rules itself;
+- the report for the PR's newest commit does not pass, say a re-review after a push found a
+  blocker. Many repos keep an approval after new commits, so the bot's approval of an earlier
+  commit would otherwise still count;
+- the repo rules say so, even when the report covers an older commit, the PR has no report yet,
+  or the CI review failed, because the job checks the rules itself;
 - a person added the `needs-human-approval` label, even when the report covers an older commit
   or the job cannot read the rules.
 
 If the job cannot read the rules and none of the above applies, it takes back only the bot's
 approvals of older commits. Otherwise it takes back nothing. It never touches a person's
 review. It approves only the exact commit it judged, and checks that the head did not move first.
+
+When a person is needed, or the job cannot read the rules or labels, it takes back every approval
+the `github-actions` bot gave the PR. When only the report fails, it takes back its own approvals
+and any bot approval it cannot place, but keeps a known approval from another workflow: a
+Dependabot auto-approval (no text) or an ai-review-auto-approve approval. Its own approvals carry a
+hidden `<!-- agent-review-approval -->` marker, and older ones are known by the approval text
+agent-review posted or the text the caller set. Right before taking any back, it reads the PR's
+head again: if a push moved it while the job ran, an approval of the new head stays, since a newer
+run gave it. If it cannot read the head again, a failing report takes back nothing and warns,
+and anything else takes back all of them.
+
+Taking back an approval uses GitHub's dismiss-review API, which the job's token can do with no
+extra setting. A branch rule that limits who may dismiss reviews blocks it: the job then shows a
+warning that a person must dismiss the approval, and it still never approves.
 
 **Irreversible changes.** A change that drops a column, deletes data or sends email is now a
 caution, not a stop. The report shows `⚠️ Irreversible`, and the approval message repeats it.
@@ -388,7 +418,11 @@ agent-review eval score --suite .claude/review/evals/suite.yml \
 ```
 
 The summary reports blocker recall/precision, clean-control false blockers, dismissal rates,
-per-category recall, and repeated-run detection stability. Dismissals use explicit reason codes:
+per-category recall, suggestion recall, and repeated-run detection stability. An expected finding
+with `must_block: false` is a real problem the review should raise below the suite's
+`blocker_threshold` (7 by default): it counts toward suggestion recall, only a finding under that
+threshold matches it, so its `min_severity` must be lower, and a case that expects no blocker counts
+as a clean run, so blocking it is a false blocker. Set `thresholds.suggestion_recall` to gate on it. Dismissals use explicit reason codes:
 `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
 `insufficient-evidence`, or `other`.
 

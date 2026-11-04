@@ -453,10 +453,10 @@ test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-fo
   const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
   const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
   assert.deepEqual(matchedLines, [
-    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
+    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
   ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
@@ -649,7 +649,7 @@ test('the skill says how to fill the capture, attempt, retry, diff, and profile 
   );
   assert.strictEqual(
     rows.get('DIFF_PATH'),
-    'The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$BASE_REF...$HEAD_REF"`, the merge base) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews',
+    'The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$REVIEWED_BASE" "$HEAD_REF"`, from the merge base, or from `BASE_REF` when there is none) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews',
   );
   const profile = rows.get('PROFILE_INSTRUCTION');
   assert.ok(
@@ -1730,6 +1730,13 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
 });
 
+test('approve jobs for one PR run one at a time, across the terminal and CI paths', () => {
+  const { parse } = require('yaml');
+  const job = (file, id) => parse(readFileSync(join(ROOT, '.github/workflows', file), 'utf8')).jobs[id];
+  assert.deepEqual(job('approve.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ inputs.pr_number }}', 'cancel-in-progress': false });
+  assert.deepEqual(job('review.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ github.event.pull_request.number }}', 'cancel-in-progress': false });
+});
+
 test('the approve action re-checks the base commit rules, owns the label, and takes back bot approvals', () => {
   const { parse } = require('yaml');
   const action = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8'));
@@ -1775,13 +1782,22 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
   assert.ok(run.includes(`if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL"`));
   assert.ok(run.includes(`if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"`));
 
-  assert.ok(
-    run.includes(
-      'select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head))',
-    ),
-    'only the bot\'s own approvals are dismissed, never a person\'s review; stale means another head',
-  );
-  assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA"'));
+  for (const [part, why] of [
+    ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals, never a person\'s review'],
+    ['| select($own_only != "true" or ((.body // "") | ours or (third_party | not)))', 'every bot approval, unless only a failing report withdraws them'],
+    ['if [ "$DISMISS_FOR" = failing-report ]; then OWN_ONLY=true; fi', 'only a failing report keeps third-party approvals'],
+    ['DISMISS_FOR=$(printf \'%s\' "$DECISION" | jq -r \'.dismissFor // "unchecked"\')', 'a missing reason is the strict one'],
+    ['def third_party: . == "" or startswith("## AI Review Auto-Approval");', 'Dependabot and ai-review-auto-approve approvals are left alone'],
+    ['or ($configured != "" and startswith($configured));', 'the caller\'s own approval text counts as ours'],
+    ['| select($mode == "all" or .commit_id != $head)', 'stale means another head'],
+    ['| select($now == $head or .commit_id != $now)', 'an approval of a head that moved in is kept'],
+    ["APPROVAL_MARKER='<!-- agent-review-approval -->'", 'the marker is one fixed string'],
+    ['*) BODY="$BODY"$\'\\n\\n\'"$APPROVAL_MARKER" ;;', 'every approval carries the marker'],
+  ]) {
+    assert.ok(run.includes(part), why);
+  }
+  assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD"'));
+  assert.ok(run.includes('--arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY"'));
   assert.ok(run.includes('*) DISMISS_MODE=all ;;'), 'a dismiss value from another engine version fails closed to all');
   // Bash before 4.4 calls an empty array unbound under set -u, so the script
   // keeps to plain strings; engine/approveAction.test.cjs runs it on the system bash.
@@ -2238,33 +2254,49 @@ test('fix pass: no gh --jq --arg anywhere, local canonical comment is the user\'
   assert.ok(address.includes('In argument mode, push without confirming'), 'argument mode and yolo never stop at the push confirmation');
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
   assert.ok(yolo.includes(OWN_FIRST), 'yolo reads the same canonical comment address writes');
-  for (const [name, text] of [['review', review], ['address', address], ['yolo-review', yolo]]) {
-    const selectors = text.split('\n').filter((line) => line.includes('--jq') && line.includes('startswith(\\"<!-- agent-review -->\\")'));
-    assert.ok(selectors.length > 0, `${name} reads the canonical comment`);
-    for (const line of selectors) assert.ok(line.includes(OWN_FIRST), `${name}: every canonical-comment read uses the own-first rule: ${line.trim()}`);
+  for (const [name, text, count] of [['review', review, 3], ['address', address, 1], ['yolo-review', yolo, 2]]) {
+    const lines = text.split('\n');
+    assert.ok(!text.includes('startswith(\\"<!-- agent-review -->\\")'), `${name}: no per-page jq pick is left`);
+    const picks = lines.flatMap((line, i) => (line.includes(OWN_FIRST) ? [i] : []));
+    assert.equal(picks.length, count, `${name} reads the canonical comment ${count} time(s)`);
+    for (const i of picks) {
+      assert.match(
+        lines[i - 1],
+        /gh api "repos\/\$REPO\/issues\/\$PR_NUMBER\/comments\?per_page=100" --paginate( 2>\/dev\/null)? \\$/,
+        `${name}: every canonical-comment pick reads every page first: ${lines[i - 1].trim()}`,
+      );
+    }
   }
 });
 
-const OWN_FIRST = '(map(select(.user.login == \\"$ME\\")) | first) // (map(select(.user.login == \\"github-actions[bot]\\")) | first)';
+const OWN_FIRST = '| agent-review report-comment --me "$ME"';
 
-test("the canonical-comment rule falls back only to the bot's report, never to anyone else's", (t) => {
-  let jq = '';
-  try {
-    jq = execFileSync('sh', ['-c', 'command -v jq'], { encoding: 'utf8' }).trim();
-  } catch {
-    return t.skip('jq is not installed');
+test("address's canonical-comment pick reads every page and falls back only to the bot's report", (t) => {
+  const { mkdirSync, writeFileSync, rmSync } = require('node:fs');
+  const address = readFileSync(ADDRESS_SKILL, 'utf8');
+  const m = address.match(/^COMMENT_ID=\$\(gh api [^\n]*\n[^\n]*\)$/m);
+  assert.ok(m, 'address picks its comment id in one two-line command');
+  const c = (id, login, text) => ({ id, user: { login }, body: `<!-- agent-review -->\n${text}` });
+  const filler = Array.from({ length: 29 }, (_, i) => ({ id: 100 + i, user: { login: 'someone' }, body: 'chat' }));
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-pick-'));
+    try {
+      mkdirSync(join(dir, 'bin'));
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncat "${dir}/pages"\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, 'bin/agent-review')}" "$@"\n`, { mode: 0o755 });
+      const pick = (...pages) => {
+        writeFileSync(join(dir, 'pages'), pages.map((p) => JSON.stringify(p)).join(''));
+        const script = `ME=me REPO=o/r PR_NUMBER=7\n${m[0]}\nprintf '%s' "$COMMENT_ID"`;
+        return execFileSync(shell, ['-c', script], { encoding: 'utf8', env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}`, HOME: dir } });
+      };
+      const forged = c(9, 'mallory', 'forged');
+      assert.equal(pick([c(1, 'github-actions[bot]', 'bot'), ...filler], [c(2, 'me', 'mine')]), '2', `${shell}: page 2 holds the user's own report`);
+      assert.equal(pick([forged, ...filler], [c(1, 'github-actions[bot]', 'bot')]), '1', `${shell}: else the bot's`);
+      assert.equal(pick([forged, c(3, 'member', 'org member')]), '', `${shell}: author_association does not mean write access`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
-  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const m = review.match(/--jq "(\(map\(select\(\.body \| startswith[^\n]*?\.body \/\/ empty)"/);
-  assert.ok(m && m[1].includes(OWN_FIRST), 'the review skill picks the canonical comment with the own-first rule');
-  const expr = m[1].replaceAll('\\"', '"').replaceAll('$ME', 'me');
-  const c = (login, association, text) => ({ user: { login }, author_association: association, body: `<!-- agent-review -->\n${text}` });
-  const pick = (comments) => execFileSync(jq, ['-r', expr], { input: JSON.stringify(comments), encoding: 'utf8' }).trim();
-  const forged = c('mallory', 'CONTRIBUTOR', 'forged');
-  assert.strictEqual(pick([forged, c('github-actions[bot]', 'NONE', 'bot')]), '<!-- agent-review -->\nbot');
-  assert.strictEqual(pick([forged, c('member', 'MEMBER', 'member')]), '', 'author_association does not mean write access');
-  assert.strictEqual(pick([forged]), '', 'a forged report alone is never picked');
-  assert.strictEqual(pick([c('github-actions[bot]', 'NONE', 'bot'), forged, c('me', 'NONE', 'mine')]), '<!-- agent-review -->\nmine');
 });
 
 test('posted review comments keep every marker on one line under zsh and bash, so the approver can read them', (t) => {
@@ -2647,6 +2679,117 @@ test('init writes engine and reviews_run only for a non-default answer', () => {
   );
 });
 
+test("init adds its ignore and attributes lines once each, and stages a file only when they are its one change, under bash and zsh", (t) => {
+  const { writeFileSync } = require('node:fs');
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
+  assert.ok(block, 'init has the .gitignore and .gitattributes block');
+  assert.ok(init.includes('rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt'), 'Stage 0 clears both lists');
+  const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
+  const staging = commit.slice(commit.indexOf('if [ -f /tmp/agent_review_init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
+  assert.ok(staging.includes('git add -- "$f"'), '3E stages from the list');
+  assert.ok(!/\.(gitignore|gitattributes|dockerignore)/.test(commit.slice(0, commit.indexOf(staging)).split('\n').filter((l) => l.startsWith('git add')).join('\n')), '3E never adds those files by name');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-ignore-'));
+    try {
+      const tmp = join(dir, 'tmp');
+      const repo = join(dir, 'repo');
+      mkdirSync(tmp);
+      mkdirSync(repo);
+      const at = (text) => text.replaceAll('/tmp/', `${tmp}/`);
+      const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
+      git('init', '-q');
+      writeFileSync(join(repo, '.gitignore'), 'node_modules/'); // no trailing newline
+      writeFileSync(join(repo, '.gitattributes'), '*.png binary\n');
+      git('add', '.gitignore', '.gitattributes');
+      git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
+      // Someone's uncommitted edit that already has init's line, so init leaves the file alone.
+      writeFileSync(join(repo, '.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n');
+      writeFileSync(join(repo, '.dockerignore'), 'tmp/\n'); // untracked, and not init's
+      const script = at(`${block}\nadd_line .dockerignore '/.claude'\nadd_line .dockerignore 'CLAUDE.md'`);
+      execFileSync(shell, ['-c', script], { cwd: repo });
+      execFileSync(shell, ['-c', script], { cwd: repo });
+      const read = (f) => readFileSync(join(repo, f), 'utf8');
+      assert.equal(read('.gitignore'), 'node_modules/\n/.claude/review/metrics/\n/.claude/review/index/\n', `${shell}: added once, on its own line`);
+      assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n', `${shell}: unchanged`);
+      assert.equal(read('.dockerignore'), 'tmp/\n/.claude\nCLAUDE.md\n', shell);
+      const out = execFileSync(shell, ['-c', at(staging)], { cwd: repo, encoding: 'utf8' });
+      assert.equal(git('diff', '--cached', '--name-only'), '.gitignore\n', `${shell}: only the file whose one change is init's lines is staged`);
+      assert.ok(!out.includes('.gitattributes'), `${shell}: no warning for a file init did not change`);
+      assert.match(out, /\.dockerignore had other changes before init, so its new lines are not staged/, shell);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('init explains whole-token triggers with examples the engine matches, and suggests a .dockerignore', () => {
+  const { contentMatches } = require('./selectAgents.cjs');
+  const flat = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8').replace(/\s+/g, ' ');
+  assert.ok(flat.includes('**Content triggers match whole tokens.**'));
+  for (const [trigger, text, want] of [
+    ['currency', 'concurrency', false],
+    ['OKTA', 'OKTA_DOMAIN', false],
+    ['OKTA_', 'OKTA_DOMAIN', true],
+    ['tsep_', 'tsep_token', true],
+    ['_SESSION_KEY', 'APP_SESSION_KEY', true],
+    ['__c', 'Amount__c', true],
+  ]) {
+    assert.ok(flat.includes(`\`${trigger}\``) && flat.includes(`\`${text}\``), `init names ${trigger} and ${text}`);
+    assert.equal(contentMatches(`+ x = ${text}\n`, trigger), want, `${trigger} on ${text}`);
+  }
+  assert.ok(flat.includes('propose adding `/.claude` and `CLAUDE.md` to `.dockerignore`'));
+  assert.ok(flat.includes("also run `add_line .dockerignore '/.claude'` and `add_line .dockerignore 'CLAUDE.md'`"));
+});
+
+test("address stages only the files its fixes changed, never the review's bookkeeping", () => {
+  const address = readFileSync(ADDRESS_SKILL, 'utf8');
+  for (const block of bashBlockList(address)) {
+    assert.ok(!/git add (-A|--all|\.)(\s|$)/m.test(block), `address never stages the whole tree:\n${block}`);
+  }
+  const commit = bashBlockList(address).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
+  const at = (s) => commit.indexOf(s);
+  assert.ok(at('git status --porcelain --untracked-files=all') >= 0, 'new files a fix created are listed one by one');
+  assert.ok(at('git add -- <each file you changed or created for these fixes>') > at('git status --porcelain'), 'then the fix commit names its files');
+  assert.ok(at("grep -E '^\\.claude/review/(metrics|index)/'") > at('git add --'), 'a staged review file stops the commit');
+  assert.ok(at('git diff --cached --name-only\ngit commit') > 0, 'and what is staged is shown before committing');
+  assert.ok(at('if git diff --cached --quiet; then') > at('git add --'), 'nothing staged stops it');
+  assert.ok(commit.includes('git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}" || exit 1'), 'a failed commit stops it');
+  assert.ok(commit.includes('git push || exit 1\nFIX_SHA='), 'a failed push stops it before FIX_SHA is saved');
+});
+
+test("address's staged-file guard stops on review files and lets a new spec through, under bash and zsh", (t) => {
+  const { writeFileSync } = require('node:fs');
+  const commit = bashBlockList(readFileSync(ADDRESS_SKILL, 'utf8')).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
+  const first = commit.indexOf('if git diff --cached');
+  const guard = commit.slice(first, commit.indexOf('fi\n', commit.indexOf('fi\n', first) + 3) + 2);
+  assert.equal((guard.match(/^fi$/gm) || []).length, 2, 'both staged-file checks run');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-stage-'));
+    try {
+      const git = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+      git('init', '-q');
+      mkdirSync(join(dir, 'spec'));
+      mkdirSync(join(dir, '.claude/review/metrics'), { recursive: true });
+      writeFileSync(join(dir, 'spec/new_spec.rb'), 'it works\n');
+      writeFileSync(join(dir, '.claude/review/metrics/PR_1_metrics.md'), 'score\n');
+      assert.throws(() => execFileSync(shell, ['-c', guard], { cwd: dir, stdio: 'pipe' }), `${shell}: nothing staged stops it`);
+      git('add', '--', 'spec/new_spec.rb');
+      execFileSync(shell, ['-c', guard], { cwd: dir });
+      git('add', '--', '.claude/review/metrics/PR_1_metrics.md');
+      assert.throws(() => execFileSync(shell, ['-c', guard], { cwd: dir, stdio: 'pipe' }), `${shell}: a staged metrics file stops it`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('a review never commits a git-ignored metrics dashboard', () => {
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const block = bashBlockList(review).find((b) => b.includes('Committing quality metrics dashboard'));
+  assert.ok(block.indexOf('git check-ignore -q') < block.indexOf('git add'), 'the ignore check comes before any git add');
+});
+
 test('init never copies or stages the CI workflows outside a local-and-ci guard', () => {
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const blocks = [...init.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
@@ -2882,9 +3025,12 @@ test('README states the merge scoring rule after the approval rules it follows',
     'A 7 or more keeps its score when it is combined with lower scores, on every engine.',
     "This only counts for a score that is still 7 or more after its reviewer's caps and the blocker bar: a line, High confidence, and evidence.",
     'When two findings of 7 or more are combined, the group takes the higher score.',
-    'If the same finding comes back with a higher score and the earlier one is still open, the new finding replaces it and keeps only its number.',
+    '**Open:** a higher score replaces it.',
+    '**Fixed:** it opens again at any score, because the fix did not hold.',
+    '**Dismissed:** it stays dismissed, unless the new score is higher than when it was dismissed.',
+    'A replaced or reopened finding keeps only its number.',
     'The score, file, line, message, evidence, and everything else come from the new finding.',
-    'A dismissed or fixed finding never changes.',
+    'A lower or equal score never changes an open or dismissed finding.',
   ]) {
     assert.ok(flat.includes(needle), `README must say ${JSON.stringify(needle)}`);
   }
@@ -2893,6 +3039,7 @@ test('README states the merge scoring rule after the approval rules it follows',
     'a 7 or more from any reviewer keeps its score, on every engine',
     'Every 7 or more has already shown concrete evidence',
     'moves up to the new score',
+    'A dismissed or fixed finding never changes.',
   ]) {
     assert.ok(!all.includes(stale), `README must no longer say ${JSON.stringify(stale)}`);
   }
@@ -3232,7 +3379,7 @@ function armBlock() {
 
 // Runs Stage 1's arm block with stub agent-review and git commands, its /tmp files moved to a
 // private directory, and returns what it called and wrote.
-function runArmBlock(shell, env, plan) {
+function runArmBlock(shell, env, plan, { noMergeBase = false } = {}) {
   const { mkdirSync, writeFileSync, existsSync } = require('node:fs');
   const { dirname } = require('node:path');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-arm-'));
@@ -3246,7 +3393,7 @@ function runArmBlock(shell, env, plan) {
     );
     writeFileSync(
       join(bin, 'git'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\ncase "$1" in\n  diff) echo "merge-base diff" ;;\n  merge-base) echo "mergebase90" ;;\n  rev-parse) echo "localhead1234" ;;\nesac\n`,
+      `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/git.args"\ncase "$1" in\n  diff) echo "merge-base diff" ;;\n  merge-base) ${noMergeBase ? 'exit 1' : 'echo "mergebase90"'} ;;\n  rev-parse) echo "localhead1234" ;;\nesac\n`,
       { mode: 0o755 },
     );
     writeFileSync(join(dir, 'review_env.sh'), Object.entries(env).map(([k, v]) => `export ${k}="${v}"`).join('\n') + '\n');
@@ -3359,10 +3506,15 @@ test('code-review-engine.md arms capture with the composed args and fills SKILL_
 });
 
 test('full PR reviews give the lane a merge-base diff', (t) => {
-  assert.ok(armBlock().includes('  git diff "$BASE_REF...$HEAD_REF" > /tmp/code_review_diff.txt\n'));
+  assert.ok(armBlock().includes('  git diff "$REVIEWED_BASE" "$HEAD_REF" > /tmp/code_review_diff.txt\n'));
   for (const shell of availableShells(t)) {
     const full = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } });
-    assert.strictEqual(full.git, 'diff aaa111...bbb222\nmerge-base aaa111 bbb222\n', `${shell}: three dots diff against the merge base`);
+    assert.strictEqual(full.git, 'merge-base aaa111 bbb222\ndiff mergebase90 bbb222\n', `${shell}: the diff starts at the merge base`);
+
+    const unrelated = runArmBlock(shell, FULL_PR_ENV, { engine: { maxFindings: null } }, { noMergeBase: true });
+    assert.strictEqual(unrelated.status, 0, `${shell}: no merge base does not stop the review: ${unrelated.stdout}`);
+    assert.strictEqual(unrelated.git, 'merge-base aaa111 bbb222\ndiff aaa111 bbb222\n', `${shell}: with no merge base the diff starts at the base tip, as RANGE does`);
+    assert.ok(unrelated.stdout.includes('code-review base: aaa111\n'), `${shell}: ${unrelated.stdout}`);
     assert.strictEqual(full.diff, 'merge-base diff\n', `${shell}: the merge-base diff is written`);
     assert.ok(full.stdout.includes(`code-review diff: ${full.dir}/code_review_diff.txt\n`), `${shell}: ${full.stdout}`);
     assert.ok(full.env.includes(`CODE_REVIEW_DIFF="${full.dir}/code_review_diff.txt"`), `${shell}: the diff path is kept`);
@@ -3893,7 +4045,8 @@ test('yolo-review uses a report only when its head marker names the current HEAD
       const head = 'aaaa111122223333444455556666777788889999';
       writeFileSync(join(dir, 'head'), `${head}\n`);
       writeFileSync(join(dir, 'bin', 'git'), `#!/bin/sh\n[ "$*" = "rev-parse HEAD" ] && cat "${dir}/head"\n`, { mode: 0o755 });
-      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncase "$*" in\n  *.body*) cat "${dir}/body" ;;\n  *) echo x ;;\nesac\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'bin', 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) ${commentsPage(join(dir, 'body'))} ;;\n  *) echo x ;;\nesac\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'bin', 'agent-review'), `#!/bin/sh\nexec "${process.execPath}" "${join(ROOT, 'bin/agent-review')}" "$@"\n`, { mode: 0o755 });
       const stubComment = (marker) =>
         writeFileSync(
           join(dir, 'body'),
@@ -4068,6 +4221,12 @@ function humanRulesRepo() {
   return { repo, fork, mid, head, base, badConfig, noConfig, blobGone, lonely };
 }
 
+// The sh command a fake gh runs for a comments read: one page holding <bodyFile> as the
+// comment of the user "me", printed the way `gh api --paginate` prints a page. No file, no page.
+function commentsPage(bodyFile) {
+  return `"${process.execPath}" -e 'const fs = require("fs"); const f = process.argv[1]; process.stdout.write(JSON.stringify(fs.existsSync(f) ? [{ id: 1, user: { login: "me" }, body: fs.readFileSync(f, "utf8") }] : []))' "${bodyFile}"`;
+}
+
 // Runs a review-skill block in `repo` with its /tmp files moved to a private directory. The real
 // CLI runs human-check; ledger is stubbed, status records its arguments, and gh prints the
 // previous comment. `failGit` names a git subcommand that fails; `want` lists extra /tmp files
@@ -4084,7 +4243,7 @@ function runRulesBlock(shell, block, { repo, env = {}, files = {}, failGit = nul
       `#!/bin/sh\ncase "$1" in\n  status) printf '%s\\n' "$@" > "${dir}/status.args"; echo '{}' ;;\n  ledger) echo '[]' ;;\n  *) exec node "${join(ROOT, 'bin/agent-review')}" "$@" ;;\nesac\n`,
       { mode: 0o755 },
     );
-    writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) cat "${dir}/previous_comment.md" ;;\nesac\n`, { mode: 0o755 });
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in\n  "api user"*) echo me ;;\n  *comments*) ${commentsPage(join(dir, 'previous_comment.md'))} ;;\nesac\n`, { mode: 0o755 });
     if (failGit || gitScript) {
       const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
       const script = gitScript ? gitScript(realGit) : `#!/bin/sh\n[ "$1" = "${failGit}" ] && exit 128\nexec "${realGit}" "$@"\n`;
@@ -4551,9 +4710,14 @@ test('a push that only merged the base branch moves the last report to the new h
       moved(noLedger, 'local, no ledger marker');
       assert.strictEqual(noLedger.wanted['agent_review_ledger.json'], null, `${shell}: an earlier run's ledger is never posted`);
 
-      const twoPages = run('local, a second page glued on', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': previous(head) + previous(fork) });
-      moved(twoPages, 'local, a second page glued on');
-      assert.strictEqual(twoPages.wanted['agent_review_report.md'], '## agent-review\nThe report body.\n', `${shell}: only the first comment is moved`);
+      // The report is one comment's body (report-comment picks one), so nothing in it is cut.
+      const quoted = run('local, a body that quotes the marker line', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': `${previous(head)}A finding quotes it:\n<!-- agent-review -->\n` });
+      moved(quoted, 'local, a body that quotes the marker line');
+      assert.strictEqual(
+        quoted.wanted['agent_review_report.md'],
+        '## agent-review\nThe report body.\nA finding quotes it:\n<!-- agent-review -->\n',
+        `${shell}: the whole body moves`,
+      );
 
       const shadow = run('local, a shadow report', { ...LOCAL, HEAD_REF: merged }, { 'previous_comment.md': previous(head, { rollout: 'shadow' }) });
       moved(shadow, 'local, a shadow report');
@@ -5046,7 +5210,7 @@ test('README lists the person-must-approve rule, drops irreversible from the sto
     'Adding the label does not run the approval job, so if the bot already approved the PR, dismiss that approval by hand.',
     'Each time the approval job runs, it takes back (dismisses) every approval the bot gave the PR when:',
     "- the report for the PR's newest commit says a person is needed;",
-    '- the repo rules say so, even when the report covers an older commit or the CI review failed, because the job checks the rules itself;',
+    '- the repo rules say so, even when the report covers an older commit, the PR has no report yet, or the CI review failed, because the job checks the rules itself;',
     '- a person added the `needs-human-approval` label, even when the report covers an older commit or the job cannot read the rules.',
     "If the job cannot read the rules and none of the above applies, it takes back only the bot's approvals of older commits. Otherwise it takes back nothing. It never touches a person's review.",
   ]) {

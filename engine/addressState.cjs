@@ -391,6 +391,16 @@ function feedbackForAddress(requestInput, resultInput, now = new Date().toISOStr
   });
 }
 
+function reopenedText(entry) {
+  const prior = entry.previousDismissal;
+  if (!prior || !(prior.by || prior.reasonCode || prior.reason)) return '';
+  const one = (v) => String(v).replace(/[\r\n]+/g, ' ');
+  const by = prior.by ? ` by @${one(prior.by)}` : '';
+  const code = prior.reasonCode ? ` [${one(prior.reasonCode)}]` : '';
+  const reason = prior.reason ? `: ${one(prior.reason)}` : '';
+  return ` · ↩️ reopened, dismissed before${by}${code}${reason}`;
+}
+
 function ledgerLine(entry) {
   const location = `\`${entry.file}${entry.line ? `:${entry.line}` : ''}\``;
   const message = String(entry.message).replace(/[\r\n]/g, ' ');
@@ -403,7 +413,7 @@ function ledgerLine(entry) {
     const dismissedPrefix = entry.severity >= 7 ? '- [x]' : '-';
     return `${dismissedPrefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} — ~~${message}~~ — 🚫 dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
   }
-  return `${prefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} — ${message} _(${entry.agent})_`;
+  return `${prefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} — ${message} _(${entry.agent})_${reopenedText(entry)}`;
 }
 
 function finalizeAddress({ request: requestInput, result, report, fixSha }) {

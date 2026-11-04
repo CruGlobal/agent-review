@@ -17146,8 +17146,8 @@ var require_selectAgents = __commonJS({
       const raw = String(trigger || "");
       if (!raw) return false;
       const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const left = /^[A-Za-z0-9_]/.test(raw) ? "(?:^|[^A-Za-z0-9_])" : "";
-      const right = /[A-Za-z0-9_]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
+      const left = /^[A-Za-z0-9]/.test(raw) ? "(?:^|[^A-Za-z0-9_])" : "";
+      const right = /[A-Za-z0-9]$/.test(raw) ? "(?![A-Za-z0-9_])" : "";
       return new RegExp(left + escaped + right, "m").test(contentText);
     }
     function hasUnmatchedReviewableFile(reviewed, config) {
@@ -17772,6 +17772,7 @@ var require_evalSuite = __commonJS({
       }
       const ids = /* @__PURE__ */ new Set();
       const base = suitePath ? dirname(suitePath) : process.cwd();
+      const blockerThreshold = Number(raw.blocker_threshold || 7);
       for (const c of raw.cases) {
         if (!c.id || !/^[a-z0-9][a-z0-9._-]*$/i.test(c.id)) {
           throw new Error(`invalid evaluation case id: ${c.id || ""}`);
@@ -17797,6 +17798,11 @@ var require_evalSuite = __commonJS({
           if (!Number.isFinite(min) || min < 1 || min > 10) {
             throw new Error(`case ${c.id}/${e.id} has invalid min_severity`);
           }
+          if (e.must_block === false && e.min_severity != null && min >= blockerThreshold) {
+            throw new Error(
+              `case ${c.id}/${e.id} has must_block: false with min_severity ${min}, which is not below blocker_threshold ${blockerThreshold}, so it can never match`
+            );
+          }
           const match = e.match || {};
           if (!Array.isArray(match.paths) || match.paths.length === 0) {
             throw new Error(`case ${c.id}/${e.id} requires match.paths`);
@@ -17814,7 +17820,8 @@ var require_evalSuite = __commonJS({
         "blocker_precision",
         "clean_false_blocker_rate",
         "false_positive_dismissal_rate",
-        "category_recall"
+        "category_recall",
+        "suggestion_recall"
       ]) {
         if (thresholds[key] != null) finiteRate(thresholds[key], `thresholds.${key}`);
       }
@@ -17898,6 +17905,8 @@ var require_evalSuite = __commonJS({
       const totals = {
         expectedBlockers: 0,
         truePositiveBlockers: 0,
+        expectedSuggestions: 0,
+        detectedSuggestions: 0,
         validBlockerFindings: 0,
         falsePositiveBlockers: 0,
         cleanRuns: 0,
@@ -17917,6 +17926,7 @@ var require_evalSuite = __commonJS({
         if (seenRuns.has(key)) throw new Error(`duplicate result run: ${key}`);
         seenRuns.add(key);
         const expected = (c.expected || []).filter((e) => e.must_block !== false);
+        const suggestions = (c.expected || []).filter((e) => e.must_block === false);
         const unmatchedActual = new Set(run.findings.map((_, i) => i));
         const matched = [];
         for (const e of expected) {
@@ -17935,6 +17945,18 @@ var require_evalSuite = __commonJS({
           }
           category.set(cat, cs);
         }
+        const matchedSuggestions = [];
+        for (const e of suggestions) {
+          totals.expectedSuggestions++;
+          const index = run.findings.findIndex(
+            (f, i) => unmatchedActual.has(i) && f.verdict !== "false_positive" && f.severity < blockerThreshold && matchesExpected(f, e, 1)
+          );
+          if (index >= 0) {
+            totals.detectedSuggestions++;
+            unmatchedActual.delete(index);
+            matchedSuggestions.push({ expected: e.id, finding: index });
+          }
+        }
         let falseBlockers = 0;
         run.findings.forEach((finding, i) => {
           if (finding.outcome === "accepted") totals.accepted++;
@@ -17950,13 +17972,14 @@ var require_evalSuite = __commonJS({
           else falseBlockers++;
         });
         totals.falsePositiveBlockers += falseBlockers;
-        if (c.kind === "clean_control") {
+        const expectsNoBlocker = expected.length === 0;
+        if (expectsNoBlocker) {
           totals.cleanRuns++;
           if (run.findings.some((f) => f.severity >= blockerThreshold && f.verdict !== "duplicate")) {
             totals.cleanRunsWithBlocker++;
           }
         }
-        const detected = c.kind === "clean_control" ? falseBlockers === 0 : matched.length === expected.length;
+        const detected = matched.length === expected.length && matchedSuggestions.length === suggestions.length && (!expectsNoBlocker || falseBlockers === 0);
         const cr = caseRuns.get(c.id) || { kind: c.kind, runs: 0, detected: 0 };
         cr.runs++;
         if (detected) cr.detected++;
@@ -17966,8 +17989,11 @@ var require_evalSuite = __commonJS({
           runId: run.run_id,
           expectedBlockers: expected.length,
           detectedBlockers: matched.length,
+          expectedSuggestions: suggestions.length,
+          detectedSuggestions: matchedSuggestions.length,
           falsePositiveBlockers: falseBlockers,
-          matched
+          matched,
+          matchedSuggestions
         });
       }
       const precisionDen = totals.validBlockerFindings + totals.falsePositiveBlockers;
@@ -17976,6 +18002,7 @@ var require_evalSuite = __commonJS({
         blockerRecall: ratio(totals.truePositiveBlockers, totals.expectedBlockers),
         blockerPrecision: ratio(totals.validBlockerFindings, precisionDen),
         cleanFalseBlockerRate: ratio(totals.cleanRunsWithBlocker, totals.cleanRuns),
+        suggestionRecall: ratio(totals.detectedSuggestions, totals.expectedSuggestions),
         dismissalRate: ratio(totals.dismissed, dispositioned),
         falsePositiveDismissalRate: ratio(totals.falsePositiveDismissals, dispositioned)
       };
@@ -17994,6 +18021,7 @@ var require_evalSuite = __commonJS({
         blockerPrecision: t.blocker_precision == null || metrics.blockerPrecision != null && metrics.blockerPrecision >= t.blocker_precision,
         cleanFalseBlockerRate: t.clean_false_blocker_rate == null || metrics.cleanFalseBlockerRate != null && metrics.cleanFalseBlockerRate <= t.clean_false_blocker_rate,
         falsePositiveDismissalRate: t.false_positive_dismissal_rate == null || metrics.falsePositiveDismissalRate != null && metrics.falsePositiveDismissalRate <= t.false_positive_dismissal_rate,
+        suggestionRecall: t.suggestion_recall == null || metrics.suggestionRecall != null && metrics.suggestionRecall >= t.suggestion_recall,
         categoryRecall: t.category_recall == null || Object.keys(categories).length > 0 && Object.values(categories).every((v) => v.recall != null && v.recall >= t.category_recall),
         minimumRuns: runsInput.length >= Number(t.minimum_runs || 1),
         everyCaseCovered: suite.cases.every((c) => caseRuns.has(c.id))
@@ -18698,6 +18726,14 @@ var require_reportState = __commonJS({
       if (raw.needsHumanReview) clean.needsHumanReview = true;
       return clean;
     }
+    function dismissalOf(entry) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+      const out = {};
+      for (const field of ["by", "reasonCode", "reason"]) {
+        if (typeof entry[field] === "string" && entry[field]) out[field] = entry[field].slice(0, 2e3);
+      }
+      return Object.keys(out).length ? out : null;
+    }
     function cleanPrevious(raw) {
       if (!Array.isArray(raw)) throw new Error("previous ledger must be an array");
       const numbers = /* @__PURE__ */ new Set();
@@ -18722,6 +18758,8 @@ var require_reportState = __commonJS({
           if (entry.reason) clean.reason = String(entry.reason);
           if (entry.reasonCode) clean.reasonCode = String(entry.reasonCode);
         }
+        const prior = dismissalOf(entry.previousDismissal);
+        if (prior) clean.previousDismissal = prior;
         return clean;
       });
     }
@@ -18765,8 +18803,10 @@ var require_reportState = __commonJS({
           unmatched.push(finding);
           continue;
         }
-        if (merged[at].status === "open" && finding.severity > merged[at].severity) {
-          merged[at] = { n: merged[at].n, ...finding, status: "open" };
+        const entry = merged[at];
+        if (entry.status === "fixed" || finding.severity > entry.severity) {
+          const prior = entry.status === "dismissed" ? dismissalOf(entry) : entry.previousDismissal;
+          merged[at] = { n: entry.n, ...finding, status: "open", ...prior ? { previousDismissal: prior } : {} };
         }
       }
       const seen = new Set(bySignature.keys());
@@ -18924,6 +18964,10 @@ var require_humanApproval = __commonJS({
       }
       return { always: block.always === true, paths: block.paths || [] };
     }
+    function pathMatches(file, pattern) {
+      const folder = pattern.replace(/\/+$/, "");
+      return minimatch(file, pattern, OPTS) || folder !== "" && minimatch(file, `${folder}/**`, OPTS);
+    }
     function humanRules(configText, files, { incomplete = false } = {}) {
       const rules = readBlock(configText);
       if (!rules) return { required: false, reasons: [] };
@@ -18931,7 +18975,7 @@ var require_humanApproval = __commonJS({
       if (incomplete && hasRules) throw new Error("the PR's file list is incomplete");
       const reasons = [];
       if (rules.always) reasons.push("every PR in this repo needs a person (human_approval.always)");
-      const hits = [...new Set(files)].filter((f) => rules.paths.some((g) => minimatch(f, g, OPTS))).sort();
+      const hits = [...new Set(files)].filter((f) => rules.paths.some((g) => pathMatches(f, g))).sort();
       for (const f of hits) reasons.push(`PCI path: ${f}`);
       if (files.includes(CONFIG_PATH) && hasRules) {
         reasons.push("changes the human_approval config");
@@ -19035,25 +19079,27 @@ var require_approval = __commonJS({
     function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
       const { result, judged } = judge(report, { head });
       const caution = cautionFor(result);
-      const out = (approve, reason, label, dismissBotApprovals) => ({
+      const out = (approve, reason, label, dismissBotApprovals, dismissFor = "none") => ({
         approve,
         reason,
         label,
         dismissBotApprovals,
+        dismissFor,
         caution
       });
       const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === "string");
       const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
+      const addLabel = labelsOk && !present ? "add" : "keep";
       const plain = rules !== null && typeof rules === "object" && !Array.isArray(rules);
       const ruleOk = plain && !("error" in rules) && typeof rules.required === "boolean" && Array.isArray(rules.reasons) && rules.reasons.every((r) => typeof r === "string");
-      const byPerson = present && labelOwner !== "bot" ? out(false, `a person added the ${LABEL} label`, "keep", "all") : null;
+      const byPerson = present && labelOwner !== "bot" ? out(false, `a person added the ${LABEL} label`, "keep", "all", "person") : null;
       const rulesUnread = () => {
         const why = plain && "error" in rules && rules.error ? String(rules.error) : "rules are missing or malformed";
-        return out(false, `could not check the human approval rules: ${why}`, "keep", "stale");
+        return out(false, `could not check the human approval rules: ${why}`, "keep", "stale", "unchecked");
       };
       if (!judged) {
         if (ruleOk && rules.required) {
-          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, present ? "keep" : "add", "all");
+          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, addLabel, "all", "person");
         }
         if (byPerson) return byPerson;
         return ruleOk ? out(false, result.reason, "keep", "none") : rulesUnread();
@@ -19063,14 +19109,67 @@ var require_approval = __commonJS({
         for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
       }
       if (result.humanRequired || ruleOk && rules.required) {
-        return out(false, `a person must approve: ${reasons.join("; ")}`, present ? "keep" : "add", "all");
+        return out(false, `a person must approve: ${reasons.join("; ")}`, addLabel, "all", "person");
       }
       if (byPerson) return byPerson;
+      if (!result.approve) {
+        return out(false, result.reason, ruleOk && present ? "remove" : "keep", "all", ruleOk && labelsOk ? "failing-report" : "unchecked");
+      }
       if (!ruleOk) return rulesUnread();
       if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", "none");
-      return out(result.approve, result.reason, present ? "remove" : "keep", "none");
+      return out(true, result.reason, present ? "remove" : "keep", "none");
     }
     module2.exports = { evaluateApproval, decideApproval, MARKER };
+  }
+});
+
+// engine/canonicalComment.cjs
+var require_canonicalComment = __commonJS({
+  "engine/canonicalComment.cjs"(exports2, module2) {
+    "use strict";
+    var { MARKER } = require_approval();
+    var BOT = "github-actions[bot]";
+    function readPages(text) {
+      const comments = [];
+      let depth = 0;
+      let start = -1;
+      let inString = false;
+      let escaped = false;
+      for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inString) {
+          if (escaped) escaped = false;
+          else if (ch === "\\") escaped = true;
+          else if (ch === '"') inString = false;
+          continue;
+        }
+        if (depth === 0) {
+          if (/\s/.test(ch)) continue;
+          if (ch !== "[") throw new Error("each page must be a JSON array of comments");
+          start = i;
+        }
+        if (ch === '"') inString = true;
+        else if (ch === "[" || ch === "{") depth++;
+        else if (ch === "]" || ch === "}") {
+          depth--;
+          if (depth === 0) {
+            const page = JSON.parse(text.slice(start, i + 1));
+            if (!Array.isArray(page)) throw new Error("each page must be a JSON array of comments");
+            comments.push(...page);
+          }
+        }
+      }
+      if (depth !== 0 || inString) throw new Error("the comment list is cut off");
+      return comments;
+    }
+    function canonicalComment(comments, me) {
+      const reports = comments.filter(
+        (c) => c && typeof c.body === "string" && c.body.startsWith(MARKER) && c.user && typeof c.user.login === "string"
+      );
+      const by = (login) => login ? reports.find((c) => c.user.login === login) : void 0;
+      return by(me) || by(BOT) || null;
+    }
+    module2.exports = { readPages, canonicalComment, BOT };
   }
 });
 
@@ -20146,6 +20245,15 @@ var require_addressState = __commonJS({
         }];
       });
     }
+    function reopenedText(entry) {
+      const prior = entry.previousDismissal;
+      if (!prior || !(prior.by || prior.reasonCode || prior.reason)) return "";
+      const one = (v) => String(v).replace(/[\r\n]+/g, " ");
+      const by = prior.by ? ` by @${one(prior.by)}` : "";
+      const code = prior.reasonCode ? ` [${one(prior.reasonCode)}]` : "";
+      const reason = prior.reason ? `: ${one(prior.reason)}` : "";
+      return ` \xB7 \u21A9\uFE0F reopened, dismissed before${by}${code}${reason}`;
+    }
     function ledgerLine(entry) {
       const location = `\`${entry.file}${entry.line ? `:${entry.line}` : ""}\``;
       const message = String(entry.message).replace(/[\r\n]/g, " ");
@@ -20158,7 +20266,7 @@ var require_addressState = __commonJS({
         const dismissedPrefix = entry.severity >= 7 ? "- [x]" : "-";
         return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
       }
-      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_`;
+      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_${reopenedText(entry)}`;
     }
     function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       const request = validateRequest(requestInput);
@@ -20644,7 +20752,7 @@ var require_package = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "agent-review",
-      version: "1.1.0",
+      version: "1.1.1",
       private: true,
       description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
       license: "MIT",
@@ -20830,6 +20938,7 @@ var require_cli = __commonJS({
     var { mergeLedger, ledgerCandidates, MatchesRejected, buildStatus } = require_reportState();
     var { evaluateApproval, decideApproval } = require_approval();
     var { humanRules } = require_humanApproval();
+    var { readPages, canonicalComment } = require_canonicalComment();
     var {
       CAPTURE_LIMIT_MINUTES,
       checkCodeReviewRun,
@@ -21240,6 +21349,7 @@ var require_cli = __commonJS({
       }
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]";
+    var REPORT_COMMENT_USAGE = "usage: agent-review report-comment --me <login> [--field body|id]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
     function diffFor(diffPath, rawPath, root, excludedPaths) {
       let raw;
@@ -21300,6 +21410,7 @@ var require_cli = __commonJS({
   ledger-candidates --findings <f> [--previous <f>]   print the pairs a matcher judges: each new suggestion the ledger would add, with every older open or dismissed entry from the same lane and file within 10 lines (JSON {count, pairs}; each side has only line, category, message, and recommendation, the last two cut to 500 characters; no severity, status, agent, confidence, or evidence)
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
+  report-comment --me <login> [--field body|id]   read every page of a PR's comments (gh api --paginate output) on stdin and print the body or id of the canonical report: the user's own marked comment, else github-actions[bot]'s (nothing when there is none; exit 1 on unreadable input)
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
@@ -21762,6 +21873,25 @@ var require_cli = __commonJS({
             out(`human-check: ${e.message}`);
             return 1;
           }
+        }
+        case "report-comment": {
+          const me = flag(rest, "--me");
+          const field = flag(rest, "--field") || "body";
+          if (me === void 0 || !["body", "id"].includes(field)) {
+            out(REPORT_COMMENT_USAGE);
+            return 1;
+          }
+          let comments;
+          try {
+            comments = readPages(readFileSync(0, "utf8"));
+          } catch (e) {
+            process.stderr.write(`report-comment: ${e.message}
+`);
+            return 1;
+          }
+          const pick = canonicalComment(comments, me);
+          if (pick && pick[field] !== void 0 && pick[field] !== null) out(String(pick[field]));
+          return 0;
         }
         case "code-review-proof": {
           const rawPath = flag(rest, "--raw");

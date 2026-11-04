@@ -125,8 +125,8 @@ REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner
 # Local canonical comment: this user's own marked comment when one exists, else the bot's.
 # Anyone else's could be a forged report.
 ME=$(gh api user --jq .login 2>/dev/null || echo "")
-COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-  --jq "(map(select(.body | startswith(\"<!-- agent-review -->\"))) | (map(select(.user.login == \"$ME\")) | first) // (map(select(.user.login == \"github-actions[bot]\")) | first)) | .id // empty" | head -n1)
+COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate \
+  | agent-review report-comment --me "$ME" --field id)
 [ -n "$COMMENT_ID" ] || { echo "❌ No marked review report on PR #$PR_NUMBER."; exit 1; }
 
 gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > /tmp/address_comment.md
@@ -224,11 +224,29 @@ For each finding to fix (work in severity order):
 
 Then commit and push once for the batch:
 
+Stage the files you changed or created for these fixes, by name. The block lists the tree first:
+a file a fix created, such as a new spec, shows as `??` and must be staged too. Leave out
+everything that is not part of the fixes: the review's own files (`.claude/review/metrics/`,
+`.claude/review/index/`) and any other change you did not make for these findings. Never
+`git add -A` or `git add .`: they take all of that, which inflates the next review's risk score.
+The block stops if a review file is staged; unstage anything else that is not yours with
+`git restore --staged <file>`.
+
 ```bash
 . /tmp/address_env.sh
-git add -A
-git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}"   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
-git push
+git status --porcelain --untracked-files=all
+git add -- <each file you changed or created for these fixes>
+if git diff --cached --name-only | grep -E '^\.claude/review/(metrics|index)/'; then
+  echo "❌ Review files are staged. Unstage them with git restore --staged, then commit."
+  exit 1
+fi
+if git diff --cached --quiet; then
+  echo "❌ Nothing is staged, so there is no fix to commit."
+  exit 1
+fi
+git diff --cached --name-only
+git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}" || exit 1   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
+git push || exit 1
 FIX_SHA=$(git rev-parse --short HEAD)
 echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh
 ```
@@ -288,7 +306,9 @@ git add .claude/review/learnings/feedback.jsonl && git commit -m "chore(review):
 ```
 
 (The feedback store is repo-tracked; committing it to the PR branch is what persists the signal —
-it merges with the PR. Skip the commit if nothing was dismissed and no fix was applied.)
+it merges with the PR. Skip the commit if nothing was dismissed and no fix was applied. It is
+excluded from review and scoring, and repos set up by init mark it `merge=union`, so a local merge
+of the base branch keeps both sides' lines.)
 
 ## Stage 5 — Report back
 

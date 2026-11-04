@@ -73,7 +73,7 @@ BATCHES=$(( (PRS + 9) / 10 ))
 : > /tmp/agent_review_init.sh
 # Clear any read-only-guard baseline left by a previous run — the guard's `[ -f ] ||` capture
 # would otherwise reuse a stale snapshot for this run's drift checks.
-rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt
+rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt
 cat >> /tmp/agent_review_init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
 export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
@@ -256,7 +256,7 @@ git ls-files | sed 's|.*\.||' | sort | uniq -c | sort -rn | head -15      # file
 
 Then Read whichever of these exist: `package.json`, `tsconfig.json` (or `jsconfig.json`),
 `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `README.md`, the CI workflow files, and the
-framework config file. For non-JavaScript repos the manifest/lockfile pair is whatever the
+framework config file, and any `Dockerfile` with its `.dockerignore`. For non-JavaScript repos the manifest/lockfile pair is whatever the
 ecosystem uses — `pyproject.toml`/`poetry.lock` or `requirements.txt`, `go.mod`/`go.sum`,
 `Gemfile`/`Gemfile.lock`, `Cargo.toml`/`Cargo.lock`, `composer.json`/`composer.lock`. Detect,
 don't assume.
@@ -272,9 +272,12 @@ API layer style, CI system. Note the evidence for each (which file, which depend
 
 **Risk `patterns`** — build the list from what actually exists; every glob must match real paths.
 Per file, the highest-scoring matching pattern wins — patterns do **not** stack on one file, and
-the per-file scores sum across the diff. A `0`-point entry never changes the score (the per-file
-max starts at 0), so it is documentation of intent — a record that the path was considered and
-deemed no-risk. To actually keep a path out of scoring, put it in `excluded_paths`.
+the per-file scores sum across the diff. A file that matches no pattern gets
+`unmatched_file_points` (1 by default), so a `0`-point entry lowers its files to 0. A push that
+touches only 0-point and excluded paths, in a small diff, scores 0, and auto mode skips its review
+and keeps the earlier report. So give 0 points only to files no review needs to see. Tests are not
+among them: a push that weakens a test should still get a quick review. To keep a path out of
+review entirely, such as snapshots and generated files, put it in `excluded_paths`.
 
 | Kind of path                                     | points | tier     |
 | ------------------------------------------------ | ------ | -------- |
@@ -286,10 +289,20 @@ deemed no-risk. To actually keep a path out of scoring, put it in `excluded_path
 | payment / billing / money code                    | 2      | high     |
 | shared cross-feature code and components          | 2      | high     |
 | ordinary source                                   | 1      | medium   |
-| tests, fixtures, snapshots                        | 0      | low      |
+| tests and fixtures                                | 1      | low      |
 
-Also treat the review harness itself as sensitive: the config, rule docs, and settings that gate
-review are worth `2`-`3` points, because weakening them weakens every future review.
+Also treat the review harness itself as sensitive: the config, ratified learnings, and settings
+that gate review (`.claude/review/config.yml`, `.claude/review/learnings/learnings.yml`,
+`.claude/settings.json`) are worth `2`-`3` points, because weakening them weakens every future
+review. A `.claude/review/**` glob is fine too, but only because the skeleton's `excluded_paths`
+keep out the bookkeeping files: `learnings/feedback.jsonl`, which `/agent-review:address` commits
+to PRs, and the `metrics/` and `index/` files reviews write. Keep those exclusions; without them a
+small fix scores as critical.
+
+**Docker images.** If a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`) and
+`.dockerignore` does not already leave them out, propose adding `/.claude` and `CLAUDE.md` to
+`.dockerignore`, so the rule docs and the seeded-bug eval patches do not ship in the image. Write
+them only on a yes at the 3B gate.
 
 **`manifests` / `lockfiles`** — the detected pair(s). Keep them accurate: they drive the
 `new_dependency`, `critical_pkg_update`, and `lockfile_only_change` detections.
@@ -370,6 +383,15 @@ The skeleton ships `security` and `data-integrity` with empty `triggers` — **f
 those agents never fire. Use the repo's real auth/API/migration/CI paths and real content markers
 (secret env names, raw-HTML sinks, redirect helpers, query/mutation helpers, cache-invalidation
 calls, schema parse calls) taken from the sampled files.
+
+**Content triggers match whole tokens.** A trigger made of letters, digits and `_` matches only a
+whole identifier: `currency` never fires on `concurrency`, and `OKTA` never fires on
+`OKTA_DOMAIN`. To match a family of names, end the trigger with `_` for a prefix (`OKTA_` matches
+`OKTA_DOMAIN`, `tsep_` matches `tsep_token`) or start it with `_` for a suffix (`_SESSION_KEY`
+matches `APP_SESSION_KEY`, `__c` matches `Amount__c`). A trigger that starts or ends with
+punctuation (`ENV[`, `.round(`) matches that exact spelling. Before proposing a trigger, find a
+real line in the repo that it matches. `agent-review config validate` cannot tell a whole-word
+trigger from one meant as a prefix, so it will not catch a trigger that never fires.
 
 ### Draft the rule docs (subagent)
 
@@ -717,7 +739,10 @@ Present the complete proposal:
    than the bot's.
 8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
-9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`.
+9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`,
+   the `.gitignore` lines for `.claude/review/metrics/` and `.claude/review/index/`, and the
+   `.gitattributes` line that merges `feedback.jsonl` with `merge=union`, and the `.dockerignore`
+   lines when the repo builds an image from the whole tree.
 
 Then ask, plainly: *"Approve writing these files? (yes / edit <what> / no)"*
 
@@ -748,6 +773,32 @@ printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/learnings/feedback.jsonl
 : > .claude/review/evals/results/.gitkeep
 ```
+
+Keep the review's bookkeeping out of git. Reviews write `.claude/review/metrics/` and the
+`.claude/review/index/` cache on every run, so both are ignored. `feedback.jsonl` is committed and
+only ever appended to, so `merge=union` keeps both sides' lines when a branch merges the base
+branch locally. GitHub's web merge and "Update branch" ignore `.gitattributes`, so a conflict there
+is still fixed by merging locally. Each line is added once, on its own line. A file is listed for
+the bootstrap commit only when it had no other changes before init touched it, so 3E never commits
+someone's unrelated edits:
+
+```bash
+add_line() {
+  [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
+  if [ -z "$(git status --porcelain -- "$1")" ] && ! grep -qxF -- "$1" /tmp/agent_review_init_stage.txt 2>/dev/null; then
+    printf '%s\n' "$1" >> /tmp/agent_review_init_stage.txt
+  fi
+  [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
+  printf '%s\n' "$2" >> "$1"
+  grep -qxF -- "$1" /tmp/agent_review_init_changed.txt 2>/dev/null || printf '%s\n' "$1" >> /tmp/agent_review_init_changed.txt
+}
+add_line .gitignore '/.claude/review/metrics/'
+add_line .gitignore '/.claude/review/index/'
+add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
+```
+
+If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'` and
+`add_line .dockerignore 'CLAUDE.md'` in that block.
 
 Then the CI workflows. The copies run only when the `REVIEWS_RUN` answer saved in 3A is
 `local-and-ci`; anything else, including an empty value, copies nothing. Do not read it back
@@ -838,13 +889,23 @@ Optionally warm the import-graph cache so the first review is fast:
 agent-review index
 ```
 
-The cache regenerates on demand, so leave it out of the commit unless the team wants it committed.
+The cache regenerates on demand and is git-ignored, so it stays out of the commit.
 
 ### 3E — Commit
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
+# Only the files whose one change is the lines 3C added.
+if [ -f /tmp/agent_review_init_stage.txt ]; then
+  while IFS= read -r f; do git add -- "$f"; done < /tmp/agent_review_init_stage.txt
+fi
+if [ -f /tmp/agent_review_init_changed.txt ]; then
+  while IFS= read -r f; do
+    grep -qxF -- "$f" /tmp/agent_review_init_stage.txt 2>/dev/null \
+      || echo "⚠️ $f had other changes before init, so its new lines are not staged. Commit them yourself."
+  done < /tmp/agent_review_init_changed.txt
+fi
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

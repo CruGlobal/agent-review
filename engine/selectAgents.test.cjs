@@ -258,6 +258,32 @@ test('identifier content triggers do not match inside larger identifiers', () =>
   assert.equal(contentMatches('+ total.round(2)\n', '.round('), true);
 });
 
+test('a trailing _ makes a prefix trigger and a leading _ a suffix trigger', () => {
+  // Prefix: open on the right, still a token start on the left.
+  assert.equal(contentMatches('+ ENV.fetch("OKTA_CLIENT_ID")\n', 'OKTA_'), true);
+  assert.equal(contentMatches('+ url = GR_TOKEN_PERMALINK\n', 'GR_TOKEN_'), true);
+  assert.equal(contentMatches('+ tsep_token = params[:t]\n', 'tsep_'), true);
+  assert.equal(contentMatches('+ MYOKTA_CLIENT = 1\n', 'OKTA_'), false);
+  // Suffix: open on the left, still a token end on the right.
+  assert.equal(contentMatches('+ ENV["APP_SESSION_KEY"]\n', '_SESSION_KEY'), true);
+  assert.equal(contentMatches('+ ENV["APP_SESSION_KEYS"]\n', '_SESSION_KEY'), false);
+  assert.equal(contentMatches('+ record.Amount__c = 5\n', '__c'), true);
+  assert.equal(contentMatches('+ record.Amount__cx = 5\n', '__c'), false);
+  // Whole-token triggers are unchanged.
+  assert.equal(contentMatches('+ OKTA_DOMAIN = x\n', 'OKTA'), false);
+  assert.equal(contentMatches('+ concurrency:\n', 'currency'), false);
+});
+
+test('prefix and suffix triggers select their lane', () => {
+  const cfg = {
+    excluded_paths: [],
+    agents: [{ id: 'auth', triggers: { content: ['OKTA_'] } }],
+  };
+  const diff = 'diff --git a/app/x.rb b/app/x.rb\n+ ENV.fetch("OKTA_ISSUER")\n';
+  const sel = selectAgents({ files: ['app/x.rb'], diffText: diff }, cfg);
+  assert.deepEqual(sel.map((a) => [a.id, a.matchedBy]), [['auth', 'content:OKTA_']]);
+});
+
 test('engine: replaced lanes are skipped and always lanes forced', () => {
   const engine = { name: 'code-review', replaces: ['architecture'], always: ['security'] };
   const sel = selectAgents({ files: ['src/x.ts'], diffText: '+x' }, config, engine);
