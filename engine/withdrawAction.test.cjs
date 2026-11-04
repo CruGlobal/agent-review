@@ -34,6 +34,8 @@ const SKIP = !BASH
       : false;
 
 const BOT = 'github-actions[bot]';
+const TOKEN = 'test-token';
+const TOKEN_HEADER = Buffer.from(`x-access-token:${TOKEN}`).toString('base64');
 const MARKER = '<!-- agent-review-approval -->';
 const BODY = `Auto-approved: the agent-review report for this head passes with no open blockers, and no repo rule or recorded check needs a person.\n\n${MARKER}`;
 const AI_REVIEW_BODY = `## AI Review Auto-Approval\n\n**Verdict:** Approved\n\n${MARKER}`;
@@ -65,12 +67,20 @@ case "$METHOD $URL" in
     if [ "$N" -ge 2 ] && has pr-later.json; then emit "$FIX/pr-later.json"; else emit "$FIX/pr.json"; fi ;;
   "GET repos/o/r/pulls/7/reviews?per_page=100")
     has fail-reviews && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    if has fail-reviews-once && [ ! -e "$FIX/../reviews-failed" ]; then
+      : > "$FIX/../reviews-failed"; echo "gh: Bad Gateway (HTTP 502)" >&2; exit 1
+    fi
     emit "$FIX/reviews.json" ;;
+  "GET repos/o/r/pulls/7/reviews/"*)
+    if has already-dismissed; then echo '{"state":"DISMISSED"}' > "$FIX/../review.json"; else echo '{"state":"APPROVED"}' > "$FIX/../review.json"; fi
+    emit "$FIX/../review.json" ;;
   "GET repos/o/r/issues/7/timeline?per_page=100")
     has fail-timeline && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     emit "$FIX/timeline.json" ;;
   "PUT repos/o/r/pulls/7/reviews/"*"/dismissals")
     has fail-dismiss-403 && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
+    has fail-dismiss-rate && { echo "gh: API rate limit exceeded for installation (HTTP 403)" >&2; exit 1; }
+    has already-dismissed && { echo "gh: Can not dismiss a dismissed pull request review (HTTP 422)" >&2; exit 1; }
     has fail-dismiss && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     for f in "\${FIELDS[@]}"; do
       case "$f" in message=*) printf '%s\\n' "\${f#message=}" >> "$FIX/../dismiss-messages.txt" ;; esac
@@ -211,6 +221,39 @@ function buildOrigin() {
   git(w, 'merge', '-q', '--no-edit', C.A);
   C.CRISS_CROSS = git(w, 'rev-parse', 'HEAD');
 
+  // A default branch that adds vuln.txt and later removes it. The approved
+  // commit forks after the addition; a head with the approved tree, forked
+  // before the addition, would bring vuln.txt back when merged.
+  at(C.F0);
+  write('rw.txt', 'rw\n');
+  C.RW1 = commit('rw base');
+  write('vuln.txt', 'vulnerable\n');
+  C.RW2 = commit('rw base adds vuln.txt');
+  fs.unlinkSync(path.join(w, 'vuln.txt'));
+  git(w, 'branch', 'rw-main', commit('rw base removes vuln.txt'));
+  at(C.RW2);
+  edit('f.txt', 'c\n', 'C-pr\n');
+  C.RA = commit('pr change on the rw base');
+  C.REWIND = git(w, 'commit-tree', `${C.RA}^{tree}`, '-p', C.RW1, '-m', 'approved tree on an older fork point');
+
+  // The same, sideways: the head forks from a side commit the default branch merged.
+  at(C.F0);
+  write('vuln2.txt', 'vulnerable\n');
+  C.SW1 = commit('sw base adds vuln2.txt');
+  fs.unlinkSync(path.join(w, 'vuln2.txt'));
+  const sw2 = commit('sw base removes vuln2.txt');
+  at(C.F0);
+  write('side2.txt', 'side\n');
+  C.SWS = commit('side commit');
+  at(sw2);
+  git(w, 'merge', '-q', '--no-edit', C.SWS);
+  git(w, 'branch', 'sw-main', 'HEAD');
+  at(C.SW1);
+  edit('f.txt', 'c\n', 'C-pr\n');
+  C.SA = commit('pr change on the sw base');
+  const sideways = git(w, 'merge-tree', '--write-tree', C.SA, C.SWS);
+  C.SIDEWAYS = git(w, 'commit-tree', sideways, '-p', C.SWS, '-m', 'approved tree merged with a side commit');
+
   for (const [name, sha] of Object.entries(C)) git(w, 'update-ref', `refs/keep/${name}`, sha);
   const origin = path.join(SERVER, 'o/r.git');
   git(TMP, 'init', '-q', '--bare', origin);
@@ -230,7 +273,13 @@ function setup() {
   BIN = path.join(TMP, 'bin');
   fs.mkdirSync(BIN);
   fs.writeFileSync(path.join(BIN, 'gh'), FAKE_GH, { mode: 0o755 });
-  fs.writeFileSync(path.join(BIN, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> "$GIT_LOG"\nexec "${GIT}" "$@"\n`, { mode: 0o755 });
+  // Logs each git call's arguments, and whether its environment carried the
+  // auth header, without logging the header.
+  fs.writeFileSync(
+    path.join(BIN, 'git'),
+    `#!/bin/sh\ncase "\${GIT_CONFIG_VALUE_0:-}" in "AUTHORIZATION: basic $EXPECTED_AUTH") a=auth ;; *) a=noauth ;; esac\nprintf '%s %s\\n' "$a" "$*" >> "$GIT_LOG"\nexec "${GIT}" "$@"\n`,
+    { mode: 0o755 },
+  );
   fs.symlinkSync(JQ, path.join(BIN, 'jq'));
   buildOrigin();
 }
@@ -272,7 +321,9 @@ function run(name, { head, base, defaultBranch, state, reviews = [], timeline = 
     FIX: fix,
     RUNNER_TEMP: runner,
     GITHUB_STEP_SUMMARY: path.join(dir, 'summary.md'),
-    GH_TOKEN: 'test-token',
+    GH_TOKEN: TOKEN,
+    EXPECTED_AUTH: TOKEN_HEADER,
+    AGENT_REVIEW_RETRY_DELAY: '0',
     REPO: 'o/r',
     PR: prNumber,
     SERVER_URL: `file://${SERVER}`,
@@ -297,7 +348,8 @@ function run(name, { head, base, defaultBranch, state, reviews = [], timeline = 
         writes,
         dismissed: writes.filter((w) => w.includes('/dismissals')).map((w) => Number(w.match(/reviews\/(\d+)\//)[1])),
         messages: read('dismiss-messages.txt').split('\n').filter(Boolean),
-        gitCalls: read('git.log').split('\n').filter(Boolean),
+        gitLog: read('git.log').split('\n').filter(Boolean),
+        gitCalls: read('git.log').split('\n').filter(Boolean).map((l) => l.replace(/^(no)?auth /, '')),
         summary: read('summary.md'),
         leftovers: fs.readdirSync(runner),
       });
@@ -316,6 +368,12 @@ function common(o) {
   assert.deepEqual(o.leftovers, [], 'the bare repository and the token-bearing work files are removed');
   for (const call of o.gitCalls) {
     assert.ok(!/^(checkout|switch|worktree|clone|reset|restore|read-tree|archive)\b/.test(call), `git never builds a work tree: ${call}`);
+  }
+  for (const line of [...o.gitLog, ...o.ghCalls]) {
+    assert.ok(!line.includes(TOKEN) && !line.includes(TOKEN_HEADER), `the token never reaches a command line: ${line}`);
+  }
+  for (const line of o.gitLog.filter((l) => / fetch /.test(l))) {
+    assert.ok(line.startsWith('auth '), `every fetch gets the token through its environment: ${line}`);
   }
 }
 const kept = (o) => assert.deepEqual(o.dismissed, []);
@@ -359,7 +417,7 @@ const SCENARIOS = {
       );
       assert.ok(m.includes('Run /agent-review:re-review (or /agent-review:review) and post the report.'), m);
       assert.ok(m.includes('The bot approves again when the report passes for the new head.'), m);
-      assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\): the PR changed beyond merging in its base branch\\.`));
+      assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\): the PR changed beyond merging in the default branch\\.`));
     },
   ],
   'a merge of the base branch with an extra change withdraws': [
@@ -384,11 +442,31 @@ const SCENARIOS = {
   ],
   'two merge bases withdraw even when the merge itself is clean': [
     () => ({ head: C.CRISS_CROSS, base: 'cc-main', reviews: [review(21, C.P1)] }),
-    (o) => assert.deepEqual(o.dismissed, [21]),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): the PR has more than one merge base with the default branch\./);
+    },
   ],
-  'an approved commit that cannot be fetched withdraws': [
+  'a head forked from before the approved fork point withdraws, though its tree is the approved tree': [
+    () => ({ head: C.REWIND, base: 'rw-main', reviews: [review(21, C.RA)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): the PR's fork point moved back or sideways on the default branch\./);
+    },
+  ],
+  'a head forked from a side commit the default branch merged withdraws': [
+    () => ({ head: C.SIDEWAYS, base: 'sw-main', reviews: [review(21, C.SA)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): the PR's fork point moved back or sideways on the default branch\./);
+    },
+  ],
+  'an approved commit that cannot be fetched withdraws, and says so': [
     () => ({ head: C.MERGE1, reviews: [review(21, 'e'.repeat(40))] }),
-    (o) => assert.deepEqual(o.dismissed, [21]),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): could not fetch the approved commit\./);
+    },
   ],
   'a base branch that cannot be fetched withdraws every candidate': [
     () => ({ head: C.MERGE1, base: 'gone', reviews: [review(21, C.X)] }),
@@ -403,6 +481,7 @@ const SCENARIOS = {
       assert.deepEqual(o.dismissed, [21]);
       assert.match(o.summary, /\(review 21\): the PR's base branch is not the repo's default branch\./);
       noGit(o);
+      assert.ok(!o.ghCalls.some((l) => l.includes('/timeline')), 'the timeline is not read for a base that cannot keep an approval');
     },
   ],
   'a clean merge of a base that is not the default branch withdraws': [
@@ -423,6 +502,17 @@ const SCENARIOS = {
   'a base change with no time withdraws': [
     () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [{ event: 'base_ref_changed' }] }),
     (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'GitHub\'s own retarget after a base branch is deleted counts as a base change': [
+    () => ({
+      head: C.MERGE1,
+      reviews: [review(21, C.X)],
+      timeline: [{ event: 'automatic_base_change_succeeded', created_at: '2026-11-03T08:00:00Z' }],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.summary, /\(review 21\): the PR's base branch changed after it was approved\./);
+    },
   ],
   'a base change before the approval keeps it': [
     () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [baseChanged('2026-11-01T08:00:00Z')] }),
@@ -446,14 +536,14 @@ const SCENARIOS = {
     () => ({ head: C.MERGE2, reviews: [review(21, C.X), review(22, C.NEW), review(23, C.X)] }),
     (o) => assert.deepEqual(o.dismissed, [22]),
   ],
-  'only the bot\'s own marked approvals of an older commit are candidates': [
+  'only the bot\'s own approvals of an older commit are candidates': [
     () => ({
       head: C.NEW,
       reviews: [
         review(31, C.X, { login: 'alice' }),
         review(32, C.X, { body: '' }),
         review(33, C.X, { body: AI_REVIEW_BODY }),
-        review(34, C.X, { body: 'Auto-approved: the agent-review report for this head passes with no open blockers.' }),
+        review(34, C.X, { body: 'Approved by another workflow.' }),
         review(35, C.X, { state: 'COMMENTED' }),
         review(36, C.X, { state: 'DISMISSED' }),
         review(37, C.X, { login: null }),
@@ -466,6 +556,17 @@ const SCENARIOS = {
       noGit(o);
       assert.match(o.summary, /PR #7 has no agent-review approval of an older commit, so there is nothing to withdraw\./);
     },
+  ],
+  'the bot\'s approvals from before the marker are withdrawn too': [
+    () => ({
+      head: C.NEW,
+      reviews: [
+        review(41, C.X, { body: 'Auto-approved: the agent-review report for this head passes with no open blockers.' }),
+        review(42, C.X, { body: 'Auto-approved: the posted agent-review report covers the current head and passes.' }),
+        review(43, C.X, { body: 'Auto-approved: every agent-review finding is fixed or dismissed with a reason.' }),
+      ],
+    }),
+    (o) => assert.deepEqual(o.dismissed, [41, 42, 43]),
   ],
   'an approval of the head as it is when re-read is never dismissed': [
     () => ({ head: C.NEW, later: C.X, reviews: [review(21, C.X)] }),
@@ -481,20 +582,45 @@ const SCENARIOS = {
       assert.match(o.stdout, /^::warning::could not read the head of PR #7 again, so the bot's approval of [0-9a-f]{40} was not withdrawn \(review 21\)\. A person must dismiss it\.$/m);
     },
   ],
-  'a read-only token skips cleanly with one warning': [
+  'a token that may not dismiss skips cleanly with one warning, without retrying': [
     () => ({ head: C.NEW, reviews: [review(21, C.X), review(22, C.MERGE1)], files: { 'fail-dismiss-403': '' } }),
     (o) => {
       assert.equal(o.writes.length, 1, 'stops after the first refusal');
       const warnings = o.stdout.split('\n').filter((l) => l.startsWith('::warning::'));
       assert.equal(warnings.length, 1);
-      assert.match(warnings[0], /token may not dismiss reviews on PR #7, so the bot's approvals of older commits stay\. A read-only token/);
+      assert.match(
+        warnings[0],
+        /GitHub refused to let this workflow dismiss reviews on PR #7 \(HTTP 403\), so the bot's approvals of older commits stay\. The token may lack pull-requests: write, a rule may limit who can dismiss reviews, or the API rate limit may be used up\./,
+      );
     },
   ],
-  'any other dismissal failure is a warning per approval': [
+  'a rate limit is retried, then skips with the same warning': [
+    () => ({ head: C.NEW, reviews: [review(21, C.X), review(22, C.MERGE1)], files: { 'fail-dismiss-rate': '' } }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21, 21, 21], 'three tries, then it stops');
+      assert.equal(o.stdout.split('\n').filter((l) => l.startsWith('::warning::GitHub refused')).length, 1);
+    },
+  ],
+  'any other dismissal failure is retried, then warns per approval': [
     () => ({ head: C.NEW, reviews: [review(21, C.X), review(22, C.MERGE1)], files: { 'fail-dismiss': '' } }),
     (o) => {
-      assert.equal(o.writes.length, 2);
+      assert.deepEqual(o.dismissed, [21, 21, 21, 22, 22, 22]);
       assert.equal(o.stdout.split('\n').filter((l) => l.startsWith('::warning::could not withdraw')).length, 2);
+    },
+  ],
+  'an approval that is already dismissed is noted, not warned about': [
+    () => ({ head: C.NEW, reviews: [review(21, C.X)], files: { 'already-dismissed': '' } }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'a 422 is not retried');
+      assert.ok(!o.stdout.includes('::warning::'));
+      assert.match(o.summary, new RegExp(`The bot's approval of ${C.X} on PR #7 was already dismissed \\(review 21\\)\\.`));
+    },
+  ],
+  'a transient API error is retried': [
+    () => ({ head: C.NEW, reviews: [review(21, C.X)], files: { 'fail-reviews-once': '' } }),
+    (o) => {
+      assert.equal(o.ghCalls.filter((l) => l.includes('/reviews?per_page=100')).length, 2);
+      assert.deepEqual(o.dismissed, [21]);
     },
   ],
   'unreadable reviews withdraw nothing and warn': [

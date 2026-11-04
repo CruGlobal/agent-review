@@ -1730,12 +1730,20 @@ test('the approval gate is one composite action that delegates the decision to t
   assert.ok(run.includes('could not judge'), 'a trapped error is reported as could-not-judge');
 });
 
-test('approve and withdraw jobs for one PR run one at a time, across the terminal and CI paths', () => {
+test('approve jobs for one PR run one at a time, and withdraw runs in its own group', () => {
   const { parse } = require('yaml');
   const job = (file, id) => parse(readFileSync(join(ROOT, '.github/workflows', file), 'utf8')).jobs[id];
   assert.deepEqual(job('approve.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ inputs.pr_number }}', 'cancel-in-progress': false });
   assert.deepEqual(job('review.yml', 'approve').concurrency, { group: 'agent-review-approve-${{ github.event.pull_request.number }}', 'cancel-in-progress': false });
-  assert.deepEqual(job('withdraw.yml', 'withdraw').concurrency, { group: 'agent-review-approve-${{ inputs.pr_number }}', 'cancel-in-progress': false });
+  // A shared group would let a new approve run replace a waiting withdraw run.
+  // The approve action's read of the head after approving covers the race
+  // that separate groups leave.
+  assert.deepEqual(job('withdraw.yml', 'withdraw').concurrency, { group: 'agent-review-withdraw-${{ inputs.pr_number }}', 'cancel-in-progress': false });
+  const approve = parse(readFileSync(join(ROOT, '.github/actions/approve/action.yml'), 'utf8')).runs.steps.map((s) => s.run || '').join('\n');
+  assert.ok(approve.includes('AFTER_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha)'), 'the head is read again after approving');
+  assert.ok(approve.includes('elif [ "$AFTER_HEAD" != "$HEAD_SHA" ]; then'));
+  assert.ok(approve.includes('if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$APPROVAL_ID/dismissals"'), 'an approval of a head that moved is taken back');
+  assert.ok(approve.indexOf('event=APPROVE') < approve.indexOf('AFTER_HEAD='), 'the check follows the approval');
 });
 
 test('the approve action re-checks the base commit rules, owns the label, and takes back bot approvals', () => {
@@ -1812,8 +1820,8 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
   // A label or dismissal failure is a warning: each write sits in an `if`, where
   // a failure cannot fire the ERR trap that ends the step.
   const writes = run.split('\n').filter((line) => /gh api -X (POST|PUT|DELETE)/.test(line));
-  assert.equal(writes.length, 4, 'label add, label remove, dismiss, and the approval are the only API writes');
-  for (const line of writes) assert.match(line.trim(), /^if gh api -X /);
+  assert.equal(writes.length, 5, 'label add, label remove, dismiss, the approval, and taking back an approval of a moved head are the only API writes');
+  for (const line of writes) assert.match(line.trim(), /^if (APPROVAL_ID=\$\()?gh api -X /);
 
   assert.ok(run.includes(".caution // empty"), 'the caution is read from the decision');
   assert.ok(run.includes(`BODY="$APPROVAL_BODY"$'\\n\\n'"$CAUTION"`), 'the caution follows the body after a blank line');
@@ -2034,15 +2042,19 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['GIT_TERMINAL_PROMPT=0', 'a refused fetch never waits for a password'],
     ["APPROVAL_MARKER='<!-- agent-review-approval -->'", 'the marker is the one the approve action writes'],
     ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals'],
-    ['contains($marker) and (startswith("## AI Review Auto-Approval") | not)', 'only agent-review\'s own approvals'],
+    ['ours and (startswith("## AI Review Auto-Approval") | not)', 'only agent-review\'s own approvals'],
+    ['or startswith("Auto-approved: the agent-review report for this head passes")', 'approvals from before the marker count as ours'],
     ['select(.commit_id != $head)', 'never an approval of the head'],
     ['DEFAULT_BRANCH=$(jq -r \'.base.repo.default_branch // empty\' "$WORK/pr.json")', 'the default branch comes from the repo, not the PR'],
     ['[ "$BASE_REF" != "$DEFAULT_BRANCH" ]', 'only merges of the default branch can keep an approval'],
-    ['select(.event == "base_ref_changed")', 'a base change is read from the timeline'],
+    ['select(.event == "base_ref_changed" or ((.event // "") | startswith("automatic_base_change")))', 'a base change, GitHub\'s own included, is read from the timeline'],
     ["'$changed < $approved'", 'a base change at or after the approval takes it back'],
+    ['git merge-base --is-ancestor "$last_fork" "$fork"', 'the fork point only moves forward'],
     ['git merge-tree --write-tree', 'the base-merge check from the review skill'],
     ['[ "$NOW_HEAD" = "$COMMIT" ]', 'the head is read again before each dismissal'],
     ['/agent-review:re-review', 'the dismissal says what to run next'],
+    ['cd "$WORK"', 'git stays out of a checkout in the workspace'],
+    ["grep -qE 'HTTP (401|404|422)|Resource not accessible'", 'errors a retry cannot fix are not retried'],
   ]) {
     assert.ok(run.includes(part) || run.includes(part.replace('git ', 'g ')), why);
   }
@@ -2050,9 +2062,22 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     assert.ok(!run.includes(banned), `the action must not use ${banned}`);
   }
   assert.ok(!/\b[A-Z_]+=\(/.test(run), 'no array assignments, for bash 3.2');
-  const writes = run.split('\n').filter((line) => /gh api -X /.test(line));
+  const writes = run.split('\n').filter((line) => /\bapi -X /.test(line));
   assert.equal(writes.length, 1, 'the dismissal is the only API write');
-  assert.match(writes[0].trim(), /^if gh api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
+  assert.match(writes[0].trim(), /^if api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
+});
+
+test('interact takes back the bot\'s approval right after it pushes, since that push starts no workflow', () => {
+  const { parse } = require('yaml');
+  const steps = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs.publish.steps;
+  const at = (pred) => steps.findIndex(pred);
+  const push = at((s) => s.id === 'push');
+  const withdraw = at((s) => s.uses === 'CruGlobal/agent-review/.github/actions/withdraw@main');
+  assert.ok(withdraw > push, 'the withdraw step follows the push');
+  assert.equal(withdraw, push + 1, 'nothing that can fail the job sits between the push and the withdraw step');
+  assert.equal(steps[withdraw].if, "steps.push.outputs.pushed_sha != ''");
+  assert.deepEqual(steps[withdraw].with, { pr_number: '${{ inputs.pr_number }}' });
+  assert.ok(withdraw < at((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main'), 'before the approve step');
 });
 
 test('the docs and skills know the approve template and the review-side auto_approve knob', () => {

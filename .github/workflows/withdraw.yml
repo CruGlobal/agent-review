@@ -13,8 +13,11 @@ on:
 
 jobs:
   withdraw:
+    # Its own group, so an approve run can never replace a waiting withdraw
+    # run. The approve action reads the head again after approving and takes
+    # back an approval of a head that moved, which closes the gap this leaves.
     concurrency:
-      group: agent-review-approve-${{ inputs.pr_number }}
+      group: agent-review-withdraw-${{ inputs.pr_number }}
       cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 15

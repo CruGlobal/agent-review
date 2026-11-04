@@ -64,11 +64,13 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   pre-0.3.0). If the marker already equals the latest version, report "up to date" and skip it.
 - **File missing**: the repo never installed that piece. Offer it, don't force it — ask the
   user whether to add it, and default to skipping `agent-review-readiness.yml` (the rollout
-  gate) and, in a CI repo, `agent-review-approve.yml` (approval of locally posted reports; a
-  stronger trust grant than the CI path) unless they want them. In a local-only repo the approve
-  file is the default yes, as above. When offering the approve file in a CI repo, say it also
-  carries the `withdraw` job, which takes back the bot's approval when new commits land. A CI
-  repo that wants only that can install it with `auto_approve: false`.
+  gate) unless they want it. The approve file is the default yes in every repo, because it
+  carries the `withdraw` job, which takes back the bot's approval when new commits land.
+  Without it, a CI repo keeps the bot's old approval through a push until the CI review
+  finishes, and keeps it for good if that review fails. In a CI repo, add the approve file with
+  `auto_approve: false` on its `approve` job (withdraw only), and set it to `true` only if the
+  user also wants locally posted reports to approve: that trusts a writer's posted report, a
+  stronger grant than the CI path.
 
 If every file is current, say so and stop here. In a local-only repo, do not stop before the
 removal check in Stage 4 if any CI file is still installed.

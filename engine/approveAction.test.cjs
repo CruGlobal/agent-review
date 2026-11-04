@@ -61,7 +61,9 @@ case "$METHOD $URL" in
     N=$(( $(cat "$FIX/../pr-reads" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$FIX/../pr-reads"
     if [ "$N" -ge 2 ] && has fail-pr-later; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
-    if [ "$N" -ge 2 ] && has pr-later.json; then serve pr pr-later.json; else serve pr pr.json; fi ;;
+    if [ "$N" -ge 3 ] && has fail-pr-after; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
+    if [ "$N" -ge 3 ] && has pr-after.json; then serve pr pr-after.json
+    elif [ "$N" -ge 2 ] && has pr-later.json; then serve pr pr-later.json; else serve pr pr.json; fi ;;
   "GET repos/o/r/contents/.claude/review/config.yml?ref="*)
     case "$(cat "$FIX/config-status")" in
       404) echo '{"message":"Not Found"}'; echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
@@ -85,7 +87,8 @@ case "$METHOD $URL" in
         event=*) printf '%s' "\${f#event=}" > "$FIX/../approved-event.txt" ;;
       esac
     done
-    echo '{}' ;;
+    printf '%s' '{"id":501}' > "$FIX/../approval.json"
+    emit "$FIX/../approval.json" ;;
   *) echo "fake gh: unhandled $METHOD $URL" >&2; exit 98 ;;
 esac
 `;
@@ -319,7 +322,23 @@ const SCENARIOS = {
     (o) => {
       assert.equal(o.approved, APPROVED);
       assert.deepEqual(o.writes, []);
-      assert.ok(o.lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length === 2, 'the head is read again');
+      assert.equal(o.lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 3, 'the head is read again before and after approving');
+    },
+  ],
+  'a head that moves while approving takes that approval back': [
+    { 'pr-after.json': prJson({ head: { sha: OLD } }) },
+    (o) => {
+      assert.equal(o.approved, APPROVED, 'it approved the judged head first');
+      assert.deepEqual(o.dismissed, [501], 'then took back exactly that approval');
+      assert.match(o.summary, /The head of PR #7 moved while it was being approved, so the bot took back its approval of a{40}\./);
+    },
+  ],
+  'a head that cannot be read after approving keeps the approval and warns': [
+    { 'fail-pr-after': '' },
+    (o) => {
+      assert.equal(o.approved, APPROVED);
+      assert.deepEqual(o.dismissed, []);
+      assert.match(o.stdout, /^::warning::could not read the head of PR #7 after approving a{40}\. If it moved, a person must dismiss that approval\.$/m);
     },
   ],
   'an irreversible report approves with the caution after a blank line': [
