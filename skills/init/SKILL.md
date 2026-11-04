@@ -73,7 +73,7 @@ BATCHES=$(( (PRS + 9) / 10 ))
 : > /tmp/agent_review_init.sh
 # Clear any read-only-guard baseline left by a previous run — the guard's `[ -f ] ||` capture
 # would otherwise reuse a stale snapshot for this run's drift checks.
-rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt
+rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt
 cat >> /tmp/agent_review_init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
 export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
@@ -778,11 +778,16 @@ Keep the review's bookkeeping out of git. Reviews write `.claude/review/metrics/
 `.claude/review/index/` cache on every run, so both are ignored. `feedback.jsonl` is committed and
 only ever appended to, so `merge=union` keeps both sides' lines when a branch merges the base
 branch locally. GitHub's web merge and "Update branch" ignore `.gitattributes`, so a conflict there
-is still fixed by merging locally. Each line is added once, on its own line:
+is still fixed by merging locally. Each line is added once, on its own line. A file is listed for
+the bootstrap commit only when it had no other changes before init touched it, so 3E never commits
+someone's unrelated edits:
 
 ```bash
 add_line() {
   [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
+  if [ -z "$(git status --porcelain -- "$1")" ] && ! grep -qxF -- "$1" /tmp/agent_review_init_stage.txt 2>/dev/null; then
+    printf '%s\n' "$1" >> /tmp/agent_review_init_stage.txt
+  fi
   [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
   printf '%s\n' "$2" >> "$1"
 }
@@ -889,8 +894,15 @@ The cache regenerates on demand and is git-ignored, so it stays out of the commi
 
 ```bash
 . /tmp/agent_review_init.sh 2>/dev/null || true
-git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml .gitignore .gitattributes
-[ -f .dockerignore ] && git add .dockerignore
+git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
+# Only the files whose one change is the lines 3C added.
+if [ -f /tmp/agent_review_init_stage.txt ]; then
+  while IFS= read -r f; do git add -- "$f"; done < /tmp/agent_review_init_stage.txt
+fi
+for f in .gitignore .gitattributes .dockerignore; do
+  grep -qxF -- "$f" /tmp/agent_review_init_stage.txt 2>/dev/null || [ -z "$(git status --porcelain -- "$f")" ] \
+    || echo "⚠️ $f had other changes before init, so its new lines are not staged. Commit them yourself."
+done
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

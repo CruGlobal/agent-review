@@ -2670,21 +2670,43 @@ test('init writes engine and reviews_run only for a non-default answer', () => {
   );
 });
 
-test("init ignores the review's metrics and index, and merges feedback.jsonl with union, once each, under bash and zsh", (t) => {
+test("init adds its ignore and attributes lines once each, and stages a file only when they are its one change, under bash and zsh", (t) => {
   const { writeFileSync } = require('node:fs');
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
   assert.ok(block, 'init has the .gitignore and .gitattributes block');
+  assert.ok(init.includes('rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt'), 'Stage 0 clears the stage list');
   const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
-  assert.ok(commit.includes(' .gitignore .gitattributes\n'), 'the bootstrap commit stages both files');
+  const staging = commit.slice(commit.indexOf('if [ -f /tmp/agent_review_init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
+  assert.ok(staging.includes('git add -- "$f"'), '3E stages from the list');
+  assert.ok(!/\.(gitignore|gitattributes|dockerignore)/.test(commit.slice(0, commit.indexOf(staging)).split('\n').filter((l) => l.startsWith('git add')).join('\n')), '3E never adds those files by name');
   for (const shell of availableShells(t)) {
     const dir = mkdtempSync(join(os.tmpdir(), 'ar-ignore-'));
     try {
-      writeFileSync(join(dir, '.gitignore'), 'node_modules/'); // no trailing newline
-      execFileSync(shell, ['-c', block], { cwd: dir });
-      execFileSync(shell, ['-c', block], { cwd: dir });
-      assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), 'node_modules/\n/.claude/review/metrics/\n/.claude/review/index/\n', shell);
-      assert.equal(readFileSync(join(dir, '.gitattributes'), 'utf8'), '.claude/review/learnings/feedback.jsonl merge=union\n', shell);
+      const tmp = join(dir, 'tmp');
+      const repo = join(dir, 'repo');
+      mkdirSync(tmp);
+      mkdirSync(repo);
+      const at = (text) => text.replaceAll('/tmp/', `${tmp}/`);
+      const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
+      git('init', '-q');
+      writeFileSync(join(repo, '.gitignore'), 'node_modules/'); // no trailing newline
+      writeFileSync(join(repo, '.gitattributes'), '*.png binary\n');
+      git('add', '.gitignore', '.gitattributes');
+      git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
+      writeFileSync(join(repo, '.gitattributes'), '*.png binary\n*.jpg binary\n'); // someone's uncommitted edit
+      writeFileSync(join(repo, '.dockerignore'), 'tmp/\n'); // untracked, and not init's
+      const script = at(`${block}\nadd_line .dockerignore '/.claude'\nadd_line .dockerignore 'CLAUDE.md'`);
+      execFileSync(shell, ['-c', script], { cwd: repo });
+      execFileSync(shell, ['-c', script], { cwd: repo });
+      const read = (f) => readFileSync(join(repo, f), 'utf8');
+      assert.equal(read('.gitignore'), 'node_modules/\n/.claude/review/metrics/\n/.claude/review/index/\n', `${shell}: added once, on its own line`);
+      assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n', shell);
+      assert.equal(read('.dockerignore'), 'tmp/\n/.claude\nCLAUDE.md\n', shell);
+      const out = execFileSync(shell, ['-c', at(staging)], { cwd: repo, encoding: 'utf8' });
+      assert.equal(git('diff', '--cached', '--name-only'), '.gitignore\n', `${shell}: only the file whose one change is init's lines is staged`);
+      assert.match(out, /\.gitattributes had other changes before init, so its new lines are not staged/, shell);
+      assert.match(out, /\.dockerignore had other changes before init/, shell);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
