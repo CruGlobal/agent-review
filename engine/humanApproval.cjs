@@ -33,8 +33,6 @@ function readBlock(configText) {
   return { always: block.always === true, paths: block.paths || [] };
 }
 
-// A pattern also covers everything under it, so a bare folder (`app/payments` or `app/payments/`)
-// means the whole folder, as in .gitignore. Matching more never lets the bot approve more.
 function pathMatches(file, pattern) {
   const folder = pattern.replace(/\/+$/, '');
   return minimatch(file, pattern, OPTS) || (folder !== '' && minimatch(file, `${folder}/**`, OPTS));

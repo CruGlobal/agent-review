@@ -70,7 +70,6 @@ runs:
         }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
         LABEL=needs-human-approval
-        # Marks the approvals this action posts, so a later run can find them.
         APPROVAL_MARKER='<!-- agent-review-approval -->'
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
         rm -rf "$RUNTIME_DIR"
@@ -102,8 +101,6 @@ runs:
             | jq -sr '[.[][] | select(.user.login == "github-actions[bot]") | select(.body | startswith("<!-- agent-review -->"))] | first | .body // empty' \
             > "$REPORT"
         fi
-        # No report never approves, but the rules re-check, the label and the
-        # dismissals below still run, as they do for a report that cannot be judged.
         if [ ! -s "$REPORT" ]; then
           echo "No agent-review report found for PR #$PR — not approving." | tee -a "$GITHUB_STEP_SUMMARY"
         fi
@@ -206,8 +203,7 @@ runs:
         case "$LABEL_ACTION" in
           add)
             # Adding a label that is already on the PR can log a new bot labeled
-            # event, which would make a person's label the bot's, so an unread
-            # label list never adds it.
+            # event, which would make a person's label the bot's.
             if [ "$LABEL_ON_PR" = true ]; then
               note "The $LABEL label is already on PR #$PR."
             elif [ "$LABELS_READ" != true ]; then
@@ -229,7 +225,7 @@ runs:
             fi
             ;;
         esac
-        # all: every approval this action posted. stale: only those on another head.
+        # all: every approval the bot posted. stale: only those on another head.
         # The runtime and this script are fetched separately and may differ in
         # version, so any value but none or stale is treated as all.
         case "$DISMISS" in
@@ -238,8 +234,6 @@ runs:
           *) DISMISS_MODE=all ;;
         esac
         if [ -n "$DISMISS_MODE" ]; then
-          # Only a failing report keeps known third-party bot approvals; every other
-          # reason withdraws every bot approval, as a person may be needed.
           OWN_ONLY=false
           if [ "$DISMISS_FOR" = failing-report ]; then OWN_ONLY=true; fi
           LIST_REVIEWS=true
@@ -258,10 +252,7 @@ runs:
             if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
               | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" \
                   --arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY" '
-                # ours: the marker, any approval text agent-review has ever posted, or the
-                # approval text this caller set. With own_only, a bot approval that is not
-                # ours stays only if it is a known approval from another workflow: a
-                # Dependabot auto-approval (no body) or ai-review-auto-approve.
+                # third_party: Dependabot auto-merge (no body) and ai-review-auto-approve.
                 def ours:
                   contains($marker)
                   or startswith("Auto-approved: the agent-review report for this head passes")

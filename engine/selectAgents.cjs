@@ -62,10 +62,7 @@ function contentMatches(contentText, trigger) {
   const raw = String(trigger || '');
   if (!raw) return false;
   const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  // Identifier-like triggers match whole language tokens, so `currency` never
-  // fires on `concurrency`. A trigger edge that is `_` or punctuation is open:
-  // `OKTA_` matches `OKTA_DOMAIN`, `__c` matches `Amount__c`, and `.round(`
-  // matches `total.round(2)`.
+  // A letter or digit edge needs a token boundary; a `_` or punctuation edge is open.
   const left = /^[A-Za-z0-9]/.test(raw) ? '(?:^|[^A-Za-z0-9_])' : '';
   const right = /[A-Za-z0-9]$/.test(raw) ? '(?![A-Za-z0-9_])' : '';
   return new RegExp(left + escaped + right, 'm').test(contentText);

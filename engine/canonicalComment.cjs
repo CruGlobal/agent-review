@@ -1,13 +1,10 @@
 'use strict';
-// The report a local run works from: the user's own marked comment, else the bot's. Anyone
-// else's could be a forged report, so it is never picked.
+// The user's own marked comment, else the bot's; never anyone else's, which could be forged.
 const { MARKER } = require('./approval.cjs');
 
 const BOT = 'github-actions[bot]';
 
-// `gh api --paginate` prints each page's JSON array one after another, with nothing between
-// them. Every page is read before the pick, so the result never depends on which page holds
-// which comment.
+// `gh api --paginate` prints each page's JSON array one after another, with nothing between.
 function readPages(text) {
   const comments = [];
   let depth = 0;

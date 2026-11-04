@@ -391,7 +391,6 @@ function feedbackForAddress(requestInput, resultInput, now = new Date().toISOStr
   });
 }
 
-// An open entry that a review reopened shows the dismissal it had before.
 function reopenedText(entry) {
   const prior = entry.previousDismissal;
   if (!prior || !(prior.by || prior.reasonCode || prior.reason)) return '';

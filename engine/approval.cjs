@@ -114,8 +114,8 @@ function cautionFor(result) {
 // dismissBotApprovals: 'all' | 'stale' | 'none'. 'all' whenever a person is needed,
 // a person's label is on the PR, or the report for the PR's head does not pass.
 // 'stale' means the bot's approvals of other heads; only unreadable rules dismiss those.
-// dismissFor: 'person' | 'failing-report' | 'unchecked' | 'none'. Only 'failing-report'
-// lets the action keep known third-party bot approvals; it needs readable rules and labels.
+// dismissFor: 'person' | 'failing-report' | 'unchecked' | 'none'; the action keeps
+// third-party bot approvals only for 'failing-report'.
 function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   const { result, judged } = judge(report, { head });
   const caution = cautionFor(result);
@@ -129,8 +129,6 @@ function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
   });
   const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === 'string');
   const present = labelsOk && labels.some((l) => l.toLowerCase() === LABEL);
-  // An unreadable label list never adds the label: if a person's label is on the PR, adding it
-  // again would log a bot event and make it look like the bot's.
   const addLabel = labelsOk && !present ? 'add' : 'keep';
   const plain = rules !== null && typeof rules === 'object' && !Array.isArray(rules);
   const ruleOk =

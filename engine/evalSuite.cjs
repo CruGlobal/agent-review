@@ -68,7 +68,6 @@ function validateSuite(raw, { suitePath } = {}) {
       if (!Number.isFinite(min) || min < 1 || min > 10) {
         throw new Error(`case ${c.id}/${e.id} has invalid min_severity`);
       }
-      // A must_block: false finding matches only below the blocker threshold.
       if (e.must_block === false && e.min_severity != null && min >= blockerThreshold) {
         throw new Error(
           `case ${c.id}/${e.id} has must_block: false with min_severity ${min}, which is not below blocker_threshold ${blockerThreshold}, so it can never match`,
@@ -213,7 +212,6 @@ function scoreSuite(suiteInput, runsInput) {
     seenRuns.add(key);
 
     const expected = (c.expected || []).filter((e) => e.must_block !== false);
-    // must_block: false is a real finding the review should raise below the blocker bar.
     const suggestions = (c.expected || []).filter((e) => e.must_block === false);
     const unmatchedActual = new Set(run.findings.map((_, i) => i));
     const matched = [];
@@ -233,7 +231,6 @@ function scoreSuite(suiteInput, runsInput) {
       }
       category.set(cat, cs);
     }
-    // A suggestion matches only below the blocker bar, so blocking on it stays a false blocker.
     const matchedSuggestions = [];
     for (const e of suggestions) {
       totals.expectedSuggestions++;
@@ -269,7 +266,6 @@ function scoreSuite(suiteInput, runsInput) {
       else falseBlockers++;
     });
     totals.falsePositiveBlockers += falseBlockers;
-    // Clean controls and seeded cases that expect no blocker must both pass review.
     const expectsNoBlocker = expected.length === 0;
     if (expectsNoBlocker) {
       totals.cleanRuns++;
