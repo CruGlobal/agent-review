@@ -258,6 +258,8 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           BASE_REF: ${{ github.event.pull_request.base.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # The review skill needs shell orchestration, but PR content is
           # attacker-influenceable. Scrub API/GitHub secrets from every Bash
           # subprocess; the deterministic post-step below owns GitHub writes.

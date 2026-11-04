@@ -1797,7 +1797,6 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
     ['if [ "$DISMISS_FOR" = failing-report ]; then OWN_ONLY=true; fi', 'only a failing report keeps third-party approvals'],
     ['DISMISS_FOR=$(printf \'%s\' "$DECISION" | jq -r \'.dismissFor // "unchecked"\')', 'a missing reason is the strict one'],
     ['def third_party: . == "" or startswith("## AI Review Auto-Approval");', 'Dependabot and ai-review-auto-approve approvals are left alone'],
-    ['or ($configured != "" and startswith($configured));', 'the caller\'s own approval text counts as ours'],
     ['| select($mode == "all" or .commit_id != $head)', 'stale means another head'],
     ['| select($now == $head or .commit_id != $now)', 'an approval of a head that moved in is kept'],
     ["APPROVAL_MARKER='<!-- agent-review-approval -->'", 'the marker is one fixed string'],
@@ -1806,7 +1805,17 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
     assert.ok(run.includes(part), why);
   }
   assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD"'));
-  assert.ok(run.includes('--arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY"'));
+  assert.ok(run.includes('--arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" \''));
+  // A configured body that is not a third party's is selected by `third_party | not`
+  // anyway, and every approval since the marker carries it, so `ours` needs no
+  // caller text and the two actions can share one definition.
+  const ours = (text) => {
+    const m = text.match(/def ours:([\s\S]*?);/);
+    assert.ok(m, 'defines ours');
+    return m[1].replace(/\s+/g, ' ').trim();
+  };
+  const withdraw = parse(readFileSync(join(ROOT, '.github/actions/withdraw/action.yml'), 'utf8')).runs.steps.map((s) => s.run || '').join('\n');
+  assert.equal(ours(run), ours(withdraw), 'the approve and withdraw actions agree on which approvals are the bot\'s own');
   assert.ok(run.includes('*) DISMISS_MODE=all ;;'), 'a dismiss value from another engine version fails closed to all');
   // Bash before 4.4 calls an empty array unbound under set -u, so the script
   // keeps to plain strings; engine/approveAction.test.cjs runs it on the system bash.
@@ -2028,11 +2037,13 @@ test('withdraw.yml and its action read the PR through the API and never check ou
 
   const action = parse(readFileSync(join(ROOT, '.github/actions/withdraw/action.yml'), 'utf8'));
   assert.equal(action.runs.using, 'composite');
-  assert.deepEqual(Object.keys(action.inputs), ['pr_number']);
+  assert.deepEqual(Object.keys(action.inputs), ['pr_number', 'expected_head']);
+  assert.equal(action.inputs.expected_head.default, '', 'withdraw.yml callers read the head from the API');
   assert.deepEqual(action.runs.steps.map((s) => s.uses).filter(Boolean), [], 'no checkout, of the PR or anything else');
   const step = action.runs.steps.find((s) => s.run);
-  assert.deepEqual(Object.keys(step.env).sort(), ['GH_TOKEN', 'PR', 'REPO', 'SERVER_URL']);
+  assert.deepEqual(Object.keys(step.env).sort(), ['EVENT_ACTION', 'EVENT_NAME', 'EXPECTED_HEAD', 'GH_TOKEN', 'PR', 'REPO', 'SERVER_URL']);
   assert.equal(step.env.PR, '${{ inputs.pr_number }}');
+  assert.equal(step.env.EXPECTED_HEAD, '${{ inputs.expected_head }}');
   const run = step.run;
   assert.ok(!run.includes('${{'), 'every value reaches the script through env');
   for (const [part, why] of [
@@ -2067,6 +2078,15 @@ test('withdraw.yml and its action read the PR through the API and never check ou
   assert.match(writes[0].trim(), /^if api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
 });
 
+test('CI reviews get the base and default branch names, so a base merge is skipped only on the default branch', () => {
+  const { parse } = require('yaml');
+  const step = parse(readFileSync(REVIEW_WORKFLOW, 'utf8')).jobs.review.steps.find((s) => s.uses === 'anthropics/claude-code-action@v1');
+  assert.equal(step.env.PR_BASE_BRANCH, '${{ github.event.pull_request.base.ref }}');
+  assert.equal(step.env.DEFAULT_BRANCH, '${{ github.event.repository.default_branch }}');
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  assert.ok(skill.includes('elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ] && [ -n "$ON_DEFAULT" ]; then'), 'only the base-merge skip needs the default branch');
+});
+
 test('interact takes back the bot\'s approval right after it pushes, since that push starts no workflow', () => {
   const { parse } = require('yaml');
   const steps = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs.publish.steps;
@@ -2076,7 +2096,8 @@ test('interact takes back the bot\'s approval right after it pushes, since that 
   assert.ok(withdraw > push, 'the withdraw step follows the push');
   assert.equal(withdraw, push + 1, 'nothing that can fail the job sits between the push and the withdraw step');
   assert.equal(steps[withdraw].if, "steps.push.outputs.pushed_sha != ''");
-  assert.deepEqual(steps[withdraw].with, { pr_number: '${{ inputs.pr_number }}' });
+  // GitHub moves the PR head a moment after the push; the action waits for this commit.
+  assert.deepEqual(steps[withdraw].with, { pr_number: '${{ inputs.pr_number }}', expected_head: '${{ steps.push.outputs.pushed_sha }}' });
   assert.ok(withdraw < at((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main'), 'before the approve step');
 });
 
@@ -4744,8 +4765,9 @@ test('a push that only merged the base branch moves the last report to the new h
       'The report body.',
       '',
     ].join('\n');
-  const CI = { BASE_REF: base, CI_MODE: '1', PR_NUMBER: '7', AGENT_REVIEW_PREVIOUS_COMMENT: '/tmp/previous_comment.md', AGENT_REVIEW_COMMENT_OUT: '/tmp/agent_review_comment.md' };
-  const LOCAL = { BASE_REF: base, INCREMENTAL_REQUESTED: '1', PR_NUMBER: '7' };
+  const ON_MAIN = { PR_BASE_BRANCH: 'main', DEFAULT_BRANCH: 'main' };
+  const CI = { BASE_REF: base, CI_MODE: '1', PR_NUMBER: '7', AGENT_REVIEW_PREVIOUS_COMMENT: '/tmp/previous_comment.md', AGENT_REVIEW_COMMENT_OUT: '/tmp/agent_review_comment.md', ...ON_MAIN };
+  const LOCAL = { BASE_REF: base, INCREMENTAL_REQUESTED: '1', PR_NUMBER: '7', ...ON_MAIN };
   const PARTS = ['agent_review_comment.md', 'agent_review_status.json', 'agent_review_ledger.json', 'agent_review_report.md', 'review_env.sh'];
   // Stale files from an earlier local run must never be posted with the moved report.
   const stale = { 'agent_review_ledger.json': '[{"n":9}]\n', 'agent_review_status.json': '{"v":1,"head":"0000000","pass":false}\n', 'agent_review_report.md': 'stale\n' };
@@ -4772,6 +4794,19 @@ test('a push that only merged the base branch moves the last report to the new h
       assert.ok(ci.output.includes(`${SKIPPED} Exiting.`), `${shell}: CI stops here: ${ci.output}`);
       assert.strictEqual(ci.wanted['agent_review_comment.md'], previous(merged), `${shell}: CI hands the moved report to the publish step`);
       assert.ok(!ci.output.includes('Diff range:'), `${shell}: nothing is reviewed`);
+
+      // The author can push to any branch but the default one, or retarget the PR to one, and merge it in.
+      for (const [label, branches] of [
+        ['CI, a clean merge of a base that is not the default branch', { PR_BASE_BRANCH: 'feature', DEFAULT_BRANCH: 'main' }],
+        ['CI, a clean merge when the default branch is unknown', { PR_BASE_BRANCH: 'main', DEFAULT_BRANCH: '' }],
+      ]) {
+        const notDefault = run(label, { ...CI, HEAD_REF: merged, ...branches });
+        reviewed(notDefault, label);
+        assert.ok(notDefault.output.includes("its base is not the repo's default branch, so this is a full review"), `${shell}, ${label}: ${notDefault.output}`);
+        assert.ok(notDefault.wanted['review_env.sh'].includes('CARRY_LEDGER="true"'), `${shell}, ${label}: the full review keeps the findings ledger`);
+      }
+      const cancelOffDefault = run('CI, commits that cancel out on a base that is not the default branch', { ...CI, HEAD_REF: cancelled, PR_BASE_BRANCH: 'feature' });
+      assert.ok(cancelOffDefault.output.includes('No net changes since the last reviewed head'), `${shell}: an unchanged tree still needs no review: ${cancelOffDefault.output}`);
 
       const older = run('CI, an older base commit merged while the base moved on', { ...CI, BASE_REF: baseNext, HEAD_REF: merged });
       moved(older, 'CI, an older base commit');

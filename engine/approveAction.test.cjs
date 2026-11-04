@@ -75,9 +75,14 @@ case "$METHOD $URL" in
   "GET repos/o/r/issues/7/labels?per_page=100") serve labels labels.json ;;
   "GET repos/o/r/issues/7/timeline?per_page=100") serve timeline timeline.json ;;
   "GET repos/o/r/pulls/7/reviews?per_page=100") serve reviews reviews.json ;;
+  "GET repos/o/r/pulls/7/reviews/"*)
+    if has already-dismissed; then echo '{"state":"DISMISSED"}' > "$FIX/../review.json"; else echo '{"state":"APPROVED"}' > "$FIX/../review.json"; fi
+    emit "$FIX/../review.json" ;;
   "POST repos/o/r/issues/7/labels") has fail-label-add && exit 1; echo '[]' ;;
   "DELETE repos/o/r/issues/7/labels/needs-human-approval") has fail-label-remove && exit 1; echo '[]' ;;
-  "PUT repos/o/r/pulls/7/reviews/"*"/dismissals") has fail-dismiss && exit 1; echo '{}' ;;
+  "PUT repos/o/r/pulls/7/reviews/"*"/dismissals")
+    has already-dismissed && { echo "gh: Can not dismiss a dismissed pull request review (HTTP 422)" >&2; exit 1; }
+    has fail-dismiss && exit 1; echo '{}' ;;
   "POST repos/o/r/pulls/7/reviews")
     has fail-approve && { echo "gh: not permitted to approve (HTTP 422)" >&2; exit 1; }
     for f in "\${FIELDS[@]}"; do
@@ -331,6 +336,23 @@ const SCENARIOS = {
       assert.equal(o.approved, APPROVED, 'it approved the judged head first');
       assert.deepEqual(o.dismissed, [501], 'then took back exactly that approval');
       assert.match(o.summary, /The head of PR #7 moved while it was being approved, so the bot took back its approval of a{40}\./);
+    },
+  ],
+  'a moved head whose approval a withdraw run already took back is noted, not warned about': [
+    { 'pr-after.json': prJson({ head: { sha: OLD } }), 'already-dismissed': '' },
+    (o) => {
+      assert.deepEqual(o.dismissed, [501]);
+      assert.ok(!o.stdout.includes('::warning::'), o.stdout);
+      assert.match(o.summary, /The head of PR #7 moved while it was being approved, and the bot's approval of a{40} was already taken back\./);
+    },
+  ],
+  'earlier approvals a withdraw run already dismissed are noted, not warned about': [
+    { config: PCI, 'reviews.json': REVIEWS, 'already-dismissed': '' },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
+      assert.ok(!o.stdout.includes('::warning::'), o.stdout);
+      assert.equal((o.summary.match(/The bot's earlier approval on PR #7 was already dismissed/g) || []).length, 4);
     },
   ],
   'a head that cannot be read after approving keeps the approval and warns': [

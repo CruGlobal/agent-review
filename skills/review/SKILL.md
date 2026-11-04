@@ -248,6 +248,8 @@ EOF
 # --- Build the diff manifest the whole review runs on ---
 BASE_REF="${BASE_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefOid -q .baseRefOid 2>/dev/null || true)}"
 HEAD_REF="${HEAD_REF:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json headRefOid -q .headRefOid 2>/dev/null || true)}"
+PR_BASE_BRANCH="${PR_BASE_BRANCH:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json baseRefName -q .baseRefName 2>/dev/null || true)}"
+DEFAULT_BRANCH="${DEFAULT_BRANCH:-$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || true)}"
 if [ -n "$BASE_REF" ] && ! git cat-file -e "$BASE_REF^{commit}" 2>/dev/null; then
   echo "❌ The PR's base commit $BASE_REF is not in this clone. Fetch the base branch (git fetch origin), then re-run."
   exit 1
@@ -368,15 +370,19 @@ writeFileSync("/tmp/agent_review_report.md", body.join("\n").replace(/\n*$/, "\n
 # head merged with the base. Both need exactly one merge base: with two, a merge can drop
 # base-branch changes that no one merge base shows, and with none the fork point is unknown. A
 # moved fork point, or two merge bases, otherwise gets a full review that keeps the findings ledger.
+# A merge carries the report only when the base is the repo's default branch: the author can push
+# to any other branch, or retarget the PR to one, and merge that in.
 CARRY_LEDGER=""
 if [ -n "$INCREMENTAL" ]; then
   ALL_BASES=$(git merge-base --all "$BASE_REF" "$HEAD_REF" 2>/dev/null) || ALL_BASES=""
   LAST_FORK=$(git merge-base "$BASE_REF" "$LAST_REVIEWED" 2>/dev/null) || LAST_FORK=""
+  ON_DEFAULT=""
+  [ -n "$DEFAULT_BRANCH" ] && [ "$PR_BASE_BRANCH" = "$DEFAULT_BRANCH" ] && ON_DEFAULT="true"
   KEPT_TREE="" NOTE=""
   if [ -n "$ALL_BASES" ] && [ "$ALL_BASES" = "$PR_BASE" ] && [ "$LAST_FORK" = "$PR_BASE" ]; then
     KEPT_TREE=$(git rev-parse "$LAST_REVIEWED^{tree}")
     NOTE="✅ No net changes since the last reviewed head — nothing to review. Exiting."
-  elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ]; then
+  elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ] && [ -n "$ON_DEFAULT" ]; then
     # merge-tree writes the trees it builds. A throwaway object store under /tmp, the only place
     # the CI sandbox can write, keeps them out of .git. A conflict or any error leaves no tree.
     if MERGE_OBJECTS=$(mktemp -d /tmp/agent_review_merge_tree.XXXXXX) \
@@ -393,6 +399,9 @@ if [ -n "$INCREMENTAL" ]; then
     INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   elif [ -n "$ALL_BASES" ] && [ "$ALL_BASES" != "$PR_BASE" ]; then
     echo "⚠️  The PR has more than one merge base with its base branch, so this is a full review. Merging the base branch again makes later reviews incremental."
+    INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
+  elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ] && [ -z "$ON_DEFAULT" ]; then
+    echo "⚠️  The PR's fork point moved, and its base is not the repo's default branch, so this is a full review."
     INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ]; then
     echo "⚠️  The PR merged its base branch since $LAST_REVIEWED along with other changes, so this is a full review."

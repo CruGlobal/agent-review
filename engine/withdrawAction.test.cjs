@@ -64,7 +64,8 @@ case "$METHOD $URL" in
     N=$(( $(cat "$FIX/../pr-reads" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$FIX/../pr-reads"
     if [ "$N" -ge 2 ] && has fail-pr-later; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
-    if [ "$N" -ge 2 ] && has pr-later.json; then emit "$FIX/pr-later.json"; else emit "$FIX/pr.json"; fi ;;
+    if has stale-reads && [ "$N" -le "$(cat "$FIX/stale-reads")" ]; then emit "$FIX/pr-stale.json"
+    elif [ "$N" -ge 2 ] && has pr-later.json; then emit "$FIX/pr-later.json"; else emit "$FIX/pr.json"; fi ;;
   "GET repos/o/r/pulls/7/reviews?per_page=100")
     has fail-reviews && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     if has fail-reviews-once && [ ! -e "$FIX/../reviews-failed" ]; then
@@ -285,8 +286,13 @@ function setup() {
 }
 
 // The fixture's default branch is the PR's base unless a scenario says otherwise.
-const pr = ({ head, base = 'main', state = 'open', defaultBranch = base }) =>
-  JSON.stringify({ state, head: { sha: head }, base: { ref: base, repo: { default_branch: defaultBranch } } });
+const pr = ({ head, base = 'main', state = 'open', defaultBranch = base, labels = [] }) =>
+  JSON.stringify({
+    state,
+    head: { sha: head },
+    base: { ref: base, repo: { default_branch: defaultBranch } },
+    labels: labels.map((name) => ({ name })),
+  });
 const APPROVED_AT = '2026-11-02T12:00:00Z';
 const review = (id, commit, { login = BOT, state = 'APPROVED', body = BODY, submitted = APPROVED_AT } = {}) => ({
   id,
@@ -298,17 +304,37 @@ const review = (id, commit, { login = BOT, state = 'APPROVED', body = BODY, subm
 });
 const baseChanged = (at) => ({ event: 'base_ref_changed', created_at: at, actor: { login: 'alice' } });
 
-function run(name, { head, base, defaultBranch, state, reviews = [], timeline = [], later, files = {}, prNumber = '7' }) {
+function run(
+  name,
+  {
+    head,
+    base,
+    defaultBranch,
+    state,
+    labels,
+    reviews = [],
+    timeline = [],
+    later,
+    stale,
+    files = {},
+    prNumber = '7',
+    expectedHead = '',
+    event = 'pull_request_target',
+    action = 'synchronize',
+  },
+) {
   const dir = path.join(TMP, 'runs', name.replace(/[^a-z0-9]+/gi, '-').slice(0, 60));
   const fix = path.join(dir, 'fix');
   const runner = path.join(dir, 'tmp');
   for (const d of [fix, runner]) fs.mkdirSync(d, { recursive: true });
   const all = {
-    'pr.json': pr({ head, base, state, defaultBranch }),
+    'pr.json': pr({ head, base, state, defaultBranch, labels }),
     // Two pages, as gh --paginate prints them.
     'reviews.json': JSON.stringify(reviews.slice(0, 1)) + JSON.stringify(reviews.slice(1)),
     'timeline.json': JSON.stringify([{ event: 'commented' }]) + JSON.stringify(timeline),
-    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch }) } : {}),
+    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch, labels }) } : {}),
+    // The PR as GitHub shows it for the first `count` reads, before the head moves to the push.
+    ...(stale ? { 'pr-stale.json': pr({ head: stale.head, base, defaultBranch, labels }), 'stale-reads': String(stale.count) } : {}),
     ...files,
   };
   for (const [f, v] of Object.entries(all)) fs.writeFileSync(path.join(fix, f), v);
@@ -324,9 +350,13 @@ function run(name, { head, base, defaultBranch, state, reviews = [], timeline = 
     GH_TOKEN: TOKEN,
     EXPECTED_AUTH: TOKEN_HEADER,
     AGENT_REVIEW_RETRY_DELAY: '0',
+    AGENT_REVIEW_POLL_DELAY: '0',
     REPO: 'o/r',
     PR: prNumber,
+    EXPECTED_HEAD: expectedHead,
     SERVER_URL: `file://${SERVER}`,
+    EVENT_NAME: event,
+    EVENT_ACTION: action,
   };
   for (const f of [env.GH_LOG, env.GIT_LOG, env.GITHUB_STEP_SUMMARY]) fs.writeFileSync(f, '');
   return new Promise((resolve) => {
@@ -410,14 +440,54 @@ const SCENARIOS = {
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
       assert.equal(o.messages.length, 1);
-      const [m] = o.messages;
-      assert.ok(
-        m.startsWith(`agent-review: this PR changed after the bot approved ${C.X.slice(0, 7)} (new commits, or a new base branch), so the bot took back its approval.`),
-        m,
-      );
-      assert.ok(m.includes('Run /agent-review:re-review (or /agent-review:review) and post the report.'), m);
-      assert.ok(m.includes('The bot approves again when the report passes for the new head.'), m);
+      assert.deepEqual(o.messages, [
+        `agent-review: the bot took back its approval of ${C.X.slice(0, 7)} because the PR changed beyond merging in the default branch. ` +
+          'Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head.',
+      ]);
       assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\): the PR changed beyond merging in the default branch\\.`));
+    },
+  ],
+  'on a push to a PR with the review label, the message says the CI review runs again': [
+    () => ({ head: C.NEW, labels: ['agent-review'], reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.equal(o.messages.length, 1);
+      assert.ok(o.messages[0].endsWith(' The CI review runs again on its own, and the bot approves again when it passes.'), o.messages[0]);
+    },
+  ],
+  'a base change on a labelled PR starts no CI review, so the message asks for a re-review': [
+    () => ({ head: C.NEW, action: 'edited', labels: ['agent-review'], reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].includes('Run /agent-review:re-review'), o.messages[0]),
+  ],
+  'a fetch failure says so in the PR, not that the PR changed': [
+    () => ({ head: C.MERGE1, reviews: [review(21, 'e'.repeat(40))] }),
+    (o) => {
+      assert.ok(o.messages[0].includes(' because it could not fetch the approved commit. '), o.messages[0]);
+      assert.equal(o.gitCalls.filter((c) => c.includes(` fetch `) && c.endsWith('e'.repeat(40))).length, 3, 'the fetch is tried three times');
+    },
+  ],
+  'an interact push: GitHub shows the old head at first, so the action waits for the pushed one': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 2 }, event: 'issue_comment', action: 'created', labels: ['agent-review'], reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'the approval of the old head is a candidate and is withdrawn');
+      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 4, 'two stale reads, the matching read, then the read before dismissing');
+      assert.ok(!o.stdout.includes('::warning::'));
+      assert.ok(o.messages[0].includes('Run /agent-review:re-review'), 'a workflow-token push starts no CI review');
+    },
+  ],
+  'an interact push GitHub never shows is judged anyway, with a loud warning': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'the stale head is not read again, so it cannot keep the old approval');
+      assert.match(o.stdout, new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7\\.`, 'm'));
+      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls');
+    },
+  ],
+  'an expected head that is not a SHA is refused': [
+    () => ({ head: C.NEW, expectedHead: 'main', reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      noGit(o);
+      assert.match(o.stdout, /^::warning::agent-review withdraw got an expected head that is not a commit SHA/m);
     },
   ],
   'a merge of the base branch with an extra change withdraws': [
@@ -465,14 +535,14 @@ const SCENARIOS = {
     () => ({ head: C.MERGE1, reviews: [review(21, 'e'.repeat(40))] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /\(review 21\): could not fetch the approved commit\./);
+      assert.match(o.summary, /\(review 21\): it could not fetch the approved commit\./);
     },
   ],
   'a base branch that cannot be fetched withdraws every candidate': [
     () => ({ head: C.MERGE1, base: 'gone', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /\(review 21\): could not fetch the PR's base branch and head\./);
+      assert.match(o.summary, /\(review 21\): it could not fetch the PR's base branch and head\./);
     },
   ],
   'a PR retargeted onto a branch the author pushed to, which it then merged in, withdraws': [
@@ -492,7 +562,7 @@ const SCENARIOS = {
     () => ({ head: C.MERGE1, reviews: [review(21, C.X)], timeline: [baseChanged('2026-11-03T08:00:00Z')] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /\(review 21\): the PR's base branch changed after it was approved\./);
+      assert.match(o.summary, /\(review 21\): the PR's base branch changed after the approval\./);
     },
   ],
   'a base change in the same second as the approval withdraws': [
@@ -511,7 +581,7 @@ const SCENARIOS = {
     }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /\(review 21\): the PR's base branch changed after it was approved\./);
+      assert.match(o.summary, /\(review 21\): the PR's base branch changed after the approval\./);
     },
   ],
   'a base change before the approval keeps it': [
@@ -522,14 +592,14 @@ const SCENARIOS = {
     () => ({ head: C.MERGE1, reviews: [review(21, C.X)], files: { 'fail-timeline': '' } }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /\(review 21\): could not read when the PR's base branch last changed\./);
+      assert.match(o.summary, /\(review 21\): it could not read when the PR's base branch last changed\./);
     },
   ],
   'an approval with no time withdraws': [
     () => ({ head: C.MERGE1, reviews: [review(21, C.X, { submitted: null })] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.summary, /\(review 21\): could not read when it was approved\./);
+      assert.match(o.summary, /\(review 21\): it could not read when the approval was given\./);
     },
   ],
   'each approved commit is judged on its own': [

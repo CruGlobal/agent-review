@@ -464,6 +464,7 @@ jobs:
         uses: CruGlobal/agent-review/.github/actions/withdraw@main
         with:
           pr_number: ${{ inputs.pr_number }}
+          expected_head: ${{ steps.push.outputs.pushed_sha }}
       - name: Finalize and publish the trusted ledger update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
