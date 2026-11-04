@@ -10,6 +10,11 @@ on:
       pr_number:
         type: string
         required: true
+      expected_head:
+        description: The PR head SHA from the triggering event; empty reads it from the API
+        type: string
+        required: false
+        default: ''
 
 jobs:
   withdraw:
@@ -28,3 +33,4 @@ jobs:
       - uses: CruGlobal/agent-review/.github/actions/withdraw@main
         with:
           pr_number: ${{ inputs.pr_number }}
+          expected_head: ${{ inputs.expected_head }}

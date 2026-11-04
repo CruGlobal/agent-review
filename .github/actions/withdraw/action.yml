@@ -13,9 +13,10 @@ inputs:
     required: true
   expected_head:
     description: >-
-      The commit the caller just pushed to the PR. GitHub moves the PR's head a
-      moment after a push, so the action waits for it, and judges against this
-      commit even if the API never shows it.
+      The commit the PR's head moved to, from the push the caller made or the
+      event it got. GitHub moves the PR's head in its API a moment after a push,
+      so the action waits for it, and judges against this commit even if the
+      API never shows it.
     required: false
     default: ''
 runs:
@@ -86,13 +87,15 @@ runs:
           done
           if [ "$(jq -r '.head.sha // empty' "$WORK/pr.json")" != "$EXPECTED_HEAD" ]; then
             HEAD_SEEN=false
-            warn "GitHub still does not show $EXPECTED_HEAD, which was just pushed, as the head of PR #$PR. Judging against it anyway, and taking back older approvals without reading the head again."
+            warn "GitHub still does not show $EXPECTED_HEAD, which was just pushed, as the head of PR #$PR. Judging against it anyway; an approval is taken back only while the PR's branch is still at that commit."
           fi
         fi
         STATE=$(jq -r '.state // empty' "$WORK/pr.json")
         HEAD_SHA=${EXPECTED_HEAD:-$(jq -r '.head.sha // empty' "$WORK/pr.json")}
         BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
         DEFAULT_BRANCH=$(jq -r '.base.repo.default_branch // empty' "$WORK/pr.json")
+        HEAD_REPO=$(jq -r '.head.repo.full_name // empty' "$WORK/pr.json")
+        HEAD_BRANCH=$(jq -r '.head.ref // empty' "$WORK/pr.json")
         if [ "$STATE" != open ]; then
           note "PR #$PR is not open, so no approval was withdrawn."
           exit 0
@@ -226,12 +229,36 @@ runs:
           only_base_merged "$approved"
         }
 
-        # A CI review re-runs on its own only for a push or reopen of a PR that
-        # carries the review label; a base change or a workflow-token push starts none.
+        # The API's PR head can lag a push, but the branch moves at push time.
+        # Without a fresh head, an approval is dismissed only while the branch is
+        # still at the pushed commit. Sets BRANCH_HEAD when the branch was read.
+        branch_at_expected() {
+          local path
+          BRANCH_HEAD=""
+          [[ "$HEAD_REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] && [ -n "$HEAD_BRANCH" ] || return 1
+          path=$(jq -rn --arg b "$HEAD_BRANCH" '$b | split("/") | map(@uri) | join("/")') || return 1
+          BRANCH_HEAD=$(api "repos/$HEAD_REPO/git/ref/heads/$path" --jq .object.sha) || { BRANCH_HEAD=""; return 1; }
+          [ "$BRANCH_HEAD" = "$EXPECTED_HEAD" ]
+        }
+
+        # A CI review re-runs on its own only for a push or reopen of a PR from
+        # this repo that carries the review label, in a repo whose CI caller
+        # keeps the template's label gate. Anything else gets the re-review
+        # wording; a base change or a workflow-token push starts no CI review.
+        ci_review_reruns() {
+          local ref
+          [ "$EVENT_NAME" = pull_request_target ] || return 1
+          [ "$EVENT_ACTION" = synchronize ] || [ "$EVENT_ACTION" = reopened ] || return 1
+          [ "$HEAD_REPO" = "$REPO" ] || return 1
+          jq -e 'any(.labels[]?; .name == "agent-review")' "$WORK/pr.json" > /dev/null || return 1
+          ref=$(jq -rn --arg b "$DEFAULT_BRANCH" '$b | @uri') || return 1
+          api "repos/$REPO/contents/.github/workflows/agent-review.yml?ref=$ref" --jq .content > "$WORK/caller.b64" || return 1
+          base64 -d < "$WORK/caller.b64" > "$WORK/caller.yml" 2> /dev/null || return 1
+          grep -qF "contains(github.event.pull_request.labels.*.name, 'agent-review') &&" "$WORK/caller.yml" \
+            && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$WORK/caller.yml"
+        }
         NEXT="Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head."
-        if [ "$EVENT_NAME" = pull_request_target ] \
-          && { [ "$EVENT_ACTION" = synchronize ] || [ "$EVENT_ACTION" = reopened ]; } \
-          && jq -e 'any(.labels[]?; .name == "agent-review")' "$WORK/pr.json" > /dev/null; then
+        if ci_review_reruns; then
           NEXT="The CI review runs again on its own, and the bot approves again when it passes."
         fi
 
@@ -251,6 +278,13 @@ runs:
               note "The head of PR #$PR is $COMMIT again, so the bot's approval of it is kept (review $REVIEW_ID)."
               continue
             fi
+          elif ! branch_at_expected; then
+            if [[ "$BRANCH_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+              note "The branch of PR #$PR moved on to $BRANCH_HEAD, so the bot's approval of $COMMIT is left to the run for that push (review $REVIEW_ID)."
+            else
+              warn "could not read the branch of PR #$PR, so the bot's approval of $COMMIT was not withdrawn (review $REVIEW_ID). A person must dismiss it."
+            fi
+            continue
           fi
           MESSAGE="agent-review: the bot took back its approval of ${COMMIT:0:7} because $WHY. $NEXT"
           if api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="$MESSAGE" -f event=DISMISS > /dev/null; then

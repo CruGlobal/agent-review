@@ -94,9 +94,10 @@ only. Read each from the existing file and apply it into the fresh copy:
   `rollout_mode`, keep the repo's version of those lines.
 - **Pinned refs**: if the repo pinned `uses: CruGlobal/agent-review/...@<ref>` to something
   other than `@main`, keep their ref and mention it — pinning is a deliberate consumer choice.
-  The approve file's `withdraw` job calls `withdraw.yml`, which exists only from v1.1.2 on. A
-  ref older than that would break the whole file on every event, so ask which ref the
-  `withdraw` job should use instead of copying the old pin onto it.
+  The approve file's `withdraw` job calls `withdraw.yml` with an `expected_head` input, which
+  exists only from v1.1.3 on (`withdraw.yml` itself from v1.1.2). A ref older than v1.1.3 would
+  break the whole file on every event, so ask which ref the `withdraw` job should use instead of
+  copying the old pin onto it.
 
 Everything else — job structure, permissions blocks, inputs like `comment_id`, and the
 `# agent-review-template-version:` marker — comes from the fresh template unchanged. Never

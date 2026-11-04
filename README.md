@@ -86,9 +86,10 @@ approval after a push ("Dismiss stale pull request approvals" is off), new code 
 merge on an old approval. So `agent-review-approve.yml` also runs a small job on every push to
 the PR, when it is reopened, and when its base branch changes, and `@claude fix` does the same
 after it pushes. It dismisses the bot's own approval of an older commit, with a note that says
-why and what to do. On a PR with the `agent-review` label, a push or reopen starts the CI review
-again on its own. Otherwise run `/agent-review:re-review` (or `/agent-review:review`) and post the
-report. Either way, the bot approves again when the report passes for the new head.
+why and what to do. On a PR from this repo with the `agent-review` label, in a repo whose CI
+caller keeps the template's label gate, a push or reopen starts the CI review again on its own.
+Otherwise run `/agent-review:re-review` (or `/agent-review:review`) and post the report. Either
+way, the bot approves again when the report passes for the new head.
 
 It keeps the approval only when the push merged in the repo's default branch (usually `main` or
 `master`) and nothing else, so the PR's own changes are still exactly the ones the bot approved.
@@ -490,7 +491,8 @@ The `withdraw` job in `agent-review-approve.yml` runs on `pull_request_target` a
 `withdraw.yml`, which runs the composite action `.github/actions/withdraw`. No AI runs in it. It
 runs on `synchronize`, on `reopened` (a push while the PR was closed moves its head with no
 `synchronize`), and on `edited` only when `changes.base` is set. An edit to the title or body
-alone runs nothing.
+alone runs nothing. It passes the event's head SHA as `expected_head`, so a first read of the PR
+that still shows the old head cannot hide the approval it must take back.
 
 **Which approvals.** Only the bot's own approvals pinned to a commit other than the PR's current
 head: those that carry the `<!-- agent-review-approval -->` marker, and older ones that open
@@ -540,7 +542,12 @@ rate limit), the job warns once and passes. It never fails red.
 pushes, before any later step can fail the job. It passes the pushed commit as `expected_head`.
 GitHub moves the PR's head a moment after a push, so the action waits up to a minute for the API
 to show it, and judges against that commit either way. If the API never shows it, the action
-warns, and takes back older approvals without reading the head again.
+warns, and reads the PR's branch instead. It takes back an approval only while the branch is still
+at the pushed commit, so a newer push or a force-push back is left to its own run. The step has
+a 5-minute timeout and `continue-on-error`, so a hung fetch cannot hold up the ledger update.
+When it does not finish, the job warns that the earlier approval may still stand. If the job
+fails after the push, the failure comment names the pushed commit instead of saying nothing
+changed.
 
 **Race safety.** The withdraw job has its own concurrency group, `agent-review-withdraw-<PR>`, so
 a new approve run can never replace a waiting withdraw run. It never dismisses an approval of the

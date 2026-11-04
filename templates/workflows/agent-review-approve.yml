@@ -46,3 +46,6 @@ jobs:
     uses: CruGlobal/agent-review/.github/workflows/withdraw.yml@main
     with:
       pr_number: ${{ github.event.pull_request.number }}
+      # A commit SHA, which the action checks is 40 hex characters and uses only
+      # as data. Never pass the branch name or other text the author picks.
+      expected_head: ${{ github.event.pull_request.head.sha }}
