@@ -148,6 +148,12 @@ test('the old dismissal of a reopened entry survives later runs and raises, and 
   }
   const [mixed] = mergeLedger([{ n: 4, ...finding(), status: 'open', previousDismissal: { by: 'dev', reason: 5, extra: 'x' } }], []);
   assert.deepEqual(mixed.previousDismissal, { by: 'dev' }, 'only string by, reasonCode and reason are kept');
+  for (const empty of [{}, { reason: 5 }, { by: '' }]) {
+    const [entry] = mergeLedger([{ n: 5, ...finding(), status: 'open', previousDismissal: empty }], []);
+    assert.equal('previousDismissal' in entry, false, `${JSON.stringify(empty)} carries nothing to show`);
+  }
+  const bare = mergeLedger([{ n: 6, ...finding({ severity: 4 }), status: 'dismissed' }], [finding({ severity: 8 })]);
+  assert.deepEqual([bare[0].status, 'previousDismissal' in bare[0]], ['open', false], 'a dismissal with no by, code or reason leaves nothing');
 });
 
 test('a finding that comes back lower or equal leaves its open entry as it was', () => {

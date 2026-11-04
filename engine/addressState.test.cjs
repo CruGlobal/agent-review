@@ -480,3 +480,16 @@ test('an open entry a review reopened keeps its old dismissal on its report line
     /^- \[ \] \*\*`#2`\*\* · 9\/10 · `app\/model\.js:12` — authorization is missing _\(security\)_ · ↩️ reopened, dismissed before by @dev \[pre-existing\]: legacy importer$/m,
   );
 });
+
+test('an open entry with an empty previousDismissal renders no reopened text', () => {
+  for (const previousDismissal of [{}, { by: '' }]) {
+    const rep = report([finding({ previousDismissal }), finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' })]);
+    const req = prepareAddressRequest({
+      command: '@claude dismiss 2 [false-positive]: guarded by the caller',
+      actor: 'dr-bizz', pr: 42, commentId: 100, reportCommentId: 200,
+      expectedHead: 'a'.repeat(40), report: rep,
+    });
+    const finalized = finalizeAddress({ request: req, result: { version: 1, expectedHead: 'a'.repeat(40), fixes: [], tests: [] }, report: rep, fixSha: '' });
+    assert.ok(!finalized.report.includes('reopened'), JSON.stringify(previousDismissal));
+  }
+});

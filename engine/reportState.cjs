@@ -70,7 +70,7 @@ function dismissalOf(entry) {
   for (const field of ['by', 'reasonCode', 'reason']) {
     if (typeof entry[field] === 'string' && entry[field]) out[field] = entry[field].slice(0, 2000);
   }
-  return out;
+  return Object.keys(out).length ? out : null;
 }
 
 function cleanPrevious(raw) {

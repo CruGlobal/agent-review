@@ -18732,7 +18732,7 @@ var require_reportState = __commonJS({
       for (const field of ["by", "reasonCode", "reason"]) {
         if (typeof entry[field] === "string" && entry[field]) out[field] = entry[field].slice(0, 2e3);
       }
-      return out;
+      return Object.keys(out).length ? out : null;
     }
     function cleanPrevious(raw) {
       if (!Array.isArray(raw)) throw new Error("previous ledger must be an array");
@@ -20247,7 +20247,7 @@ var require_addressState = __commonJS({
     }
     function reopenedText(entry) {
       const prior = entry.previousDismissal;
-      if (!prior) return "";
+      if (!prior || !(prior.by || prior.reasonCode || prior.reason)) return "";
       const one = (v) => String(v).replace(/[\r\n]+/g, " ");
       const by = prior.by ? ` by @${one(prior.by)}` : "";
       const code = prior.reasonCode ? ` [${one(prior.reasonCode)}]` : "";
