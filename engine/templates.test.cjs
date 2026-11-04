@@ -2752,12 +2752,17 @@ test("address stages only the files its fixes changed, never the review's bookke
   assert.ok(at('git add -- <each file you changed or created for these fixes>') > at('git status --porcelain'), 'then the fix commit names its files');
   assert.ok(at("grep -E '^\\.claude/review/(metrics|index)/'") > at('git add --'), 'a staged review file stops the commit');
   assert.ok(at('git diff --cached --name-only\ngit commit') > 0, 'and what is staged is shown before committing');
+  assert.ok(at('if git diff --cached --quiet; then') > at('git add --'), 'nothing staged stops it');
+  assert.ok(commit.includes('git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}" || exit 1'), 'a failed commit stops it');
+  assert.ok(commit.includes('git push || exit 1\nFIX_SHA='), 'a failed push stops it before FIX_SHA is saved');
 });
 
 test("address's staged-file guard stops on review files and lets a new spec through, under bash and zsh", (t) => {
   const { writeFileSync } = require('node:fs');
   const commit = bashBlockList(readFileSync(ADDRESS_SKILL, 'utf8')).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
-  const guard = commit.slice(commit.indexOf('if git diff --cached'), commit.indexOf('fi\n') + 2);
+  const first = commit.indexOf('if git diff --cached');
+  const guard = commit.slice(first, commit.indexOf('fi\n', commit.indexOf('fi\n', first) + 3) + 2);
+  assert.equal((guard.match(/^fi$/gm) || []).length, 2, 'both staged-file checks run');
   for (const shell of availableShells(t)) {
     const dir = mkdtempSync(join(os.tmpdir(), 'ar-stage-'));
     try {
@@ -2767,6 +2772,7 @@ test("address's staged-file guard stops on review files and lets a new spec thro
       mkdirSync(join(dir, '.claude/review/metrics'), { recursive: true });
       writeFileSync(join(dir, 'spec/new_spec.rb'), 'it works\n');
       writeFileSync(join(dir, '.claude/review/metrics/PR_1_metrics.md'), 'score\n');
+      assert.throws(() => execFileSync(shell, ['-c', guard], { cwd: dir, stdio: 'pipe' }), `${shell}: nothing staged stops it`);
       git('add', '--', 'spec/new_spec.rb');
       execFileSync(shell, ['-c', guard], { cwd: dir });
       git('add', '--', '.claude/review/metrics/PR_1_metrics.md');

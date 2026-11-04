@@ -240,9 +240,13 @@ if git diff --cached --name-only | grep -E '^\.claude/review/(metrics|index)/'; 
   echo "❌ Review files are staged. Unstage them with git restore --staged, then commit."
   exit 1
 fi
+if git diff --cached --quiet; then
+  echo "❌ Nothing is staged, so there is no fix to commit."
+  exit 1
+fi
 git diff --cached --name-only
-git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}"   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
-git push
+git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}" || exit 1   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
+git push || exit 1
 FIX_SHA=$(git rev-parse --short HEAD)
 echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh
 ```
