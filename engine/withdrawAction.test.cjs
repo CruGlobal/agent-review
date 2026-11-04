@@ -78,12 +78,6 @@ case "$METHOD $URL" in
   "GET repos/o/r/issues/7/timeline?per_page=100")
     has fail-timeline && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     emit "$FIX/timeline.json" ;;
-  "GET repos/"*"/git/ref/heads/"*)
-    has branch-ref.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-    emit "$FIX/branch-ref.json" ;;
-  "GET repos/o/r/git/ref/pull/7/head")
-    has pull-ref.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
-    emit "$FIX/pull-ref.json" ;;
   "GET repos/o/r/contents/.github/workflows/agent-review.yml?ref="*)
     has caller.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     emit "$FIX/caller.json" ;;
@@ -334,9 +328,6 @@ function run(
     event = 'pull_request_target',
     action = 'synchronize',
     headRepo,
-    headBranch,
-    branchAt,
-    pullRefAt,
     caller,
   },
 ) {
@@ -345,16 +336,14 @@ function run(
   const runner = path.join(dir, 'tmp');
   for (const d of [fix, runner]) fs.mkdirSync(d, { recursive: true });
   const all = {
-    'pr.json': pr({ head, base, state, defaultBranch, labels, headRepo, headBranch }),
-    ...(branchAt ? { 'branch-ref.json': JSON.stringify({ ref: 'refs/heads/x', object: { sha: branchAt, type: 'commit' } }) } : {}),
-    ...(pullRefAt ? { 'pull-ref.json': JSON.stringify({ ref: 'refs/pull/7/head', object: { sha: pullRefAt, type: 'commit' } }) } : {}),
+    'pr.json': pr({ head, base, state, defaultBranch, labels, headRepo }),
     ...(caller !== undefined ? { 'caller.json': callerJson(caller) } : {}),
     // Two pages, as gh --paginate prints them.
     'reviews.json': JSON.stringify(reviews.slice(0, 1)) + JSON.stringify(reviews.slice(1)),
     'timeline.json': JSON.stringify([{ event: 'commented' }]) + JSON.stringify(timeline),
-    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch, labels, headRepo, headBranch }) } : {}),
+    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch, labels, headRepo }) } : {}),
     // The PR as GitHub shows it for the first `count` reads, before the head moves to the push.
-    ...(stale ? { 'pr-stale.json': pr({ head: stale.head, base, defaultBranch, labels, headRepo, headBranch }), 'stale-reads': String(stale.count) } : {}),
+    ...(stale ? { 'pr-stale.json': pr({ head: stale.head, base, defaultBranch, labels, headRepo }), 'stale-reads': String(stale.count) } : {}),
     ...files,
   };
   for (const [f, v] of Object.entries(all)) fs.writeFileSync(path.join(fix, f), v);
@@ -512,79 +501,42 @@ const SCENARIOS = {
       assert.ok(o.messages[0].includes('Run /agent-review:re-review'), 'a workflow-token push starts no CI review');
     },
   ],
-  'a pushed head GitHub never shows is judged anyway, and withdrawn while the branch is still at it': [
-    () => ({
-      head: C.NEW,
-      expectedHead: C.NEW,
-      stale: { head: C.X, count: 1000 },
-      branchAt: C.NEW,
-      headBranch: 'feature/a#b',
-      event: 'issue_comment',
-      action: 'created',
-      reviews: [review(21, C.X)],
-    }),
-    (o) => {
-      assert.deepEqual(o.dismissed, [21], 'the stale API head is not read again, so it cannot keep the old approval');
-      assert.match(o.stdout, new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7\\.`, 'm'));
-      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls');
-      assert.ok(o.ghCalls.some((l) => l.startsWith('api ¦ repos/o/r/git/ref/heads/feature/a%23b ¦ ')), 'the branch is read from its repo, each part of its name escaped');
-    },
-  ],
-  'a pushed head GitHub never shows is not withdrawn once the branch moved on': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, branchAt: C.MERGE1, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
-    (o) => {
-      kept(o);
-      assert.match(o.summary, new RegExp(`The branch of PR #7 moved on to ${C.MERGE1}, so the bot's approval of ${C.X} is left to the run for that push \\(review 21\\)\\.`));
-    },
-  ],
-  'a pushed head GitHub never shows is not withdrawn after a force-push back to the approved commit': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, branchAt: C.X, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
-    kept,
-  ],
-  'a pushed head GitHub never shows is withdrawn with a warning when the branch cannot be read': [
+  'a pushed head GitHub never shows: the old approval is withdrawn, though the API still shows its commit': [
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
     (o) => {
-      assert.deepEqual(o.dismissed, [21], 'an unreadable branch fails closed');
-      assert.match(
-        o.stdout,
-        new RegExp(`^::warning::could not read the branch of PR #7, so the bot's approval of ${C.X} is withdrawn without checking that the branch is still at ${C.NEW} \\(review 21\\)\\.$`, 'm'),
-      );
+      assert.deepEqual(o.dismissed, [21], 'a stale read cannot keep the old approval');
+      assert.match(o.stdout, new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7\\.`, 'm'));
+      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls, and no read before dismissing');
+      assert.ok(!o.ghCalls.some((l) => l.includes('/git/ref')), 'no PR or branch ref is read');
     },
   ],
-  'a fork PR is read from refs/pull/N/head in the base repo, never from the fork': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, pullRefAt: C.NEW, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
-    (o) => {
-      assert.deepEqual(o.dismissed, [21]);
-      assert.ok(o.ghCalls.some((l) => l.startsWith('api ¦ repos/o/r/git/ref/pull/7/head ¦ ')), 'the base repo keeps the PR ref');
-      assert.ok(!o.ghCalls.some((l) => l.includes('repos/someone/')), 'the fork is never read');
-    },
-  ],
-  'a fork PR whose refs/pull/N/head moved to a newer commit is left to that push\'s run': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.MERGE1, count: 1000 }, pullRefAt: C.MERGE1, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
+  'a pushed head GitHub never shows: an approval of a newer commit built on it is left to that push\'s run': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.MERGE_THEN_NEW, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.MERGE_THEN_NEW)] }),
     (o) => {
       kept(o);
-      assert.match(o.summary, new RegExp(`The branch of PR #7 moved on to ${C.MERGE1}`));
+      assert.match(o.summary, new RegExp(`The bot's approval of ${C.MERGE_THEN_NEW} on PR #7 is of a newer commit built on ${C.MERGE1}, so it is left to the run for that push \\(review 21\\)\\.`));
+      assert.ok(o.gitCalls.some((c) => c.includes(` merge-base --is-ancestor ${C.MERGE1} ${C.MERGE_THEN_NEW}`)), 'the descent is checked in git');
     },
   ],
-  'a fork PR whose refs/pull/N/head cannot be read is withdrawn with a warning': [
+  'a pushed head GitHub never shows: an approval of an unrelated commit is withdrawn': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.SIDE, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.SIDE)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a pushed head GitHub never shows: an approval of a commit that cannot be fetched is withdrawn': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, 'e'.repeat(40))] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a pushed head GitHub never shows: a force-push straight back to the approved commit still withdraws it': [
+    // The API shows the approved commit either way; the action cannot tell a
+    // force-push back from a stale read, so it fails safe and dismisses.
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, reviews: [review(21, C.X)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a fork PR whose pushed head GitHub never shows is judged the same way, and the fork is never read': [
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.match(o.stdout, /^::warning::could not read the branch of PR #7/m);
-    },
-  ],
-  'a PR whose head repo is gone is read from refs/pull/N/head too': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, pullRefAt: C.NEW, headRepo: null, reviews: [review(21, C.X)] }),
-    (o) => {
-      assert.deepEqual(o.dismissed, [21]);
-      assert.ok(o.ghCalls.some((l) => l.startsWith('api ¦ repos/o/r/git/ref/pull/7/head ¦ ')));
-    },
-  ],
-  'a same-repo PR reads its branch, not the lagging refs/pull/N/head': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, branchAt: C.NEW, pullRefAt: C.X, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
-    (o) => {
-      assert.deepEqual(o.dismissed, [21], 'a pull ref still at the old head must not keep the old approval');
-      assert.ok(!o.ghCalls.some((l) => l.includes('/git/ref/pull/')));
+      assert.ok(!o.ghCalls.some((l) => l.includes('repos/someone/')), 'the fork is never read');
     },
   ],
   'a pull_request_target run with the event\'s head waits for a lagging API': [

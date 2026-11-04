@@ -2083,10 +2083,12 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['/agent-review:re-review', 'the dismissal says what to run next'],
     ['cd "$WORK"', 'git stays out of a checkout in the workspace'],
     ["grep -qE 'HTTP (401|404|422)|Resource not accessible'", 'errors a retry cannot fix are not retried'],
+    ['git merge-base --is-ancestor "$EXPECTED_HEAD" "$1"', 'without a fresh head, only a verified descendant of the pushed commit keeps its approval'],
   ]) {
     assert.ok(run.includes(part) || run.includes(part.replace('git ', 'g ')), why);
   }
-  for (const banned of ['git checkout', 'g checkout', 'worktree', 'git clone', '-c http', 'git config', 'g config', 'gh pr ']) {
+  // Every ref GitHub keeps for a PR can lag a push and show the old approved commit.
+  for (const banned of ['git checkout', 'g checkout', 'worktree', 'git clone', '-c http', 'git config', 'g config', 'gh pr ', 'git/ref']) {
     assert.ok(!run.includes(banned), `the action must not use ${banned}`);
   }
   assert.ok(!/\b[A-Z_]+=\(/.test(run), 'no array assignments, for bash 3.2');

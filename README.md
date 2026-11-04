@@ -542,11 +542,10 @@ rate limit), the job warns once and passes. It never fails red.
 pushes, before any later step can fail the job. It passes the pushed commit as `expected_head`.
 GitHub moves the PR's head a moment after a push, so the action waits up to a minute for the API
 to show it, and judges against that commit either way. If the API never shows it, the action
-warns, and reads the PR's branch instead: the branch itself for a PR from this repo, since it
-moves at push time, or `refs/pull/N/head` in this repo for a fork. It leaves an approval alone only
-when it read the branch and the branch has moved on to another commit, so a newer push or a
-force-push back is left to its own run. If it cannot read the branch, it takes the approval back
-and warns. The step has
+warns, and does not trust any ref GitHub keeps for the PR, since each can lag the same way. It
+leaves an approval alone only when git shows the approved commit is a newer commit built on the
+pushed one (`git merge-base --is-ancestor`): a later push, whose own run judges it. Every other
+approval of an older commit is taken back, including one it cannot fetch. The step has
 a 5-minute timeout and `continue-on-error`, so a hung fetch cannot hold up the ledger update.
 When it does not finish, the job warns that the earlier approval may still stand. If the job
 fails after the push, the failure comment names the pushed commit instead of saying nothing
@@ -683,6 +682,10 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
 - **A fast merge can land before the withdraw job finishes.** The job starts on the push and
   takes up to a minute or so, most of it fetching commits. A merge in that window still uses
   the old approval.
+- **A force-push straight back to the approved commit can lose the approval.** If GitHub's API
+  never shows the pushed commit, the withdraw action cannot tell a force-push back to the
+  approved commit from a stale read, so it takes that approval back. Post the report again to
+  get it back. Losing an approval here is the safe way to fail.
 - **A base change leaves the bot's approval of the PR's current head.** The withdraw job never
   dismisses an approval of the current head. After a retarget with no new commits, that
   approval stays and still counts for merging. Only a later push takes it back, because the base

@@ -87,7 +87,7 @@ runs:
           done
           if [ "$(jq -r '.head.sha // empty' "$WORK/pr.json")" != "$EXPECTED_HEAD" ]; then
             HEAD_SEEN=false
-            warn "GitHub still does not show $EXPECTED_HEAD, which was just pushed, as the head of PR #$PR. Judging against it anyway; an approval is left alone only if the PR's branch has moved on from that commit."
+            warn "GitHub still does not show $EXPECTED_HEAD, which was just pushed, as the head of PR #$PR. Judging against it anyway; only an approval of a newer commit built on it is left alone."
           fi
         fi
         STATE=$(jq -r '.state // empty' "$WORK/pr.json")
@@ -95,7 +95,6 @@ runs:
         BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
         DEFAULT_BRANCH=$(jq -r '.base.repo.default_branch // empty' "$WORK/pr.json")
         HEAD_REPO=$(jq -r '.head.repo.full_name // empty' "$WORK/pr.json")
-        HEAD_BRANCH=$(jq -r '.head.ref // empty' "$WORK/pr.json")
         if [ "$STATE" != open ]; then
           note "PR #$PR is not open, so no approval was withdrawn."
           exit 0
@@ -156,10 +155,16 @@ runs:
             try=$((try + 1))
           done
         }
-        fetch_base_and_head() {
-          git check-ref-format "refs/heads/$BASE_REF" || return 1
+        REPO_READY=false
+        init_repo() {
+          [ "$REPO_READY" = true ] && return 0
           git init --quiet --bare --template= "$REPO_GIT" || return 1
           g remote add origin "$SERVER_URL/$REPO.git" || return 1
+          REPO_READY=true
+        }
+        fetch_base_and_head() {
+          git check-ref-format "refs/heads/$BASE_REF" || return 1
+          init_repo || return 1
           fetch "+refs/heads/$BASE_REF:refs/agent-review/base" "$HEAD_SHA"
         }
         # Succeeds only when the head adds nothing to the approved commit but
@@ -229,22 +234,13 @@ runs:
           only_base_merged "$approved"
         }
 
-        # Without a fresh head, a dismissal is skipped only when the PR's branch
-        # was read and points at another commit; an unreadable branch dismisses.
-        # A PR from this repo is read from its branch, which moves at push time,
-        # unlike refs/pull/N/head, which lags with the API's head. Any other PR
-        # is read from refs/pull/N/head in this repo: a fork only gets here when
-        # GitHub already shows a newer head. Sets BRANCH_HEAD, empty if unread.
-        read_branch_head() {
-          local path
-          BRANCH_HEAD=""
-          if [ "$HEAD_REPO" = "$REPO" ] && [ -n "$HEAD_BRANCH" ]; then
-            path=$(jq -rn --arg b "$HEAD_BRANCH" '$b | split("/") | map(@uri) | join("/")') || return 0
-            BRANCH_HEAD=$(api "repos/$REPO/git/ref/heads/$path" --jq .object.sha) || BRANCH_HEAD=""
-          else
-            BRANCH_HEAD=$(api "repos/$REPO/git/ref/pull/$PR/head" --jq .object.sha) || BRANCH_HEAD=""
-          fi
-          [[ "$BRANCH_HEAD" =~ ^[0-9a-f]{40}$ ]] || BRANCH_HEAD=""
+        # Without a fresh head, the only approval left alone is one of a verified
+        # descendant of the pushed commit: a newer push, which its own run judges.
+        # Every ref GitHub keeps for the PR can lag a push and show the old,
+        # approved commit, so none is read; anything unproven is taken back.
+        descends_from_expected() {
+          [[ "$1" =~ ^[0-9a-f]{40}$ ]] && init_repo && fetch "$EXPECTED_HEAD" "$1" \
+            && g merge-base --is-ancestor "$EXPECTED_HEAD" "$1"
         }
 
         # A CI review re-runs on its own only for a push or reopen of a PR from
@@ -284,14 +280,9 @@ runs:
               note "The head of PR #$PR is $COMMIT again, so the bot's approval of it is kept (review $REVIEW_ID)."
               continue
             fi
-          else
-            read_branch_head
-            if [ -z "$BRANCH_HEAD" ]; then
-              warn "could not read the branch of PR #$PR, so the bot's approval of $COMMIT is withdrawn without checking that the branch is still at $EXPECTED_HEAD (review $REVIEW_ID)."
-            elif [ "$BRANCH_HEAD" != "$EXPECTED_HEAD" ]; then
-              note "The branch of PR #$PR moved on to $BRANCH_HEAD, so the bot's approval of $COMMIT is left to the run for that push (review $REVIEW_ID)."
-              continue
-            fi
+          elif descends_from_expected "$COMMIT"; then
+            note "The bot's approval of $COMMIT on PR #$PR is of a newer commit built on $EXPECTED_HEAD, so it is left to the run for that push (review $REVIEW_ID)."
+            continue
           fi
           MESSAGE="agent-review: the bot took back its approval of ${COMMIT:0:7} because $WHY. $NEXT"
           if api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="$MESSAGE" -f event=DISMISS > /dev/null; then
