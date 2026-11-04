@@ -60,6 +60,7 @@ case "$METHOD $URL" in
   "GET repos/o/r/pulls/7")
     N=$(( $(cat "$FIX/../pr-reads" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$FIX/../pr-reads"
+    if [ "$N" -ge 2 ] && has fail-pr-later; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
     if [ "$N" -ge 2 ] && has pr-later.json; then serve pr pr-later.json; else serve pr pr.json; fi ;;
   "GET repos/o/r/contents/.claude/review/config.yml?ref="*)
     case "$(cat "$FIX/config-status")" in
@@ -107,15 +108,21 @@ const posted = ({ login = 'alice', pr = 7, status } = {}) =>
 const permission = (p) => JSON.stringify({ permission: p });
 const prJson = (extra = {}) => JSON.stringify({ head: { sha: HEAD }, base: { sha: BASE }, changed_files: 2, ...extra });
 const labeled = (login, name = LABEL) => ({ event: 'labeled', label: { name }, actor: { login } });
+const MARKER = '<!-- agent-review-approval -->';
+const APPROVED = `${BODY}\n\n${MARKER}`;
+// Bot approvals: 11 has the 1.1.0 approval text, 14 the marker. 16 (Dependabot's empty body)
+// and 17 (another workflow's text) are other workflows' and are never dismissed.
 const REVIEWS =
   JSON.stringify([
-    { id: 11, user: { login: BOT }, state: 'APPROVED', commit_id: OLD },
-    { id: 12, user: { login: 'alice' }, state: 'APPROVED', commit_id: OLD },
+    { id: 11, user: { login: BOT }, state: 'APPROVED', commit_id: OLD, body: BODY },
+    { id: 12, user: { login: 'alice' }, state: 'APPROVED', commit_id: OLD, body: MARKER },
   ]) +
   JSON.stringify([
-    { id: 13, user: { login: BOT }, state: 'COMMENTED', commit_id: OLD },
-    { id: 14, user: { login: BOT }, state: 'APPROVED', commit_id: HEAD },
+    { id: 13, user: { login: BOT }, state: 'COMMENTED', commit_id: OLD, body: MARKER },
+    { id: 14, user: { login: BOT }, state: 'APPROVED', commit_id: HEAD, body: `Auto-approved: every agent-review finding is fixed or dismissed with a reason.\n\n${MARKER}` },
     { id: 15, user: null, state: 'APPROVED', commit_id: OLD },
+    { id: 16, user: { login: BOT }, state: 'APPROVED', commit_id: OLD, body: '' },
+    { id: 17, user: { login: BOT }, state: 'APPROVED', commit_id: HEAD, body: 'Auto-approved by ai-review-auto-approve: the AI review passed.' },
   ]);
 
 function defaults() {
@@ -180,7 +187,7 @@ function setup() {
   fs.symlinkSync(process.execPath, path.join(BIN, 'node'));
 }
 
-function run(name, overrides = {}, { patch, approveAllowed = 'true', commentId = '' } = {}) {
+function run(name, overrides = {}, { patch, approveAllowed = 'true', commentId = '', approvalBody = BODY } = {}) {
   const dir = path.join(TMP, name);
   const fix = path.join(dir, 'fix');
   const ws = path.join(dir, 'ws');
@@ -208,7 +215,7 @@ function run(name, overrides = {}, { patch, approveAllowed = 'true', commentId =
     REPO: 'o/r',
     PR: '7',
     REPORT_COMMENT_ID: commentId,
-    APPROVAL_BODY: BODY,
+    APPROVAL_BODY: approvalBody,
     APPROVE_ALLOWED: approveAllowed,
   };
   fs.writeFileSync(env.GH_LOG, '');
@@ -291,7 +298,7 @@ const SCENARIOS = {
   'a repo with no config approves, pinned to the judged head': [
     {},
     (o) => {
-      assert.equal(o.approved, BODY);
+      assert.equal(o.approved, APPROVED);
       assert.deepEqual(o.writes, []);
       assert.ok(o.lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length === 2, 'the head is read again');
     },
@@ -301,7 +308,7 @@ const SCENARIOS = {
     (o) => {
       assert.equal(
         o.approved,
-        `${BODY}\n\nCaution: this change is irreversible (drops a column). A revert will not undo it. Check backups and the deploy plan before you merge.`,
+        `${BODY}\n\nCaution: this change is irreversible (drops a column). A revert will not undo it. Check backups and the deploy plan before you merge.\n\n${MARKER}`,
       );
     },
   ],
@@ -330,7 +337,7 @@ const SCENARIOS = {
   'a short file list approves where the base config sets no rules, and says so': [
     { 'pr.json': prJson({ changed_files: 3001 }) },
     (o) => {
-      assert.equal(o.approved, BODY);
+      assert.equal(o.approved, APPROVED);
       assert.match(o.summary, /file list .*incomplete.*no human approval rules/);
     },
   ],
@@ -448,7 +455,7 @@ const SCENARIOS = {
     },
     (o) => {
       assert.deepEqual(o.writes, [`api ¦ -X ¦ DELETE ¦ repos/o/r/issues/7/labels/${LABEL} ¦ `]);
-      assert.equal(o.approved, BODY);
+      assert.equal(o.approved, APPROVED);
     },
   ],
   'label keep: a label a person added holds the bot off': [
@@ -478,6 +485,39 @@ const SCENARIOS = {
       assert.match(o.summary, /approve=false, label=keep, dismiss bot approvals=all\. status is not passing \(2 open blockers\)/);
     },
   ],
+  'only approvals this action posted are dismissed, never Dependabot\'s or another workflow\'s': [
+    { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14], '16 and 17 are bot approvals from other workflows; 12 is a person\'s');
+    },
+  ],
+  'a head that moved before dismissing keeps the bot approval of the new head and takes back the rest': [
+    {
+      'comments.json': comments({ pass: false, openBlockers: 1 }),
+      'pr-later.json': JSON.stringify({ head: { sha: 'e'.repeat(40) } }),
+      'reviews.json': REVIEWS.slice(0, -1) + `,${JSON.stringify({ id: 18, user: { login: BOT }, state: 'APPROVED', commit_id: 'e'.repeat(40), body: APPROVED })}]`,
+    },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14], '18 approves the new head, which a newer run judged');
+      assert.match(o.summary, new RegExp(`The head of PR #7 moved to ${'e'.repeat(40)} while it was being judged, so a bot approval of that head is kept\\.`));
+    },
+  ],
+  'a head that cannot be read again before dismissing dismisses nothing and says so': [
+    { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'reviews.json': REVIEWS, 'fail-pr-later': '' },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, []);
+      assert.ok(!o.lines.some((l) => l.includes('pulls/7/reviews?per_page=100')), 'the reviews are not even listed');
+      assert.match(o.stdout, /^::warning::could not read the head of PR #7 again, so the bot's earlier approvals were not dismissed\.$/m);
+    },
+  ],
+  'an approval body that already carries the marker gets no second one': [
+    {},
+    (o) => assert.equal(o.approved, APPROVED),
+    { approvalBody: APPROVED },
+  ],
   'open blockers whose dismissal is refused warn that a person must dismiss it, and never approve': [
     { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'reviews.json': REVIEWS, 'fail-dismiss': '' },
     (o) => {
@@ -497,7 +537,7 @@ const SCENARIOS = {
   'a passing report dismisses nothing and reads no reviews': [
     { 'reviews.json': REVIEWS },
     (o) => {
-      assert.equal(o.approved, BODY);
+      assert.equal(o.approved, APPROVED);
       assert.deepEqual(o.writes, []);
       assert.ok(!o.lines.some((l) => l.includes('pulls/7/reviews?per_page=100')));
     },
@@ -596,7 +636,7 @@ for (const level of ['admin', 'maintain', 'write']) {
   SCENARIOS[`a posted report from a user with ${level} permission approves`] = [
     { 'comment.json': posted(), 'permission.json': permission(level) },
     (o) => {
-      assert.equal(o.approved, BODY);
+      assert.equal(o.approved, APPROVED);
       assert.ok(o.lines.some((l) => l.startsWith('api ¦ repos/o/r/collaborators/alice/permission ¦ ')));
     },
     { commentId: '99' },

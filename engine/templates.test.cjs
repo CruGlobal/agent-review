@@ -1775,13 +1775,17 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
   assert.ok(run.includes(`if gh api -X POST "repos/$REPO/issues/$PR/labels" -f "labels[]=$LABEL"`));
   assert.ok(run.includes(`if gh api -X DELETE "repos/$REPO/issues/$PR/labels/$LABEL"`));
 
-  assert.ok(
-    run.includes(
-      'select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head))',
-    ),
-    'only the bot\'s own approvals are dismissed, never a person\'s review; stale means another head',
-  );
-  assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA"'));
+  for (const [part, why] of [
+    ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals, never a person\'s review'],
+    ['| select((.body // "") | contains($marker)', 'only approvals this action posted, by their marker'],
+    ['| select($mode == "all" or .commit_id != $head)', 'stale means another head'],
+    ['| select($now == $head or .commit_id != $now)', 'an approval of a head that moved in is kept'],
+    ["APPROVAL_MARKER='<!-- agent-review-approval -->'", 'the marker is one fixed string'],
+    ['*) BODY="$BODY"$\'\\n\\n\'"$APPROVAL_MARKER" ;;', 'every approval carries the marker'],
+  ]) {
+    assert.ok(run.includes(part), why);
+  }
+  assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD"'));
   assert.ok(run.includes('*) DISMISS_MODE=all ;;'), 'a dismiss value from another engine version fails closed to all');
   // Bash before 4.4 calls an empty array unbound under set -u, so the script
   // keeps to plain strings; engine/approveAction.test.cjs runs it on the system bash.

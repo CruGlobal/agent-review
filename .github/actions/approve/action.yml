@@ -3,9 +3,10 @@ description: >-
   Approve a pull request when its published agent-review report passes for the
   PR's current head and no person needs to approve it. Re-checks the base
   commit's human_approval rules, owns the needs-human-approval label, and
-  dismisses the bot's own earlier approvals when a person must approve or the
-  report for the PR's head does not pass, or its approvals of other heads when
-  the rules cannot be read. The approval is pinned
+  dismisses its own earlier approvals (marked in their body) when a person must
+  approve or the report for the PR's head does not pass, or its approvals of
+  other heads when the rules cannot be read, never one of a head that moved in
+  while it ran. The approval is pinned
   to the judged commit, and is never posted unless approve_allowed is 'true'. Fails closed on any missing or disagreeing marker, never
   requests changes, never fails the job, and downgrades a label, dismissal, or
   approval API failure to a warning.
@@ -70,6 +71,10 @@ runs:
         }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
         LABEL=needs-human-approval
+        # Marks the approvals this action posts. Only those, and approvals with the
+        # 1.1.0 approval text below, are ever dismissed; other bot approvals, such as
+        # a Dependabot auto-approval, are left alone.
+        APPROVAL_MARKER='<!-- agent-review-approval -->'
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
         rm -rf "$RUNTIME_DIR"
         mv .agent-review-approve-runtime "$RUNTIME_DIR"
@@ -226,7 +231,7 @@ runs:
             fi
             ;;
         esac
-        # all: every approval the bot posted. stale: only those on another head.
+        # all: every approval this action posted. stale: only those on another head.
         # The runtime and this script are fetched separately and may differ in
         # version, so any value but none or stale is treated as all.
         case "$DISMISS" in
@@ -235,9 +240,24 @@ runs:
           *) DISMISS_MODE=all ;;
         esac
         if [ -n "$DISMISS_MODE" ]; then
-          if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" \
-              '.[][] | select(.user.login == "github-actions[bot]" and .state == "APPROVED" and ($mode == "all" or .commit_id != $head)) | .id'); then
+          # The head is read again right before dismissing. If it moved, a newer run
+          # may already have approved the new head, so that approval is kept.
+          if ! NOW_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) \
+            || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            warn "could not read the head of PR #$PR again, so the bot's earlier approvals were not dismissed."
+          elif BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" --arg marker "$APPROVAL_MARKER" '
+              .[][]
+              | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
+              | select((.body // "") | contains($marker)
+                  or startswith("Auto-approved: the agent-review report for this head passes")
+                  or startswith("Auto-approved: every agent-review finding is fixed or dismissed"))
+              | select($mode == "all" or .commit_id != $head)
+              | select($now == $head or .commit_id != $now)
+              | .id'); then
+            if [ "$NOW_HEAD" != "$HEAD_SHA" ]; then
+              note "The head of PR #$PR moved to $NOW_HEAD while it was being judged, so a bot approval of that head is kept."
+            fi
             for REVIEW_ID in $BOT_APPROVALS; do
               if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
                 note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
@@ -273,6 +293,10 @@ runs:
         if [ -n "$CAUTION" ]; then
           BODY="$APPROVAL_BODY"$'\n\n'"$CAUTION"
         fi
+        case "$BODY" in
+          *"$APPROVAL_MARKER"*) ;;
+          *) BODY="$BODY"$'\n\n'"$APPROVAL_MARKER" ;;
+        esac
         # Needs the repo/org setting "Allow GitHub Actions to create and approve
         # pull requests" (off by GitHub default). A 422 here means it is disabled:
         # warn instead of failing, so a passing review never shows as a red check.
