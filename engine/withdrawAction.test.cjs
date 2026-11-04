@@ -505,38 +505,56 @@ const SCENARIOS = {
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21], 'a stale read cannot keep the old approval');
-      assert.match(o.stdout, new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7\\.`, 'm'));
+      assert.match(
+        o.stdout,
+        new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7, so every bot approval of another commit is taken back without checking it\\.$`, 'm'),
+      );
       assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls, and no read before dismissing');
       assert.ok(!o.ghCalls.some((l) => l.includes('/git/ref')), 'no PR or branch ref is read');
+      assert.deepEqual(o.gitCalls, [], 'no commit check runs');
+      assert.ok(o.messages[0].includes(`because GitHub never showed the pushed commit ${C.NEW.slice(0, 7)} as the PR's head, so it could not check the approval.`), o.messages[0]);
     },
   ],
-  'a pushed head GitHub never shows: an approval of a newer commit built on it is left to that push\'s run': [
+  'a pushed head GitHub never shows: an approval of a newer commit built on it is withdrawn too': [
     () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.MERGE_THEN_NEW, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.MERGE_THEN_NEW)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a pushed head GitHub never shows: an approval of the pushed commit itself is kept': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X), review(22, C.NEW)] }),
+    (o) => assert.deepEqual(o.dismissed, [21], 'only the approval of another commit goes'),
+  ],
+  'a pushed head GitHub never shows: a force-push back to an older commit withdraws the approval of the newer one': [
+    // The bot approved D, then the author force-pushed back to E, an ancestor of D.
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.MERGE_THEN_NEW, count: 1000 }, reviews: [review(21, C.MERGE_THEN_NEW)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a pushed head GitHub never shows: an approval the keep rule would keep is withdrawn too': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.X, count: 1000 }, reviews: [review(21, C.X)] }),
     (o) => {
-      kept(o);
-      assert.match(o.summary, new RegExp(`The bot's approval of ${C.MERGE_THEN_NEW} on PR #7 is of a newer commit built on ${C.MERGE1}, so it is left to the run for that push \\(review 21\\)\\.`));
-      assert.ok(o.gitCalls.some((c) => c.includes(` merge-base --is-ancestor ${C.MERGE1} ${C.MERGE_THEN_NEW}`)), 'the descent is checked in git');
+      assert.deepEqual(o.dismissed, [21], 'a clean merge of main, but the head could not be confirmed');
+      assert.deepEqual(o.gitCalls, []);
     },
-  ],
-  'a pushed head GitHub never shows: an approval of an unrelated commit is withdrawn': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.SIDE, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.SIDE)] }),
-    (o) => assert.deepEqual(o.dismissed, [21]),
-  ],
-  'a pushed head GitHub never shows: an approval of a commit that cannot be fetched is withdrawn': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, 'e'.repeat(40))] }),
-    (o) => assert.deepEqual(o.dismissed, [21]),
-  ],
-  'a pushed head GitHub never shows: a force-push straight back to the approved commit still withdraws it': [
-    // The API shows the approved commit either way; the action cannot tell a
-    // force-push back from a stale read, so it fails safe and dismisses.
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, reviews: [review(21, C.X)] }),
-    (o) => assert.deepEqual(o.dismissed, [21]),
   ],
   'a fork PR whose pushed head GitHub never shows is judged the same way, and the fork is never read': [
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
       assert.ok(!o.ghCalls.some((l) => l.includes('repos/someone/')), 'the fork is never read');
+    },
+  ],
+  'with the head shown in time, a force-push back to an older commit withdraws the approval of the newer one': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, reviews: [review(21, C.MERGE_THEN_NEW)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.stdout.includes('::warning::'));
+      assert.match(o.summary, /\(review 21\): the PR changed beyond merging in the default branch\./);
+    },
+  ],
+  'with the head shown in time, the keep rule still keeps a clean merge of the default branch': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.X, count: 1 }, reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      assert.ok(!o.stdout.includes('::warning::'));
     },
   ],
   'a pull_request_target run with the event\'s head waits for a lagging API': [

@@ -2083,7 +2083,7 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['/agent-review:re-review', 'the dismissal says what to run next'],
     ['cd "$WORK"', 'git stays out of a checkout in the workspace'],
     ["grep -qE 'HTTP (401|404|422)|Resource not accessible'", 'errors a retry cannot fix are not retried'],
-    ['git merge-base --is-ancestor "$EXPECTED_HEAD" "$1"', 'without a fresh head, only a verified descendant of the pushed commit keeps its approval'],
+    ['WHY="GitHub never showed the pushed commit ${EXPECTED_HEAD:0:7} as the PR\'s head, so it could not check the approval"', 'without a fresh head, every approval of another commit is taken back'],
   ]) {
     assert.ok(run.includes(part) || run.includes(part.replace('git ', 'g ')), why);
   }
