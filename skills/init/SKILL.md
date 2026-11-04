@@ -73,7 +73,7 @@ BATCHES=$(( (PRS + 9) / 10 ))
 : > /tmp/agent_review_init.sh
 # Clear any read-only-guard baseline left by a previous run — the guard's `[ -f ] ||` capture
 # would otherwise reuse a stale snapshot for this run's drift checks.
-rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt
+rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt
 cat >> /tmp/agent_review_init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
 export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
@@ -790,6 +790,7 @@ add_line() {
   fi
   [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
   printf '%s\n' "$2" >> "$1"
+  grep -qxF -- "$1" /tmp/agent_review_init_changed.txt 2>/dev/null || printf '%s\n' "$1" >> /tmp/agent_review_init_changed.txt
 }
 add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
@@ -899,10 +900,12 @@ git add .claude/review .claude/settings.json .github/workflows/agent-review-appr
 if [ -f /tmp/agent_review_init_stage.txt ]; then
   while IFS= read -r f; do git add -- "$f"; done < /tmp/agent_review_init_stage.txt
 fi
-for f in .gitignore .gitattributes .dockerignore; do
-  grep -qxF -- "$f" /tmp/agent_review_init_stage.txt 2>/dev/null || [ -z "$(git status --porcelain -- "$f")" ] \
-    || echo "⚠️ $f had other changes before init, so its new lines are not staged. Commit them yourself."
-done
+if [ -f /tmp/agent_review_init_changed.txt ]; then
+  while IFS= read -r f; do
+    grep -qxF -- "$f" /tmp/agent_review_init_stage.txt 2>/dev/null \
+      || echo "⚠️ $f had other changes before init, so its new lines are not staged. Commit them yourself."
+  done < /tmp/agent_review_init_changed.txt
+fi
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
           .github/workflows/agent-review-readiness.yml

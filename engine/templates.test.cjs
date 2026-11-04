@@ -2684,7 +2684,7 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
   assert.ok(block, 'init has the .gitignore and .gitattributes block');
-  assert.ok(init.includes('rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt'), 'Stage 0 clears the stage list');
+  assert.ok(init.includes('rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt'), 'Stage 0 clears both lists');
   const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
   const staging = commit.slice(commit.indexOf('if [ -f /tmp/agent_review_init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
   assert.ok(staging.includes('git add -- "$f"'), '3E stages from the list');
@@ -2703,19 +2703,20 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
       writeFileSync(join(repo, '.gitattributes'), '*.png binary\n');
       git('add', '.gitignore', '.gitattributes');
       git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
-      writeFileSync(join(repo, '.gitattributes'), '*.png binary\n*.jpg binary\n'); // someone's uncommitted edit
+      // Someone's uncommitted edit that already has init's line, so init leaves the file alone.
+      writeFileSync(join(repo, '.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n');
       writeFileSync(join(repo, '.dockerignore'), 'tmp/\n'); // untracked, and not init's
       const script = at(`${block}\nadd_line .dockerignore '/.claude'\nadd_line .dockerignore 'CLAUDE.md'`);
       execFileSync(shell, ['-c', script], { cwd: repo });
       execFileSync(shell, ['-c', script], { cwd: repo });
       const read = (f) => readFileSync(join(repo, f), 'utf8');
       assert.equal(read('.gitignore'), 'node_modules/\n/.claude/review/metrics/\n/.claude/review/index/\n', `${shell}: added once, on its own line`);
-      assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n', shell);
+      assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n', `${shell}: unchanged`);
       assert.equal(read('.dockerignore'), 'tmp/\n/.claude\nCLAUDE.md\n', shell);
       const out = execFileSync(shell, ['-c', at(staging)], { cwd: repo, encoding: 'utf8' });
       assert.equal(git('diff', '--cached', '--name-only'), '.gitignore\n', `${shell}: only the file whose one change is init's lines is staged`);
-      assert.match(out, /\.gitattributes had other changes before init, so its new lines are not staged/, shell);
-      assert.match(out, /\.dockerignore had other changes before init/, shell);
+      assert.ok(!out.includes('.gitattributes'), `${shell}: no warning for a file init did not change`);
+      assert.match(out, /\.dockerignore had other changes before init, so its new lines are not staged/, shell);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
