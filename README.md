@@ -542,8 +542,11 @@ rate limit), the job warns once and passes. It never fails red.
 pushes, before any later step can fail the job. It passes the pushed commit as `expected_head`.
 GitHub moves the PR's head a moment after a push, so the action waits up to a minute for the API
 to show it, and judges against that commit either way. If the API never shows it, the action
-warns, and reads the PR's branch instead. It takes back an approval only while the branch is still
-at the pushed commit, so a newer push or a force-push back is left to its own run. The step has
+warns, and reads the PR's branch instead: the branch itself for a PR from this repo, since it
+moves at push time, or `refs/pull/N/head` in this repo for a fork. It leaves an approval alone only
+when it read the branch and the branch has moved on to another commit, so a newer push or a
+force-push back is left to its own run. If it cannot read the branch, it takes the approval back
+and warns. The step has
 a 5-minute timeout and `continue-on-error`, so a hung fetch cannot hold up the ledger update.
 When it does not finish, the job warns that the earlier approval may still stand. If the job
 fails after the push, the failure comment names the pushed commit instead of saying nothing

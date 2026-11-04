@@ -81,6 +81,9 @@ case "$METHOD $URL" in
   "GET repos/"*"/git/ref/heads/"*)
     has branch-ref.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     emit "$FIX/branch-ref.json" ;;
+  "GET repos/o/r/git/ref/pull/7/head")
+    has pull-ref.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    emit "$FIX/pull-ref.json" ;;
   "GET repos/o/r/contents/.github/workflows/agent-review.yml?ref="*)
     has caller.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     emit "$FIX/caller.json" ;;
@@ -333,6 +336,7 @@ function run(
     headRepo,
     headBranch,
     branchAt,
+    pullRefAt,
     caller,
   },
 ) {
@@ -343,6 +347,7 @@ function run(
   const all = {
     'pr.json': pr({ head, base, state, defaultBranch, labels, headRepo, headBranch }),
     ...(branchAt ? { 'branch-ref.json': JSON.stringify({ ref: 'refs/heads/x', object: { sha: branchAt, type: 'commit' } }) } : {}),
+    ...(pullRefAt ? { 'pull-ref.json': JSON.stringify({ ref: 'refs/pull/7/head', object: { sha: pullRefAt, type: 'commit' } }) } : {}),
     ...(caller !== undefined ? { 'caller.json': callerJson(caller) } : {}),
     // Two pages, as gh --paginate prints them.
     'reviews.json': JSON.stringify(reviews.slice(0, 1)) + JSON.stringify(reviews.slice(1)),
@@ -536,18 +541,50 @@ const SCENARIOS = {
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, branchAt: C.X, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
     kept,
   ],
-  'a pushed head GitHub never shows is not withdrawn when the branch cannot be read': [
+  'a pushed head GitHub never shows is withdrawn with a warning when the branch cannot be read': [
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
     (o) => {
-      kept(o);
-      assert.match(o.stdout, /^::warning::could not read the branch of PR #7, so the bot's approval of [0-9a-f]{40} was not withdrawn \(review 21\)\. A person must dismiss it\.$/m);
+      assert.deepEqual(o.dismissed, [21], 'an unreadable branch fails closed');
+      assert.match(
+        o.stdout,
+        new RegExp(`^::warning::could not read the branch of PR #7, so the bot's approval of ${C.X} is withdrawn without checking that the branch is still at ${C.NEW} \\(review 21\\)\\.$`, 'm'),
+      );
     },
   ],
-  'a fork PR\'s branch is read from the fork': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, branchAt: C.NEW, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
+  'a fork PR is read from refs/pull/N/head in the base repo, never from the fork': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, pullRefAt: C.NEW, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21]);
-      assert.ok(o.ghCalls.some((l) => l.startsWith('api ¦ repos/someone/r/git/ref/heads/pr-branch ¦ ')), 'the fork\'s branch');
+      assert.ok(o.ghCalls.some((l) => l.startsWith('api ¦ repos/o/r/git/ref/pull/7/head ¦ ')), 'the base repo keeps the PR ref');
+      assert.ok(!o.ghCalls.some((l) => l.includes('repos/someone/')), 'the fork is never read');
+    },
+  ],
+  'a fork PR whose refs/pull/N/head moved to a newer commit is left to that push\'s run': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.MERGE1, count: 1000 }, pullRefAt: C.MERGE1, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      assert.match(o.summary, new RegExp(`The branch of PR #7 moved on to ${C.MERGE1}`));
+    },
+  ],
+  'a fork PR whose refs/pull/N/head cannot be read is withdrawn with a warning': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.match(o.stdout, /^::warning::could not read the branch of PR #7/m);
+    },
+  ],
+  'a PR whose head repo is gone is read from refs/pull/N/head too': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, pullRefAt: C.NEW, headRepo: null, reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(o.ghCalls.some((l) => l.startsWith('api ¦ repos/o/r/git/ref/pull/7/head ¦ ')));
+    },
+  ],
+  'a same-repo PR reads its branch, not the lagging refs/pull/N/head': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, branchAt: C.NEW, pullRefAt: C.X, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'a pull ref still at the old head must not keep the old approval');
+      assert.ok(!o.ghCalls.some((l) => l.includes('/git/ref/pull/')));
     },
   ],
   'a pull_request_target run with the event\'s head waits for a lagging API': [
