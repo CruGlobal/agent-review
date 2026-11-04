@@ -63,6 +63,16 @@ function cleanFinding(raw, { requireBlockerEvidence = false } = {}) {
   return clean;
 }
 
+// The dismissal a reopened entry had, so the report can show why it was dismissed before.
+function dismissalOf(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const out = {};
+  for (const field of ['by', 'reasonCode', 'reason']) {
+    if (typeof entry[field] === 'string' && entry[field]) out[field] = entry[field].slice(0, 2000);
+  }
+  return out;
+}
+
 function cleanPrevious(raw) {
   if (!Array.isArray(raw)) throw new Error('previous ledger must be an array');
   const numbers = new Set();
@@ -87,6 +97,8 @@ function cleanPrevious(raw) {
       if (entry.reason) clean.reason = String(entry.reason);
       if (entry.reasonCode) clean.reasonCode = String(entry.reasonCode);
     }
+    const prior = dismissalOf(entry.previousDismissal);
+    if (prior) clean.previousDismissal = prior;
     return clean;
   });
 }
@@ -161,10 +173,11 @@ function mergeSteps(previousInput, findingsInput, matchSuggestionsByLocation) {
     }
     // A returning finding reopens a fixed entry at any score: the fix did not hold. It raises
     // an open entry, or reopens a dismissed one, only at a higher score than the entry has.
-    // A reopened or raised entry keeps only its number.
+    // A reopened or raised entry keeps its number and the last dismissal it had.
     const entry = merged[at];
     if (entry.status === 'fixed' || finding.severity > entry.severity) {
-      merged[at] = { n: entry.n, ...finding, status: 'open' };
+      const prior = entry.status === 'dismissed' ? dismissalOf(entry) : entry.previousDismissal;
+      merged[at] = { n: entry.n, ...finding, status: 'open', ...(prior ? { previousDismissal: prior } : {}) };
     }
   }
   // Location matching runs after every raise, against the moved entries.

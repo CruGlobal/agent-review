@@ -92,7 +92,8 @@ A later review can raise or reopen an earlier finding when the same finding come
 - **Open:** a higher score replaces it.
 - **Fixed:** it opens again at any score, because the fix did not hold.
 - **Dismissed:** it stays dismissed, unless the new score is higher than when it was dismissed.
-  Then it opens again, and needs a new fix or dismissal.
+  Then it opens again, and needs a new fix or dismissal. Its line in the report shows who
+  dismissed it before and why.
 
 A replaced or reopened finding keeps only its number. The score, file, line, message, evidence,
 and everything else come from the new finding. A lower or equal score never changes an open or

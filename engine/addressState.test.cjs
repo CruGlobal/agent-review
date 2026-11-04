@@ -459,3 +459,24 @@ test('finalizeAddress words the irreversible note as a caution', () => {
   assert.ok(finalized.summary.includes('⚠️ This change is marked irreversible (drops a column; deletes data). A revert will not undo it. Check backups and the deploy plan before you merge.'));
   assert.ok(!finalized.summary.includes('auto-approval stays off'));
 });
+
+test('an open entry a review reopened keeps its old dismissal on its report line after address', () => {
+  const previousDismissal = { by: 'dev', reasonCode: 'pre-existing', reason: 'legacy\nimporter' };
+  const rep = report([finding(), finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js', previousDismissal })]);
+  const req = prepareAddressRequest({
+    command: '@claude fix 1',
+    actor: 'dr-bizz', pr: 42, commentId: 100, reportCommentId: 200,
+    expectedHead: 'a'.repeat(40), report: rep,
+  });
+  const finalized = finalizeAddress({
+    request: req,
+    result: { version: 1, expectedHead: 'a'.repeat(40), fixes: [{ n: 1, status: 'applied', summary: 'added the check', files: ['app/controller.js'] }], tests: [] },
+    report: rep,
+    fixSha: 'c'.repeat(40),
+  });
+  assert.deepEqual(finalized.ledger[1].previousDismissal, previousDismissal, 'the ledger keeps it');
+  assert.match(
+    finalized.report,
+    /^- \[ \] \*\*`#2`\*\* · 9\/10 · `app\/model\.js:12` — authorization is missing _\(security\)_ · ↩️ reopened, dismissed before by @dev \[pre-existing\]: legacy importer$/m,
+  );
+});

@@ -453,10 +453,10 @@ test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-fo
   const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
   const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
   assert.deepEqual(matchedLines, [
-    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review]',
+    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
     '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
   ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');

@@ -18720,6 +18720,14 @@ var require_reportState = __commonJS({
       if (raw.needsHumanReview) clean.needsHumanReview = true;
       return clean;
     }
+    function dismissalOf(entry) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+      const out = {};
+      for (const field of ["by", "reasonCode", "reason"]) {
+        if (typeof entry[field] === "string" && entry[field]) out[field] = entry[field].slice(0, 2e3);
+      }
+      return out;
+    }
     function cleanPrevious(raw) {
       if (!Array.isArray(raw)) throw new Error("previous ledger must be an array");
       const numbers = /* @__PURE__ */ new Set();
@@ -18744,6 +18752,8 @@ var require_reportState = __commonJS({
           if (entry.reason) clean.reason = String(entry.reason);
           if (entry.reasonCode) clean.reasonCode = String(entry.reasonCode);
         }
+        const prior = dismissalOf(entry.previousDismissal);
+        if (prior) clean.previousDismissal = prior;
         return clean;
       });
     }
@@ -18789,7 +18799,8 @@ var require_reportState = __commonJS({
         }
         const entry = merged[at];
         if (entry.status === "fixed" || finding.severity > entry.severity) {
-          merged[at] = { n: entry.n, ...finding, status: "open" };
+          const prior = entry.status === "dismissed" ? dismissalOf(entry) : entry.previousDismissal;
+          merged[at] = { n: entry.n, ...finding, status: "open", ...prior ? { previousDismissal: prior } : {} };
         }
       }
       const seen = new Set(bySignature.keys());
@@ -20225,6 +20236,15 @@ var require_addressState = __commonJS({
         }];
       });
     }
+    function reopenedText(entry) {
+      const prior = entry.previousDismissal;
+      if (!prior) return "";
+      const one = (v) => String(v).replace(/[\r\n]+/g, " ");
+      const by = prior.by ? ` by @${one(prior.by)}` : "";
+      const code = prior.reasonCode ? ` [${one(prior.reasonCode)}]` : "";
+      const reason = prior.reason ? `: ${one(prior.reason)}` : "";
+      return ` \xB7 \u21A9\uFE0F reopened, dismissed before${by}${code}${reason}`;
+    }
     function ledgerLine(entry) {
       const location = `\`${entry.file}${entry.line ? `:${entry.line}` : ""}\``;
       const message = String(entry.message).replace(/[\r\n]/g, " ");
@@ -20237,7 +20257,7 @@ var require_addressState = __commonJS({
         const dismissedPrefix = entry.severity >= 7 ? "- [x]" : "-";
         return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
       }
-      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_`;
+      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_${reopenedText(entry)}`;
     }
     function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       const request = validateRequest(requestInput);
