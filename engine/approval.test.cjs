@@ -386,3 +386,28 @@ test('decide: a rules error keeps a label the bot added and never approves', () 
   const d = decide({ rules: { error: 'boom' }, labels: [LABEL], labelOwner: 'bot' });
   assert.deepEqual([d.approve, d.label, d.dismissBotApprovals], [false, 'keep', 'stale']);
 });
+
+test('decide: dismissFor is failing-report only when the report alone fails and the rules and labels were read', () => {
+  const failing = report({ status: { v: 1, head: HEAD, pass: false, openBlockers: 1 } });
+  const cases = [
+    ['a failing report', { report: failing }, 'failing-report'],
+    ['a failing report with a bot-owned label', { report: failing, labels: [LABEL], labelOwner: 'bot' }, 'failing-report'],
+    ['a failing report with unreadable rules', { report: failing, rules: { error: 'boom' } }, 'unchecked'],
+    ['a failing report with unreadable labels', { report: failing, labels: null }, 'unchecked'],
+    ['a failing report on a PCI path', { report: failing, rules: PCI_RULES }, 'person'],
+    ['a failing report with a person\'s label', { report: failing, labels: [LABEL], labelOwner: 'person' }, 'person'],
+    ['a passing report on a PCI path', { rules: PCI_RULES }, 'person'],
+    ['a report that says a person is needed', { report: report({ status: { v: 1, head: HEAD, pass: true, humanRequired: true, humanReasons: ['PCI'] } }) }, 'person'],
+    ['no report on a PCI path', { report: '', rules: PCI_RULES }, 'person'],
+    ['no report with a person\'s label', { report: '', labels: [LABEL], labelOwner: 'none' }, 'person'],
+    ['no report with unreadable rules', { report: '', rules: { error: 'boom' } }, 'unchecked'],
+    ['a passing report with unreadable rules', { rules: { error: 'boom' } }, 'unchecked'],
+    ['approves', {}, 'none'],
+    ['no report', { report: '' }, 'none'],
+  ];
+  for (const [name, o, want] of cases) {
+    const d = decide(o);
+    assert.equal(d.dismissFor, want, name);
+    assert.equal(d.dismissFor === 'none', d.dismissBotApprovals === 'none', `${name}: dismissFor names a reason exactly when something is dismissed`);
+  }
+});

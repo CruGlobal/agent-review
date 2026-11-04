@@ -295,7 +295,7 @@ const SCENARIOS = {
       assert.match(o.summary, /^No agent-review report found for PR #7 — not approving\.$/m);
       assert.match(o.summary, /approve=false, label=add, dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
       assert.ok(o.writes.some((w) => w.startsWith('api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ ')));
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
     },
   ],
   'no report with rules that need no person changes nothing': [
@@ -311,7 +311,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11]);
+      assert.deepEqual(o.dismissed, [11, 16]);
     },
   ],
   'a repo with no config approves, pinned to the judged head': [
@@ -373,7 +373,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
       assert.match(o.summary, /label=keep, dismiss bot approvals=all\. a person added the needs-human-approval label/);
     },
   ],
@@ -383,7 +383,7 @@ const SCENARIOS = {
       notApproved(o);
       noLabelWrites(o);
       assert.match(o.summary, /label=keep, dismiss bot approvals=all\./);
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
     },
   ],
   'a report for an older head with unreadable rules dismisses only bot approvals of other heads': [
@@ -391,7 +391,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11]);
+      assert.deepEqual(o.dismissed, [11, 16]);
       assert.match(o.summary, /label=keep, dismiss bot approvals=stale\. could not check the human approval rules/);
     },
   ],
@@ -404,6 +404,8 @@ const SCENARIOS = {
         `api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ -f ¦ labels[]=${LABEL} ¦ `,
         'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/11/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
         'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/14/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/16/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/17/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
       ]);
     },
   ],
@@ -417,6 +419,8 @@ const SCENARIOS = {
         `api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ -f ¦ labels[]=${LABEL} ¦ `,
         'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/11/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
         'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/14/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/16/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+        'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/17/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
       ]);
     },
   ],
@@ -433,7 +437,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
       assert.match(o.summary, /a person added the needs-human-approval label/);
     },
   ],
@@ -447,7 +451,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
       assert.match(o.summary, /label=keep, dismiss bot approvals=all\. a person added the needs-human-approval label/);
     },
   ],
@@ -461,7 +465,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
       assert.match(o.summary, /label=keep, dismiss bot approvals=all\. a person added the needs-human-approval label/);
     },
   ],
@@ -490,7 +494,7 @@ const SCENARIOS = {
     (o) => {
       notApproved(o);
       noLabelWrites(o);
-      assert.deepEqual(o.dismissed, [11]);
+      assert.deepEqual(o.dismissed, [11, 16]);
     },
   ],
   'dismiss all: open blockers for this head take back every bot approval and leave a person\'s alone': [
@@ -555,6 +559,26 @@ const SCENARIOS = {
       notApproved(o);
       assert.deepEqual(o.dismissed, [11, 14], '18 approves the new head, which a newer run judged');
       assert.match(o.summary, new RegExp(`The head of PR #7 moved to ${'e'.repeat(40)} while it was being judged, so a bot approval of that head is kept\\.`));
+    },
+  ],
+  'a PR that needs a person withdraws every bot approval, Dependabot\'s and ai-review-auto-approve\'s too': [
+    { config: PCI, 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17], 'a kept third-party approval would let a PCI PR merge with no person');
+      assert.match(o.summary, /dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
+    },
+  ],
+  'a PR that needs a person, whose head cannot be read again, still withdraws every bot approval, even one of a newer head': [
+    {
+      config: PCI,
+      'fail-pr-later': '',
+      'reviews.json': REVIEWS.slice(0, -1) + `,${JSON.stringify({ id: 18, user: { login: BOT }, state: 'APPROVED', commit_id: 'e'.repeat(40), body: APPROVED })}]`,
+    },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17, 18]);
+      assert.match(o.stdout, /^::warning::could not read the head of PR #7 again, so every bot approval is dismissed, including one of a newer head\.$/m);
     },
   ],
   'a head that cannot be read again before dismissing dismisses nothing and says so': [
@@ -657,6 +681,8 @@ SCENARIOS['approve_allowed "false" where a PCI path needs a person still adds th
       `api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ -f ¦ labels[]=${LABEL} ¦ `,
       'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/11/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
       'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/14/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+      'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/16/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
+      'api ¦ -X ¦ PUT ¦ repos/o/r/pulls/7/reviews/17/dismissals ¦ -f ¦ message=agent-review: a person must approve: PCI path: app/pci/x.rb ¦ -f ¦ event=DISMISS ¦ ',
     ]);
     assert.match(o.summary, SKIPPED);
     assert.match(o.summary, /Not approving PR #7: a person must approve: PCI path: app\/pci\/x\.rb/);
@@ -678,7 +704,7 @@ for (const value of [true, '', 'bogus']) {
     { 'config-status': '500', 'reviews.json': REVIEWS },
     (o) => {
       notApproved(o);
-      assert.deepEqual(o.dismissed, [11, 14]);
+      assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
     },
     { patch: { dismissBotApprovals: value } },
   ];
@@ -732,7 +758,7 @@ SCENARIOS['unreadable labels never add the label when a PCI path needs a person,
   (o) => {
     notApproved(o);
     noLabelWrites(o);
-    assert.deepEqual(o.dismissed, [11, 14]);
+    assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
     assert.match(o.summary, /approve=false, label=keep, dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
   },
 ];
@@ -744,6 +770,14 @@ SCENARIOS['a runtime from another version that asks to add a label after the lab
     assert.match(o.summary, /The needs-human-approval label was not added to PR #7, since its labels could not be read\./);
   },
   { patch: { label: 'add' } },
+];
+SCENARIOS['a runtime from another version that gives no dismissFor withdraws every bot approval on a failing report'] = [
+  { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'reviews.json': REVIEWS },
+  (o) => {
+    notApproved(o);
+    assert.deepEqual(o.dismissed, [11, 14, 16, 17]);
+  },
+  { patch: { dismissFor: null } },
 ];
 SCENARIOS['a runtime from another version that asks to add a label already on the PR never adds it again'] = [
   { config: PCI, 'labels.json': JSON.stringify([{ name: LABEL }]), 'timeline.json': JSON.stringify([labeled('alice')]) },

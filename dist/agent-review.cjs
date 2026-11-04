@@ -19079,11 +19079,12 @@ var require_approval = __commonJS({
     function decideApproval({ report, head, rules, labels, labelOwner } = {}) {
       const { result, judged } = judge(report, { head });
       const caution = cautionFor(result);
-      const out = (approve, reason, label, dismissBotApprovals) => ({
+      const out = (approve, reason, label, dismissBotApprovals, dismissFor = "none") => ({
         approve,
         reason,
         label,
         dismissBotApprovals,
+        dismissFor,
         caution
       });
       const labelsOk = Array.isArray(labels) && labels.every((l) => typeof l === "string");
@@ -19091,14 +19092,14 @@ var require_approval = __commonJS({
       const addLabel = labelsOk && !present ? "add" : "keep";
       const plain = rules !== null && typeof rules === "object" && !Array.isArray(rules);
       const ruleOk = plain && !("error" in rules) && typeof rules.required === "boolean" && Array.isArray(rules.reasons) && rules.reasons.every((r) => typeof r === "string");
-      const byPerson = present && labelOwner !== "bot" ? out(false, `a person added the ${LABEL} label`, "keep", "all") : null;
+      const byPerson = present && labelOwner !== "bot" ? out(false, `a person added the ${LABEL} label`, "keep", "all", "person") : null;
       const rulesUnread = () => {
         const why = plain && "error" in rules && rules.error ? String(rules.error) : "rules are missing or malformed";
-        return out(false, `could not check the human approval rules: ${why}`, "keep", "stale");
+        return out(false, `could not check the human approval rules: ${why}`, "keep", "stale", "unchecked");
       };
       if (!judged) {
         if (ruleOk && rules.required) {
-          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, addLabel, "all");
+          return out(false, `a person must approve: ${rules.reasons.join("; ")}`, addLabel, "all", "person");
         }
         if (byPerson) return byPerson;
         return ruleOk ? out(false, result.reason, "keep", "none") : rulesUnread();
@@ -19108,10 +19109,12 @@ var require_approval = __commonJS({
         for (const r of rules.reasons) if (!reasons.includes(r)) reasons.push(r);
       }
       if (result.humanRequired || ruleOk && rules.required) {
-        return out(false, `a person must approve: ${reasons.join("; ")}`, addLabel, "all");
+        return out(false, `a person must approve: ${reasons.join("; ")}`, addLabel, "all", "person");
       }
       if (byPerson) return byPerson;
-      if (!result.approve) return out(false, result.reason, ruleOk && present ? "remove" : "keep", "all");
+      if (!result.approve) {
+        return out(false, result.reason, ruleOk && present ? "remove" : "keep", "all", ruleOk && labelsOk ? "failing-report" : "unchecked");
+      }
       if (!ruleOk) return rulesUnread();
       if (!labelsOk) return out(false, "could not read the PR labels: expected a list of names", "keep", "none");
       return out(true, result.reason, present ? "remove" : "keep", "none");

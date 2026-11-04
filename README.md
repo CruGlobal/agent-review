@@ -150,12 +150,15 @@ If the job cannot read the rules and none of the above applies, it takes back on
 approvals of older commits. Otherwise it takes back nothing. It never touches a person's
 review. It approves only the exact commit it judged, and checks that the head did not move first.
 
-Its own approvals carry a hidden `<!-- agent-review-approval -->` marker, and older ones are known
-by the approval text agent-review posted or the text the caller set. A bot approval it cannot place
-is taken back too, unless it is a known approval from another workflow: a Dependabot auto-approval
-(no text) or an ai-review-auto-approve approval stays. Right before taking any back, it reads the
-PR's head again: if a push moved it while the job ran, an approval of the new head stays, since a
-newer run gave it.
+When a person is needed, or the job cannot read the rules or labels, it takes back every approval
+the `github-actions` bot gave the PR. When only the report fails, it takes back its own approvals
+and any bot approval it cannot place, but keeps a known approval from another workflow: a
+Dependabot auto-approval (no text) or an ai-review-auto-approve approval. Its own approvals carry a
+hidden `<!-- agent-review-approval -->` marker, and older ones are known by the approval text
+agent-review posted or the text the caller set. Right before taking any back, it reads the PR's
+head again: if a push moved it while the job ran, an approval of the new head stays, since a newer
+run gave it. If it cannot read the head again, a failing report takes back nothing and warns,
+and anything else takes back all of them.
 
 Taking back an approval uses GitHub's dismiss-review API, which the job's token can do with no
 extra setting. A branch rule that limits who may dismiss reviews blocks it: the job then shows a

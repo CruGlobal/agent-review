@@ -3,10 +3,9 @@ description: >-
   Approve a pull request when its published agent-review report passes for the
   PR's current head and no person needs to approve it. Re-checks the base
   commit's human_approval rules, owns the needs-human-approval label, and
-  dismisses its own earlier approvals (marked in their body) when a person must
-  approve or the report for the PR's head does not pass, or its approvals of
-  other heads when the rules cannot be read, never one of a head that moved in
-  while it ran. The approval is pinned
+  dismisses every bot approval when a person must approve, all but known
+  third-party ones when only the report for the PR's head fails, and those of
+  other heads when the rules cannot be read. The approval is pinned
   to the judged commit, and is never posted unless approve_allowed is 'true'. Fails closed on any missing or disagreeing marker, never
   requests changes, never fails the job, and downgrades a label, dismissal, or
   approval API failure to a warning.
@@ -198,6 +197,7 @@ runs:
         REASON=$(printf '%s' "$DECISION" | jq -r '.reason')
         LABEL_ACTION=$(printf '%s' "$DECISION" | jq -r '.label')
         DISMISS=$(printf '%s' "$DECISION" | jq -r '.dismissBotApprovals')
+        DISMISS_FOR=$(printf '%s' "$DECISION" | jq -r '.dismissFor // "unchecked"')
         CAUTION=$(printf '%s' "$DECISION" | jq -r '.caution // empty')
         note "Decision for PR #$PR: approve=$APPROVE, label=$LABEL_ACTION, dismiss bot approvals=$DISMISS. $REASON"
 
@@ -238,43 +238,53 @@ runs:
           *) DISMISS_MODE=all ;;
         esac
         if [ -n "$DISMISS_MODE" ]; then
-          # The head is read again right before dismissing. If it moved, a newer run
-          # may already have approved the new head, so that approval is kept.
-          if ! NOW_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) \
-            || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
-            warn "could not read the head of PR #$PR again, so the bot's earlier approvals were not dismissed."
-          elif BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" \
-                --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY" '
-              # ours: the marker, any approval text agent-review has ever posted, or the
-              # approval text this caller set. A bot approval that is not ours is withdrawn
-              # too, unless it is a known approval from another workflow: a Dependabot
-              # auto-approval (no body) or ai-review-auto-approve.
-              def ours:
-                contains($marker)
-                or startswith("Auto-approved: the agent-review report for this head passes")
-                or startswith("Auto-approved: the posted agent-review report covers the current head")
-                or startswith("Auto-approved: every agent-review finding is fixed or dismissed")
-                or ($configured != "" and startswith($configured));
-              def third_party: . == "" or startswith("## AI Review Auto-Approval");
-              .[][]
-              | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
-              | select((.body // "") | ours or (third_party | not))
-              | select($mode == "all" or .commit_id != $head)
-              | select($now == $head or .commit_id != $now)
-              | .id'); then
+          # Only a failing report keeps known third-party bot approvals; every other
+          # reason withdraws every bot approval, as a person may be needed.
+          OWN_ONLY=false
+          if [ "$DISMISS_FOR" = failing-report ]; then OWN_ONLY=true; fi
+          LIST_REVIEWS=true
+          if NOW_HEAD=$(gh api "repos/$REPO/pulls/$PR" --jq .head.sha) && [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
             if [ "$NOW_HEAD" != "$HEAD_SHA" ]; then
               note "The head of PR #$PR moved to $NOW_HEAD while it was being judged, so a bot approval of that head is kept."
             fi
-            for REVIEW_ID in $BOT_APPROVALS; do
-              if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
-                note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
-              else
-                warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
-              fi
-            done
+          elif [ "$OWN_ONLY" = true ]; then
+            warn "could not read the head of PR #$PR again, so the bot's earlier approvals were not dismissed."
+            LIST_REVIEWS=false
           else
-            warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+            warn "could not read the head of PR #$PR again, so every bot approval is dismissed, including one of a newer head."
+            NOW_HEAD=$HEAD_SHA
+          fi
+          if [ "$LIST_REVIEWS" = true ]; then
+            if BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
+              | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" \
+                  --arg own_only "$OWN_ONLY" --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY" '
+                # ours: the marker, any approval text agent-review has ever posted, or the
+                # approval text this caller set. With own_only, a bot approval that is not
+                # ours stays only if it is a known approval from another workflow: a
+                # Dependabot auto-approval (no body) or ai-review-auto-approve.
+                def ours:
+                  contains($marker)
+                  or startswith("Auto-approved: the agent-review report for this head passes")
+                  or startswith("Auto-approved: the posted agent-review report covers the current head")
+                  or startswith("Auto-approved: every agent-review finding is fixed or dismissed")
+                  or ($configured != "" and startswith($configured));
+                def third_party: . == "" or startswith("## AI Review Auto-Approval");
+                .[][]
+                | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
+                | select($own_only != "true" or ((.body // "") | ours or (third_party | not)))
+                | select($mode == "all" or .commit_id != $head)
+                | select($now == $head or .commit_id != $now)
+                | .id'); then
+              for REVIEW_ID in $BOT_APPROVALS; do
+                if gh api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="agent-review: $REASON" -f event=DISMISS > /dev/null; then
+                  note "Dismissed the bot's earlier approval on PR #$PR (review $REVIEW_ID)."
+                else
+                  warn "could not dismiss the bot's earlier approval on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+                fi
+              done
+            else
+              warn "could not list the reviews on PR #$PR, so the bot's earlier approvals were not dismissed."
+            fi
           fi
         fi
 
