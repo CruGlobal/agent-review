@@ -110,8 +110,27 @@ const prJson = (extra = {}) => JSON.stringify({ head: { sha: HEAD }, base: { sha
 const labeled = (login, name = LABEL) => ({ event: 'labeled', label: { name }, actor: { login } });
 const MARKER = '<!-- agent-review-approval -->';
 const APPROVED = `${BODY}\n\n${MARKER}`;
-// Bot approvals: 11 has the 1.1.0 approval text, 14 the marker. 16 (Dependabot's empty body)
-// and 17 (another workflow's text) are other workflows' and are never dismissed.
+// The bodies other workflows post with the same bot token, as their workflow files write them:
+// Dependabot auto-merge (ararat, clm, cutmeoff) runs `gh pr review --approve` with no body, and
+// ai-review-auto-approve (staff_accounting_app, mpdx-react) builds a markdown report.
+const DEPENDABOT_BODY = '';
+const AI_REVIEW_BODY = (riskLine) =>
+  [
+    '## AI Review Auto-Approval',
+    '',
+    riskLine,
+    '**Verdict:** Approved',
+    '',
+    'This PR was auto-approved because:',
+    '- The multi-agent AI review determined it is **low risk**',
+    '- **No blocking issues** were found',
+    '',
+    'If you believe this PR needs human review, dismiss this approval and request a review manually.',
+    '',
+    '<!-- Agent Review ID: 42 -->',
+  ].join('\n');
+// Bot approvals: 11 has a 1.1.0 approval text, 14 the marker. 16 (Dependabot) and 17
+// (ai-review-auto-approve) are known approvals from other workflows and are never dismissed.
 const REVIEWS =
   JSON.stringify([
     { id: 11, user: { login: BOT }, state: 'APPROVED', commit_id: OLD, body: BODY },
@@ -121,8 +140,8 @@ const REVIEWS =
     { id: 13, user: { login: BOT }, state: 'COMMENTED', commit_id: OLD, body: MARKER },
     { id: 14, user: { login: BOT }, state: 'APPROVED', commit_id: HEAD, body: `Auto-approved: every agent-review finding is fixed or dismissed with a reason.\n\n${MARKER}` },
     { id: 15, user: null, state: 'APPROVED', commit_id: OLD },
-    { id: 16, user: { login: BOT }, state: 'APPROVED', commit_id: OLD, body: '' },
-    { id: 17, user: { login: BOT }, state: 'APPROVED', commit_id: HEAD, body: 'Auto-approved by ai-review-auto-approve: the AI review passed.' },
+    { id: 16, user: { login: BOT }, state: 'APPROVED', commit_id: OLD, body: DEPENDABOT_BODY },
+    { id: 17, user: { login: BOT }, state: 'APPROVED', commit_id: HEAD, body: AI_REVIEW_BODY('**Risk Level:** LOW (2/10)') },
   ]);
 
 function defaults() {
@@ -491,6 +510,40 @@ const SCENARIOS = {
       notApproved(o);
       assert.deepEqual(o.dismissed, [11, 14], '16 and 17 are bot approvals from other workflows; 12 is a person\'s');
     },
+  ],
+  'every approval text agent-review has posted, the caller\'s own text, and any unknown bot approval are withdrawn; known third-party approvals stay': [
+    {
+      'comments.json': comments({ pass: false, openBlockers: 1 }),
+      'reviews.json': JSON.stringify(
+        [
+          [21, 'Auto-approved: every agent-review finding is fixed or dismissed with a reason.'],
+          [22, 'Auto-approved: every agent-review finding is fixed or dismissed with a reason, and the change is reversible.'],
+          [23, 'Auto-approved: the posted agent-review report covers the current head, passes with no open blockers, and the change is reversible.'],
+          [24, 'Auto-approved: the agent-review report for this head passes with no open blockers and the change is reversible.'],
+          [25, `${BODY}\n\nCaution: this change is irreversible (drops a column). A revert will not undo it.`],
+          [26, 'Auto-approved: every agent-review finding is fixed or dismissed with a reason, and no repo rule or recorded check needs a person.'],
+          [27, 'Approved by the platform bot after review.'],
+          [28, 'LGTM from a workflow nobody remembers'],
+          [29, DEPENDABOT_BODY],
+          [30, null],
+          [31, AI_REVIEW_BODY('**Risk Level:** LOW (2/10)')],
+          [32, AI_REVIEW_BODY('**Risk Level:** MEDIUM (5 points across 3 files)')],
+        ].map(([id, body]) => ({ id, user: { login: BOT }, state: 'APPROVED', commit_id: OLD, body })),
+      ),
+    },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [21, 22, 23, 24, 25, 26, 27, 28], '27 is this caller\'s text and 28 is unknown, so both go; 29 to 32 are Dependabot\'s and ai-review-auto-approve\'s');
+    },
+    { approvalBody: 'Approved by the platform bot after review.' },
+  ],
+  'an empty approval text from the caller never makes a Dependabot approval look like ours': [
+    { 'comments.json': comments({ pass: false, openBlockers: 1 }), 'reviews.json': REVIEWS },
+    (o) => {
+      notApproved(o);
+      assert.deepEqual(o.dismissed, [11, 14]);
+    },
+    { approvalBody: '' },
   ],
   'a head that moved before dismissing keeps the bot approval of the new head and takes back the rest': [
     {

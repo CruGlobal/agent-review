@@ -71,9 +71,7 @@ runs:
         }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
         LABEL=needs-human-approval
-        # Marks the approvals this action posts. Only those, and approvals with the
-        # 1.1.0 approval text below, are ever dismissed; other bot approvals, such as
-        # a Dependabot auto-approval, are left alone.
+        # Marks the approvals this action posts, so a later run can find them.
         APPROVAL_MARKER='<!-- agent-review-approval -->'
         RUNTIME_DIR="$RUNNER_TEMP/agent-review-approve-runtime"
         rm -rf "$RUNTIME_DIR"
@@ -246,12 +244,22 @@ runs:
             || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
             warn "could not read the head of PR #$PR again, so the bot's earlier approvals were not dismissed."
           elif BOT_APPROVALS=$(gh api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate \
-            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" --arg marker "$APPROVAL_MARKER" '
+            | jq -rs --arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD" \
+                --arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY" '
+              # ours: the marker, any approval text agent-review has ever posted, or the
+              # approval text this caller set. A bot approval that is not ours is withdrawn
+              # too, unless it is a known approval from another workflow: a Dependabot
+              # auto-approval (no body) or ai-review-auto-approve.
+              def ours:
+                contains($marker)
+                or startswith("Auto-approved: the agent-review report for this head passes")
+                or startswith("Auto-approved: the posted agent-review report covers the current head")
+                or startswith("Auto-approved: every agent-review finding is fixed or dismissed")
+                or ($configured != "" and startswith($configured));
+              def third_party: . == "" or startswith("## AI Review Auto-Approval");
               .[][]
               | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
-              | select((.body // "") | contains($marker)
-                  or startswith("Auto-approved: the agent-review report for this head passes")
-                  or startswith("Auto-approved: every agent-review finding is fixed or dismissed"))
+              | select((.body // "") | ours or (third_party | not))
               | select($mode == "all" or .commit_id != $head)
               | select($now == $head or .commit_id != $now)
               | .id'); then

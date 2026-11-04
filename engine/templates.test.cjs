@@ -1777,7 +1777,9 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
 
   for (const [part, why] of [
     ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals, never a person\'s review'],
-    ['| select((.body // "") | contains($marker)', 'only approvals this action posted, by their marker'],
+    ['| select((.body // "") | ours or (third_party | not))', 'its own approvals, and any bot approval not known to be another workflow\'s'],
+    ['def third_party: . == "" or startswith("## AI Review Auto-Approval");', 'Dependabot and ai-review-auto-approve approvals are left alone'],
+    ['or ($configured != "" and startswith($configured));', 'the caller\'s own approval text counts as ours'],
     ['| select($mode == "all" or .commit_id != $head)', 'stale means another head'],
     ['| select($now == $head or .commit_id != $now)', 'an approval of a head that moved in is kept'],
     ["APPROVAL_MARKER='<!-- agent-review-approval -->'", 'the marker is one fixed string'],
@@ -1786,6 +1788,7 @@ test('the approve action re-checks the base commit rules, owns the label, and ta
     assert.ok(run.includes(part), why);
   }
   assert.ok(run.includes('--arg mode "$DISMISS_MODE" --arg head "$HEAD_SHA" --arg now "$NOW_HEAD"'));
+  assert.ok(run.includes('--arg marker "$APPROVAL_MARKER" --arg configured "$APPROVAL_BODY"'));
   assert.ok(run.includes('*) DISMISS_MODE=all ;;'), 'a dismiss value from another engine version fails closed to all');
   // Bash before 4.4 calls an empty array unbound under set -u, so the script
   // keeps to plain strings; engine/approveAction.test.cjs runs it on the system bash.
