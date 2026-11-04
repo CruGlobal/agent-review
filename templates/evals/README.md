@@ -16,7 +16,8 @@ agent-review eval score --suite .claude/review/evals/suite.yml \
 ```
 
 An expected finding marked `must_block: false` is a real problem the reviewer should raise as a
-suggestion, below `blocker_threshold`. Only a finding under the threshold matches it, so it counts
+suggestion, below `blocker_threshold`. Only a finding under the threshold matches it (so its
+`min_severity` must be lower, or validation fails), and it counts
 toward `suggestionRecall`, never blocker recall. A seeded case whose expected findings are all
 `must_block: false` must not be blocked: its runs count with the clean controls, and a blocker on
 one is a false blocker. `thresholds.suggestion_recall` is optional.

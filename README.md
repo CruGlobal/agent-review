@@ -416,9 +416,10 @@ agent-review eval score --suite .claude/review/evals/suite.yml \
 
 The summary reports blocker recall/precision, clean-control false blockers, dismissal rates,
 per-category recall, suggestion recall, and repeated-run detection stability. An expected finding
-with `must_block: false` is a real problem the review should raise below 7: it counts toward
-suggestion recall, only a finding under 7 matches it, and a case that expects no blocker counts as
-a clean run, so blocking it is a false blocker. Set `thresholds.suggestion_recall` to gate on it. Dismissals use explicit reason codes:
+with `must_block: false` is a real problem the review should raise below the suite's
+`blocker_threshold` (7 by default): it counts toward suggestion recall, only a finding under that
+threshold matches it, so its `min_severity` must be lower, and a case that expects no blocker counts
+as a clean run, so blocking it is a false blocker. Set `thresholds.suggestion_recall` to gate on it. Dismissals use explicit reason codes:
 `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
 `insufficient-evidence`, or `other`.
 

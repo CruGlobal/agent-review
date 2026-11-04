@@ -17772,6 +17772,7 @@ var require_evalSuite = __commonJS({
       }
       const ids = /* @__PURE__ */ new Set();
       const base = suitePath ? dirname(suitePath) : process.cwd();
+      const blockerThreshold = Number(raw.blocker_threshold || 7);
       for (const c of raw.cases) {
         if (!c.id || !/^[a-z0-9][a-z0-9._-]*$/i.test(c.id)) {
           throw new Error(`invalid evaluation case id: ${c.id || ""}`);
@@ -17796,6 +17797,11 @@ var require_evalSuite = __commonJS({
           const min = Number(e.min_severity == null ? 7 : e.min_severity);
           if (!Number.isFinite(min) || min < 1 || min > 10) {
             throw new Error(`case ${c.id}/${e.id} has invalid min_severity`);
+          }
+          if (e.must_block === false && e.min_severity != null && min >= blockerThreshold) {
+            throw new Error(
+              `case ${c.id}/${e.id} has must_block: false with min_severity ${min}, which is not below blocker_threshold ${blockerThreshold}, so it can never match`
+            );
           }
           const match = e.match || {};
           if (!Array.isArray(match.paths) || match.paths.length === 0) {

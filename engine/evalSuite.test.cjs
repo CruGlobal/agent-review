@@ -111,6 +111,22 @@ test('a missed must_block false case fails its run, and fails the gate only with
   assert.throws(() => validateSuite(suggestionSuite({ suggestion_recall: 2 })), /suggestion_recall/);
 });
 
+test('suite validation rejects a must_block false finding that could never match', () => {
+  const at = (min, threshold) => {
+    const raw = suggestionSuite();
+    raw.cases[2].expected[0].min_severity = min;
+    if (threshold !== undefined) raw.blocker_threshold = threshold;
+    return raw;
+  };
+  assert.throws(() => validateSuite(at(7)), /must_block: false with min_severity 7, which is not below blocker_threshold 7, so it can never match/);
+  assert.throws(() => validateSuite(at(5, 5)), /not below blocker_threshold 5/);
+  assert.doesNotThrow(() => validateSuite(at(6)));
+  assert.doesNotThrow(() => validateSuite(at(7, 8)), 'a higher threshold leaves room');
+  const unset = suggestionSuite();
+  delete unset.cases[2].expected[0].min_severity;
+  assert.doesNotThrow(() => validateSuite(unset), 'with no min_severity a suggestion matches from 1');
+});
+
 test('suite validation rejects clean controls that require blockers', () => {
   const raw = suite();
   raw.cases[1].expected = [{ id: 'bad', match: { paths: ['**'] } }];
