@@ -9,6 +9,9 @@ const {
   captureDir,
   captureDirProblem,
   armedState,
+  argsTarget,
+  chooseArms,
+  sessionArms,
   stripSkillHeader,
   lastAssistantText,
   postSkillWrites,
@@ -543,4 +546,48 @@ test('lastAssistantText returns the last assistant text block in a transcript', 
   assert.equal(lastAssistantText(jsonl), 'final text');
   assert.equal(lastAssistantText(''), null);
   assert.equal(lastAssistantText(line({ type: 'user', message: { content: 'hi' } })), null);
+});
+
+test('argsTarget is the second word of the /code-review args', () => {
+  assert.equal(argsTarget('xhigh 12 --max-findings default'), '12');
+  assert.equal(argsTarget('  high   abc123..def456  '), 'abc123..def456');
+  assert.equal(argsTarget('low'), null);
+  assert.equal(argsTarget(undefined), null);
+});
+
+test('chooseArms keeps each session to its own arms and tells runs apart by args', () => {
+  const arm = (run, args, session_id) => ({ dir: `/runs/${run}`, arm: { ...ARM, run_id: run, args, session_id } });
+  const a = arm('a', 'xhigh 12', 's1');
+  const b = arm('b', 'xhigh 34', 's1');
+  const c = arm('c', 'xhigh 12', 's2');
+  const call = (session_id, args, extra = {}) => skillPayload({ session_id, tool_input: { args, ...extra } });
+  const pick = (payload, arms = [a, b, c]) => {
+    const r = chooseArms({ arms, payload });
+    return [r.kind, r.entries.map((e) => e.arm.run_id)];
+  };
+  assert.deepEqual(pick(call('s1', 'xhigh 12')), ['match', ['a']]);
+  assert.deepEqual(pick(call('s2', 'xhigh 12')), ['match', ['c']], 'same args, other session');
+  assert.deepEqual(pick(call('s1', 'xhigh 34')), ['match', ['b']]);
+  assert.deepEqual(pick(call('s3', 'xhigh 12')), ['none', []], 'another session never reaches these arms');
+  assert.deepEqual(pick(call('s1', 'high 12')), ['mismatch', ['a']], 'wrong effort on run a target');
+  assert.deepEqual(pick(call('s1', 'xhigh 12', { skill: 'code-review:code-review' })), ['mismatch', ['a']]);
+  assert.deepEqual(pick(call('s1', 'high 99')), ['none', []], 'another target is not these runs');
+  assert.deepEqual(pick(call('s1', 'high')), ['none', []]);
+  assert.deepEqual(pick(call('s1', 'xhigh 12', { skill: 'simplify' })), ['none', []]);
+  assert.deepEqual(pick({ ...call('s1', 'xhigh 12'), agent_id: undefined }), ['none', []], 'a main-thread call is never captured');
+  assert.deepEqual(pick({ ...call('s1', 'xhigh 12'), session_id: undefined }), ['none', []], 'no session id reaches only session-less arms');
+  assert.deepEqual(pick(call('s1', 'xhigh 12'), [a, arm('d', 'xhigh 12', 's1')]), ['ambiguous', ['a', 'd']]);
+  assert.deepEqual(pick(call('s1', 'high 12'), [a, arm('d', 'xhigh 12', 's1')]), ['none', []], 'a wrong call two runs could own fails neither');
+  const legacy = arm('e', 'xhigh 56', null);
+  assert.deepEqual(pick(call('s9', 'xhigh 56'), [legacy]), ['match', ['e']], 'an arm with no session id takes any session');
+});
+
+test('sessionArms picks the arms a subagent stop of this session may belong to', () => {
+  const arms = [
+    { dir: '/a', arm: { ...ARM, session_id: 's1' } },
+    { dir: '/b', arm: { ...ARM, session_id: 's2' } },
+    { dir: '/c', arm: { ...ARM } },
+  ];
+  assert.deepEqual(sessionArms({ arms, payload: { session_id: 's1', agent_id: 'x' } }).map((e) => e.dir), ['/a', '/c']);
+  assert.deepEqual(sessionArms({ arms, payload: { session_id: 's1' } }), []);
 });

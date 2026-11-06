@@ -68,13 +68,13 @@ the wrong finding:]
 ```
 
 [Local mode only — never in CI, nothing is executed there:]
-Apply: `bash /tmp/automated_fixes/fix_N_category.sh` (omit `--yes` first for a dry run)
+Apply, from the PR's checkout: `bash "$(agent-review run-dir)/automated_fixes/fix_N_category.sh"` (omit `--yes` first for a dry run)
 
 </details>
 
 <details><summary>📦 Dependency impact</summary>
 
-[blastRadius, direct dependents, and topImpacted table from /tmp/review_impact.json; say
+[blastRadius, direct dependents, and topImpacted table from $RUN_DIR/review_impact.json; say
 "index disabled" when Stage 1B was skipped]
 
 **Breaking changes** [omit this subsection when none were detected]: [removed exports or other

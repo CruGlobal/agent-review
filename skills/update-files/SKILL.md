@@ -25,7 +25,8 @@ may itself be the stale thing. `gh` auth is already required by the rest of the 
 
 ```bash
 set -e
-UPDATE_DIR=/tmp/agent_review_templates
+RUN_DIR=$(agent-review run-dir)
+UPDATE_DIR="$RUN_DIR/update-files"
 rm -rf "$UPDATE_DIR" && mkdir -p "$UPDATE_DIR"
 for f in agent-review.yml agent-review-interact.yml agent-review-readiness.yml agent-review-approve.yml; do
   gh api "repos/CruGlobal/agent-review/contents/templates/workflows/$f" --jq .content \
@@ -36,6 +37,7 @@ gh api "repos/CruGlobal/agent-review/contents/templates/workflows/template-manif
 LATEST=$(gh api repos/CruGlobal/agent-review/contents/.claude-plugin/plugin.json --jq .content \
   | base64 -d | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')
 echo "Latest agent-review version: $LATEST"
+echo "$LATEST" > "$UPDATE_DIR/LATEST"
 grep -h '^# agent-review-template-version:' "$UPDATE_DIR"/*.yml | sort -u
 ```
 
@@ -60,11 +62,12 @@ compare or offer `agent-review.yml`, `agent-review-interact.yml`, or `agent-revi
 and say they were skipped because the repo is local-only. Then see Stage 4 for CI files that are
 still installed. Stage 3 applies to the approve file only.
 
-Then judge every installed copy against the fetched templates. Put the version Stage 1 printed
-in place of `<latest>`:
+Then judge every installed copy against the fetched templates and the latest version Stage 1
+saved:
 
 ```bash
-agent-review template-status --templates /tmp/agent_review_templates --version <latest>
+UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1
+agent-review template-status --templates "$UPDATE_DIR" --version "$(cat "$UPDATE_DIR/LATEST")"
 ```
 
 It prints one JSON line with a `files` entry for each `.github/workflows/agent-review*.yml`. A copy
@@ -183,3 +186,9 @@ default branch directly, and never push without the user's go-ahead.
 
 If nothing changed after the merge, leave the working tree clean and say the repo was already
 current.
+
+Either way, finish by removing the fetched templates:
+
+```bash
+UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"
+```

@@ -16,9 +16,12 @@ SHA-PINNED CROSS-REPOSITORY CONTEXT:
 
 INSTRUCTIONS:
 
+Your shell may start outside the repository, so begin every command with `cd {{REPO_ROOT}} &&`.
+This review's files live in {{RUN_DIR}}; use the paths below exactly as written.
+
 1. Read {{DIFF_PATH}} for the diff — your assigned slice of hunks matching your triggers for a
    sliced lane, or the full diff for a full-mode lane
-2. Read /tmp/changed_files.txt for the list of changed files
+2. Read {{RUN_DIR}}/changed_files.txt for the list of changed files
 3. `full-file read budget`: open at most 5 complete files (10 when your model tier is sonnet and
    risk is HIGH/CRITICAL — the launch prompt tells you); prefer the hunk context in your diff
 4. Search the codebase for the patterns and conventions the change touches (see CODEBASE CONTEXT
@@ -42,7 +45,7 @@ universal checks implied by your expertise.
 OUTPUT FORMAT:
 
 Do not write a markdown report. Write your findings to
-`/tmp/agent_findings/{{AGENT_ID}}.json` as a single JSON object:
+`{{RUN_DIR}}/agent_findings/{{AGENT_ID}}.json` as a single JSON object:
 
 ```json
 {
@@ -88,7 +91,7 @@ const out = {
   questions: [],
   overallConfidence: "High",
 };
-fs.writeFileSync("/tmp/agent_findings/{{AGENT_ID}}.json", JSON.stringify(out, null, 2));
+fs.writeFileSync("{{RUN_DIR}}/agent_findings/{{AGENT_ID}}.json", JSON.stringify(out, null, 2));
 EOF
 ```
 
@@ -159,7 +162,7 @@ When you find a fixable issue, use that finding's own `fix` field (see OUTPUT FO
 the fix content, then also write it out as an executable script so `apply_all.sh` can offer it:
 
 ```bash
-cat > /tmp/automated_fixes/fix_N_[category].sh << 'EOF'
+cat > {{RUN_DIR}}/automated_fixes/fix_N_[category].sh << 'EOF'
 #!/bin/bash
 # Fix: [description]
 # File: path/to/file
@@ -167,7 +170,7 @@ cat > /tmp/automated_fixes/fix_N_[category].sh << 'EOF'
 # [Bash commands to apply fix using sed or other tools]
 sed -i.bak 's/old_pattern/new_pattern/g' path/to/file && rm path/to/file.bak
 EOF
-chmod +x /tmp/automated_fixes/fix_N_[category].sh
+chmod +x {{RUN_DIR}}/automated_fixes/fix_N_[category].sh
 ```
 
 Only generate a fix when the change is mechanical and you are confident it is correct. Skip the

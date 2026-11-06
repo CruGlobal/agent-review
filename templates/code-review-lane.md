@@ -15,12 +15,18 @@ The diff for this review pass is {{DIFF_PATH}}. STEP 3 shows you the parts of it
 
 BEFORE YOU START:
 
+Your shell may start outside the repository, so begin every command with `cd {{REPO_ROOT}} &&`.
+This review's files live in its run folder, {{RUN_DIR}}. Each `agent-review capture`,
+`capture-wait`, and `code-review-proof` command below names it with `--run-dir {{RUN_DIR}}`, so it
+reads this review's files even while other reviews run on this machine; keep that flag exactly as
+written.
+
 Remove this attempt's three files, in case an earlier run left them. Remove nothing else. Never
 write, edit, or remove /code-review's saved result: the review's hooks save it, and the review
 checks it.
 
 ```bash
-rm -f /tmp/code_review_raw.{{ATTEMPT}}.json /tmp/code_review_findings.{{ATTEMPT}}.json /tmp/code_review_dropped.{{ATTEMPT}}.json
+rm -f {{RUN_DIR}}/code_review_raw.{{ATTEMPT}}.json {{RUN_DIR}}/code_review_findings.{{ATTEMPT}}.json {{RUN_DIR}}/code_review_dropped.{{ATTEMPT}}.json
 ```
 
 RETRY NOTE (empty on the first attempt):
@@ -40,7 +46,7 @@ second, `tail -c +40001 | head -c 20000` for the third, and so on, until a part 
 For example, the second part of the saved result is:
 
 ```bash
-agent-review capture show --run {{RUN_ID}} | tail -c +20001 | head -c 20000
+agent-review capture show --run-dir {{RUN_DIR}} --run {{RUN_ID}} | tail -c +20001 | head -c 20000
 ```
 
 If a part still comes back cut short, halve the page size and read that part again in two halves.
@@ -75,7 +81,7 @@ Then wait for the result. Run this with the Bash tool, and give that Bash call a
 600000 (10 minutes), because one wait can last 9 minutes:
 
 ```bash
-agent-review capture-wait --run {{RUN_ID}} --effort {{EFFORT}}
+agent-review capture-wait --run-dir {{RUN_DIR}} --run {{RUN_ID}} --effort {{EFFORT}}
 ```
 
 It prints one JSON line. Act on its exit code:
@@ -92,7 +98,7 @@ STEP 2. LIST THE RAW FINDINGS
 Print /code-review's result:
 
 ```bash
-agent-review capture show --run {{RUN_ID}}
+agent-review capture show --run-dir {{RUN_DIR}} --run {{RUN_ID}}
 ```
 
 It prints the saved result exactly, and that text is the only source of raw findings. If the
@@ -151,7 +157,7 @@ const raw = [
   { n: 2, file: "dist/app.js", line: 120, summary: "the built bundle has the same profile bug" },
   { n: 3, file: "lib/num.js", line: 9, summary: "parseCount accepts an empty string" },
 ];
-fs.writeFileSync("/tmp/code_review_raw.{{ATTEMPT}}.json", JSON.stringify(raw, null, 2));
+fs.writeFileSync("{{RUN_DIR}}/code_review_raw.{{ATTEMPT}}.json", JSON.stringify(raw, null, 2));
 EOF
 ```
 
@@ -167,7 +173,7 @@ When the raw list is empty, skip to STEP 4. Otherwise, print the parts of the di
 your raw findings name:
 
 ```bash
-agent-review diff-for --diff {{DIFF_PATH}} --raw /tmp/code_review_raw.{{ATTEMPT}}.json
+agent-review diff-for --diff {{DIFF_PATH}} --raw {{RUN_DIR}}/code_review_raw.{{ATTEMPT}}.json
 ```
 
 Read that output, not the whole diff. It skips files on an excluded path, and for any other file
@@ -393,8 +399,8 @@ const dropped = [
   { raw: 2, reason: "excluded", glob: "dist/**" },
   { raw: 3, reason: "disproved", proof: "misreads the code: lib/num.js:7 if (!/^\\d+$/.test(s)) return null;" },
 ];
-fs.writeFileSync("/tmp/code_review_findings.{{ATTEMPT}}.json", JSON.stringify(out, null, 2));
-fs.writeFileSync("/tmp/code_review_dropped.{{ATTEMPT}}.json", JSON.stringify(dropped, null, 2));
+fs.writeFileSync("{{RUN_DIR}}/code_review_findings.{{ATTEMPT}}.json", JSON.stringify(out, null, 2));
+fs.writeFileSync("{{RUN_DIR}}/code_review_dropped.{{ATTEMPT}}.json", JSON.stringify(dropped, null, 2));
 EOF
 ```
 
@@ -408,7 +414,7 @@ STEP 5. CHECK THE FILES
 Run the review's own check on your three files:
 
 ```bash
-agent-review code-review-proof --raw /tmp/code_review_raw.{{ATTEMPT}}.json --findings /tmp/code_review_findings.{{ATTEMPT}}.json --dropped /tmp/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}} --head {{REVIEWED_HEAD}} --base {{REVIEWED_BASE}}
+agent-review code-review-proof --run-dir {{RUN_DIR}} --raw {{RUN_DIR}}/code_review_raw.{{ATTEMPT}}.json --findings {{RUN_DIR}}/code_review_findings.{{ATTEMPT}}.json --dropped {{RUN_DIR}}/code_review_dropped.{{ATTEMPT}}.json --run {{RUN_ID}} --head {{REVIEWED_HEAD}} --base {{REVIEWED_BASE}}
 ```
 
 It prints one JSON line. Act on its `ok` and `stage`:
@@ -428,7 +434,7 @@ When you are done, your final message must be exactly one line:
 
 `done — <N> findings, max severity <X>`
 
-where `<N>` is `findings.length` in `/tmp/code_review_findings.{{ATTEMPT}}.json` and `<X>` is the
+where `<N>` is `findings.length` in `{{RUN_DIR}}/code_review_findings.{{ATTEMPT}}.json` and `<X>` is the
 highest `severity` among them (0 if `findings` is empty). Dropped findings do not count. Write
 nothing else in that final message: no summary, no markdown, no restated findings. The only other
 final lines are `/code-review did not finish: <reason>` (STEP 1) and `/code-review returned no usable result`

@@ -299,13 +299,19 @@ do not add or remove reviewers under this engine. `/code-review` has no security
 asks for tests, which is why those reviewers stay on.
 
 **How the result is captured.** The lane does not copy `/code-review`'s answer by hand. A plugin
-hook writes it to a private directory, `/tmp/agent-review-<uid>`, which only your user can open
-(mode 0700, owned by you, checked before every read and write). The hooks act only while a
-review has armed capture, and an arm expires after 6 hours. They never touch a `/code-review` you
-run yourself in the main conversation. While a review is armed, though, a `/code-review` run in
-another subagent of yours writes a mismatch record and fails that review's wait, and the hooks
-keep the final message of every subagent that stops in your sessions (the newest 50) in that
-directory until the review disarms. The lane reads the capture with `agent-review capture show`.
+hook writes it into the review's own run folder (see "Where a run keeps its files"), under
+`/tmp/agent-review-<uid>`, which only your user can open (mode 0700, owned by you, checked before
+every read and write). The hooks act only while a review has armed capture, and an arm expires
+after 6 hours. The arm records the Claude Code session that made it, and a hook only ever writes
+into a run its own session armed: the hook's `session_id` is the main session's id even for a
+subagent's Skill call, and it equals `CLAUDE_CODE_SESSION_ID` in that session's shells. So a
+`/code-review` in another session never touches your review. Within one session, the args tell
+runs apart: a call with a run's exact args is that run's, and a wrong `/code-review` call (another
+effort, or the `code-review:code-review` plugin command) whose target, the PR number or range, is
+one run's writes a mismatch record and fails that run's wait. A `/code-review` you run yourself in
+the main conversation is never captured. While a run is armed, the hooks also keep the final
+message of each subagent that stops in its session (the newest 50) in its folder until it
+disarms. The lane reads the capture with `agent-review capture show --run-dir <folder>`.
 
 **The review waits for `/code-review` to finish.** The lane waits with `agent-review
 capture-wait`, up to a limit that depends on the effort: `low` 10 minutes, `medium` 15, `high`
@@ -402,6 +408,14 @@ a deep one more. `re-review` only looks at new commits, so it is usually the che
 **Where do the rules come from?** From your repo: `.claude/review/config.yml` and
 `.claude/review/rules/*.md`. `/agent-review:init` writes the first version; `/agent-review:learn`
 grows it from what you dismiss.
+
+**Can I run two reviews at once?** Yes, from different checkouts (a worktree per PR works well),
+in one session or several. Each review keeps its files in its own folder, so they never share a
+diff, ledger, report or `/code-review` result. A second review of the same checkout while the
+first is still running stops at once and says which session holds it. If that session is gone,
+free the checkout with `agent-review run-dir --release --force`. Two reviews in one session that
+both wait on `/code-review` for the same PR number at the same effort (one PR number in two repos)
+cannot be told apart, so the second one stops and asks you to run them one at a time.
 
 ---
 
@@ -631,6 +645,39 @@ score 0 skips for free, LOW runs quick, MEDIUM/HIGH standard, CRITICAL deep). Se
 `ANTHROPIC_API_KEY` secret before merging the workflow; it must be a Console API key, since
 Anthropic rejects subscription OAuth tokens for CI use.
 
+## Where a run keeps its files
+
+Every local review, re-review, yolo-review, and address run keeps its files in one run folder per
+checkout: `/tmp/agent-review-<uid>/runs/<checkout folder name>-<12 hex of the checkout's path
+hash>`, mode 0700. `agent-review run-dir` prints it for the checkout the shell is in (from any
+subfolder, or through a symlink, it is the same folder; two worktrees of one repo get two). Each
+bash block in the skills is a new shell, so each one works the folder out again with
+`RUN_DIR=$(agent-review run-dir) || exit 1` before it sources the run's `review_env.sh`, and it
+stops if the command fails rather than falling back to `/tmp`. Subagents start outside the repo
+and never see `$RUN_DIR`, so the lane prompts get the folder as a literal path (`{{RUN_DIR}}`,
+with `{{REPO_ROOT}}` to `cd` into), and the lane's engine commands take `--run-dir`.
+
+- **The lock.** `agent-review run-dir --lock <skill>` takes the checkout for that run. It holds
+  while the Claude Code process that took it runs (`CLAUDE_PID`), for at most 6 hours. The same
+  session can take it again, so yolo-review can run review and address inside its own hold, and
+  a retry after a stop works. Another live session gets exit 4 and a message naming the holder.
+  Every other `agent-review run-dir` call refuses the same way, so a block run from another
+  session's checkout stops instead of writing into that run.
+- **The end of a run.** `agent-review run-dir --release <skill>` frees the checkout and deletes
+  the run's files, keeping only `agent_review_report.md` and any fix scripts in
+  `automated_fixes/`; the next run of that checkout clears both. Only the skill that took the
+  lock cleans up, so a review inside yolo-review leaves the folder to yolo-review. Cleanup only
+  ever touches a folder directly under `runs/`, and never another session's live run.
+  `--release --force` deletes the lock alone.
+- **CI** sets `AGENT_REVIEW_CI`, and then `agent-review run-dir` prints `/tmp` itself and takes no
+  lock, so the reusable workflows and their sandbox keep the same `/tmp` files as before.
+  `AGENT_REVIEW_RUN_DIR` names a folder outright, for tests.
+- **Older versions.** 1.1.4 and earlier kept fixed `/tmp/review_*` and `/tmp/agent_review_*` files
+  and one arm at `/tmp/agent-review-<uid>/agent_review_capture.json`. 1.1.5 never reads either,
+  so a session still on 1.1.4 and one on 1.1.5 do not collide; two 1.1.4 sessions still can.
+- `/agent-review:init` still uses its own fixed `/tmp/agent_review_init*` files, so run one init
+  at a time.
+
 ## Testing CI changes locally
 
 ```
@@ -726,6 +773,11 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   match each other either. Expect dismissed findings to come back, and dismiss them again. Under
   the `code-review` engine, ledger matching usually catches a reworded suggestion within 10 lines
   of a dismissed one from the same reviewer in the same file, so this mostly applies across PRs.
+- **Two reviews in one session cannot both wait on the same `/code-review` args.** The hooks tell
+  sessions apart by `session_id`, but inside one session only the args separate runs, so a second
+  arm with the same args (the same PR number at the same effort, in two repos) is refused. Two
+  helpers of one session reviewing the same checkout would also share its run folder; give each
+  review its own checkout.
 - **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
   lane, and the check reads that file. But a lane runs as the same user, so it could replace the
   file. The check cannot rule that out.
@@ -783,7 +835,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | Path | What it is |
 | --- | --- |
 | `.claude-plugin/` | `marketplace.json` + `plugin.json` — plugin/marketplace manifests |
-| `hooks/` | `hooks.json` - the capture hooks (`PostToolUse` on `Skill`, and `SubagentStop`). They run `bin/agent-review-hook`, which loads the engine only when a review has armed capture |
+| `hooks/` | `hooks.json` - the capture hooks (`PostToolUse` on `Skill`, and `SubagentStop`). They run `bin/agent-review-hook`, which loads the engine only when some run has armed capture, and write only into a run their own session armed |
 | `skills/init/` | `/agent-review:init` — bootstrap skill (stack scan + PR-history mining) |
 | `skills/review/` | `/agent-review:review` — review orchestrator skill (also the `incremental` mode) |
 | `skills/re-review/` | `/agent-review:re-review` — thin driver: `review auto incremental` |
@@ -794,7 +846,7 @@ marker, publishes the comment, and fails the check if any postcondition is not m
 | `agents/` | Thin per-tier subagent shells (`reviewer-opus`/`-sonnet`/`-haiku`) that the review skill's launch table selects by plan-resolved tier |
 | `engine/` | Node engine: risk scoring, agent selection, import-graph index, learnings store, approval rule, address grammar, CLI commands, unit tests (`*.test.cjs`) |
 | `bin/agent-review` | Thin shim that requires the bundled `dist/agent-review.cjs` |
-| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless the capture arm file holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |
+| `bin/agent-review-hook` | Plain-Node hook entry: exits at once unless some run folder under `/tmp/agent-review-<uid>/runs/` holds a live arm (`armed: true`, created within the last 6 hours), then hands the hook to `dist/agent-review.cjs` |
 | `dist/agent-review.cjs` | esbuild bundle of the engine, committed so the plugin works with no install step |
 | `schema/config.schema.json` | JSON Schema for `.claude/review/config.yml` |
 | `templates/` | Files `/agent-review:init` instantiates into a consuming repo (`config.yml` skeleton, `rules/*.md` starters, `settings-snippet.json`, `workflows/agent-review*.yml`), plus `archetype.md`, `code-review-lane.md`, `ledger-match.md`, and `report.md`. The agent-prompt and report skeletons ship inside the plugin and are read directly by `skills/review/SKILL.md`, never copied out |

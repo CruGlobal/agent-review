@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 'use strict';
 // The plugin hooks run this on every Skill call and every subagent stop in every session, so it
-// must not load the bundle unless the arm file holds a live arm. The dir rule must stay the same
-// as captureDir() in engine/captureHook.cjs.
-const { readFileSync } = require('node:fs');
+// must not load the bundle unless some run folder holds a live arm. The folder rules must stay the
+// same as captureDir() and hookRunDirs() in engine/.
+const { readFileSync, readdirSync } = require('node:fs');
 const { join } = require('node:path');
 
 const ARM_FILE = 'agent_review_capture.json';
+const RUNS_DIR = 'runs';
 // Must equal ARM_MAX_AGE_SECONDS in engine/captureHook.cjs; a test checks it. This file cannot
 // require the engine without loading it.
 const ARM_MAX_AGE_SECONDS = 21600;
@@ -15,9 +16,21 @@ function hookCaptureDir(env = process.env) {
   return env.AGENT_REVIEW_CAPTURE_DIR || `/tmp/agent-review-${process.getuid()}`;
 }
 
-function armIsLive(nowSeconds = Math.floor(Date.now() / 1000)) {
+function hookRunDirs(env = process.env) {
+  if (env.AGENT_REVIEW_RUN_DIR) return [env.AGENT_REVIEW_RUN_DIR];
+  const runs = join(hookCaptureDir(env), RUNS_DIR);
   try {
-    const arm = JSON.parse(readFileSync(join(hookCaptureDir(), ARM_FILE), 'utf8'));
+    return readdirSync(runs, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => join(runs, d.name));
+  } catch {
+    return [];
+  }
+}
+
+function armIsLive(dir, nowSeconds) {
+  try {
+    const arm = JSON.parse(readFileSync(join(dir, ARM_FILE), 'utf8'));
     return (
       arm !== null &&
       typeof arm === 'object' &&
@@ -30,8 +43,12 @@ function armIsLive(nowSeconds = Math.floor(Date.now() / 1000)) {
   }
 }
 
+function anyArmIsLive(env = process.env, nowSeconds = Math.floor(Date.now() / 1000)) {
+  return hookRunDirs(env).some((dir) => armIsLive(dir, nowSeconds));
+}
+
 if (require.main === module) {
-  if (!armIsLive()) process.exit(0);
+  if (!anyArmIsLive()) process.exit(0);
   process.argv.splice(2, 0, 'hook');
   try {
     require('../dist/agent-review.cjs');
@@ -40,4 +57,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { ARM_FILE, ARM_MAX_AGE_SECONDS, hookCaptureDir };
+module.exports = { ARM_FILE, RUNS_DIR, ARM_MAX_AGE_SECONDS, hookCaptureDir, hookRunDirs, anyArmIsLive };

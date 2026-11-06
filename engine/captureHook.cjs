@@ -12,6 +12,7 @@ const CAPTURE_FILES = {
   mismatch: 'code_review_capture.mismatch.json',
 };
 const ARM_MAX_AGE_SECONDS = 21600;
+const RUNS_DIR = 'runs';
 const STOP_BUFFER_LINES = 50;
 const CAPTURE_SOURCE = 'agent-review-capture-hook';
 
@@ -49,6 +50,54 @@ function armedState(arm, nowSeconds) {
   if (!nonEmpty(arm.run_id) || typeof arm.args !== 'string') return null;
   if (!Number.isFinite(arm.created) || nowSeconds - arm.created > ARM_MAX_AGE_SECONDS) return null;
   return arm;
+}
+
+// /code-review's args are "<effort> <target> ...": the target is the PR number or commit range.
+function argsTarget(args) {
+  const words = typeof args === 'string' ? args.trim().split(/\s+/) : [];
+  return words.length > 1 ? words[1] : null;
+}
+
+function skillCall(payload) {
+  const input = isObject(payload.tool_input) ? payload.tool_input : {};
+  return {
+    skill: typeof input.skill === 'string' ? input.skill.replace(/^\//, '') : '',
+    args: typeof input.args === 'string' ? input.args : '',
+  };
+}
+
+// A hook's session_id is the main session's id for subagents at any depth and equals the Bash
+// CLAUDE_CODE_SESSION_ID, so a call reaches only arms its own session made (or one with no session
+// id). Within a session only the args tell runs apart.
+function chooseArms({ arms, payload } = {}) {
+  if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return { kind: 'none', entries: [] };
+  const session = nonEmpty(payload.session_id) ? payload.session_id : null;
+  const candidates = arms.filter(
+    (e) => isObject(e) && isObject(e.arm) && (!nonEmpty(e.arm.session_id) || e.arm.session_id === session),
+  );
+  const { skill, args } = skillCall(payload);
+  const builtIn = skill === CODE_REVIEW_SKILL;
+  if (!builtIn && !skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return { kind: 'none', entries: [] };
+  if (builtIn) {
+    const exact = candidates.filter((e) => e.arm.args === args);
+    if (exact.length === 1) return { kind: 'match', entries: exact };
+    if (exact.length > 1) return { kind: 'ambiguous', entries: exact };
+  }
+  const target = argsTarget(args);
+  const same = target === null ? [] : candidates.filter((e) => argsTarget(e.arm.args) === target);
+  return same.length === 1 ? { kind: 'mismatch', entries: same } : { kind: 'none', entries: [] };
+}
+
+// The arms a subagent stop in this session may belong to.
+function sessionArms({ arms, payload } = {}) {
+  if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return [];
+  const session = nonEmpty(payload.session_id) ? payload.session_id : null;
+  return arms.filter((e) => isObject(e) && isObject(e.arm) && (!nonEmpty(e.arm.session_id) || e.arm.session_id === session));
+}
+
+function ambiguousMismatch({ arm, payload, now }) {
+  const { args } = skillCall(payload);
+  return { mismatch: { run_id: arm.run_id, expected: arm.args, got: args, reason: 'ambiguous', ts: now } };
 }
 
 // The Skill tool's header is stripped only when its Result: line follows it with nothing but blank
@@ -122,9 +171,7 @@ function captureRecord({ mode, armed, args, forkId, result, transcript, stopCoun
 function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
   const armed = armedState(arm, now);
   if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
-  const input = isObject(payload.tool_input) ? payload.tool_input : {};
-  const skill = typeof input.skill === 'string' ? input.skill.replace(/^\//, '') : '';
-  const args = typeof input.args === 'string' ? input.args : '';
+  const { skill, args } = skillCall(payload);
   const mismatch = (got, reason) => ({
     mismatch: { run_id: armed.run_id, expected: armed.args, got, ...(reason ? { reason } : {}), ts: now },
   });
@@ -220,11 +267,16 @@ module.exports = {
   CODE_REVIEW_SKILL,
   CAPTURE_FILES,
   ARM_MAX_AGE_SECONDS,
+  RUNS_DIR,
   STOP_BUFFER_LINES,
   CAPTURE_SOURCE,
   captureDir,
   captureDirProblem,
   armedState,
+  argsTarget,
+  chooseArms,
+  sessionArms,
+  ambiguousMismatch,
   stripSkillHeader,
   lastAssistantText,
   postSkillWrites,

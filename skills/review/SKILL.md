@@ -72,7 +72,7 @@ Arguments are not case-sensitive: `agent-review options` resolves them all.
 `engine=agent-review|code-review` and `effort=low|medium|high|xhigh|max` (in any position) pick
 the review engine. An argument beats `.claude/review/config.yml`, which beats the built-in default
 (`agent-review`; effort `xhigh`). `agent-review options` resolves the mode, engine, and effort into
-`/tmp/review_options.json`. Under the `code-review` engine, Claude Code's built-in `/code-review`
+`$RUN_DIR/review_options.json`. Under the `code-review` engine, Claude Code's built-in `/code-review`
 replaces the lanes in `engine.replaces` and the debate rounds, and depth words no longer change who
 runs: quick drops no lane and deep adds none. They still set each lane's model tier, and `auto`
 still skips a score-0 diff. CI always runs the `agent-review` engine.
@@ -82,9 +82,31 @@ non-empty. If so, follow **[CI Mode](#ci-mode)** below — it changes what sever
 
 ⚠️ **CROSS-STAGE STATE** — read this once, it applies to every bash block below. Each block you
 run is a SEPARATE shell: shell variables do NOT survive from one block to the next. Anything a
-later stage needs is persisted to `/tmp/review_env.sh` at the moment it is computed, and every
+later stage needs is persisted to `$RUN_DIR/review_env.sh` at the moment it is computed, and every
 later block starts by sourcing that file. Keep this discipline or later stages will silently
 operate on empty strings.
+
+⚠️ **THE RUN FOLDER** — every file this review writes lives in its own run folder, never in a
+fixed `/tmp` path, so reviews running at the same time on this machine, from any session or
+checkout, never share state. `agent-review run-dir` prints the folder of the checkout the shell is
+in (`/tmp` itself in CI), so every block works it out again on its first line, with
+`RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR`, before it sources
+`"$RUN_DIR/review_env.sh"`. Run every block from the checkout under review: if the shell is not in
+it, `cd` there first. If `agent-review run-dir` fails, stop and show its error: never fall back to
+`/tmp`. Stage 0A's first block also takes the checkout for this review (`--lock review`); when
+another live session's review already holds it, the block prints who holds it and stops, and you
+must stop too and show that message.
+
+Subagents start in another shell, often outside the repository, and never see `$RUN_DIR`. In every
+prompt you hand a subagent, and in every path you show the user, write the run folder's literal
+path (the value `agent-review run-dir` printed) where this skill says `$RUN_DIR`, and fill the
+templates' `{{RUN_DIR}}` the same way and `{{REPO_ROOT}}` with the checkout's top folder
+(`git rev-parse --show-toplevel`).
+
+⚠️ **STOPPING EARLY** — whenever the run stops before Stage 8, for any reason (a ❌ line, a
+skip, a head already reviewed, a lane that failed twice), run Stage 8's **Finish the run** block
+before you stop, after any capture disarm the code-review engine asks for. It frees the checkout
+and deletes this run's working files, keeping only the report and any fix scripts.
 
 ### Initialize
 
@@ -98,9 +120,10 @@ else (leave nothing between them when there were none). For example, for
 the arguments inert:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
-cat > /tmp/review_args.txt <<'REVIEW_ARGS_END_7f3a'
+cat > "$RUN_DIR"/review_args.txt <<'REVIEW_ARGS_END_7f3a'
 REVIEW_ARGS_END_7f3a
 
 # --- Detect CI Mode (the workflow's signal; a `ci` argument is resolved with the options) ---
@@ -114,13 +137,13 @@ agent-review config show >/dev/null || {
 }
 
 # --- Resolve mode, engine, and effort (argument, then config, then default) ---
-agent-review options --args-file /tmp/review_args.txt ${CI_MODE:+--ci} > /tmp/review_options.json || {
-  cat /tmp/review_options.json
-  rm -f /tmp/review_options.json
+agent-review options --args-file "$RUN_DIR"/review_args.txt ${CI_MODE:+--ci} > "$RUN_DIR"/review_options.json || {
+  cat "$RUN_DIR"/review_options.json
+  rm -f "$RUN_DIR"/review_options.json
   exit 1
 }
 OPTION_VARS=$(node -e '
-const o = require("/tmp/review_options.json");
+const o = require(process.env.RUN_DIR + "/review_options.json");
 const vars = {
   CI_MODE: o.ci ? "true" : "",
   MODE: o.mode.value,
@@ -166,21 +189,21 @@ esac
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-: > /tmp/review_env.sh    # fresh state for this review
+: > "$RUN_DIR"/review_env.sh    # fresh state for this review
 # Cross-run state from a prior review on this same machine/runner must never leak into this
 # one: a stale consensus_decisions.json silently merges unrelated findings (or throws an
 # unknown-index error against this run's smaller candidates array), and a stale per-lane
 # findings file can coincidentally pass Stage 2's N cross-check even though no agent wrote it
 # this run.
-rm -f /tmp/consensus_decisions.json /tmp/consensus_raw.json /tmp/consensus_findings.json
-rm -f /tmp/agent_findings/*.json 2>/dev/null || true
-rm -f /tmp/agent_review_card_scan.json /tmp/agent_review_human_rules.json
+rm -f "$RUN_DIR"/consensus_decisions.json "$RUN_DIR"/consensus_raw.json "$RUN_DIR"/consensus_findings.json
+rm -f "$RUN_DIR"/agent_findings/*.json 2>/dev/null || true
+rm -f "$RUN_DIR"/agent_review_card_scan.json "$RUN_DIR"/agent_review_human_rules.json
 # No earlier run's /code-review files or armed capture may carry into this run. Under zsh a glob
 # with no match fails its whole command and prints an error, so each glob gets its own quiet line.
-{ rm -f /tmp/code_review_raw.*.json; } 2>/dev/null || true
-{ rm -f /tmp/code_review_findings.*.json; } 2>/dev/null || true
-{ rm -f /tmp/code_review_dropped.*.json; } 2>/dev/null || true
-rm -f /tmp/code_review_proof.json /tmp/code_review_diff.txt
+{ rm -f "$RUN_DIR"/code_review_raw.*.json; } 2>/dev/null || true
+{ rm -f "$RUN_DIR"/code_review_findings.*.json; } 2>/dev/null || true
+{ rm -f "$RUN_DIR"/code_review_dropped.*.json; } 2>/dev/null || true
+rm -f "$RUN_DIR"/code_review_proof.json "$RUN_DIR"/code_review_diff.txt
 # disarm exits 1 when the capture dir does not exist yet, the normal state on a fresh machine.
 if [ "$ENGINE" = "code-review" ]; then
   agent-review capture disarm >/dev/null 2>&1 || true
@@ -188,39 +211,42 @@ fi
 # A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
 # run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a
 # launched-subset plan this run never wrote.
-rm -f /tmp/slice_manifest.json /tmp/review_plan_launched.json /tmp/launched_lanes.json /tmp/skipped_lanes.txt
-rm -rf /tmp/agent_slices 2>/dev/null || true
+rm -f "$RUN_DIR"/slice_manifest.json "$RUN_DIR"/review_plan_launched.json "$RUN_DIR"/launched_lanes.json "$RUN_DIR"/skipped_lanes.txt
+rm -rf "$RUN_DIR"/agent_slices 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
-cat >> /tmp/review_env.sh <<EOF
+cat >> "$RUN_DIR"/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
 export ENGINE="$ENGINE" EFFORT="$EFFORT" REVIEWS_RUN="$REVIEWS_RUN"
 EOF
 
 [ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
-echo "export CI_MODE=\"$CI_MODE\"" >> /tmp/review_env.sh
+echo "export CI_MODE=\"$CI_MODE\"" >> "$RUN_DIR"/review_env.sh
 
 # --- Detect a local incremental request ---
 [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
-echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> /tmp/review_env.sh
+echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> "$RUN_DIR"/review_env.sh
 
 # --- Initialize Directories ---
-mkdir -p /tmp/automated_fixes
+# An earlier run's fix scripts would otherwise be offered, and applied by apply_all.sh, with this run's.
+rm -rf "$RUN_DIR"/automated_fixes
+mkdir -p "$RUN_DIR"/automated_fixes
 # On a cold runner this dir does not exist yet — without it every lane's findings-file write
 # throws ENOENT, the unchanged-prompt retry reproduces the same error, and the review posts
 # nothing.
-mkdir -p /tmp/agent_findings
-mkdir -p /tmp/agent_slices
+mkdir -p "$RUN_DIR"/agent_findings
+mkdir -p "$RUN_DIR"/agent_slices
 # Metrics live in the consuming repo's review dir; skipped entirely in CI mode.
 [ -z "${CI_MODE:-}" ] && mkdir -p "$REVIEW_DIR/metrics/history"
 
 # --- Enabled agents (used by deep mode; plan agents[] drives quick/standard) ---
-agent-review config get agents > /tmp/config_agents.json || true
+agent-review config get agents > "$RUN_DIR"/config_agents.json || true
 ```
 
 ### Gather PR Context & Diff Manifest
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
 
 # --- Gather PR Context ---
@@ -241,7 +267,7 @@ gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number,title,baseRefName,headRefNam
 
 DAY_OF_WEEK=$(date +%A)
 echo "Today is: $DAY_OF_WEEK"
-cat >> /tmp/review_env.sh <<EOF
+cat >> "$RUN_DIR"/review_env.sh <<EOF
 export DAY_OF_WEEK="$DAY_OF_WEEK" PR_NUMBER="$PR_NUMBER" REVIEW_ID="$REVIEW_ID"
 EOF
 
@@ -277,7 +303,7 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     PREV_COMMENT="$AGENT_REVIEW_PREVIOUS_COMMENT"
   else
-    PREV_COMMENT=/tmp/agent_review_previous_report.md
+    PREV_COMMENT="$RUN_DIR"/agent_review_previous_report.md
     REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
     # Local canonical comment: this user's own marked comment when one exists, else the bot's.
     # Anyone else's could be a forged report.
@@ -336,7 +362,7 @@ process.exit((evidence.staticFindings || []).every((finding) => listed.has(findi
     echo "$1"
     return 0
   fi
-  rm -f /tmp/agent_review_ledger.json /tmp/agent_review_status.json /tmp/agent_review_report.md
+  rm -f "$RUN_DIR"/agent_review_ledger.json "$RUN_DIR"/agent_review_status.json "$RUN_DIR"/agent_review_report.md
   node -e '
 const { readFileSync, writeFileSync } = require("fs");
 const [file, head] = process.argv.slice(1);
@@ -352,13 +378,13 @@ if (lines[i] === "") i++;
 const body = lines.slice(i);
 const ledger = "ledger" in markers ? JSON.parse(markers.ledger) : null;
 const status = "status" in markers ? { ...JSON.parse(markers.status), head } : null;
-if (ledger) writeFileSync("/tmp/agent_review_ledger.json", JSON.stringify(ledger) + "\n");
-if (status) writeFileSync("/tmp/agent_review_status.json", JSON.stringify(status) + "\n");
-writeFileSync("/tmp/agent_review_report.md", body.join("\n").replace(/\n*$/, "\n"));
+if (ledger) writeFileSync(process.env.RUN_DIR + "/agent_review_ledger.json", JSON.stringify(ledger) + "\n");
+if (status) writeFileSync(process.env.RUN_DIR + "/agent_review_status.json", JSON.stringify(status) + "\n");
+writeFileSync(process.env.RUN_DIR + "/agent_review_report.md", body.join("\n").replace(/\n*$/, "\n"));
 ' "$PREV_COMMENT" "$HEAD_REF" || return 1
-  echo "export HEAD_REF=\"$HEAD_REF\"" >> /tmp/review_env.sh
+  echo "export HEAD_REF=\"$HEAD_REF\"" >> "$RUN_DIR"/review_env.sh
   if [ "$(sed -n 's/^<!-- agent-review-rollout: \([a-z]*\) -->$/\1/p' "$PREV_COMMENT" | head -1)" = shadow ]; then
-    echo 'export AGENT_REVIEW_ROLLOUT_MODE="shadow"' >> /tmp/review_env.sh
+    echo 'export AGENT_REVIEW_ROLLOUT_MODE="shadow"' >> "$RUN_DIR"/review_env.sh
   fi
   echo "${1% Exiting.}"
   echo "Next, run only Stage 7's Post and print block, which posts the moved report."
@@ -385,7 +411,7 @@ if [ -n "$INCREMENTAL" ]; then
   elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ] && [ -n "$ON_DEFAULT" ]; then
     # merge-tree writes the trees it builds. A throwaway object store under /tmp, the only place
     # the CI sandbox can write, keeps them out of .git. A conflict or any error leaves no tree.
-    if MERGE_OBJECTS=$(mktemp -d /tmp/agent_review_merge_tree.XXXXXX) \
+    if MERGE_OBJECTS=$(mktemp -d "$RUN_DIR"/agent_review_merge_tree.XXXXXX) \
        && REPO_OBJECTS=$(git rev-parse --path-format=absolute --git-path objects); then
       KEPT_TREE=$(GIT_OBJECT_DIRECTORY="$MERGE_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$REPO_OBJECTS" \
         git merge-tree --write-tree "$LAST_REVIEWED" "$PR_BASE" 2>/dev/null) || KEPT_TREE=""
@@ -449,30 +475,30 @@ fi
 
 echo "Diff range: $RANGE"
 echo "Full PR range: $FULL_RANGE"
-git diff "$RANGE" --name-only > /tmp/changed_files.txt
-git diff "$RANGE" --stat      > /tmp/diff_stat.txt
-git diff "$RANGE"             > /tmp/pr_diff.txt
+git diff "$RANGE" --name-only > "$RUN_DIR"/changed_files.txt
+git diff "$RANGE" --stat      > "$RUN_DIR"/diff_stat.txt
+git diff "$RANGE"             > "$RUN_DIR"/pr_diff.txt
 if [ "$FULL_RANGE" = "$RANGE" ]; then
-  cp /tmp/changed_files.txt /tmp/full_changed_files.txt
-  cp /tmp/diff_stat.txt /tmp/full_diff_stat.txt
-  cp /tmp/pr_diff.txt /tmp/pr_full_diff.txt
+  cp "$RUN_DIR"/changed_files.txt "$RUN_DIR"/full_changed_files.txt
+  cp "$RUN_DIR"/diff_stat.txt "$RUN_DIR"/full_diff_stat.txt
+  cp "$RUN_DIR"/pr_diff.txt "$RUN_DIR"/pr_full_diff.txt
 else
-  git diff "$FULL_RANGE" --name-only > /tmp/full_changed_files.txt
-  git diff "$FULL_RANGE" --stat      > /tmp/full_diff_stat.txt
-  git diff "$FULL_RANGE"             > /tmp/pr_full_diff.txt
+  git diff "$FULL_RANGE" --name-only > "$RUN_DIR"/full_changed_files.txt
+  git diff "$FULL_RANGE" --stat      > "$RUN_DIR"/full_diff_stat.txt
+  git diff "$FULL_RANGE"             > "$RUN_DIR"/pr_full_diff.txt
 fi
 # The card scan reads the whole PR, never just an incremental delta.
-cp /tmp/pr_full_diff.txt /tmp/pr_card_scan_diff.txt
+cp "$RUN_DIR"/pr_full_diff.txt "$RUN_DIR"/pr_card_scan_diff.txt
 
 # An incremental run with an unchanged tree stopped above, so an empty diff here means a bad base
 # ref or a change git config hides from the diff.
-if [ ! -s /tmp/changed_files.txt ]; then
+if [ ! -s "$RUN_DIR"/changed_files.txt ]; then
   echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
   exit 1
 fi
-wc -l < /tmp/changed_files.txt
+wc -l < "$RUN_DIR"/changed_files.txt
 
-cat >> /tmp/review_env.sh <<EOF
+cat >> "$RUN_DIR"/review_env.sh <<EOF
 export BASE_REF="$BASE_REF" HEAD_REF="$HEAD_REF" RANGE="$RANGE" FULL_RANGE="$FULL_RANGE"
 export INCREMENTAL="$INCREMENTAL" LAST_REVIEWED="$LAST_REVIEWED" CARRY_LEDGER="$CARRY_LEDGER"
 EOF
@@ -483,7 +509,7 @@ covers the new head and the block has moved that report to it. Run that one bloc
 Skip every other stage.
 
 **Checkpoint — set REVIEW_SCOPE (not a bash turn; a decision).** Read the changed-file list and
-diff stat from the previous block's output (`/tmp/changed_files.txt`, `/tmp/diff_stat.txt`) and
+diff stat from the previous block's output (`$RUN_DIR/changed_files.txt`, `$RUN_DIR/diff_stat.txt`) and
 set REVIEW_SCOPE (`single_feature` | `multi_feature` | `cross_cutting` | `core_infra`) **before**
 running the next block; it defaults to `single_feature` only when the footprint genuinely is one
 — use `multi_feature`, `cross_cutting`, or `core_infra` for changes spanning unrelated feature
@@ -496,61 +522,62 @@ Risk scoring, agent selection, special-pattern detection, and rule resolution ar
 declarative review core (`.claude/review/config.yml`) — never computed inline here:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
 REVIEW_SCOPE="${REVIEW_SCOPE:-single_feature}"   # ← set at the checkpoint above
 
 # --- Build the Review Plan ---
 agent-review plan \
-  --files /tmp/changed_files.txt \
-  --stat /tmp/diff_stat.txt \
-  --diff /tmp/pr_diff.txt \
+  --files "$RUN_DIR"/changed_files.txt \
+  --stat "$RUN_DIR"/diff_stat.txt \
+  --diff "$RUN_DIR"/pr_diff.txt \
   --scope "$REVIEW_SCOPE" \
   --mode "$MODE" \
-  --options /tmp/review_options.json \
-  > /tmp/review_plan.json
-cat /tmp/review_plan.json
+  --options "$RUN_DIR"/review_options.json \
+  > "$RUN_DIR"/review_plan.json
+cat "$RUN_DIR"/review_plan.json
 
 # --- Slice the diff per lane ---
 # `always`/`escalates`/`architecture` lanes get the whole diff (mode "full"); every other lane
 # gets only the hunks its triggers matched (mode "sliced", possibly with hunks: 0 for a
 # header-only binary/mode/rename section — that lane still launches). A lane with no matching
 # hunks at all gets mode "empty" — Stage 1 does not launch it (see Stage 0B/Stage 1 below).
-agent-review slice --plan /tmp/review_plan.json --diff /tmp/pr_diff.txt \
-  --out-dir /tmp/agent_slices > /tmp/slice_manifest.json
-cat /tmp/slice_manifest.json
+agent-review slice --plan "$RUN_DIR"/review_plan.json --diff "$RUN_DIR"/pr_diff.txt \
+  --out-dir "$RUN_DIR"/agent_slices > "$RUN_DIR"/slice_manifest.json
+cat "$RUN_DIR"/slice_manifest.json
 
 # A second plan covers the full PR and is the source of truth for governance:
 # displayed risk, required reviewer, and the machine-readable approval status.
 if [ "$FULL_RANGE" = "$RANGE" ]; then
-  cp /tmp/review_plan.json /tmp/review_gate_plan.json
+  cp "$RUN_DIR"/review_plan.json "$RUN_DIR"/review_gate_plan.json
 else
   agent-review plan \
-    --files /tmp/full_changed_files.txt \
-    --stat /tmp/full_diff_stat.txt \
-    --diff /tmp/pr_full_diff.txt \
+    --files "$RUN_DIR"/full_changed_files.txt \
+    --stat "$RUN_DIR"/full_diff_stat.txt \
+    --diff "$RUN_DIR"/pr_full_diff.txt \
     --scope "$REVIEW_SCOPE" \
     --mode "$MODE" \
-    --options /tmp/review_options.json \
-    > /tmp/review_gate_plan.json
+    --options "$RUN_DIR"/review_options.json \
+    > "$RUN_DIR"/review_gate_plan.json
 fi
-cat /tmp/review_gate_plan.json
+cat "$RUN_DIR"/review_gate_plan.json
 
 # --- Load deterministic evidence and cross-repository context ---
 # The reusable workflow creates these artifacts outside the model. Treat them as immutable inputs.
 if [ -s "${AGENT_REVIEW_EVIDENCE:-}" ]; then
-  cp "$AGENT_REVIEW_EVIDENCE" /tmp/review_evidence.json
+  cp "$AGENT_REVIEW_EVIDENCE" "$RUN_DIR"/review_evidence.json
 else
-  echo '{"version":1,"staticFindings":[],"ci":null}' > /tmp/review_evidence.json
+  echo '{"version":1,"staticFindings":[],"ci":null}' > "$RUN_DIR"/review_evidence.json
 fi
 if [ -s "${AGENT_REVIEW_CONTEXT_INVENTORY:-}" ]; then
-  cp "$AGENT_REVIEW_CONTEXT_INVENTORY" /tmp/review_context.json
+  cp "$AGENT_REVIEW_CONTEXT_INVENTORY" "$RUN_DIR"/review_context.json
 else
-  echo '{"version":1,"repositories":[]}' > /tmp/review_context.json
+  echo '{"version":1,"repositories":[]}' > "$RUN_DIR"/review_context.json
 fi
 node - <<'NODE' || true
-const evidence = require('/tmp/review_evidence.json');
-const context = require('/tmp/review_context.json');
+const evidence = require(process.env.RUN_DIR + '/review_evidence.json');
+const context = require(process.env.RUN_DIR + '/review_context.json');
 const ci = evidence.ci && evidence.ci.summary;
 console.log(`Deterministic AST findings: ${(evidence.staticFindings || []).length}`);
 console.log(ci ? `CI snapshot: ${ci.success} passed, ${ci.failed} failed, ${ci.pending} pending` : 'CI snapshot: unavailable');
@@ -635,10 +662,11 @@ instead of stacking new ones.
 The marker lines are emitted ONLY by the node commands below — never type or edit them by hand; hand-transcribed JSON mangles escapes.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 if [ -z "$PR_NUMBER" ]; then
-  echo "⚠️  No PR number available — report left at /tmp/agent_review_report.md"
+  echo "⚠️  No PR number available — report left at $RUN_DIR/agent_review_report.md"
 else
   # Line 2 records the head SHA this report covers — the next CI run reads it back to review
   # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
@@ -648,13 +676,13 @@ else
   { printf '%s\n' '<!-- agent-review -->'
     [ -n "${HEAD_REF:-}" ] && printf '%s\n' "<!-- agent-review-head: $HEAD_REF -->"
     printf '%s\n' "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->"
-    [ -s /tmp/agent_review_ledger.json ] \
-      && printf '%s\n' "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
-    [ -s /tmp/agent_review_status.json ] \
-      && printf '%s\n' "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+    [ -s "$RUN_DIR"/agent_review_ledger.json ] \
+      && printf '%s\n' "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.env.RUN_DIR + "/agent_review_ledger.json","utf8"))))') -->"
+    [ -s "$RUN_DIR"/agent_review_status.json ] \
+      && printf '%s\n' "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.env.RUN_DIR + "/agent_review_status.json","utf8"))))') -->"
     echo
-    cat /tmp/agent_review_report.md
-  } > /tmp/agent_review_comment.md
+    cat "$RUN_DIR"/agent_review_report.md
+  } > "$RUN_DIR"/agent_review_comment.md
 
   # SELF-CHECK — catches hand-transcribed marker lines (mangled escapes) before they ever reach
   # the trusted post-job. Reads the just-assembled file itself (not $AGENT_REVIEW_COMMENT_OUT,
@@ -662,7 +690,7 @@ else
   # MUST come only from the node commands; never hand-write or hand-edit them.
   node -e '
 const fs = require("fs");
-const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+const c = fs.readFileSync(process.env.RUN_DIR + "/agent_review_comment.md", "utf8").replace(/\r/g, "");
 // The approver reads marker lines only up to the first line that is not one, so do the same.
 const header = [];
 for (const line of c.split("\n")) {
@@ -672,7 +700,7 @@ for (const line of c.split("\n")) {
 for (const name of ["ledger", "status"]) {
   const m = header.join("\n").match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
   if (m) JSON.parse(m[1]);
-  else if (fs.existsSync("/tmp/agent_review_" + name + ".json") && fs.statSync("/tmp/agent_review_" + name + ".json").size > 0)
+  else if (fs.existsSync(process.env.RUN_DIR + "/agent_review_" + name + ".json") && fs.statSync(process.env.RUN_DIR + "/agent_review_" + name + ".json").size > 0)
     throw new Error(name + " marker is missing from the comment header");
 }
 console.log("marker self-check OK");
@@ -682,8 +710,8 @@ console.log("marker self-check OK");
   # stages a comment; a deterministic post-step validates the reviewed head and
   # performs the write. Local CI-like runs retain the direct gh fallback.
   if [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
-    if [ "$AGENT_REVIEW_COMMENT_OUT" != /tmp/agent_review_comment.md ]; then
-      cp /tmp/agent_review_comment.md "$AGENT_REVIEW_COMMENT_OUT"
+    if [ "$AGENT_REVIEW_COMMENT_OUT" != "$RUN_DIR"/agent_review_comment.md ]; then
+      cp "$RUN_DIR"/agent_review_comment.md "$AGENT_REVIEW_COMMENT_OUT"
     fi
     echo "✅ Staged review comment for trusted workflow publication"
   else
@@ -692,10 +720,10 @@ console.log("marker self-check OK");
       --jq 'map(select(.body | contains("<!-- agent-review -->"))) | first | .id // empty' \
       2>/dev/null | head -n1)
     if [ -n "$EXISTING" ]; then
-      gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md
+      gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@"$RUN_DIR"/agent_review_comment.md
       echo "✅ Updated existing review comment ($EXISTING)"
     else
-      gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md
+      gh pr comment "$PR_NUMBER" --body-file "$RUN_DIR"/agent_review_comment.md
       echo "✅ Posted review comment"
     fi
   fi
@@ -713,13 +741,13 @@ project's conventions. That context is shared with all agents via the archetype 
 instructs each agent to read them too.
 
 Every `staticFindings[]` entry is a trusted, changed-line-anchored finding and MUST be copied into
-`/tmp/consensus_findings.json` unchanged before Stage 6 emission. Agents may add corroborating
+`$RUN_DIR/consensus_findings.json` unchanged before Stage 6 emission. Agents may add corroborating
 context but may not suppress, downgrade, or duplicate it. CI failures are evidence to investigate,
 not automatic code-review blockers: distinguish a failure caused by this diff from a pending,
 flaky, or unrelated check. The workflow verifies the final ledger contains every deterministic
 static signature and rejects publication otherwise.
 
-`/tmp/review_context.json` contains only a bounded inventory. Repositories marked `available` are
+`$RUN_DIR/review_context.json` contains only a bounded inventory. Repositories marked `available` are
 under `$AGENT_REVIEW_CONTEXT_DIR/<id>/`. Read only inventory-listed files relevant to the changed
 API/schema/contract. Cite the repository id, pinned SHA, and file when cross-repo evidence changes
 a finding. Never search outside those roots.
@@ -730,7 +758,8 @@ a finding. Never search outside those roots.
 score — never from your own judgment of the diff:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 # A flag and its value go in an array: zsh never splits a ${X:+...} expansion into words.
 HEAD_ARGS=()
 if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi
@@ -738,15 +767,15 @@ if [ "$MODE" = "auto" ]; then
   # The skip report keeps the options notes (such as the CI engine override) and the Notes bullets
   # the previous report for this PR carried; $1 is that previous comment, when there is one.
   skip_notes() {
-    { node -e 'for (const n of require("/tmp/review_options.json").notes || []) console.log("- " + n)' 2>/dev/null
+    { node -e 'for (const n of require(process.env.RUN_DIR + "/review_options.json").notes || []) console.log("- " + n)' 2>/dev/null
       [ -s "${1:-}" ] && tr -d '\r' < "$1" | sed -n '/^\*\*Notes\*\*:/,/^$/{/^- /p;}'
       true
     } | awk '!seen[$0]++' | { read -r first && { echo ""; echo "**Notes**:"; echo "$first"; cat; }; true; }
   }
-  LEVEL=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
-  RESOLVED=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.mode.resolved)' 2>/dev/null)
+  LEVEL=$(node -e 'const p = require(process.env.RUN_DIR + "/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
+  RESOLVED=$(node -e 'const p = require(process.env.RUN_DIR + "/review_plan.json"); console.log(p.mode.resolved)' 2>/dev/null)
   RESOLVED="${RESOLVED:-standard}"
-  STATIC_FINDINGS=$(node -e 'const e=require("/tmp/review_evidence.json"); console.log((e.staticFindings||[]).length)' 2>/dev/null || echo 0)
+  STATIC_FINDINGS=$(node -e 'const e=require(process.env.RUN_DIR + "/review_evidence.json"); console.log((e.staticFindings||[]).length)' 2>/dev/null || echo 0)
   if [ "$RESOLVED" = "skip" ] && [ "${STATIC_FINDINGS:-0}" = "0" ]; then
     # Nothing risk-scored in the diff (excluded or 0-point paths only, small volume).
     # A skipped review still checks the repo's human approval rules. The rules come from the base
@@ -758,8 +787,8 @@ if [ "$MODE" = "auto" ]; then
     # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
     # keeps every path from the repo root, whatever the user's git config says.
     if [ -z "$RULES_ERROR" ]; then
-      git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
-        && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
+      git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > "$RUN_DIR"/agent_review_changed_files.z \
+        && tr '\0' '\n' < "$RUN_DIR"/agent_review_changed_files.z > "$RUN_DIR"/agent_review_changed_files.txt \
         || RULES_ERROR="could not list the changed files"
     fi
     # Only a path missing from the base tree means no config. A listed config that will not show,
@@ -768,94 +797,94 @@ if [ "$MODE" = "auto" ]; then
       if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
         RULES_ERROR="could not read the base tree"
       elif [ -z "$CONFIG_ENTRY" ]; then
-        : > /tmp/agent_review_base_config.yml
-      elif ! git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null; then
+        : > "$RUN_DIR"/agent_review_base_config.yml
+      elif ! git show "${RULES_BASE}:.claude/review/config.yml" > "$RUN_DIR"/agent_review_base_config.yml 2>/dev/null; then
         RULES_ERROR="could not read the base config"
       fi
     fi
     if [ -z "$RULES_ERROR" ]; then
-      if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
-        printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json
+      if HUMAN_CHECK=$(agent-review human-check --config "$RUN_DIR"/agent_review_base_config.yml --files "$RUN_DIR"/agent_review_changed_files.txt); then
+        printf '%s\n' "$HUMAN_CHECK" > "$RUN_DIR"/agent_review_human_rules.json
       else
         RULES_ERROR="${HUMAN_CHECK#human-check: }"
         RULES_ERROR="${RULES_ERROR:-human-check failed}"
       fi
     fi
     if [ -n "$RULES_ERROR" ]; then
-      node -e 'process.stdout.write(JSON.stringify({ required: true, reasons: ["could not read the human approval rules: " + process.argv[1].split("\n")[0]] }) + "\n")' "$RULES_ERROR" > /tmp/agent_review_human_rules.json
+      node -e 'process.stdout.write(JSON.stringify({ required: true, reasons: ["could not read the human approval rules: " + process.argv[1].split("\n")[0]] }) + "\n")' "$RULES_ERROR" > "$RUN_DIR"/agent_review_human_rules.json
     fi
     if [ -n "$CI_MODE" ]; then
       # A zero-risk incremental delta must not erase earlier open findings, irreversible
       # state, or needs-a-person state when the canonical comment is updated.
-      echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
-      echo '[]' > /tmp/previous_agent_review_ledger.json
-      echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
-      echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json
+      echo '{"kept":[],"suppressed":[]}' > "$RUN_DIR"/review_filtered.json
+      echo '[]' > "$RUN_DIR"/previous_agent_review_ledger.json
+      echo '{"irreversible":false,"reasons":[]}' > "$RUN_DIR"/agent_review_safety.json
+      echo '{"cardData":false,"reasons":[]}' > "$RUN_DIR"/agent_review_card_scan.json
       if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
         tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
           | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-          > /tmp/previous_agent_review_ledger.json
-        [ -s /tmp/previous_agent_review_ledger.json ] \
-          || echo '[]' > /tmp/previous_agent_review_ledger.json
+          > "$RUN_DIR"/previous_agent_review_ledger.json
+        [ -s "$RUN_DIR"/previous_agent_review_ledger.json ] \
+          || echo '[]' > "$RUN_DIR"/previous_agent_review_ledger.json
         tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
           | sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' | head -1 \
-          > /tmp/previous_agent_review_status.json
-        if [ -s /tmp/previous_agent_review_status.json ]; then
-          node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' \
-            > /tmp/agent_review_safety.json
-          node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]}))' \
-            > /tmp/agent_review_card_scan.json
+          > "$RUN_DIR"/previous_agent_review_status.json
+        if [ -s "$RUN_DIR"/previous_agent_review_status.json ]; then
+          node -e 'const s=require(process.env.RUN_DIR + "/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' \
+            > "$RUN_DIR"/agent_review_safety.json
+          node -e 'const s=require(process.env.RUN_DIR + "/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]}))' \
+            > "$RUN_DIR"/agent_review_card_scan.json
         fi
       fi
-      agent-review ledger --findings /tmp/review_filtered.json \
-        --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
+      agent-review ledger --findings "$RUN_DIR"/review_filtered.json \
+        --previous "$RUN_DIR"/previous_agent_review_ledger.json > "$RUN_DIR"/agent_review_ledger.json
       # Status is always COMPUTED, never hand-authored — a zero-risk delta carries forward
       # whatever the ledger already holds, so an incremental skip with prior open blockers must
       # still report pass:false. Only a truly clean carried-forward ledger yields pass:true.
-      agent-review status --ledger /tmp/agent_review_ledger.json \
-        --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json \
-        --human /tmp/agent_review_human_rules.json --card-scan /tmp/agent_review_card_scan.json \
-        --evidence /tmp/review_evidence.json \
-        "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
+      agent-review status --ledger "$RUN_DIR"/agent_review_ledger.json \
+        --plan "$RUN_DIR"/review_gate_plan.json --safety "$RUN_DIR"/agent_review_safety.json \
+        --human "$RUN_DIR"/agent_review_human_rules.json --card-scan "$RUN_DIR"/agent_review_card_scan.json \
+        --evidence "$RUN_DIR"/review_evidence.json \
+        "${HEAD_ARGS[@]}" > "$RUN_DIR"/agent_review_status.json
       # Post a minimal skip note. The CI posting step prepends the comment markers
       # (including the reviewed-head marker, so the next run still diffs incrementally). A
       # carried-forward open blocker from a prior run still blocks, so surface it here rather
       # than letting a zero-risk delta read as silently clean.
-      OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
+      OPEN_BLOCKERS=$(node -e 'const l=require(process.env.RUN_DIR + "/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
       { echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null \
           && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
         skip_notes "${AGENT_REVIEW_PREVIOUS_COMMENT:-}"
-      } > /tmp/agent_review_report.md
-      echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via the CI posting step, then exit."
+      } > "$RUN_DIR"/agent_review_report.md
+      echo "AUTO MODE: skip (score 0) — post $RUN_DIR/agent_review_report.md via the CI posting step, then exit."
     elif [ -n "$INCREMENTAL_REQUESTED" ]; then
       # Same carry-forward as CI: keep the previous ledger, reversibility, and needs-a-person
       # state, recompute status, and post a skip note so the head marker advances and the next
       # re-review stays small.
-      echo '{"kept":[],"suppressed":[]}' > /tmp/review_filtered.json
-      echo '[]' > /tmp/previous_agent_review_ledger.json
-      echo '{"irreversible":false,"reasons":[]}' > /tmp/agent_review_safety.json
-      echo '{"cardData":false,"reasons":[]}' > /tmp/agent_review_card_scan.json
+      echo '{"kept":[],"suppressed":[]}' > "$RUN_DIR"/review_filtered.json
+      echo '[]' > "$RUN_DIR"/previous_agent_review_ledger.json
+      echo '{"irreversible":false,"reasons":[]}' > "$RUN_DIR"/agent_review_safety.json
+      echo '{"cardData":false,"reasons":[]}' > "$RUN_DIR"/agent_review_card_scan.json
       REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
       # Local canonical comment: this user's own marked comment when one exists, else the bot's.
       # Anyone else's could be a forged report.
       ME=$(gh api user --jq .login 2>/dev/null || echo "")
       gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
         | agent-review report-comment --me "$ME" 2>/dev/null \
-        | tr -d '\r' > /tmp/previous_agent_review_comment.md
-      sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_ledger.json
-      [ -s /tmp/previous_agent_review_ledger.json ] || echo '[]' > /tmp/previous_agent_review_ledger.json
-      sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' /tmp/previous_agent_review_comment.md | head -1 > /tmp/previous_agent_review_status.json
-      [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' > /tmp/agent_review_safety.json
-      [ -s /tmp/previous_agent_review_status.json ] && node -e 'const s=require("/tmp/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]}))' > /tmp/agent_review_card_scan.json
-      agent-review ledger --findings /tmp/review_filtered.json --previous /tmp/previous_agent_review_ledger.json > /tmp/agent_review_ledger.json
-      agent-review status --ledger /tmp/agent_review_ledger.json --plan /tmp/review_gate_plan.json --safety /tmp/agent_review_safety.json --human /tmp/agent_review_human_rules.json --card-scan /tmp/agent_review_card_scan.json --evidence /tmp/review_evidence.json "${HEAD_ARGS[@]}" > /tmp/agent_review_status.json
-      OPEN_BLOCKERS=$(node -e 'const l=require("/tmp/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
+        | tr -d '\r' > "$RUN_DIR"/previous_agent_review_comment.md
+      sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' "$RUN_DIR"/previous_agent_review_comment.md | head -1 > "$RUN_DIR"/previous_agent_review_ledger.json
+      [ -s "$RUN_DIR"/previous_agent_review_ledger.json ] || echo '[]' > "$RUN_DIR"/previous_agent_review_ledger.json
+      sed -n 's/^<!-- agent-review-status: \(.*\) -->$/\1/p' "$RUN_DIR"/previous_agent_review_comment.md | head -1 > "$RUN_DIR"/previous_agent_review_status.json
+      [ -s "$RUN_DIR"/previous_agent_review_status.json ] && node -e 'const s=require(process.env.RUN_DIR + "/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({irreversible:!!s.irreversible,reasons:s.irreversibleReasons||[]}))' > "$RUN_DIR"/agent_review_safety.json
+      [ -s "$RUN_DIR"/previous_agent_review_status.json ] && node -e 'const s=require(process.env.RUN_DIR + "/previous_agent_review_status.json"); process.stdout.write(JSON.stringify({cardData:!!s.humanRequired,reasons:s.humanReasons||[]}))' > "$RUN_DIR"/agent_review_card_scan.json
+      agent-review ledger --findings "$RUN_DIR"/review_filtered.json --previous "$RUN_DIR"/previous_agent_review_ledger.json > "$RUN_DIR"/agent_review_ledger.json
+      agent-review status --ledger "$RUN_DIR"/agent_review_ledger.json --plan "$RUN_DIR"/review_gate_plan.json --safety "$RUN_DIR"/agent_review_safety.json --human "$RUN_DIR"/agent_review_human_rules.json --card-scan "$RUN_DIR"/agent_review_card_scan.json --evidence "$RUN_DIR"/review_evidence.json "${HEAD_ARGS[@]}" > "$RUN_DIR"/agent_review_status.json
+      OPEN_BLOCKERS=$(node -e 'const l=require(process.env.RUN_DIR + "/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
       { echo "🎚️ **agent-review: skipped** — no reviewable risk in the delta since the last review."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
-        skip_notes /tmp/previous_agent_review_comment.md
-      } > /tmp/agent_review_report.md
-      echo "AUTO MODE: skip (score 0) — post /tmp/agent_review_report.md via Stage 7, then exit."
+        skip_notes "$RUN_DIR"/previous_agent_review_comment.md
+      } > "$RUN_DIR"/agent_review_report.md
+      echo "AUTO MODE: skip (score 0) — post $RUN_DIR/agent_review_report.md via Stage 7, then exit."
     else
       echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
     fi
@@ -864,7 +893,7 @@ if [ "$MODE" = "auto" ]; then
     echo "🎚️ AUTO MODE resolved: $LEVEL risk → $RESOLVED"
   fi
   MODE="$RESOLVED" AGENT_MODE="$RESOLVED"
-  cat >> /tmp/review_env.sh <<EOF
+  cat >> "$RUN_DIR"/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE"
 EOF
 fi
@@ -879,13 +908,14 @@ skip. It states the options this run uses, where each came from, the final mode,
 reviewers:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 if [ -n "$INCREMENTAL" ]; then
   STARTUP_SCOPE="since $(git rev-parse --short "$LAST_REVIEWED") (re-review)"
 else
   STARTUP_SCOPE="full review"
 fi
-agent-review startup --options /tmp/review_options.json --plan /tmp/review_plan.json --slices /tmp/slice_manifest.json --scope "$STARTUP_SCOPE" --mode "$MODE"
+agent-review startup --options "$RUN_DIR"/review_options.json --plan "$RUN_DIR"/review_plan.json --slices "$RUN_DIR"/slice_manifest.json --scope "$STARTUP_SCOPE" --mode "$MODE"
 ```
 
 Show the user the start-up lines (`agent-review · engine: …`, `reviewers: …`, and any `note:`
@@ -903,7 +933,7 @@ exactly as if that mode had been passed on the command line.
 ### Risk Assessment
 
 Read `risk.score`, `risk.level`, `risk.reviewer`, and `risk.special` from
-`/tmp/review_gate_plan.json`
+`$RUN_DIR/review_gate_plan.json`
 (do NOT compute the score inline — the engine is the single source of truth). The classification
 comes from `risk.levels` in config; the shipped default is:
 
@@ -925,7 +955,7 @@ Display the summary:
 📊 RISK ASSESSMENT
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Risk Score: [risk.score]            ← from /tmp/review_gate_plan.json (full PR)
+Risk Score: [risk.score]            ← from $RUN_DIR/review_gate_plan.json (full PR)
 Risk Level: [risk.level]            ← LOW | MEDIUM | HIGH | CRITICAL
 Day: [DAY_OF_WEEK]
 
@@ -935,7 +965,7 @@ Lines Changed: +[X] -[Y]
 Risk Factors Detected:
 • [risk.special[] entries, unmatchedFiles, plus notable risk.factors highlights]
 
-Required Reviewer: [risk.reviewer]  ← from /tmp/review_gate_plan.json
+Required Reviewer: [risk.reviewer]  ← from $RUN_DIR/review_gate_plan.json
 
 💰 Estimated Review Cost: $[X.XX]
 
@@ -975,7 +1005,7 @@ plan's `agents[]` has:
   the three slots (bumping the "first triggered agent" pick if needed) — quick mode must never
   narrow away the one lane the coverage guarantee force-included for an otherwise-unmatched file.
 
-`/tmp/config_agents.json` (used by deep mode; plan `agents[]` drives quick/standard) was already
+`$RUN_DIR/config_agents.json` (used by deep mode; plan `agents[]` drives quick/standard) was already
 fetched in Stage 0A's setup block, alongside config validation.
 
 Announce the selection, including each agent's `matchedBy` reason, e.g.:
@@ -1010,9 +1040,10 @@ back to `subagent_type: "general-purpose"` for every agent, and Stage 6 notes th
 `Review detail & stats`. On success, leave `ROUTING` unset.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 ROUTING=""   # ← change to "degraded" if any smoke-test Task above errored
-cat >> /tmp/review_env.sh <<EOF
+cat >> "$RUN_DIR"/review_env.sh <<EOF
 export ROUTING="$ROUTING"
 EOF
 ```
@@ -1043,7 +1074,8 @@ read-only lookups nothing else here depends on, so one shell handles both. Under
 `code-review` engine the same shell also prints the `code-review` lane's `/code-review` target:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
 
 # --- The code-review lane's /code-review target ---
@@ -1056,25 +1088,25 @@ if [ "${ENGINE:-}" = "code-review" ]; then
     CODE_REVIEW_TARGET="$RANGE"
   fi
   echo "code-review target: $CODE_REVIEW_TARGET"
-  echo "export CODE_REVIEW_TARGET=\"$CODE_REVIEW_TARGET\"" >> /tmp/review_env.sh
+  echo "export CODE_REVIEW_TARGET=\"$CODE_REVIEW_TARGET\"" >> "$RUN_DIR"/review_env.sh
 fi
 
 # --- Approved learnings (learning layer) ---
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
-  agent-review rules > /tmp/review_rules.json 2>/dev/null || echo "[]" > /tmp/review_rules.json
+  agent-review rules > "$RUN_DIR"/review_rules.json 2>/dev/null || echo "[]" > "$RUN_DIR"/review_rules.json
 else
-  echo "[]" > /tmp/review_rules.json
+  echo "[]" > "$RUN_DIR"/review_rules.json
 fi
 
 # --- Dependency impact analysis (Stage 1B) ---
 echo "🔍 Analyzing dependency impact (index engine)..."
 if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
   if [ -n "${BASE_REF:-}" ]; then
-    agent-review impact --base "$BASE_REF" > /tmp/review_impact.json || true
+    agent-review impact --base "$BASE_REF" > "$RUN_DIR"/review_impact.json || true
   else
-    agent-review impact > /tmp/review_impact.json || true
+    agent-review impact > "$RUN_DIR"/review_impact.json || true
   fi
-  cat /tmp/review_impact.json
+  cat "$RUN_DIR"/review_impact.json
 else
   echo "ℹ️  Index disabled in config.yml — skipping impact analysis."
 fi
@@ -1087,7 +1119,7 @@ human from prior review feedback.
 ### Assemble each agent prompt from the archetype template
 
 There are no per-agent prompts in this skill. Every agent gets the SAME prompt skeleton — the
-plugin's `templates/archetype.md` (see the path note at the top of this file) — with eleven
+plugin's `templates/archetype.md` (see the path note at the top of this file) — with thirteen
 placeholders filled in. Read the template once, then for EACH entry in the launch list produce one
 filled copy:
 
@@ -1098,16 +1130,18 @@ filled copy:
 | `{{RISK_CONTEXT}}`      | A bullet block from the current review plan: `- Review-delta risk: <score> (<level>)`, `- Full-PR gate risk: <gate score> (<gate level>)`, `- Special patterns: <gate risk.special joined, or "none">`, `- Unmatched risk paths: <gate risk.factors.unmatchedFiles joined, or "none">`, `- Changed Files in this pass: <N>`, `- Lines Changed in this pass: +<X> -<Y>`, `- Selected because: <matchedBy>`, `- Model tier: <tier>` (this lane's resolved `opus`/`sonnet`/`haiku` tier — the archetype's full-file read budget reads this to know when it's doubled). |
 | `{{PROFILE_INSTRUCTION}}` | From the plan's `profile`: `chill` → "Report only high-confidence, severity ≥ 7 findings; suppress nits." · `standard` → "Report findings at all severities per the output format above." · `assertive` → "Report all findings including low-severity suggestions." |
 | `{{RULES}}`             | The full contents of every doc in the agent's `rules[]`, resolved against `$REVIEW_DIR` (`rules/security.md` → `$REVIEW_DIR/rules/security.md`), each preceded by a `----- <path> -----` line. In CI, `$AGENT_REVIEW_DIR` points to the immutable base-branch copy; never read rule docs from the PR checkout. If a listed doc is missing, note it in your output and continue with the rest. |
-| `{{LEARNINGS}}`         | Entries from `/tmp/review_rules.json` whose `agent` matches this agent's `id`, rendered as `APPROVED LEARNINGS (ratified from prior reviews — apply to files under <paths>):` followed by one bullet per `ruleText`. Empty string when there are none. |
-| `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only, and only when `/tmp/review_impact.json` exists: the **actual dependents, inlined** (see the block below). Empty string for every other agent, and when impact was not computed. |
-| `{{EVIDENCE}}`          | A compact rendering of `/tmp/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
-| `{{CONTEXT}}`           | A compact rendering of `/tmp/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
-| `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `/tmp/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
-| `{{DIFF_PATH}}`         | Read `/tmp/slice_manifest.json` (written right after the plan — see above) for this agent's `<id>` entry. `mode: "full"` → `/tmp/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `/tmp/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. **No manifest entry at all** (deep mode's config-only lanes — agents with no plan entry, so `agent-review slice` never sliced them) → treat it as a full-diff lane: fill `/tmp/pr_diff.txt`. |
+| `{{LEARNINGS}}`         | Entries from `$RUN_DIR/review_rules.json` whose `agent` matches this agent's `id`, rendered as `APPROVED LEARNINGS (ratified from prior reviews — apply to files under <paths>):` followed by one bullet per `ruleText`. Empty string when there are none. |
+| `{{IMPACT}}`            | For the `architecture` and `data-integrity` agents only, and only when `$RUN_DIR/review_impact.json` exists: the **actual dependents, inlined** (see the block below). Empty string for every other agent, and when impact was not computed. |
+| `{{EVIDENCE}}`          | A compact rendering of `$RUN_DIR/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
+| `{{CONTEXT}}`           | A compact rendering of `$RUN_DIR/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
+| `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `$RUN_DIR/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
+| `{{RUN_DIR}}`           | The run folder's literal path, the value `agent-review run-dir` printed. The lane writes its findings and fix scripts there, and reads the changed-file list from there. |
+| `{{REPO_ROOT}}`         | The checkout's top folder (`git rev-parse --show-toplevel`). The lane's shell may start outside the repository, so it runs every command from there. |
+| `{{DIFF_PATH}}`         | Read `$RUN_DIR/slice_manifest.json` (written right after the plan — see above) for this agent's `<id>` entry. `mode: "full"` → `$RUN_DIR/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `$RUN_DIR/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. **No manifest entry at all** (deep mode's config-only lanes — agents with no plan entry, so `agent-review slice` never sliced them) → treat it as a full-diff lane: fill `$RUN_DIR/pr_diff.txt`. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
 begin with its own step number and read as a standalone step. Build it from
-`/tmp/review_impact.json` (Stage 1B), listing real file names rather than pointing at the JSON:
+`$RUN_DIR/review_impact.json` (Stage 1B), listing real file names rather than pointing at the JSON:
 
 ```
 7. BLAST RADIUS — this change has <blastRadius> transitive dependents. The changed files below
@@ -1122,18 +1156,18 @@ Truncate sensibly — at most ~15 dependent paths per changed file and ~15 chang
 "…and N more" tail — so a wide blast radius cannot crowd out the rest of the prompt. Omit the
 placeholder entirely (empty string) if `blastRadius` is 0.
 
-**Skipping empty-slice lanes.** A lane whose `/tmp/slice_manifest.json` entry has
+**Skipping empty-slice lanes.** A lane whose `$RUN_DIR/slice_manifest.json` entry has
 `mode is "empty"` has no changes matching its triggers anywhere in this diff — do NOT launch it;
 there is nothing for it to review. Track its id — the launched-subset derivation below writes the
-full skipped-lane list to `/tmp/skipped_lanes.txt` for Stage 6 to note in `Review detail & stats`
+full skipped-lane list to `$RUN_DIR/skipped_lanes.txt` for Stage 6 to note in `Review detail & stats`
 as `lane <id>: no matching changes` for every skipped lane. A `mode: "sliced"` lane with `hunks: 0`
 (a header-only binary/mode/rename section) is NOT empty — it still launches, told only that the
 file changed.
 
 **Sliced lanes see only their slice.** A lane launched with `mode: "sliced"` cannot see the rest
 of the diff, so append one line to its filled prompt, right after the INSTRUCTIONS block: "Other
-changed files in this PR (not in your slice): <comma-joined contents of /tmp/changed_files.txt>.
-Diff stat: <contents of /tmp/diff_stat.txt>" (spec R1 — the changed-file list plus the diff stat,
+changed files in this PR (not in your slice): <comma-joined contents of $RUN_DIR/changed_files.txt>.
+Diff stat: <contents of $RUN_DIR/diff_stat.txt>" (spec R1 — the changed-file list plus the diff stat,
 together, so a sliced lane can pull other hunks deliberately). Omit this line for `mode: "full"`
 lanes — they already have the whole diff.
 
@@ -1181,14 +1215,15 @@ the same list the "Skipping empty-slice lanes" note above uses for `Review detai
 run:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 node -e '
 const launchedIds = ["<fill with the exact ids launched above>"];
 const skippedIds = ["<fill with the exact empty-slice-skipped ids, or leave empty>"];
-const plan = require("/tmp/review_plan.json");
-const gate = require("/tmp/review_gate_plan.json");
+const plan = require(process.env.RUN_DIR + "/review_plan.json");
+const gate = require(process.env.RUN_DIR + "/review_gate_plan.json");
 let cfgAgents = [];
-try { cfgAgents = JSON.parse(require("fs").readFileSync("/tmp/config_agents.json", "utf8")); } catch {}
+try { cfgAgents = JSON.parse(require("fs").readFileSync(process.env.RUN_DIR + "/config_agents.json", "utf8")); } catch {}
 const byId = new Map(plan.agents.map((a) => [a.id, a]));
 const cfgById = new Map((Array.isArray(cfgAgents) ? cfgAgents : []).map((a) => [a.id, a]));
 const gateLevel = (gate.risk || {}).level;
@@ -1202,13 +1237,13 @@ const agents = launchedIds.map((id) => {
   return { id, escalates, tier };
 });
 const fs = require("fs");
-fs.writeFileSync("/tmp/launched_lanes.json", JSON.stringify(launchedIds));
-// One id per line; an empty file (not a missing one) when nothing was skipped — Stage 6 reads
-// this to fill Review detail & stats' "lanes with no matching changes" note.
-fs.writeFileSync("/tmp/skipped_lanes.txt", skippedIds.length ? skippedIds.join("\n") + "\n" : "");
-fs.writeFileSync("/tmp/review_plan_launched.json", JSON.stringify({ ...plan, agents }, null, 2));
+fs.writeFileSync(process.env.RUN_DIR + "/launched_lanes.json", JSON.stringify(launchedIds));
+// One id per line; an empty file (not a missing one) when nothing was skipped. Stage 6 reads
+// this to fill the "lanes with no matching changes" note in Review detail and stats.
+fs.writeFileSync(process.env.RUN_DIR + "/skipped_lanes.txt", skippedIds.length ? skippedIds.join("\n") + "\n" : "");
+fs.writeFileSync(process.env.RUN_DIR + "/review_plan_launched.json", JSON.stringify({ ...plan, agents }, null, 2));
 '
-cat /tmp/review_plan_launched.json
+cat "$RUN_DIR"/review_plan_launched.json
 ```
 
 After launching, display:
@@ -1247,7 +1282,7 @@ you do not inline is invisible to them.
 ## Stage 2 — Collect Agent Reports
 
 Wait for all agents to complete and display progress, one line per launched agent — the same
-launched-id list Stage 1 just recorded into `/tmp/launched_lanes.json`. Waiting means actively
+launched-id list Stage 1 just recorded into `$RUN_DIR/launched_lanes.json`. Waiting means actively
 collecting inside this same turn (TaskOutput per pending agent) — never ending the turn to "wait"
 for notifications; in CI that kills the run.
 
@@ -1255,14 +1290,14 @@ Each agent's final Task message is exactly one line — `done — <N> findings, 
 (the archetype's return contract) — never a pasted report. Do not trust `<N>` on its own; cross-
 check it against the findings file the agent actually wrote:
 
-- Read `/tmp/agent_findings/<agent id>.json`.
+- Read `$RUN_DIR/agent_findings/<agent id>.json`.
 - The lane **fails its cross-check** when the file is missing, its contents fail `JSON.parse`
   (treat unparseable JSON exactly like a missing file — never partially trust a truncated write),
   or `findings.length` does not equal the reported `<N>`.
 - When $ENGINE is code-review, read code-review-engine.md, section "Stage 2: checking the code-review lane", and follow it.
 - On a failed cross-check: relaunch that lane once; a lane that fails twice fails the run —
   no report is posted. Use the lane's original Stage 1 prompt, unchanged, for the retry.
-  Optionally append the lane's id to `/tmp/degraded_lanes.txt` (one id per line, create it if
+  Optionally append the lane's id to `$RUN_DIR/degraded_lanes.txt` (one id per line, create it if
   absent) if that helps you track which lane(s) failed — but nothing downstream may read that
   file into any status or report field; it is scratch state for you, not a report input.
   **A review with an incomplete lane must not produce a report at all** — an incomplete review
@@ -1291,44 +1326,46 @@ Agent Reviews Complete:
 Parse agent outputs for automated fixes:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 echo "🔧 Extracting automated fixes from agent reports..."
 
-FIX_COUNT=$(find /tmp/automated_fixes -name "fix_*.sh" 2>/dev/null | wc -l | tr -d ' ')
-echo "export FIX_COUNT=\"$FIX_COUNT\"" >> /tmp/review_env.sh
+FIX_COUNT=$(find "$RUN_DIR"/automated_fixes -name "fix_*.sh" 2>/dev/null | wc -l | tr -d ' ')
+echo "export FIX_COUNT=\"$FIX_COUNT\"" >> "$RUN_DIR"/review_env.sh
 
 if [ "$FIX_COUNT" -gt 0 ]; then
   echo "Found $FIX_COUNT automated fixes"
 
   # Organize by category (categories come from the agents' own Category: fields)
-  echo "By Category:" > /tmp/fix_summary.txt
-  for fix in /tmp/automated_fixes/fix_*.sh; do
+  echo "By Category:" > "$RUN_DIR"/fix_summary.txt
+  for fix in "$RUN_DIR"/automated_fixes/fix_*.sh; do
     [ -f "$fix" ] || continue
     basename "$fix" | sed 's/^fix_[0-9]*_//; s/\.sh$//'
   done | sort | uniq -c | while read -r count category; do
-    echo "  • $category: $count fixes" | tee -a /tmp/fix_summary.txt
+    echo "  • $category: $count fixes" | tee -a "$RUN_DIR"/fix_summary.txt
   done
-  cat /tmp/fix_summary.txt
+  cat "$RUN_DIR"/fix_summary.txt
 
   # Create master apply script.
   # SECURITY: these fix_*.sh scripts are MODEL-GENERATED from (attacker-influenceable) PR content
   # and are UNTRUSTED. apply_all.sh therefore DRY-RUNS by default — it prints each fix for human
   # review and applies nothing unless explicitly re-run with `--yes`.
-  cat > /tmp/automated_fixes/apply_all.sh << 'EOF'
+  cat > "$RUN_DIR"/automated_fixes/apply_all.sh << 'EOF'
 #!/bin/bash
 set -euo pipefail
 # fix_*.sh are model-generated from PR content and UNTRUSTED — review each before applying.
+FIXES=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" != "--yes" ]; then
   echo "DRY RUN — review each fix, then re-run with --yes to apply. Nothing applied yet."
-  for fix in /tmp/automated_fixes/fix_*.sh; do
+  for fix in "$FIXES"/fix_*.sh; do
     [ -f "$fix" ] || continue
     echo ""; echo "===== $(basename "$fix") ====="; cat "$fix"
   done
-  echo ""; echo "To apply after review:  bash /tmp/automated_fixes/apply_all.sh --yes"
+  echo ""; echo "To apply after review:  bash $FIXES/apply_all.sh --yes"
   exit 0
 fi
 echo "Applying all automated fixes..."
-for fix in /tmp/automated_fixes/fix_*.sh; do
+for fix in "$FIXES"/fix_*.sh; do
   if [ -f "$fix" ]; then
     echo "Applying: $(basename "$fix")"
     bash "$fix"
@@ -1338,7 +1375,7 @@ echo "✅ All fixes applied"
 echo "Review changes with: git diff"
 echo "To undo: git checkout ."
 EOF
-  chmod +x /tmp/automated_fixes/apply_all.sh
+  chmod +x "$RUN_DIR"/automated_fixes/apply_all.sh
 else
   echo "No automated fixes available"
 fi
@@ -1379,10 +1416,10 @@ Use the Task tool for each agent with:
 You are the [Agent Title] in the cross-examination debate phase.
 
 YOUR ORIGINAL FINDINGS:
-Read /tmp/agent_findings/<this agent's id>.json.
+Read $RUN_DIR/agent_findings/<this agent's id>.json.
 
 OTHER AGENTS' FINDINGS:
-Read every other launched agent's /tmp/agent_findings/<their id>.json — one path per lane, never
+Read every other launched agent's $RUN_DIR/agent_findings/<their id>.json — one path per lane, never
 pasted inline.
 
 MISSION: Review other agents' findings from your specialized perspective.
@@ -1464,7 +1501,7 @@ Use the Task tool with:
 You are the [Agent Title] responding to challenges from debate round 1.
 
 YOUR ORIGINAL FINDINGS:
-Read /tmp/agent_findings/<this agent's id>.json.
+Read $RUN_DIR/agent_findings/<this agent's id>.json.
 
 CHALLENGES RAISED AGAINST YOU:
 [List each challenge with severity score adjustments]
@@ -1518,17 +1555,18 @@ Launch rebuttal tasks for all challenged agents.
 
 Grouping, severity averaging, and corroboration counting are computed by the deterministic
 engine — never in context. This stage's job is to run it, resolve any ambiguous near-miss pairs
-it surfaces, and land a plain findings array at `/tmp/consensus_findings.json` for Stage 6.
+it surfaces, and land a plain findings array at `$RUN_DIR/consensus_findings.json` for Stage 6.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 echo "📊 Synthesizing consensus..."
-PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
+PROFILE=$(node -e 'const p = require(process.env.RUN_DIR + "/review_plan.json"); console.log(p.profile || "standard")')
 agent-review consensus \
-  --plan /tmp/review_plan_launched.json \
-  --dir /tmp/agent_findings \
+  --plan "$RUN_DIR"/review_plan_launched.json \
+  --dir "$RUN_DIR"/agent_findings \
   --profile "$PROFILE" \
-  > /tmp/consensus_raw.json
+  > "$RUN_DIR"/consensus_raw.json
 ```
 
 `agent-review consensus` is fail-closed: a missing findings file, or one that fails
@@ -1537,13 +1575,13 @@ verbatim, never paper over it by fabricating findings or silently retrying. Ever
 should already have a valid findings file by this stage — a lane that failed its Stage 2
 cross-check twice stopped the run before reaching here.
 
-Read `/tmp/consensus_raw.json`. Its `candidates` array names pairs of output findings (by index)
+Read `$RUN_DIR/consensus_raw.json`. Its `candidates` array names pairs of output findings (by index)
 that are close — same file, within 10 lines — but the clique rule deliberately left unmerged
 rather than risk conflating two distinct findings. When `candidates` is non-empty, resolve every
 pair with **one bounded model pass**: for each pair, read only the two named findings
-(`findings[a]` and `findings[b]` in `/tmp/consensus_raw.json` — never the full per-agent output)
+(`findings[a]` and `findings[b]` in `$RUN_DIR/consensus_raw.json` — never the full per-agent output)
 and decide whether they describe the same underlying issue. Never re-open findings outside the
-named pairs. Write the decisions to `/tmp/consensus_decisions.json`:
+named pairs. Write the decisions to `$RUN_DIR/consensus_decisions.json`:
 
 ```json
 [
@@ -1557,27 +1595,28 @@ rounded mean, or the highest member's when any member is 7+; line/message/fix = 
 higher-severity member's, evidence = for a 7+ entry the primary member's, trimmed, else the
 longest trimmed, and below 7 the longest trimmed, recommendation = the longest trimmed); `keep` is
 a no-op kept for auditability. Skip writing
-`/tmp/consensus_decisions.json` entirely when `candidates` was empty — the first invocation's
+`$RUN_DIR/consensus_decisions.json` entirely when `candidates` was empty — the first invocation's
 output is already final. Either way, this block re-runs the command when decisions exist and then
 extracts the plain findings array Stage 6 expects:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
-PROFILE=$(node -e 'const p = require("/tmp/review_plan.json"); console.log(p.profile || "standard")')
-if [ -s /tmp/consensus_decisions.json ]; then
+PROFILE=$(node -e 'const p = require(process.env.RUN_DIR + "/review_plan.json"); console.log(p.profile || "standard")')
+if [ -s "$RUN_DIR"/consensus_decisions.json ]; then
   agent-review consensus \
-    --plan /tmp/review_plan_launched.json \
-    --dir /tmp/agent_findings \
+    --plan "$RUN_DIR"/review_plan_launched.json \
+    --dir "$RUN_DIR"/agent_findings \
     --profile "$PROFILE" \
-    --decisions /tmp/consensus_decisions.json \
-    > /tmp/consensus_raw.json
+    --decisions "$RUN_DIR"/consensus_decisions.json \
+    > "$RUN_DIR"/consensus_raw.json
 fi
-node -e 'const r = require("/tmp/consensus_raw.json"); process.stdout.write(JSON.stringify(r.findings, null, 2))' \
-  > /tmp/consensus_findings.json
+node -e 'const r = require(process.env.RUN_DIR + "/consensus_raw.json"); process.stdout.write(JSON.stringify(r.findings, null, 2))' \
+  > "$RUN_DIR"/consensus_findings.json
 ```
 
-Display a summary from `/tmp/consensus_raw.json`'s `stats`:
+Display a summary from `$RUN_DIR/consensus_raw.json`'s `stats`:
 
 ```
 📊 Consensus Analysis:
@@ -1594,7 +1633,8 @@ Dropped by profile: [stats.droppedByProfile]   Needs human review: [stats.needsH
 **SKIP THIS ENTIRE STAGE IN CI MODE.** Nothing under `.claude/review/metrics/` is written in CI.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # AGENT_MODE, FIX_COUNT, CI_MODE …
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # AGENT_MODE, FIX_COUNT, CI_MODE …
 echo "📊 Generating quality metrics dashboard..."
 
 PR_NUM="${PR_NUMBER:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number -q .number 2>/dev/null)}"
@@ -1603,10 +1643,10 @@ CURRENT_DATE=$(date +%Y-%m-%d)
 AUTHOR=$(git config user.name || echo "Developer")
 
 # Average consensus severity for this review — derive the mean `severity` across
-# /tmp/consensus_findings.json's entries and substitute the real number.
+# $RUN_DIR/consensus_findings.json's entries and substitute the real number.
 CURRENT_SEVERITY="[X.X]"
 
-cat >> /tmp/review_env.sh <<EOF
+cat >> "$RUN_DIR"/review_env.sh <<EOF
 export PR_NUM="$PR_NUM" CURRENT_DATE="$CURRENT_DATE" CURRENT_SEVERITY="$CURRENT_SEVERITY"
 EOF
 
@@ -1671,7 +1711,7 @@ ${LAST_10}
 
 ---
 
-_Generated by agent-review | Full report: /tmp/agent_review_report.md_
+_Generated by agent-review | Full report: the review comment on PR #${PR_NUM}_
 EOF
 
 echo "✅ Metrics dashboard created: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"
@@ -1680,7 +1720,8 @@ echo "✅ Metrics dashboard created: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md
 ### Update Review History
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 echo "$PR_NUM $CURRENT_SEVERITY $CURRENT_DATE" >> "$REVIEW_DIR/metrics/severity_history.txt"
 
 cat > "$REVIEW_DIR/metrics/history/${CURRENT_DATE}_${PR_NUM}.json" << EOF
@@ -1710,7 +1751,7 @@ echo "✅ Review history updated"
 
 ### Capture consensus for the learning layer
 
-Write the consensus findings as a JSON array to `/tmp/consensus_findings.json`. Each entry is
+Write the consensus findings as a JSON array to `$RUN_DIR/consensus_findings.json`. Each entry is
 shaped `{ agent, category, severity, file, line, message, confidence, evidence, recommendation }`.
 For severity ≥ 7, `confidence` must be `High`, `line` must anchor to an added/modified line, and
 `evidence` must name the verified execution path or violated contract. Then emit the findings and
@@ -1719,7 +1760,8 @@ the result — both steps are read-only engine calls with no required decision i
 shell handles them (see **Build the findings ledger** below for what the second half does):
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # REVIEW_ID, INCREMENTAL, PR_NUMBER, set in Stage 0
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # REVIEW_ID, INCREMENTAL, PR_NUMBER, set in Stage 0
 set -e
 
 # --- Capture consensus for the learning layer ---
@@ -1728,32 +1770,32 @@ set -e
 # filtering and ledger construction.
 node - <<'NODE'
 const fs = require('fs');
-const model = JSON.parse(fs.readFileSync('/tmp/consensus_findings.json', 'utf8'));
-const evidence = JSON.parse(fs.readFileSync('/tmp/review_evidence.json', 'utf8'));
+const model = JSON.parse(fs.readFileSync(process.env.RUN_DIR + '/consensus_findings.json', 'utf8'));
+const evidence = JSON.parse(fs.readFileSync(process.env.RUN_DIR + '/review_evidence.json', 'utf8'));
 if (!Array.isArray(model)) throw new Error('consensus findings must be an array');
 fs.writeFileSync(
-  '/tmp/consensus_findings.json',
+  process.env.RUN_DIR + '/consensus_findings.json',
   JSON.stringify([...(evidence.staticFindings || []), ...model], null, 2),
 );
 NODE
 if [ "$(agent-review config get learning.enabled 2>/dev/null)" = "true" ]; then
   # REVIEW_ID is "<pr-or-local>-<timestamp>", so two reviews of the same branch never write to the
   # same pending/<reviewId>.yml.
-  agent-review emit --in /tmp/consensus_findings.json --review "${REVIEW_ID:-local}"
-  agent-review filter > /tmp/review_filtered.json   # defaults to the just-emitted findings.json
+  agent-review emit --in "$RUN_DIR"/consensus_findings.json --review "${REVIEW_ID:-local}"
+  agent-review filter > "$RUN_DIR"/review_filtered.json   # defaults to the just-emitted findings.json
 else
   # Keep one downstream shape even when learnings are disabled.
-  node -e 'const f=require("/tmp/consensus_findings.json"); process.stdout.write(JSON.stringify({kept:f,suppressed:[]},null,2))' \
-    > /tmp/review_filtered.json
+  node -e 'const f=require(process.env.RUN_DIR + "/consensus_findings.json"); process.stdout.write(JSON.stringify({kept:f,suppressed:[]},null,2))' \
+    > "$RUN_DIR"/review_filtered.json
 fi
 
 # --- Build the findings ledger ---
-echo '[]' > /tmp/previous_agent_review_ledger.json
+echo '[]' > "$RUN_DIR"/previous_agent_review_ledger.json
 if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] || [ -z "$CI_MODE" ]; }; then
   if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ]; then
     tr -d '\r' < "$AGENT_REVIEW_PREVIOUS_COMMENT" \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-      > /tmp/previous_agent_review_ledger.json
+      > "$RUN_DIR"/previous_agent_review_ledger.json
   else
     REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)}"
     # Local canonical comment: this user's own marked comment when one exists, else the bot's.
@@ -1762,39 +1804,39 @@ if [ -n "$PR_NUMBER" ] && { [ -n "$INCREMENTAL" ] || [ -n "${CARRY_LEDGER:-}" ] 
     gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate 2>/dev/null \
       | agent-review report-comment --me "$ME" 2>/dev/null | tr -d '\r' \
       | sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' | head -1 \
-      > /tmp/previous_agent_review_ledger.json
+      > "$RUN_DIR"/previous_agent_review_ledger.json
   fi
-  [ -s /tmp/previous_agent_review_ledger.json ] \
-    || echo '[]' > /tmp/previous_agent_review_ledger.json
+  [ -s "$RUN_DIR"/previous_agent_review_ledger.json ] \
+    || echo '[]' > "$RUN_DIR"/previous_agent_review_ledger.json
 fi
 LEDGER_BY_LOCATION=""
 [ "$ENGINE" = "code-review" ] && LEDGER_BY_LOCATION=1
 # While matcher pairs exist, no ledger may exist: the next step builds it from the matcher's answers.
-rm -f /tmp/ledger_candidates.json /tmp/ledger_matches.json /tmp/agent_review_ledger.json
+rm -f "$RUN_DIR"/ledger_candidates.json "$RUN_DIR"/ledger_matches.json "$RUN_DIR"/agent_review_ledger.json
 LEDGER_PAIRS=0
 if [ -n "$LEDGER_BY_LOCATION" ]; then
-  if agent-review ledger-candidates --findings /tmp/review_filtered.json \
-      --previous /tmp/previous_agent_review_ledger.json > /tmp/ledger_candidates.json; then
-    LEDGER_PAIRS=$(node -e 'console.log(require("/tmp/ledger_candidates.json").count)') || LEDGER_PAIRS=0
+  if agent-review ledger-candidates --findings "$RUN_DIR"/review_filtered.json \
+      --previous "$RUN_DIR"/previous_agent_review_ledger.json > "$RUN_DIR"/ledger_candidates.json; then
+    LEDGER_PAIRS=$(node -e 'console.log(require(process.env.RUN_DIR + "/ledger_candidates.json").count)') || LEDGER_PAIRS=0
   else
     echo "ledger matching skipped: the candidate pairs could not be computed"
   fi
   echo "ledger matching: $LEDGER_PAIRS pairs"
   echo "routing: ${ROUTING:-normal}"
 fi
-echo "export LEDGER_PAIRS=\"$LEDGER_PAIRS\"" >> /tmp/review_env.sh
+echo "export LEDGER_PAIRS=\"$LEDGER_PAIRS\"" >> "$RUN_DIR"/review_env.sh
 if [ "$LEDGER_PAIRS" = 0 ]; then
   agent-review ledger \
-    --findings /tmp/review_filtered.json \
-    --previous /tmp/previous_agent_review_ledger.json \
+    --findings "$RUN_DIR"/review_filtered.json \
+    --previous "$RUN_DIR"/previous_agent_review_ledger.json \
     ${LEDGER_BY_LOCATION:+--match-suggestions-by-location} \
-    > /tmp/agent_review_ledger.json
+    > "$RUN_DIR"/agent_review_ledger.json
 fi
 ```
 
 When $ENGINE is code-review, read code-review-engine.md, section "Stage 6: the ledger matcher", and follow it.
 
-Report the `kept` findings from `/tmp/review_filtered.json` and note the count of `suppressed`
+Report the `kept` findings from `$RUN_DIR/review_filtered.json` and note the count of `suppressed`
 findings (suppressed by approved learnings). Tell the user they can mark outcomes in the emitted
 `pending/<reviewId>.yml` (set each finding's `outcome` to `accepted` or `dismissed`), then run
 `agent-review feedback <that file>` and `agent-review learn` to mine new proposed learnings, and
@@ -1812,7 +1854,7 @@ The report's blocker checklist and findings list are the interactive surface dev
 hidden ledger marker carries the machine state behind them: each finding gets a stable number,
 severity ≥ 7 items get a checkbox, and `/agent-review:address` (locally or via
 `@claude fix/dismiss` PR comments) checks items off as **fixed** or **dismissed**. Build its
-machine state now from the kept findings in `/tmp/review_filtered.json` (they already carry the
+machine state now from the kept findings in `$RUN_DIR/review_filtered.json` (they already carry the
 engine's `id` and `signature` from the emit step — keep both; the dismiss path writes them into
 the feedback store):
 
@@ -1846,7 +1888,7 @@ it by the ledger matcher step. See those blocks for the exact commands.
 
 Render the ledger section of the report from this JSON, exactly per the skeleton's format.
 
-**Inline finding anchors.** Also write `/tmp/agent_review_inline.json`: an array of
+**Inline finding anchors.** Also write `$RUN_DIR/agent_review_inline.json`: an array of
 `{ "n", "file", "line", "severity", "message" }` for every ledger entry that is **open,
 severity ≥ 7, and anchored to a line present in this diff** (skip entries with no line, and
 cap at 25, highest severity first — inline anchors are a navigation aid, not a second report).
@@ -1861,8 +1903,8 @@ dedupes by number, so already-anchored findings are never re-posted.
 Workflows gate auto-approval on a machine-readable status line — never on grepping the report's
 prose. Build it now.
 
-**Reversibility.** Judge from `/tmp/pr_full_diff.txt` — never the incremental-only
-`/tmp/pr_diff.txt` — whether the full current PR contains operations that CANNOT be
+**Reversibility.** Judge from `$RUN_DIR/pr_full_diff.txt` — never the incremental-only
+`$RUN_DIR/pr_diff.txt` — whether the full current PR contains operations that CANNOT be
 cleanly undone by reverting the commit and rolling back. The question is "if this ships broken,
 can we get back to the previous state?" — not how risky the change is. Classify as
 **irreversible** when the diff includes any of:
@@ -1880,9 +1922,9 @@ Purely additive changes (new column, new table, new index, new code paths, confi
 List concrete reasons (`"change_column on donations.amount"`, `"update_all backfill in
 migration X"`), each traceable to a diff hunk.
 
-**Card data.** Judge from `/tmp/pr_card_scan_diff.txt`, the whole PR's own changes from the
-merge base (never the incremental-only `/tmp/pr_diff.txt`), whether the PR touches payment card
-handling. Read all of `/tmp/pr_card_scan_diff.txt`, in parts if it is long. Lockfiles cannot
+**Card data.** Judge from `$RUN_DIR/pr_card_scan_diff.txt`, the whole PR's own changes from the
+merge base (never the incremental-only `$RUN_DIR/pr_diff.txt`), whether the PR touches payment card
+handling. Read all of `$RUN_DIR/pr_card_scan_diff.txt`, in parts if it is long. Lockfiles cannot
 carry card handling, so skip them. Run this scan on every review, in every repo, whether or not
 the repo's config sets `human_approval`: a repo with no card code today may add some later. Flag
 the PR when the diff adds or changes code that does any of these:
@@ -1907,13 +1949,13 @@ A lane that failed its Stage 2 cross-check twice never reaches this point: the r
 stopped with no report at all (see Stage 2). Reversibility and the card-data scan judge the
 diff itself; neither is ever used to signal incomplete review coverage.
 
-**Status JSON.** Write the safety judgment first as `/tmp/agent_review_safety.json`:
+**Status JSON.** Write the safety judgment first as `$RUN_DIR/agent_review_safety.json`:
 
 ```json
 { "irreversible": false, "reasons": [] }
 ```
 
-Write the card-data judgment as `/tmp/agent_review_card_scan.json`. A `true` needs at least one
+Write the card-data judgment as `$RUN_DIR/agent_review_card_scan.json`. A `true` needs at least one
 reason, and a `false` takes an empty list. `agent-review status` fails on anything else,
 including a misnamed key:
 
@@ -1925,14 +1967,15 @@ Then run the block below. It first checks the repo's own human approval rules: i
 `human_approval` from `.claude/review/config.yml` at the PR's base commit (the commit the approve
 action reads), never from the PR's own changes, and matches it against every file the whole PR
 changes, even on an incremental run. A local review with no PR uses the start of its full
-range. Only the block writes the result: never write `/tmp/agent_review_human_rules.json` by
+range. Only the block writes the result: never write `$RUN_DIR/agent_review_human_rules.json` by
 hand. When the rules cannot be read, the result is `required: true` with a `could not read the
 human approval rules` reason, so the PR needs a person. The engine then computes
-`/tmp/agent_review_status.json` from the ledger, the **full-PR** gate plan, and these three
+`$RUN_DIR/agent_review_status.json` from the ledger, the **full-PR** gate plan, and these three
 files. Never hand-author `openBlockers`, `pass`, `risk`, or `humanRequired`:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 # The rules come from the base commit, the one the approve action reads, never from the PR's own
 # changes: BASE_REF on a PR, and the range's start otherwise.
 RULES_BASE="${BASE_REF:-${FULL_RANGE%%..*}}" RULES_HEAD="${FULL_RANGE#*..}"
@@ -1941,8 +1984,8 @@ RULES_ERROR=""
 # --no-renames lists both sides of a rename; -z keeps unusual paths unquoted. diff.relative=false
 # keeps every path from the repo root, whatever the user's git config says.
 if [ -z "$RULES_ERROR" ]; then
-  git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > /tmp/agent_review_changed_files.z \
-    && tr '\0' '\n' < /tmp/agent_review_changed_files.z > /tmp/agent_review_changed_files.txt \
+  git -c diff.relative=false diff --name-only --no-renames -z "${RULES_BASE}...${RULES_HEAD}" > "$RUN_DIR"/agent_review_changed_files.z \
+    && tr '\0' '\n' < "$RUN_DIR"/agent_review_changed_files.z > "$RUN_DIR"/agent_review_changed_files.txt \
     || RULES_ERROR="could not list the changed files"
 fi
 # Only a path missing from the base tree means no config. A listed config that will not show,
@@ -1951,34 +1994,34 @@ if [ -z "$RULES_ERROR" ]; then
   if ! CONFIG_ENTRY=$(git ls-tree --full-tree --name-only "$RULES_BASE" -- .claude/review/config.yml); then
     RULES_ERROR="could not read the base tree"
   elif [ -z "$CONFIG_ENTRY" ]; then
-    : > /tmp/agent_review_base_config.yml
-  elif ! git show "${RULES_BASE}:.claude/review/config.yml" > /tmp/agent_review_base_config.yml 2>/dev/null; then
+    : > "$RUN_DIR"/agent_review_base_config.yml
+  elif ! git show "${RULES_BASE}:.claude/review/config.yml" > "$RUN_DIR"/agent_review_base_config.yml 2>/dev/null; then
     RULES_ERROR="could not read the base config"
   fi
 fi
 if [ -z "$RULES_ERROR" ]; then
-  if HUMAN_CHECK=$(agent-review human-check --config /tmp/agent_review_base_config.yml --files /tmp/agent_review_changed_files.txt); then
-    printf '%s\n' "$HUMAN_CHECK" > /tmp/agent_review_human_rules.json
+  if HUMAN_CHECK=$(agent-review human-check --config "$RUN_DIR"/agent_review_base_config.yml --files "$RUN_DIR"/agent_review_changed_files.txt); then
+    printf '%s\n' "$HUMAN_CHECK" > "$RUN_DIR"/agent_review_human_rules.json
   else
     RULES_ERROR="${HUMAN_CHECK#human-check: }"
     RULES_ERROR="${RULES_ERROR:-human-check failed}"
   fi
 fi
 if [ -n "$RULES_ERROR" ]; then
-  node -e 'process.stdout.write(JSON.stringify({ required: true, reasons: ["could not read the human approval rules: " + process.argv[1].split("\n")[0]] }) + "\n")' "$RULES_ERROR" > /tmp/agent_review_human_rules.json
+  node -e 'process.stdout.write(JSON.stringify({ required: true, reasons: ["could not read the human approval rules: " + process.argv[1].split("\n")[0]] }) + "\n")' "$RULES_ERROR" > "$RUN_DIR"/agent_review_human_rules.json
 fi
 # A flag and its value go in an array: zsh never splits a ${X:+...} expansion into words.
 HEAD_ARGS=()
 if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi
 agent-review status \
-  --ledger /tmp/agent_review_ledger.json \
-  --plan /tmp/review_gate_plan.json \
-  --safety /tmp/agent_review_safety.json \
-  --human /tmp/agent_review_human_rules.json \
-  --card-scan /tmp/agent_review_card_scan.json \
-  --evidence /tmp/review_evidence.json \
+  --ledger "$RUN_DIR"/agent_review_ledger.json \
+  --plan "$RUN_DIR"/review_gate_plan.json \
+  --safety "$RUN_DIR"/agent_review_safety.json \
+  --human "$RUN_DIR"/agent_review_human_rules.json \
+  --card-scan "$RUN_DIR"/agent_review_card_scan.json \
+  --evidence "$RUN_DIR"/review_evidence.json \
   "${HEAD_ARGS[@]}" \
-  > /tmp/agent_review_status.json
+  > "$RUN_DIR"/agent_review_status.json
 ```
 
 The resulting object is:
@@ -2009,15 +2052,15 @@ must approve, and `humanReasons` says why; the bot never approves such a PR. Lik
 ### Write the report
 
 Read the plugin's report skeleton — `../../templates/report.md`, relative to this skill file — and
-fill it in from `/tmp/consensus_findings.json` (consensus JSON), the full-PR gate plan
-(`/tmp/review_gate_plan.json`), and the status marker (`/tmp/agent_review_status.json`) built
+fill it in from `$RUN_DIR/consensus_findings.json` (consensus JSON), the full-PR gate plan
+(`$RUN_DIR/review_gate_plan.json`), and the status marker (`$RUN_DIR/agent_review_status.json`) built
 above — plus the dependency impact analysis and each agent's own
-`/tmp/agent_findings/<id>.json` for its summary-table row. The skeleton's bracketed placeholders
+`$RUN_DIR/agent_findings/<id>.json` for its summary-table row. The skeleton's bracketed placeholders
 and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. Honor its conditionals:
 
 - Set Rollout from `$AGENT_REVIEW_ROLLOUT_MODE` (default `advisory`). In `shadow`, say plainly that
   the report cannot approve or block the PR. Fill deterministic evidence from
-  `/tmp/review_evidence.json` and cross-repo context from `/tmp/review_context.json`; do not infer.
+  `$RUN_DIR/review_evidence.json` and cross-repo context from `$RUN_DIR/review_context.json`; do not infer.
 - The header's ` · ⚠️ irreversible` tag shows only when `status.irreversible` is true, and its
   ` · 👤 needs a person` tag only when `status.humanRequired` is true.
 - One summary-table row per **launched** agent, using each agent's `title`, in launch order.
@@ -2042,7 +2085,7 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
 - Omit the **Debate summary** block from `Review detail & stats` entirely when debate rounds did
   not run. That block is the only place debate output ever appears in the report.
 - Omit the learning-layer line when the learning layer is disabled.
-- Fill the DEPENDENCY IMPACT section from `/tmp/review_impact.json` (`blastRadius`, `topImpacted`,
+- Fill the DEPENDENCY IMPACT section from `$RUN_DIR/review_impact.json` (`blastRadius`, `topImpacted`,
   `truncated`) — that is the only impact artifact this skill produces. State "index disabled" there
   when Stage 1B was skipped, and drop the breaking-changes subsection when nothing was detected.
 - Fill the skeleton's `[IF routing degraded:]` line inside `Review detail & stats` when
@@ -2050,7 +2093,7 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   `general-purpose` instead of its tier subagent type). Omit it entirely otherwise — never
   freestyle this note; the skeleton in `templates/report.md` owns its exact wording.
 - Fill the skeleton's `[IF any lanes were skipped:]` line inside `Review detail & stats` from
-  `/tmp/skipped_lanes.txt` (one id per line, written at Stage 1's launched-subset derivation) as
+  `$RUN_DIR/skipped_lanes.txt` (one id per line, written at Stage 1's launched-subset derivation) as
   `- lanes with no matching changes: <comma-joined ids>`. Omit the line entirely when the file is
   empty or absent.
 
@@ -2063,12 +2106,12 @@ FINDINGS lives in the four <details> sections from the skeleton; add nothing
 outside them; soft target 25,000 bytes; the 60,000-byte hard cap and its trim
 order still apply.
 
-Save the filled report to `/tmp/agent_review_report.md`.
+Save the filled report to `$RUN_DIR/agent_review_report.md`.
 
 In CI mode, the `🔧 Fix suggestions` details section stays — but frame it as suggestions a human
 can apply locally after review, and never execute anything.
 
-GitHub issue comments are size-limited. In CI, keep `/tmp/agent_review_report.md` under 60,000
+GitHub issue comments are size-limited. In CI, keep `$RUN_DIR/agent_review_report.md` under 60,000
 bytes (`wc -c`): prioritize the verdict line, the ledger, and blocker evidence. If still over
 budget, trim in this order: drop the `📊 Review detail & stats` details section first, then the
 `🔧 Fix suggestions` diffs, then non-blocker findings' `↳ evidence` lines. Never touch the hidden
@@ -2124,7 +2167,8 @@ straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
 ### Commit Metrics Dashboard
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
 if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ] && git check-ignore -q "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"; then
   echo "📊 Metrics dashboard: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md (git-ignored here, so not committed)"
 elif [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
@@ -2155,10 +2199,11 @@ unrelated staged changes, report the dashboard path and skip the commit instead.
 No menu. When a PR resolves, post the report now; either way print what a reader sees on the PR.
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
-: > /tmp/agent_review_post_result.txt
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
+: > "$RUN_DIR"/agent_review_post_result.txt
 if [ -z "${PR_NUMBER:-}" ]; then
-  echo "💾 Saved locally, no PR — report at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+  echo "💾 Saved locally, no PR — report at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
 else
   REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
   # The rollout marker decides whether an approver may act on this report. Locally it comes
@@ -2171,20 +2216,20 @@ else
   { printf '%s\n' '<!-- agent-review -->'
     [ -n "${HEAD_REF:-}" ] && printf '%s\n' "<!-- agent-review-head: $HEAD_REF -->"
     printf '%s\n' "<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-$ROLLOUT} -->"
-    [ -s /tmp/agent_review_ledger.json ] \
-      && printf '%s\n' "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_ledger.json","utf8"))))') -->"
-    [ -s /tmp/agent_review_status.json ] \
-      && printf '%s\n' "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync("/tmp/agent_review_status.json","utf8"))))') -->"
+    [ -s "$RUN_DIR"/agent_review_ledger.json ] \
+      && printf '%s\n' "<!-- agent-review-ledger: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.env.RUN_DIR + "/agent_review_ledger.json","utf8"))))') -->"
+    [ -s "$RUN_DIR"/agent_review_status.json ] \
+      && printf '%s\n' "<!-- agent-review-status: $(node -e 'console.log(JSON.stringify(JSON.parse(require("fs").readFileSync(process.env.RUN_DIR + "/agent_review_status.json","utf8"))))') -->"
     echo
-    cat /tmp/agent_review_report.md
-  } > /tmp/agent_review_comment.md
+    cat "$RUN_DIR"/agent_review_report.md
+  } > "$RUN_DIR"/agent_review_comment.md
 
   # SELF-CHECK — same as the CI posting step: catches hand-transcribed marker lines
   # (mangled escapes) before this ever reaches GitHub. The marker lines above MUST come
   # only from the node commands; never hand-write or hand-edit them.
   node -e '
 const fs = require("fs");
-const c = fs.readFileSync("/tmp/agent_review_comment.md", "utf8").replace(/\r/g, "");
+const c = fs.readFileSync(process.env.RUN_DIR + "/agent_review_comment.md", "utf8").replace(/\r/g, "");
 // The approver reads marker lines only up to the first line that is not one, so do the same.
 const header = [];
 for (const line of c.split("\n")) {
@@ -2194,7 +2239,7 @@ for (const line of c.split("\n")) {
 for (const name of ["ledger", "status"]) {
   const m = header.join("\n").match(new RegExp("^<!-- agent-review-" + name + ": (.*) -->$", "m"));
   if (m) JSON.parse(m[1]);
-  else if (fs.existsSync("/tmp/agent_review_" + name + ".json") && fs.statSync("/tmp/agent_review_" + name + ".json").size > 0)
+  else if (fs.existsSync(process.env.RUN_DIR + "/agent_review_" + name + ".json") && fs.statSync(process.env.RUN_DIR + "/agent_review_" + name + ".json").size > 0)
     throw new Error(name + " marker is missing from the comment header");
 }
 console.log("marker self-check OK");
@@ -2212,25 +2257,25 @@ console.log("marker self-check OK");
     --jq "map(select(.user.login == \"$ME\") | select(.body | contains(\"<!-- agent-review -->\"))) | first | .id // empty" \
     2>/dev/null | head -n1)
   if [ -n "$EXISTING" ]; then
-    gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@/tmp/agent_review_comment.md >/dev/null \
-      && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt \
-      || echo "❌ post failed — could not update comment $EXISTING; report left at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+    gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@"$RUN_DIR"/agent_review_comment.md >/dev/null \
+      && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee "$RUN_DIR"/agent_review_post_result.txt \
+      || echo "❌ post failed — could not update comment $EXISTING; report left at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
   else
-    gh pr comment "$PR_NUMBER" --body-file /tmp/agent_review_comment.md >/dev/null \
-      && echo "✅ Review posted to PR #$PR_NUMBER" | tee /tmp/agent_review_post_result.txt \
-      || echo "❌ post failed — could not comment on PR #$PR_NUMBER; report left at /tmp/agent_review_report.md" | tee /tmp/agent_review_post_result.txt
+    gh pr comment "$PR_NUMBER" --body-file "$RUN_DIR"/agent_review_comment.md >/dev/null \
+      && echo "✅ Review posted to PR #$PR_NUMBER" | tee "$RUN_DIR"/agent_review_post_result.txt \
+      || echo "❌ post failed — could not comment on PR #$PR_NUMBER; report left at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
   fi
 fi
 
 # What the PR shows, in the terminal: everything before the collapsed appendix.
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-awk '/^<details>/{exit} {print}' /tmp/agent_review_report.md
+awk '/^<details>/{exit} {print}' "$RUN_DIR"/agent_review_report.md
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 ```
 
-The metrics dashboard (`$REVIEW_DIR/metrics/PR_<n>_metrics.md`), the dependency impact
-(`/tmp/review_impact.json`), and the fix dry-run (`bash /tmp/automated_fixes/apply_all.sh`,
-which prints and applies nothing) are optional follow-ups named in Stage 8; do not stop to ask.
+The metrics dashboard (`$REVIEW_DIR/metrics/PR_<n>_metrics.md`) and the fix dry-run
+(`bash $RUN_DIR/automated_fixes/apply_all.sh`, which prints and applies nothing) are optional
+follow-ups named in Stage 8; do not stop to ask.
 
 Never run `apply_all.sh --yes` on the user's behalf without an explicit, informed "yes" — the fix
 scripts are model-generated from PR content and are untrusted input.
@@ -2271,9 +2316,9 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 
 **Artifacts**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📄 /tmp/agent_review_report.md
+📄 $RUN_DIR/agent_review_report.md
 📊 .claude/review/metrics/ (skipped in CI mode)
-💬 [contents of /tmp/agent_review_post_result.txt]
+💬 [contents of $RUN_DIR/agent_review_post_result.txt]
 
 **Next Steps**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2281,7 +2326,7 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 2. Review [FIX_COUNT] suggested fixes before applying any
 3. Check [N] high-impact dependency changes
 4. Mark finding outcomes and run `agent-review learn` to grow the learning layer
-5. Optional: cat $REVIEW_DIR/metrics/PR_[N]_metrics.md · cat /tmp/review_impact.json · bash /tmp/automated_fixes/apply_all.sh (dry run)
+5. Optional: cat $REVIEW_DIR/metrics/PR_[N]_metrics.md · bash $RUN_DIR/automated_fixes/apply_all.sh (dry run)
 6. /agent-review:address fix 1,2 dismiss 3 [code]: reason — then /agent-review:re-review
 [IF the installed plugin is older than main (local runs only):]
 ⬆️  agent-review update available: you are on v[PLUGIN_VERSION], latest is v[LATEST]
@@ -2291,6 +2336,23 @@ carrying `needsHumanReview: true`, not a debate-specific count)
    → run `/agent-review:update-files`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+### Finish the run
+
+Run this last, after the summary, and whenever the run stops early (see **STOPPING EARLY** at the
+top):
+
+```bash
+agent-review run-dir --release review
+```
+
+It frees the checkout for the next review and deletes this run's working files. It keeps the
+report (`agent_review_report.md`) and, when this run wrote any, the fix scripts in
+`automated_fixes/`, so the paths in the summary still work until the next review of this checkout
+clears them. When the checkout was taken by a skill that runs this one, such as
+`/agent-review:yolo-review`, it leaves the folder to that skill and prints `kept`. In CI it does
+nothing. If it prints that another session's run holds the checkout, show that line: this run's
+blocks were run from the wrong checkout.
 
 ---
 
@@ -2307,13 +2369,15 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 
 **Cross-stage state**
 
-Every bash block runs in its own shell. `/tmp/review_env.sh` is the only carrier between stages:
+Every bash block runs in its own shell. `$RUN_DIR/review_env.sh` is the only carrier between stages:
 Stage 0A truncates it and writes `MODE`/`AGENT_MODE`, `ENGINE`/`EFFORT`/`REVIEWS_RUN` (from
-`/tmp/review_options.json`; `EFFORT` is empty under the `agent-review` engine), then `CI_MODE`; Stage 0 adds `DAY_OF_WEEK`,
+`$RUN_DIR/review_options.json`; `EFFORT` is empty under the `agent-review` engine), then `CI_MODE`; Stage 0 adds `DAY_OF_WEEK`,
 `BASE_REF`, `RANGE`; the Stage 0B smoke test adds `ROUTING`; Stage 2B adds `FIX_COUNT`; Stage 5B
 adds `PR_NUM`, `CURRENT_DATE`, `CURRENT_SEVERITY`; Stage 6 adds `LEDGER_PAIRS`. Any block using a value it did not compute
-itself begins with `. /tmp/review_env.sh 2>/dev/null || true`. If you add a stage, keep the
-discipline.
+itself, or any run file, begins with `RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR`
+and then `. "$RUN_DIR/review_env.sh" 2>/dev/null || true`. If you add a stage, keep the
+discipline. The run folder is `<capture dir>/runs/<checkout name>-<hash>`, one per checkout, so
+`RUN_DIR` is never itself saved in `review_env.sh`.
 
 **Modes**
 
