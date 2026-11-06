@@ -4,9 +4,15 @@ description: >-
   head, unless the PR targets the default branch, its base has not changed
   since the approval, and the head adds nothing to the approved commit but that
   branch. Never checks out or runs PR code: it reads the PR through the API and
-  compares commits in a fresh bare repository. Never dismisses an approval of
-  the current head, a person's approval, or another workflow's, and never fails
-  the job.
+  compares commits in a fresh bare repository. Never dismisses a person's
+  approval or another workflow's, or an approval of the head it confirmed, and
+  never fails the job. When GitHub does not confirm the expected head, it takes
+  back every bot approval it cannot check. Sets `complete` to true only when it
+  finished and left no approval it had to take back. Leaves
+  $RUNNER_TEMP/agent-review-withdraw.pending only when it read the reviews and
+  did not finish, so a caller can tell a person. It lists "<review id> <commit>"
+  for each bot approval that may still stand, and is empty when the reviews
+  could not be read.
 inputs:
   pr_number:
     description: Pull request number
@@ -15,23 +21,42 @@ inputs:
     description: >-
       The commit the PR's head moved to, from the push the caller made or the
       event it got. GitHub moves the PR's head in its API a moment after a push,
-      so the action waits for it, and judges against this commit even if the
-      API never shows it.
+      so the action waits for it, and judges against this commit unless GitHub
+      shows a later change to the PR.
     required: false
     default: ''
+  previous_head:
+    description: >-
+      The PR's head before the caller's own push. A pull_request_target run
+      passes nothing: the action reads the event's before and after itself.
+    required: false
+    default: ''
+outputs:
+  complete:
+    description: >-
+      true when the action finished and left no approval it had to take back.
+      Empty when the step was stopped, as by a timeout.
+    value: ${{ steps.withdraw.outputs.complete }}
 runs:
   using: composite
   steps:
     - name: Withdraw the bot's approval of an older commit
+      id: withdraw
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
         PR: ${{ inputs.pr_number }}
         EXPECTED_HEAD: ${{ inputs.expected_head }}
+        PREVIOUS_HEAD: ${{ inputs.previous_head }}
         SERVER_URL: ${{ github.server_url }}
         EVENT_NAME: ${{ github.event_name }}
         EVENT_ACTION: ${{ github.event.action }}
+        EVENT_BEFORE: ${{ github.event.before }}
+        EVENT_AFTER: ${{ github.event.after }}
+        EVENT_HEAD: ${{ github.event.pull_request.head.sha }}
+        EVENT_UPDATED_AT: ${{ github.event.pull_request.updated_at }}
+        ACTOR: ${{ github.actor }}
       run: |
         set -eEuo pipefail
         # Anything unexpected is "could not check": report it and stop
@@ -41,10 +66,20 @@ runs:
         trap '[ "$BASH_SUBSHELL" -eq 0 ] || exit 1; echo "::warning::agent-review withdraw could not check PR #$PR (${BASH_COMMAND%% *} failed), so no approval was withdrawn." | tee -a "$GITHUB_STEP_SUMMARY"; exit 0' ERR
         note() { echo "$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
         warn() { echo "::warning::$1" | tee -a "$GITHUB_STEP_SUMMARY"; }
+        is_sha() { [[ "$1" =~ ^[0-9a-f]{40}$ ]]; }
+        is_time() { [[ "$1" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; }
+        # GitHub times are compared as strings, so both must have its format.
+        later_than() { is_time "$1" && is_time "$2" && [ "$(jq -n --arg a "$1" --arg b "$2" '$a > $b')" = true ]; }
         WORK="$RUNNER_TEMP/agent-review-withdraw"
         rm -rf "$WORK"
         mkdir -p "$WORK"
-        trap 'rm -rf "$WORK"' EXIT
+        # Callers read anything but true as "an approval may still stand".
+        COMPLETE=false
+        # Created right before the reviews are read, and removed only by a run
+        # that completes, so it marks a run that may have left an approval.
+        PENDING="$RUNNER_TEMP/agent-review-withdraw.pending"
+        rm -f "$PENDING"
+        trap 'rm -rf "$WORK"; [ "$COMPLETE" != true ] || rm -f "$PENDING"; echo "complete=$COMPLETE" >> "${GITHUB_OUTPUT:-/dev/null}"' EXIT
         # A caller may have the PR checked out in the workspace; git stays out of it.
         cd "$WORK"
         APPROVAL_MARKER='<!-- agent-review-approval -->'
@@ -52,7 +87,7 @@ runs:
           warn "agent-review withdraw needs a pull request number, so no approval was withdrawn."
           exit 0
         fi
-        if [ -n "$EXPECTED_HEAD" ] && ! [[ "$EXPECTED_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+        if [ -n "$EXPECTED_HEAD" ] && ! is_sha "$EXPECTED_HEAD"; then
           warn "agent-review withdraw got an expected head that is not a commit SHA, so no approval was withdrawn."
           exit 0
         fi
@@ -75,40 +110,121 @@ runs:
           done
         }
 
-        api "repos/$REPO/pulls/$PR" > "$WORK/pr.json"
-        # Once the API shows the pushed head, later reads of it can be trusted.
-        HEAD_SEEN=true
+        # The PR's head before this run's push: the event's own `before`, or
+        # the commit the caller pushed on top of.
+        PREVIOUS=""
         if [ -n "$EXPECTED_HEAD" ]; then
+          if [ "$EVENT_NAME" = pull_request_target ] && [ "$EVENT_ACTION" = synchronize ] && [ "$EVENT_AFTER" = "$EXPECTED_HEAD" ]; then
+            PREVIOUS=$EVENT_BEFORE
+          else
+            PREVIOUS=$PREVIOUS_HEAD
+          fi
+          if ! is_sha "$PREVIOUS" || [ "$PREVIOUS" = "$EXPECTED_HEAD" ]; then PREVIOUS=""; fi
+        fi
+        # GitHub's own time on the PR as the event saw it at the expected head.
+        # A read is placed after the event only by a strictly later time, never
+        # by its commits: any read can lag, and a force-push can make an older
+        # head look like a newer one.
+        EVENT_PR_TIME=""
+        if [ -n "$EXPECTED_HEAD" ] && [ "$EVENT_NAME" = pull_request_target ] && [ "$EVENT_HEAD" = "$EXPECTED_HEAD" ] && is_time "$EVENT_UPDATED_AT"; then
+          EVENT_PR_TIME=$EVENT_UPDATED_AT
+        fi
+        # Tried once: the poll is the retry. A failed or malformed read leaves
+        # the last good one in place.
+        read_pr() {
+          gh api "repos/$REPO/pulls/$PR" > "$WORK/pr.next" 2> "$WORK/api.err" \
+            && jq -e 'type == "object"' "$WORK/pr.next" > /dev/null 2>&1 \
+            && mv -f "$WORK/pr.next" "$WORK/pr.json"
+        }
+        # seen: the API shows the expected head. before: it still shows the
+        # commit before the push. moved: a read later than the event shows
+        # another commit, so a later push moved the head. unplaced: anything else.
+        place_head() {
+          local head updated
+          head=$(jq -r '.head.sha // empty' "$WORK/pr.json")
+          updated=$(jq -r '.updated_at // empty' "$WORK/pr.json")
+          if [ "$head" = "$EXPECTED_HEAD" ]; then
+            echo seen
+          elif [ -n "$PREVIOUS" ] && [ "$head" = "$PREVIOUS" ]; then
+            echo before
+          elif [ -n "$EVENT_PR_TIME" ] && is_sha "$head" && later_than "$updated" "$EVENT_PR_TIME"; then
+            echo moved
+          else
+            echo unplaced
+          fi
+        }
+
+        # Only when PLACE is seen (the API shows the expected head, or no head
+        # was expected) does the keep rule run. Otherwise every bot approval of
+        # another commit goes; when moved, the one approval kept is of the newer
+        # head and given after the event.
+        if [ -z "$EXPECTED_HEAD" ]; then
+          api "repos/$REPO/pulls/$PR" > "$WORK/pr.json"
+          PLACE=seen
+        else
+          echo '{}' > "$WORK/pr.json"
+          read_pr || true
+          PLACE=$(place_head)
           POLLS=0
-          while [ "$(jq -r '.head.sha // empty' "$WORK/pr.json")" != "$EXPECTED_HEAD" ] && [ "$POLLS" -lt 20 ]; do
+          while [ "$PLACE" != seen ] && [ "$PLACE" != moved ] && [ "$POLLS" -lt 20 ]; do
             sleep "${AGENT_REVIEW_POLL_DELAY:-3}"
             POLLS=$((POLLS + 1))
-            api "repos/$REPO/pulls/$PR" > "$WORK/pr.json"
+            read_pr || true
+            PLACE=$(place_head)
           done
-          if [ "$(jq -r '.head.sha // empty' "$WORK/pr.json")" != "$EXPECTED_HEAD" ]; then
-            HEAD_SEEN=false
-            warn "GitHub still does not show $EXPECTED_HEAD, which was just pushed, as the head of PR #$PR, so every bot approval of another commit is taken back without checking it."
-          fi
+          SHOWN=$(jq -r '.head.sha // empty' "$WORK/pr.json")
+          case "$PLACE" in
+            seen) ;;
+            moved)
+              note "PR #$PR moved on from $EXPECTED_HEAD to $SHOWN after the event this run is for, so only an approval of $SHOWN given after that event is kept, and every other bot approval is taken back without checking it."
+              ;;
+            *)
+              if [ "$PLACE" = before ]; then
+                SHOWN_AS="it still shows $SHOWN, the commit before it"
+              elif is_sha "$SHOWN"; then
+                SHOWN_AS="it shows $SHOWN, and nothing shows that commit is newer"
+              else
+                SHOWN_AS="the PR could not be read"
+              fi
+              warn "GitHub did not show $EXPECTED_HEAD as the head of PR #$PR in time ($SHOWN_AS), so every bot approval of another commit is taken back without checking it."
+              ;;
+          esac
         fi
+        if [ "$PLACE" = moved ] || [ -z "$EXPECTED_HEAD" ]; then
+          HEAD_SHA=$(jq -r '.head.sha // empty' "$WORK/pr.json")
+        else
+          HEAD_SHA=$EXPECTED_HEAD
+        fi
+        KEPT_AFTER=""
+        if [ "$PLACE" = moved ]; then KEPT_AFTER=$EVENT_PR_TIME; fi
+        # A re-read before a dismissal is trusted only when it is later than this,
+        # and never than the event: a head can return to an older commit.
+        TRUSTED_AT=$(jq -r '.updated_at // empty' "$WORK/pr.json")
+        if later_than "$EVENT_PR_TIME" "$TRUSTED_AT"; then TRUSTED_AT=$EVENT_PR_TIME; fi
         STATE=$(jq -r '.state // empty' "$WORK/pr.json")
-        HEAD_SHA=${EXPECTED_HEAD:-$(jq -r '.head.sha // empty' "$WORK/pr.json")}
         BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
         DEFAULT_BRANCH=$(jq -r '.base.repo.default_branch // empty' "$WORK/pr.json")
         HEAD_REPO=$(jq -r '.head.repo.full_name // empty' "$WORK/pr.json")
-        if [ "$STATE" != open ]; then
+        # An old read can still show the PR closed, so it stops the run only
+        # when placed, and, given an event time, later than the event.
+        if [ "$STATE" != open ] && { [ "$PLACE" = seen ] || [ "$PLACE" = moved ]; } \
+          && { [ -z "$EVENT_PR_TIME" ] || later_than "$TRUSTED_AT" "$EVENT_PR_TIME"; }; then
           note "PR #$PR is not open, so no approval was withdrawn."
+          COMPLETE=true
           exit 0
         fi
-        if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+        if ! is_sha "$HEAD_SHA"; then
           warn "could not read the head of PR #$PR, so no approval was withdrawn."
           exit 0
         fi
 
         # Only the bot's own approvals are candidates, and never one of the
-        # current head, so a run that lands after the bot approved a newer head
-        # cannot take that approval back. `ours` must match the approve action's.
+        # judged head (after a later change, only one given after the event), so
+        # a run that lands after the bot approved a newer head cannot take that
+        # approval back. `ours` must match the approve action's.
+        : > "$PENDING"
         api "repos/$REPO/pulls/$PR/reviews?per_page=100" --paginate > "$WORK/reviews.json"
-        jq -rs --arg marker "$APPROVAL_MARKER" --arg head "$HEAD_SHA" '
+        jq -rs --arg marker "$APPROVAL_MARKER" --arg head "$HEAD_SHA" --arg kept_after "$KEPT_AFTER" '
           def ours:
             contains($marker)
             or startswith("Auto-approved: the agent-review report for this head passes")
@@ -117,18 +233,22 @@ runs:
           .[][]
           | select(.user.login == "github-actions[bot]" and .state == "APPROVED")
           | select((.body // "") | ours and (startswith("## AI Review Auto-Approval") | not))
-          | select(.commit_id != $head)
+          | select(.commit_id != $head or ($kept_after != "" and (.submitted_at // "") <= $kept_after))
           | "\(.id) \(.commit_id) \(.submitted_at // "")"' "$WORK/reviews.json" > "$WORK/candidates.txt"
         if [ ! -s "$WORK/candidates.txt" ]; then
           note "PR #$PR has no agent-review approval of an older commit, so there is nothing to withdraw."
+          COMPLETE=true
           exit 0
         fi
+        # Until the loop ends, every candidate may still stand.
+        awk '{ print $1, $2 }' "$WORK/candidates.txt" > "$PENDING"
+        : > "$WORK/left.txt"
 
         # When the base last changed comes from the timeline, which the author
         # cannot edit; GitHub's own retarget after a base branch is deleted
         # counts too. A change with no time sorts after every approval.
         LAST_BASE_CHANGE=unread
-        if [ -n "$DEFAULT_BRANCH" ] && [ "$BASE_REF" = "$DEFAULT_BRANCH" ] \
+        if [ "$PLACE" = seen ] && [ -n "$DEFAULT_BRANCH" ] && [ "$BASE_REF" = "$DEFAULT_BRANCH" ] \
           && api "repos/$REPO/issues/$PR/timeline?per_page=100" --paginate > "$WORK/timeline.json" \
           && CHANGED=$(jq -rs '[.[][] | select(.event == "base_ref_changed" or ((.event // "") | startswith("automatic_base_change"))) | .created_at // "unknown"] | max // ""' "$WORK/timeline.json"); then
           LAST_BASE_CHANGE=$CHANGED
@@ -172,7 +292,7 @@ runs:
         # code the branch has since removed. Sets WHY.
         only_base_merged() {
           local approved=$1 tip bases fork last_fork kept
-          if ! [[ "$approved" =~ ^[0-9a-f]{40}$ ]] || ! fetch "$approved"; then
+          if ! is_sha "$approved" || ! fetch "$approved"; then
             WHY="it could not fetch the approved commit"
             return 1
           fi
@@ -209,7 +329,7 @@ runs:
             WHY="it could not read when the PR's base branch last changed"
             return 1
           fi
-          if ! [[ "$submitted" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+          if ! is_time "$submitted"; then
             WHY="it could not read when the approval was given"
             return 1
           fi
@@ -228,58 +348,93 @@ runs:
           only_base_merged "$approved"
         }
 
-        # A CI review re-runs on its own only for a push or reopen of a PR from
-        # this repo that carries the review label, in a repo whose CI caller
-        # keeps the template's label gate. Anything else gets the re-review
-        # wording; a base change or a workflow-token push starts no CI review.
+        # The CI caller as it is at a ref keeps the template's gates and
+        # approves: it calls review.yml with auto_approve true, and advisory or
+        # enforce reports. Comment lines and trailing comments are dropped first.
+        caller_approves_at() {
+          api "repos/$REPO/contents/.github/workflows/agent-review.yml?ref=$1" --jq .content > "$WORK/caller.b64" || return 1
+          base64 -d < "$WORK/caller.b64" > "$WORK/caller.yml" 2> /dev/null || return 1
+          sed -e '/^[[:space:]]*#/d' -e 's/[[:space:]]#.*$//' "$WORK/caller.yml" > "$WORK/caller.lines" || return 1
+          grep -qF 'uses: CruGlobal/agent-review/.github/workflows/review.yml@' "$WORK/caller.lines" \
+            && grep -qF "contains(github.event.pull_request.labels.*.name, 'agent-review') &&" "$WORK/caller.lines" \
+            && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$WORK/caller.lines" \
+            && grep -qE '^[[:space:]]*auto_approve:[[:space:]]*true[[:space:]]*$' "$WORK/caller.lines" \
+            && grep -qE '^[[:space:]]*rollout_mode:[[:space:]]*(advisory|enforce)[[:space:]]*$' "$WORK/caller.lines" \
+            && ! grep -qE '^[[:space:]]*(auto_approve:[[:space:]]*false|rollout_mode:[[:space:]]*shadow)' "$WORK/caller.lines"
+        }
+        # A CI review re-runs on its own and can approve only for this run's own
+        # push or reopen, seen in the API, of a labelled PR from this repo that
+        # Dependabot neither opened nor pushed (Dependabot runs get no secrets)
+        # and that has no merge conflict (no merge, no pull_request run). That
+        # run uses the base's caller, or the PR's when the PR changes it.
+        # Anything else gets the re-review wording.
         ci_review_reruns() {
           local ref
+          [ "$PLACE" = seen ] || return 1
           [ "$EVENT_NAME" = pull_request_target ] || return 1
           [ "$EVENT_ACTION" = synchronize ] || [ "$EVENT_ACTION" = reopened ] || return 1
           [ "$HEAD_REPO" = "$REPO" ] || return 1
+          [ "$ACTOR" != 'dependabot[bot]' ] || return 1
+          [ "$(jq -r '.user.login // empty' "$WORK/pr.json")" != 'dependabot[bot]' ] || return 1
+          [ "$(jq -r '.mergeable' "$WORK/pr.json")" != false ] || return 1
           jq -e 'any(.labels[]?; .name == "agent-review")' "$WORK/pr.json" > /dev/null || return 1
-          ref=$(jq -rn --arg b "$DEFAULT_BRANCH" '$b | @uri') || return 1
-          api "repos/$REPO/contents/.github/workflows/agent-review.yml?ref=$ref" --jq .content > "$WORK/caller.b64" || return 1
-          base64 -d < "$WORK/caller.b64" > "$WORK/caller.yml" 2> /dev/null || return 1
-          grep -qF "contains(github.event.pull_request.labels.*.name, 'agent-review') &&" "$WORK/caller.yml" \
-            && grep -qF 'github.event.pull_request.head.repo.full_name == github.repository' "$WORK/caller.yml"
+          ref=$(jq -rn --arg b "$BASE_REF" '$b | @uri') || return 1
+          caller_approves_at "$ref" || return 1
+          api "repos/$REPO/pulls/$PR/files?per_page=100" --paginate --jq '.[] | .filename, (.previous_filename // empty)' > "$WORK/files.txt" || return 1
+          if grep -qxF '.github/workflows/agent-review.yml' "$WORK/files.txt"; then
+            caller_approves_at "$HEAD_SHA"
+          fi
         }
         NEXT="Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head."
         if ci_review_reruns; then
           NEXT="The CI review runs again on its own, and the bot approves again when it passes."
         fi
 
+        LEFT=false
         while read -r REVIEW_ID COMMIT SUBMITTED <&3; do
-          if [ "$HEAD_SEEN" = true ]; then
+          if [ "$PLACE" = seen ]; then
             if keep_approval "$COMMIT" "${SUBMITTED:-}"; then
               note "Kept the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID): since then the PR only merged in or rebased onto the default branch, so its own changes are the ones approved."
               continue
             fi
-            # The head is read again right before each dismissal, so an approval
-            # of the head as it is now is never dismissed.
-            if ! NOW_HEAD=$(api "repos/$REPO/pulls/$PR" --jq .head.sha) || ! [[ "$NOW_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            # The head is read again right before each dismissal, and an approval
+            # of it is kept only when that read is later than the trusted one: a
+            # lagging re-read can still show the approved commit.
+            if ! NOW=$(api "repos/$REPO/pulls/$PR" --jq '"\(.head.sha // "") \(.updated_at // "")"') \
+              || ! read -r NOW_HEAD NOW_AT <<< "$NOW" || ! is_sha "$NOW_HEAD"; then
               warn "could not read the head of PR #$PR again, so the bot's approval of $COMMIT was not withdrawn (review $REVIEW_ID). A person must dismiss it."
+              LEFT=true
+              echo "$REVIEW_ID $COMMIT" >> "$WORK/left.txt"
               continue
             fi
-            if [ "$NOW_HEAD" = "$COMMIT" ]; then
+            if [ "$NOW_HEAD" = "$COMMIT" ] && later_than "${NOW_AT:-}" "$TRUSTED_AT"; then
               note "The head of PR #$PR is $COMMIT again, so the bot's approval of it is kept (review $REVIEW_ID)."
               continue
             fi
-          else
+          elif [ "$PLACE" != moved ]; then
             # Any read of the PR or of a ref GitHub keeps for it can still show an
             # older head, and no commit check can tell a newer push from a push
             # back to an older commit, so every approval of another commit goes.
-            WHY="GitHub never showed the pushed commit ${EXPECTED_HEAD:0:7} as the PR's head, so it could not check the approval"
+            WHY="GitHub did not show ${EXPECTED_HEAD:0:7} as the PR's head in time, so it could not check the approval"
+          elif [ "$COMMIT" = "$HEAD_SHA" ]; then
+            WHY="it was given before the PR's head moved away from ${COMMIT:0:7} and back, so it could not check the approval"
+          else
+            WHY="newer commits moved the PR's head on to ${HEAD_SHA:0:7}"
           fi
           MESSAGE="agent-review: the bot took back its approval of ${COMMIT:0:7} because $WHY. $NEXT"
           if api -X PUT "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID/dismissals" -f message="$MESSAGE" -f event=DISMISS > /dev/null; then
             note "Withdrew the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID): $WHY."
           elif grep -qF '(HTTP 403)' "$WORK/api.err"; then
             warn "GitHub refused to let this workflow dismiss reviews on PR #$PR (HTTP 403), so the bot's approvals of older commits stay. The token may lack pull-requests: write, a rule may limit who can dismiss reviews, or the API rate limit may be used up. A person must dismiss them."
+            LEFT=true
+            { echo "$REVIEW_ID $COMMIT"; awk '{ print $1, $2 }' <&3; } >> "$WORK/left.txt"
             break
           elif [ "$(api "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID" --jq .state)" = DISMISSED ]; then
             note "The bot's approval of $COMMIT on PR #$PR was already dismissed (review $REVIEW_ID)."
           else
             warn "could not withdraw the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID). A person must dismiss it."
+            LEFT=true
+            echo "$REVIEW_ID $COMMIT" >> "$WORK/left.txt"
           fi
         done 3< "$WORK/candidates.txt"
+        if [ "$LEFT" = false ]; then COMPLETE=true; else cp "$WORK/left.txt" "$PENDING"; fi

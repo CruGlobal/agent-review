@@ -63,6 +63,11 @@ case "$METHOD $URL" in
   "GET repos/o/r/pulls/7")
     N=$(( $(cat "$FIX/../pr-reads" 2>/dev/null || echo 0) + 1 ))
     echo "$N" > "$FIX/../pr-reads"
+    if has reads-count; then
+      I=$N; [ "$I" -le "$(cat "$FIX/reads-count")" ] || I=$(cat "$FIX/reads-count")
+      has "read-$I.fail" && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+      emit "$FIX/read-$I.json"; exit 0
+    fi
     if [ "$N" -ge 2 ] && has fail-pr-later; then echo "gh: Server Error (HTTP 500)" >&2; exit 1; fi
     if has stale-reads && [ "$N" -le "$(cat "$FIX/stale-reads")" ]; then emit "$FIX/pr-stale.json"
     elif [ "$N" -ge 2 ] && has pr-later.json; then emit "$FIX/pr-later.json"; else emit "$FIX/pr.json"; fi ;;
@@ -78,7 +83,11 @@ case "$METHOD $URL" in
   "GET repos/o/r/issues/7/timeline?per_page=100")
     has fail-timeline && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     emit "$FIX/timeline.json" ;;
+  "GET repos/o/r/pulls/7/files?per_page=100")
+    has fail-files && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
+    emit "$FIX/files.json" ;;
   "GET repos/o/r/contents/.github/workflows/agent-review.yml?ref="*)
+    has "caller-\${URL##*ref=}.json" && { emit "$FIX/caller-\${URL##*ref=}.json"; exit 0; }
     has caller.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
     emit "$FIX/caller.json" ;;
   "PUT repos/o/r/pulls/7/reviews/"*"/dismissals")
@@ -89,6 +98,7 @@ case "$METHOD $URL" in
     for f in "\${FIELDS[@]}"; do
       case "$f" in message=*) printf '%s\\n' "\${f#message=}" >> "$FIX/../dismiss-messages.txt" ;; esac
     done
+    [ -e "$FIX/../pending-at-dismiss" ] || cp "$RUNNER_TEMP/agent-review-withdraw.pending" "$FIX/../pending-at-dismiss" 2>/dev/null
     echo '{}' ;;
   *) echo "fake gh: unhandled $METHOD $URL" >&2; exit 98 ;;
 esac
@@ -289,12 +299,15 @@ function setup() {
 }
 
 // The fixture's default branch is the PR's base unless a scenario says otherwise.
-const pr = ({ head, base = 'main', state = 'open', defaultBranch = base, labels = [], headRepo = 'o/r', headBranch = 'pr-branch' }) =>
+const pr = ({ head, base = 'main', state = 'open', defaultBranch = base, labels = [], headRepo = 'o/r', headBranch = 'pr-branch', updatedAt, author = 'alice', mergeable = null }) =>
   JSON.stringify({
     state,
+    mergeable,
+    user: { login: author },
     head: { sha: head, ref: headBranch, repo: { full_name: headRepo } },
     base: { ref: base, repo: { default_branch: defaultBranch } },
     labels: labels.map((name) => ({ name })),
+    ...(updatedAt ? { updated_at: updatedAt } : {}),
   });
 // The repo's CI caller, as the contents API returns it.
 const STOCK_CALLER = fs.readFileSync(path.join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
@@ -309,6 +322,18 @@ const review = (id, commit, { login = BOT, state = 'APPROVED', body = BODY, subm
   submitted_at: submitted,
 });
 const baseChanged = (at) => ({ event: 'base_ref_changed', created_at: at, actor: { login: 'alice' } });
+// GitHub's updated_at on the PR as the event saw it, and on reads before and after it.
+const EVENT_AT = '2026-11-05T10:00:05Z';
+const BEFORE_EVENT = '2026-11-05T10:00:00Z';
+const AFTER_EVENT = '2026-11-05T10:00:30Z';
+// A pull_request_target synchronize event: its before, its after, and its PR snapshot.
+const sync = (before, after, { at = EVENT_AT, snapshotHead = after } = {}) => ({
+  expectedHead: after,
+  eventBefore: before,
+  eventAfter: after,
+  eventHead: snapshotHead,
+  eventAt: at,
+});
 
 function run(
   name,
@@ -329,14 +354,35 @@ function run(
     action = 'synchronize',
     headRepo,
     caller,
+    // PR reads in order, the last one repeating: { head, updatedAt, state } or 'fail'.
+    reads,
+    previousHead = '',
+    eventBefore = '',
+    eventAfter = '',
+    eventHead = '',
+    eventAt = '',
+    actor = 'alice',
+    author,
+    mergeable,
+    // The files the PR changes, as the files API lists them.
+    changed = [],
   },
 ) {
   const dir = path.join(TMP, 'runs', name.replace(/[^a-z0-9]+/gi, '-').slice(0, 60));
   const fix = path.join(dir, 'fix');
   const runner = path.join(dir, 'tmp');
   for (const d of [fix, runner]) fs.mkdirSync(d, { recursive: true });
+  const readFiles = {};
+  for (const [i, r] of (reads || []).entries()) {
+    if (r === 'fail') readFiles[`read-${i + 1}.fail`] = '';
+    else if (typeof r === 'string') readFiles[`read-${i + 1}.json`] = r;
+    else readFiles[`read-${i + 1}.json`] = pr({ base, defaultBranch, labels, headRepo, author, mergeable, ...r });
+  }
+  if (reads) readFiles['reads-count'] = String(reads.length);
   const all = {
-    'pr.json': pr({ head, base, state, defaultBranch, labels, headRepo }),
+    'pr.json': pr({ head, base, state, defaultBranch, labels, headRepo, author, mergeable }),
+    'files.json': JSON.stringify(changed.map((filename) => ({ filename }))),
+    ...readFiles,
     ...(caller !== undefined ? { 'caller.json': callerJson(caller) } : {}),
     // Two pages, as gh --paginate prints them.
     'reviews.json': JSON.stringify(reviews.slice(0, 1)) + JSON.stringify(reviews.slice(1)),
@@ -366,8 +412,15 @@ function run(
     SERVER_URL: `file://${SERVER}`,
     EVENT_NAME: event,
     EVENT_ACTION: action,
+    PREVIOUS_HEAD: previousHead,
+    EVENT_BEFORE: eventBefore,
+    EVENT_AFTER: eventAfter,
+    EVENT_HEAD: eventHead,
+    EVENT_UPDATED_AT: eventAt,
+    ACTOR: actor,
+    GITHUB_OUTPUT: path.join(dir, 'output.txt'),
   };
-  for (const f of [env.GH_LOG, env.GIT_LOG, env.GITHUB_STEP_SUMMARY]) fs.writeFileSync(f, '');
+  for (const f of [env.GH_LOG, env.GIT_LOG, env.GITHUB_STEP_SUMMARY, env.GITHUB_OUTPUT]) fs.writeFileSync(f, '');
   return new Promise((resolve) => {
     // The runner's composite `shell: bash` runs `bash --noprofile --norc -eo pipefail {0}`.
     const child = spawn(BASH, ['--noprofile', '--norc', '-eo', 'pipefail', SCRIPT], { cwd: dir, env });
@@ -390,7 +443,15 @@ function run(
         gitLog: read('git.log').split('\n').filter(Boolean),
         gitCalls: read('git.log').split('\n').filter(Boolean).map((l) => l.replace(/^(no)?auth /, '')),
         summary: read('summary.md'),
-        leftovers: fs.readdirSync(runner),
+        outputs: read('output.txt').split('\n').filter(Boolean),
+        prReads: lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length,
+        // The pending list as it stood at the first dismissal that went through.
+        leftAtDismiss: read('pending-at-dismiss').split('\n').filter(Boolean),
+        pending: fs.existsSync(path.join(runner, 'agent-review-withdraw.pending')),
+        left: fs.existsSync(path.join(runner, 'agent-review-withdraw.pending'))
+          ? fs.readFileSync(path.join(runner, 'agent-review-withdraw.pending'), 'utf8').split('\n').filter(Boolean)
+          : null,
+        leftovers: fs.readdirSync(runner).filter((f) => f !== 'agent-review-withdraw.pending'),
       });
     });
   });
@@ -405,6 +466,9 @@ function common(o) {
     'only warnings and the token mask reach the runner as workflow commands',
   );
   assert.deepEqual(o.leftovers, [], 'the bare repository and the token-bearing work files are removed');
+  assert.equal(o.outputs.length, 1, `one output, set on every exit\n${o.outputs.join('\n')}`);
+  assert.match(o.outputs[0], /^complete=(true|false)$/);
+  if (o.outputs[0] === 'complete=true') assert.equal(o.pending, false, 'a complete run leaves no pending mark');
   for (const call of o.gitCalls) {
     assert.ok(!/^(checkout|switch|worktree|clone|reset|restore|read-tree|archive)\b/.test(call), `git never builds a work tree: ${call}`);
   }
@@ -417,6 +481,11 @@ function common(o) {
 }
 const kept = (o) => assert.deepEqual(o.dismissed, []);
 const noGit = (o) => assert.deepEqual(o.gitCalls, [], 'no candidate means no fetch');
+const complete = (o) => assert.deepEqual(o.outputs, ['complete=true'], 'nothing that had to go was left');
+const incomplete = (o) => assert.deepEqual(o.outputs, ['complete=false'], 'an approval may still stand');
+const warnings = (o) => o.stdout.split('\n').filter((l) => l.startsWith('::warning::'));
+const RE_REVIEW = 'Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head.';
+const CI_RERUNS = 'The CI review runs again on its own, and the bot approves again when it passes.';
 
 const SCENARIOS = {
   'a clean merge of the base branch keeps the approval': [
@@ -454,14 +523,17 @@ const SCENARIOS = {
           'Run /agent-review:re-review (or /agent-review:review) and post the report. The bot approves again when the report passes for the new head.',
       ]);
       assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\): the PR changed beyond merging in the default branch\\.`));
+      complete(o);
     },
   ],
   'on a push to a labelled PR in a repo with the stock CI caller, the message says the CI review runs again': [
     () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, reviews: [review(21, C.X)] }),
     (o) => {
       assert.equal(o.messages.length, 1);
-      assert.ok(o.messages[0].endsWith(' The CI review runs again on its own, and the bot approves again when it passes.'), o.messages[0]);
-      assert.ok(o.ghCalls.some((l) => l.includes('contents/.github/workflows/agent-review.yml?ref=main')), 'the caller is read from the default branch');
+      assert.ok(o.messages[0].endsWith(` ${CI_RERUNS}`), o.messages[0]);
+      assert.ok(o.ghCalls.some((l) => l.includes('contents/.github/workflows/agent-review.yml?ref=main ')), 'the caller is read from the base branch');
+      assert.ok(o.ghCalls.some((l) => l.includes('pulls/7/files?per_page=100')), 'and the PR\'s files, to see if it changes the caller');
+      assert.ok(!o.ghCalls.some((l) => l.includes(`ref=${C.NEW} `)), 'a PR that does not change the caller runs the base\'s copy');
     },
   ],
   'a fork PR never gets a CI review, so the message asks for a re-review': [
@@ -502,17 +574,23 @@ const SCENARIOS = {
     },
   ],
   'a pushed head GitHub never shows: the old approval is withdrawn, though the API still shows its commit': [
-    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
+    () => ({ head: C.NEW, expectedHead: C.NEW, previousHead: C.X, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
     (o) => {
       assert.deepEqual(o.dismissed, [21], 'a stale read cannot keep the old approval');
       assert.match(
         o.stdout,
-        new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7, so every bot approval of another commit is taken back without checking it\\.$`, 'm'),
+        new RegExp(
+          `^::warning::GitHub did not show ${C.NEW} as the head of PR #7 in time \\(it still shows ${C.X}, the commit before it\\), so every bot approval of another commit is taken back without checking it\\.$`,
+          'm',
+        ),
       );
-      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls, and no read before dismissing');
+      assert.ok(!o.stdout.includes('just pushed'), 'nothing claims a push it cannot see');
+      assert.equal(o.prReads, 21, 'one read and twenty polls, and no read before dismissing');
       assert.ok(!o.ghCalls.some((l) => l.includes('/git/ref')), 'no PR or branch ref is read');
       assert.deepEqual(o.gitCalls, [], 'no commit check runs');
-      assert.ok(o.messages[0].includes(`because GitHub never showed the pushed commit ${C.NEW.slice(0, 7)} as the PR's head, so it could not check the approval.`), o.messages[0]);
+      assert.ok(!o.ghCalls.some((l) => l.includes('/timeline')), 'no keep rule, so no timeline');
+      assert.ok(o.messages[0].includes(`because GitHub did not show ${C.NEW.slice(0, 7)} as the PR's head in time, so it could not check the approval. `), o.messages[0]);
+      complete(o);
     },
   ],
   'a pushed head GitHub never shows: an approval of a newer commit built on it is withdrawn too': [
@@ -564,11 +642,370 @@ const SCENARIOS = {
       assert.ok(!o.stdout.includes('::warning::'));
     },
   ],
+  'a stale event: a later read shows a newer push, so waiting stops and only that head\'s approval from after the event stays': [
+    () => ({
+      head: C.NEW,
+      ...sync(C.X, C.NEW),
+      reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }],
+      labels: ['agent-review'],
+      caller: STOCK_CALLER,
+      reviews: [review(21, C.X), review(22, C.MERGE1, { submitted: AFTER_EVENT }), review(23, C.NEW)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21, 23], 'one the keep rule would keep goes, and so does the event\'s own head\'s');
+      assert.equal(o.prReads, 1, 'no waiting, and no read before dismissing');
+      assert.deepEqual(o.gitCalls, [], 'no keep rule');
+      assert.ok(!o.ghCalls.some((l) => l.includes('/timeline') || l.includes('/contents/')), 'no timeline or caller read');
+      assert.deepEqual(warnings(o), [], 'a superseded event is normal');
+      assert.match(o.summary, new RegExp(`PR #7 moved on from ${C.NEW} to ${C.MERGE1} after the event this run is for`));
+      assert.deepEqual(o.messages, [
+        `agent-review: the bot took back its approval of ${C.X.slice(0, 7)} because newer commits moved the PR's head on to ${C.MERGE1.slice(0, 7)}. ${RE_REVIEW}`,
+        `agent-review: the bot took back its approval of ${C.NEW.slice(0, 7)} because newer commits moved the PR's head on to ${C.MERGE1.slice(0, 7)}. ${RE_REVIEW}`,
+      ]);
+      complete(o);
+    },
+  ],
+  'a stale event: an approval of the newer head from before the event goes, since the head went away and back': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }], reviews: [review(22, C.MERGE1)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [22]);
+      assert.ok(o.messages[0].includes(`because it was given before the PR's head moved away from ${C.MERGE1.slice(0, 7)} and back, so it could not check the approval. `), o.messages[0]);
+    },
+  ],
+  'a stale event: an approval of the newer head given in the same second as the event goes': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }], reviews: [review(22, C.MERGE1, { submitted: EVENT_AT })] }),
+    (o) => assert.deepEqual(o.dismissed, [22]),
+  ],
+  'out of order: the run for an older push that sees the PR rewound later takes back the newer commit\'s approval': [
+    // The bot approved D after it was pushed, and then the author force-pushed back to E, an ancestor of D.
+    () => ({
+      head: C.MERGE_THEN_NEW,
+      ...sync(C.X, C.MERGE_THEN_NEW),
+      reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }],
+      reviews: [review(21, C.MERGE_THEN_NEW, { submitted: AFTER_EVENT })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'D is not the newer head, so its approval goes, whenever it was given');
+      assert.deepEqual(o.gitCalls, [], 'no ancestry check');
+    },
+  ],
+  'the rewind that broke the descendant rule: a read still showing the newer commit is the commit before the push': [
+    // The bot approved D, then the author force-pushed back to E. The event's before is D.
+    () => ({
+      head: C.MERGE1,
+      ...sync(C.MERGE_THEN_NEW, C.MERGE1),
+      reads: [{ head: C.MERGE_THEN_NEW, updatedAt: BEFORE_EVENT }],
+      reviews: [review(21, C.MERGE_THEN_NEW)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.equal(o.prReads, 21, 'it waits the full minute');
+      assert.match(warnings(o)[0], new RegExp(`\\(it still shows ${C.MERGE_THEN_NEW}, the commit before it\\)`));
+      assert.deepEqual(o.gitCalls, [], 'no ancestry check');
+    },
+  ],
+  'a read of the commit before the push is never trusted, even with a later time': [
+    () => ({
+      head: C.MERGE1,
+      ...sync(C.MERGE_THEN_NEW, C.MERGE1),
+      reads: [{ head: C.MERGE_THEN_NEW, updatedAt: AFTER_EVENT }],
+      reviews: [review(21, C.MERGE_THEN_NEW, { submitted: AFTER_EVENT })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.equal(o.prReads, 21);
+    },
+  ],
+  'a read of a third commit with no later time is not trusted: it can be older than the push': [
+    // Two pushes GitHub has not caught up with: it still shows X, from before the event's before.
+    () => ({
+      head: C.MERGE2,
+      ...sync(C.MERGE1, C.MERGE2),
+      reads: [{ head: C.X, updatedAt: BEFORE_EVENT }],
+      labels: ['agent-review'],
+      caller: STOCK_CALLER,
+      reviews: [review(21, C.X)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'the head GitHub shows is not trusted, so its approval goes');
+      assert.equal(o.prReads, 21);
+      assert.match(warnings(o)[0], new RegExp(`\\(it shows ${C.X}, and nothing shows that commit is newer\\)`));
+      assert.ok(!o.ghCalls.some((l) => l.includes('/timeline')), 'no keep rule, so no timeline');
+      assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), 'an unconfirmed head never promises a CI review');
+      complete(o);
+    },
+  ],
+  'a read of a third commit in the same second as the event is not trusted': [
+    () => ({ head: C.MERGE2, ...sync(C.MERGE1, C.MERGE2), reads: [{ head: C.X, updatedAt: EVENT_AT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.equal(o.prReads, 21);
+    },
+  ],
+  'an event whose PR snapshot is at another head gives no time to trust': [
+    () => ({
+      head: C.NEW,
+      ...sync(C.X, C.NEW, { snapshotHead: C.X }),
+      reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }],
+      reviews: [review(22, C.MERGE1, { submitted: AFTER_EVENT })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [22]);
+      assert.equal(o.prReads, 21);
+    },
+  ],
+  'a base change that a push superseded moves on too, with no before to wait on': [
+    () => ({
+      head: C.NEW,
+      action: 'edited',
+      expectedHead: C.NEW,
+      eventHead: C.NEW,
+      eventAt: EVENT_AT,
+      reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }],
+      reviews: [review(21, C.NEW), review(22, C.MERGE1, { submitted: AFTER_EVENT })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.equal(o.prReads, 1);
+    },
+  ],
+  'interact: a read of another commit is never trusted, since the bot\'s own push has no event to time it': [
+    () => ({
+      head: C.NEW,
+      expectedHead: C.NEW,
+      previousHead: C.X,
+      event: 'issue_comment',
+      action: 'created',
+      reads: [{ head: C.MERGE1, updatedAt: AFTER_EVENT }],
+      reviews: [review(21, C.X), review(22, C.MERGE1, { submitted: AFTER_EVENT })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21, 22]);
+      assert.equal(o.prReads, 21);
+      assert.match(warnings(o)[0], new RegExp(`\\(it shows ${C.MERGE1}, and nothing shows that commit is newer\\)`));
+    },
+  ],
+  'a head GitHub shows in time keeps the CI wording': [
+    () => ({
+      head: C.NEW,
+      ...sync(C.X, C.NEW),
+      reads: [{ head: C.X, updatedAt: BEFORE_EVENT }, { head: C.NEW, updatedAt: EVENT_AT }],
+      labels: ['agent-review'],
+      caller: STOCK_CALLER,
+      reviews: [review(21, C.X)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(o.messages[0].endsWith(` ${CI_RERUNS}`), o.messages[0]);
+      complete(o);
+    },
+  ],
+  'a failed read while waiting keeps the last good read and goes on waiting': [
+    () => ({
+      head: C.NEW,
+      ...sync(C.X, C.NEW),
+      reads: [{ head: C.X, updatedAt: BEFORE_EVENT }, 'fail', { head: C.NEW, updatedAt: EVENT_AT }],
+      reviews: [review(21, C.X)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.equal(o.prReads, 4, 'one read, a failed poll tried once, the read that shows the head, and the read before dismissing');
+      assert.deepEqual(warnings(o), []);
+      assert.match(o.summary, /\(review 21\): the PR changed beyond merging in the default branch\./, 'the keep rule ran');
+      complete(o);
+    },
+  ],
+  'a PR that cannot be read at all falls to the fail-closed path': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: ['fail'], reviews: [review(21, C.X), review(22, C.NEW)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'only the expected head\'s approval stays');
+      assert.equal(o.prReads, 21, 'each poll read is tried once, so an outage fails closed in about a minute');
+      assert.match(warnings(o)[0], /\(the PR could not be read\)/);
+      complete(o);
+    },
+  ],
+  'an old read that shows the PR closed does not stop the fail-closed path': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.X, state: 'closed', updatedAt: BEFORE_EVENT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.summary.includes('is not open'));
+    },
+  ],
+  'a read that is not a JSON object is not used': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: ['<html>busy</html>', { head: C.NEW, updatedAt: EVENT_AT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.equal(o.prReads, 3, 'the bad read, the read that shows the head, and the read before dismissing');
+      assert.deepEqual(warnings(o), []);
+    },
+  ],
+  'a CI caller that does not auto-approve gets the re-review wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER.replace('auto_approve: true', 'auto_approve: false'), reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a CI caller with no auto_approve line never approves, so it gets the re-review wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER.replace(/^ *auto_approve: true\n/m, ''), reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a CI caller in shadow mode gets the re-review wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER.replace('rollout_mode: advisory', 'rollout_mode: shadow'), reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a CI caller with no rollout mode runs in shadow, so it gets the re-review wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER.replace(/^ *rollout_mode: advisory\n/m, ''), reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a label gate found only in a comment gets the re-review wording': [
+    () => ({
+      head: C.NEW,
+      labels: ['agent-review'],
+      caller: `# was: contains(github.event.pull_request.labels.*.name, 'agent-review') &&\n${STOCK_CALLER.replace(
+        "contains(github.event.pull_request.labels.*.name, 'agent-review') &&",
+        "contains(github.event.pull_request.labels.*.name, 'ai-review') &&",
+      )}`,
+      reviews: [review(21, C.X)],
+    }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a PR that changes the CI caller needs its own copy to approve too': [
+    () => ({
+      head: C.NEW,
+      labels: ['agent-review'],
+      caller: STOCK_CALLER,
+      changed: ['.github/workflows/agent-review.yml'],
+      files: { [`caller-${C.NEW}.json`]: callerJson(STOCK_CALLER.replace('auto_approve: true', 'auto_approve: false')) },
+      reviews: [review(21, C.X)],
+    }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a push by Dependabot gets the re-review wording, since its CI runs get no secrets': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, actor: 'dependabot[bot]', reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a Dependabot PR gets the re-review wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, author: 'dependabot[bot]', reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a lagging re-read that still shows the approved commit does not keep it': [
+    // The bot approved X, the author pushed NEW, and the read before dismissing lags.
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.NEW, updatedAt: EVENT_AT }, { head: C.X, updatedAt: BEFORE_EVENT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.summary.includes('again, so the bot\'s approval of it is kept'));
+      complete(o);
+    },
+  ],
+  'a seen read from before the event cannot let a re-read from before the event keep an approval': [
+    // The head went E, then D (approved), then back to E as this event. The seen read is from E's first
+    // time as the head, and the re-read lags to D's time: later than the seen read, not than the event.
+    () => ({
+      head: C.MERGE1,
+      ...sync(C.MERGE_THEN_NEW, C.MERGE1),
+      reads: [{ head: C.MERGE1, updatedAt: '2026-11-05T09:00:00Z' }, { head: C.MERGE_THEN_NEW, updatedAt: '2026-11-05T09:30:00Z' }],
+      reviews: [review(21, C.MERGE_THEN_NEW, { submitted: '2026-11-05T09:20:00Z' })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      complete(o);
+    },
+  ],
+  'interact: a re-read of the approved commit in the same second as the trusted read does not keep it': [
+    () => ({
+      head: C.NEW,
+      expectedHead: C.NEW,
+      previousHead: C.X,
+      event: 'issue_comment',
+      action: 'created',
+      reads: [{ head: C.NEW, updatedAt: EVENT_AT }, { head: C.X, updatedAt: EVENT_AT }],
+      reviews: [review(21, C.X)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      complete(o);
+    },
+  ],
+  'a force-push back to the approved commit during the run, with a later time, keeps the approval': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.NEW, updatedAt: EVENT_AT }, { head: C.X, updatedAt: AFTER_EVENT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      assert.match(o.summary, new RegExp(`The head of PR #7 is ${C.X} again, so the bot's approval of it is kept \\(review 21\\)`));
+      complete(o);
+    },
+  ],
+  'reopened: a lagging read that still shows the PR closed does not stop the run': [
+    () => ({
+      head: C.NEW,
+      action: 'reopened',
+      expectedHead: C.NEW,
+      eventHead: C.NEW,
+      eventAt: EVENT_AT,
+      reads: [{ head: C.NEW, state: 'closed', updatedAt: BEFORE_EVENT }],
+      reviews: [review(21, C.X)],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.summary.includes('is not open'));
+    },
+  ],
+  'a closed read later than the event stops the run': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.NEW, state: 'closed', updatedAt: AFTER_EVENT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      assert.match(o.summary, /PR #7 is not open, so no approval was withdrawn\./);
+      assert.ok(!o.ghCalls.some((l) => l.includes('/reviews')), 'the reviews are not read');
+      complete(o);
+    },
+  ],
+  'a stale event on a PR merged since then stops the run instead of dismissing': [
+    () => ({ head: C.NEW, ...sync(C.X, C.NEW), reads: [{ head: C.MERGE1, state: 'closed', updatedAt: AFTER_EVENT }], reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      assert.match(o.summary, /PR #7 is not open, so no approval was withdrawn\./);
+      complete(o);
+    },
+  ],
+  'interact: with no event time, a closed read of the pushed commit still stops the run': [
+    () => ({
+      head: C.NEW,
+      expectedHead: C.NEW,
+      previousHead: C.X,
+      event: 'issue_comment',
+      action: 'created',
+      reads: [{ head: C.NEW, state: 'closed', updatedAt: AFTER_EVENT }],
+      reviews: [review(21, C.X)],
+    }),
+    (o) => {
+      kept(o);
+      complete(o);
+    },
+  ],
+  'a PR that cannot be read with no expected head stops before the reviews, so nothing is pending': [
+    () => ({ head: C.NEW, reads: ['fail'], reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      incomplete(o);
+      assert.equal(o.pending, false, 'an outage before the reviews never tells the PR');
+      assert.ok(!o.ghCalls.some((l) => l.includes('/reviews')));
+    },
+  ],
+  'a PR with a merge conflict gets the re-review wording, since it gets no pull_request run': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, mergeable: false, reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a PR whose files cannot be read gets the re-review wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, files: { 'fail-files': '' }, reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${RE_REVIEW}`), o.messages[0]),
+  ],
+  'a PR with no merge conflict keeps the CI wording': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, mergeable: true, reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].endsWith(` ${CI_RERUNS}`), o.messages[0]),
+  ],
   'an expected head that is not a SHA is refused': [
     () => ({ head: C.NEW, expectedHead: 'main', reviews: [review(21, C.X)] }),
     (o) => {
       kept(o);
       noGit(o);
+      incomplete(o);
       assert.match(o.stdout, /^::warning::agent-review withdraw got an expected head that is not a commit SHA/m);
     },
   ],
@@ -707,6 +1144,7 @@ const SCENARIOS = {
       kept(o);
       noGit(o);
       assert.match(o.summary, /PR #7 has no agent-review approval of an older commit, so there is nothing to withdraw\./);
+      complete(o);
     },
   ],
   'the bot\'s approvals from before the marker are withdrawn too': [
@@ -720,11 +1158,12 @@ const SCENARIOS = {
     }),
     (o) => assert.deepEqual(o.dismissed, [41, 42, 43]),
   ],
-  'an approval of the head as it is when re-read is never dismissed': [
-    () => ({ head: C.NEW, later: C.X, reviews: [review(21, C.X)] }),
+  'an approval of the head as it is when re-read later is never dismissed': [
+    () => ({ head: C.NEW, reads: [{ head: C.NEW, updatedAt: BEFORE_EVENT }, { head: C.X, updatedAt: AFTER_EVENT }], reviews: [review(21, C.X)] }),
     (o) => {
       kept(o);
       assert.match(o.summary, new RegExp(`The head of PR #7 is ${C.X} again, so the bot's approval of it is kept`));
+      complete(o);
     },
   ],
   'a head that cannot be read again dismisses nothing and warns': [
@@ -732,16 +1171,36 @@ const SCENARIOS = {
     (o) => {
       kept(o);
       assert.match(o.stdout, /^::warning::could not read the head of PR #7 again, so the bot's approval of [0-9a-f]{40} was not withdrawn \(review 21\)\. A person must dismiss it\.$/m);
+      incomplete(o);
+      assert.deepEqual(o.left, [`21 ${C.X}`]);
+    },
+  ],
+  'until the dismissals end, every candidate is listed, so a run stopped midway leaves them named': [
+    () => ({ head: C.NEW, reviews: [review(21, C.X), review(22, C.MERGE1)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21, 22]);
+      assert.deepEqual(o.leftAtDismiss, [`21 ${C.X}`, `22 ${C.MERGE1}`]);
+      complete(o);
+    },
+  ],
+  'only the approvals actually left are listed for the PR': [
+    // X's approval is kept by the keep rule; NEW's needs a re-read, which fails.
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X), review(22, C.NEW)], files: { 'fail-pr-later': '' } }),
+    (o) => {
+      kept(o);
+      incomplete(o);
+      assert.deepEqual(o.left, [`22 ${C.NEW}`]);
     },
   ],
   'a token that may not dismiss skips cleanly with one warning, without retrying': [
     () => ({ head: C.NEW, reviews: [review(21, C.X), review(22, C.MERGE1)], files: { 'fail-dismiss-403': '' } }),
     (o) => {
       assert.equal(o.writes.length, 1, 'stops after the first refusal');
-      const warnings = o.stdout.split('\n').filter((l) => l.startsWith('::warning::'));
-      assert.equal(warnings.length, 1);
+      incomplete(o);
+      assert.deepEqual(o.left, [`21 ${C.X}`, `22 ${C.MERGE1}`], 'the refused approval and every one after it are listed');
+      assert.equal(warnings(o).length, 1);
       assert.match(
-        warnings[0],
+        warnings(o)[0],
         /GitHub refused to let this workflow dismiss reviews on PR #7 \(HTTP 403\), so the bot's approvals of older commits stay\. The token may lack pull-requests: write, a rule may limit who can dismiss reviews, or the API rate limit may be used up\./,
       );
     },
@@ -758,6 +1217,8 @@ const SCENARIOS = {
     (o) => {
       assert.deepEqual(o.dismissed, [21, 21, 21, 22, 22, 22]);
       assert.equal(o.stdout.split('\n').filter((l) => l.startsWith('::warning::could not withdraw')).length, 2);
+      incomplete(o);
+      assert.deepEqual(o.left, [`21 ${C.X}`, `22 ${C.MERGE1}`]);
     },
   ],
   'an approval that is already dismissed is noted, not warned about': [
@@ -766,6 +1227,7 @@ const SCENARIOS = {
       assert.deepEqual(o.dismissed, [21], 'a 422 is not retried');
       assert.ok(!o.stdout.includes('::warning::'));
       assert.match(o.summary, new RegExp(`The bot's approval of ${C.X} on PR #7 was already dismissed \\(review 21\\)\\.`));
+      complete(o);
     },
   ],
   'a transient API error is retried': [
@@ -781,6 +1243,8 @@ const SCENARIOS = {
       kept(o);
       noGit(o);
       assert.match(o.stdout, /^::warning::agent-review withdraw could not check PR #7 \(\S+ failed\), so no approval was withdrawn\.$/m);
+      incomplete(o);
+      assert.deepEqual(o.left, [], 'unreadable reviews are marked for the PR, with no review to name');
     },
   ],
   'a closed PR is left alone': [
@@ -789,6 +1253,7 @@ const SCENARIOS = {
       kept(o);
       noGit(o);
       assert.ok(!o.ghCalls.some((l) => l.includes('/reviews')), 'the reviews are not read');
+      complete(o);
     },
   ],
   'a pull request number that is not a number is refused before any call': [
@@ -797,6 +1262,8 @@ const SCENARIOS = {
       kept(o);
       noGit(o);
       assert.match(o.stdout, /^::warning::agent-review withdraw needs a pull request number/m);
+      incomplete(o);
+      assert.equal(o.pending, false, 'a bad input never reads the reviews');
     },
   ],
 };
