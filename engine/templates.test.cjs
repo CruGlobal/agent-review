@@ -2057,7 +2057,7 @@ test('withdraw.yml and its action read the PR through the API and never check ou
   assert.ok(withdrawStep['timeout-minutes'] < wf.jobs.withdraw['timeout-minutes'], 'a hung withdraw still reaches the next step');
   assert.equal(tellStep.if, "steps.withdraw.outputs.complete != 'true'", 'a timed-out, trapped, or refused run is said on the PR');
   assert.ok(!tellStep.run.includes('${{'), 'the comment is built from env only');
-  assert.ok(tellStep.run.includes('gh pr comment "$PR" --repo "$REPO" --body-file'));
+  assert.ok(tellStep.run.startsWith('set +e\n') && tellStep.run.trimEnd().endsWith('exit 0'), 'the comment step never fails the job');
 
   const action = parse(readFileSync(join(ROOT, '.github/actions/withdraw/action.yml'), 'utf8'));
   assert.equal(action.runs.using, 'composite');
@@ -2108,7 +2108,12 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['cd "$WORK"', 'git stays out of a checkout in the workspace'],
     ["grep -qE 'HTTP (401|404|422)|Resource not accessible'", 'errors a retry cannot fix are not retried'],
     ['WHY="GitHub did not show ${EXPECTED_HEAD:0:7} as the PR\'s head in time, so it could not check the approval"', 'without a fresh head, every approval of another commit is taken back'],
-    ["'$read > $event'", 'only a strictly later GitHub time places a read after the event'],
+    ["later_than() { is_time \"$1\" && is_time \"$2\" && [ \"$(jq -n --arg a \"$1\" --arg b \"$2\" '$a > $b')\" = true ]; }", 'only a strictly later GitHub time places a read'],
+    ['elif [ -n "$EVENT_PR_TIME" ] && is_sha "$head" && later_than "$updated" "$EVENT_PR_TIME"; then', 'a read is placed after the event only by its time'],
+    ['if [ "$NOW_HEAD" = "$COMMIT" ] && later_than "${NOW_AT:-}" "$TRUSTED_AT"; then', 'a re-read keeps an approval only when it is later than the trusted read'],
+    ['&& { [ -z "$EVENT_PR_TIME" ] || later_than "$TRUSTED_AT" "$EVENT_PR_TIME"; }; then', 'an old read showing the PR closed never stops the run'],
+    ['gh api "repos/$REPO/pulls/$PR" > "$WORK/pr.next" 2> "$WORK/api.err"', 'each poll read is tried once'],
+    [': > "$PENDING"\napi "repos/$REPO/pulls/$PR/reviews?per_page=100"', 'the pending mark is set right before the reviews are read'],
     ['[ "$EVENT_HEAD" = "$EXPECTED_HEAD" ]', 'the event\'s time counts only for the head it was taken at'],
     ['elif [ -n "$PREVIOUS" ] && [ "$head" = "$PREVIOUS" ]; then', 'a read of the commit before the push is never trusted'],
     ['select(.commit_id != $head or ($kept_after != "" and (.submitted_at // "") <= $kept_after))', 'after a later change, only the newer head\'s approval from after the event stays'],
@@ -2126,7 +2131,7 @@ test('withdraw.yml and its action read the PR through the API and never check ou
   assert.match(writes[0].trim(), /^if api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
 });
 
-test('withdraw.yml tells the PR when the bot\'s approval may still stand', (t) => {
+test('withdraw.yml tells the PR in one comment, only when an approval may still stand, and never fails', (t) => {
   const { parse } = require('yaml');
   const { writeFileSync, readFileSync: read, existsSync } = require('node:fs');
   const { spawnSync } = require('node:child_process');
@@ -2141,32 +2146,65 @@ test('withdraw.yml tells the PR when the bot\'s approval may still stand', (t) =
   if (!bash) return t.skip('bash is not installed');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-withdraw-tell-'));
   try {
-    writeFileSync(join(dir, 'gh'), '#!/bin/sh\necho "$*" > "$ARGS"\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$OUT"; shift; done\n', { mode: 0o755 });
-    const tell = (pr) =>
-      spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+    // Logs each call, serves the comment list from $IDS, and fails a call whose kind is in $FAIL.
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/bin/bash',
+        'echo "$*" >> "$LOG"',
+        'kind=post; case "$*" in *"-X PATCH"*) kind=patch ;; *--paginate*) kind=list ;; esac',
+        'case " $FAIL " in *" $kind "*) echo "gh: HTTP 403" >&2; exit 1 ;; esac',
+        '[ "$kind" = list ] && { printf "%s" "$IDS"; exit 0; }',
+        'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$OUT" ;; esac; done',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const tell = ({ pr = '7', pending = true, ids = '', fail = '' } = {}) => {
+      for (const f of ['log', 'body.md', 'agent-review-withdraw.pending']) rmSync(join(dir, f), { force: true });
+      if (pending) writeFileSync(join(dir, 'agent-review-withdraw.pending'), '');
+      // The runner's default shell for a run step.
+      const r = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
         encoding: 'utf8',
         env: {
           PATH: `${dir}:/usr/bin:/bin`,
           RUNNER_TEMP: dir,
           GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
           OUT: join(dir, 'body.md'),
-          ARGS: join(dir, 'args'),
+          LOG: join(dir, 'log'),
+          IDS: ids,
+          FAIL: fail,
           GH_TOKEN: 't',
           REPO: 'o/r',
           PR: pr,
           RUN_URL: 'https://x/run',
         },
       });
-    const r = tell('7');
-    assert.equal(r.status, 0, r.stderr);
-    assert.match(r.stdout, /^::warning::agent-review withdraw did not finish, so the bot's approval of an older commit may still stand on PR #7\./m);
-    const body = read(join(dir, 'body.md'), 'utf8');
-    assert.ok(body.includes('so that approval may still stand'), body);
-    assert.ok(body.includes('[View the run log](https://x/run)'), body);
-    assert.ok(read(join(dir, 'args'), 'utf8').startsWith('pr comment 7 --repo o/r --body-file '));
-    rmSync(join(dir, 'args'));
-    assert.notEqual(tell('7 --repo x/y').status, 0, 'a PR number that is not a number is refused');
-    assert.ok(!existsSync(join(dir, 'args')), 'and gh is never called');
+      assert.equal(r.status, 0, `the step never fails the job\n${r.stderr}`);
+      assert.match(r.stdout, /^::warning::agent-review withdraw did not finish, so the bot's approval of an older commit may still stand on PR #/m);
+      const calls = existsSync(join(dir, 'log')) ? read(join(dir, 'log'), 'utf8').split('\n').filter(Boolean) : [];
+      return { calls, body: existsSync(join(dir, 'body.md')) ? read(join(dir, 'body.md'), 'utf8') : '', stdout: r.stdout };
+    };
+
+    const first = tell();
+    assert.equal(first.calls.length, 2, first.calls.join('\n'));
+    assert.ok(first.calls[0].startsWith('api repos/o/r/issues/7/comments?per_page=100 --paginate --jq '), 'it looks for its own comment first');
+    assert.ok(first.calls[1].startsWith('api repos/o/r/issues/7/comments -F body=@'), 'and posts one when there is none');
+    assert.ok(first.body.startsWith('<!-- agent-review-withdraw -->\n'), first.body);
+    assert.ok(first.body.includes('so that approval may still stand'), first.body);
+    assert.ok(first.body.includes('[View the latest run log](https://x/run)'), first.body);
+
+    const again = tell({ ids: '901\n902' });
+    assert.equal(again.calls.length, 2);
+    assert.ok(again.calls[1].startsWith('api -X PATCH repos/o/r/issues/comments/901 -F body=@'), 'a later run edits the same comment');
+
+    assert.deepEqual(tell({ pending: false }).calls, [], 'a run stopped before the reviews were read, as in an outage, only warns');
+    assert.deepEqual(tell({ pr: '7 --repo x/y' }).calls, [], 'a PR number that is not a number never reaches gh');
+    const unlisted = tell({ fail: 'list' });
+    assert.equal(unlisted.calls.length, 1, 'no comment is added when the existing ones cannot be read');
+    assert.match(unlisted.stdout, /^::warning::could not read the comments on PR #7/m);
+    assert.match(tell({ fail: 'post' }).stdout, /^::warning::could not comment on PR #7\./m);
+    assert.match(tell({ ids: '901', fail: 'patch' }).stdout, /^::warning::could not update the agent-review comment on PR #7\./m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2209,16 +2247,18 @@ test('interact takes back the bot\'s approval right after it pushes, since that 
   );
   assert.equal(warn.id, 'withdraw-warn');
   assert.ok(warn.run.includes('::warning::') && !warn.run.includes('${{'), 'a warning built from env only');
-  assert.ok(warn.run.includes('> "$RUNNER_TEMP/withdraw-warning.md"') && warn.run.includes('echo "incomplete=true" >> "$GITHUB_OUTPUT"'));
+  assert.ok(warn.run.includes('printf \'%s\\n\' "$WARNING" > "$RUNNER_TEMP/withdraw-warning.md"') && warn.run.includes('echo "warning=$WARNING" >> "$GITHUB_OUTPUT"'));
   const finalize = steps[withdraw + 2];
   assert.equal(finalize.id, 'finalize');
   const appended = finalize.run.indexOf('cat "$RUNNER_TEMP/withdraw-warning.md"; } >> "$RUNNER_TEMP/address-final/summary.md"');
   assert.ok(appended > 0 && appended < finalize.run.indexOf('gh pr comment'), 'the warning reaches the PR summary comment');
   assert.ok(finalize.run.indexOf('echo "ledger_updated=true"') > finalize.run.indexOf('gh api -X PATCH'), 'the ledger counts as updated only after the PATCH');
+  assert.ok(finalize.run.indexOf('echo "summary_posted=true"') > finalize.run.indexOf('gh pr comment'), 'the summary counts as posted only after the comment');
   const job = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs.publish;
   assert.equal(job.outputs.pushed_sha, '${{ steps.push.outputs.pushed_sha }}', 'report-failure learns what was pushed');
-  assert.equal(job.outputs.withdraw_incomplete, '${{ steps.withdraw-warn.outputs.incomplete }}');
+  assert.equal(job.outputs.withdraw_warning, '${{ steps.withdraw-warn.outputs.warning }}');
   assert.equal(job.outputs.ledger_updated, '${{ steps.finalize.outputs.ledger_updated }}');
+  assert.equal(job.outputs.summary_posted, '${{ steps.finalize.outputs.summary_posted }}');
 });
 
 test('interact\'s failure report says when a commit was already pushed, and "nothing was changed" only when not', (t) => {
@@ -2228,8 +2268,9 @@ test('interact\'s failure report says when a commit was already pushed, and "not
   const job = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs['report-failure'];
   const step = job.steps[0];
   assert.equal(step.env.PUSHED_SHA, '${{ needs.publish.outputs.pushed_sha }}');
-  assert.equal(step.env.WITHDRAW_INCOMPLETE, '${{ needs.publish.outputs.withdraw_incomplete }}');
+  assert.equal(step.env.WITHDRAW_WARNING, '${{ needs.publish.outputs.withdraw_warning }}');
   assert.equal(step.env.LEDGER_UPDATED, '${{ needs.publish.outputs.ledger_updated }}');
+  assert.equal(step.env.SUMMARY_POSTED, '${{ needs.publish.outputs.summary_posted }}');
   const bash = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
   if (!bash) return t.skip('bash is not installed');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-report-failure-'));
@@ -2248,8 +2289,9 @@ test('interact\'s failure report says when a commit was already pushed, and "not
           REASON: '',
           MODEL_RESULT: 'success',
           PUSHED_SHA: '',
-          WITHDRAW_INCOMPLETE: '',
+          WITHDRAW_WARNING: '',
           LEDGER_UPDATED: '',
+          SUMMARY_POSTED: '',
           RUN_URL: 'https://x/run',
           ...env,
         },
@@ -2264,10 +2306,14 @@ test('interact\'s failure report says when a commit was already pushed, and "not
     assert.ok(pushed.includes('[View the run log](https://x/run)'), pushed);
     assert.ok(pushed.includes('The findings ledger was not updated.'), pushed);
     assert.ok(!pushed.includes('may still stand'), pushed);
-    const posted = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12', LEDGER_UPDATED: 'true', WITHDRAW_INCOMPLETE: 'true' });
-    assert.ok(posted.includes('The findings ledger was updated, but its summary comment was not posted.'), posted);
-    assert.ok(!posted.includes('was not updated'), posted);
-    assert.ok(posted.includes("The bot could not finish taking back its approval of the commit before `abcdef1`, so that approval may still stand."), posted);
+    const WARNING = '⚠️ The bot could not finish taking back its approval of the commit before `abcdef1`, so that approval may still stand.';
+    const unposted = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12', LEDGER_UPDATED: 'true', WITHDRAW_WARNING: WARNING });
+    assert.ok(unposted.includes('The findings ledger was updated, but its summary comment was not posted.'), unposted);
+    assert.ok(!unposted.includes('was not updated'), unposted);
+    assert.ok(unposted.includes(WARNING), 'the withdraw warning is carried when the summary did not go out');
+    const posted = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12', LEDGER_UPDATED: 'true', SUMMARY_POSTED: 'true', WITHDRAW_WARNING: WARNING });
+    assert.ok(posted.includes('The findings ledger and its summary comment were updated.'), posted);
+    assert.ok(!posted.includes('was not posted') && !posted.includes(WARNING), 'a posted summary already carried the warning');
     const refused = say({});
     assert.ok(refused.includes('**nothing was changed**'), refused);
     assert.ok(refused.includes('publishing was refused'), refused);

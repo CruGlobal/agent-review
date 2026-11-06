@@ -244,8 +244,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pushed_sha: ${{ steps.push.outputs.pushed_sha }}
-      withdraw_incomplete: ${{ steps.withdraw-warn.outputs.incomplete }}
+      withdraw_warning: ${{ steps.withdraw-warn.outputs.warning }}
       ledger_updated: ${{ steps.finalize.outputs.ledger_updated }}
+      summary_posted: ${{ steps.finalize.outputs.summary_posted }}
     permissions:
       actions: write
       contents: write
@@ -484,8 +485,9 @@ jobs:
           PUSHED_SHA: ${{ steps.push.outputs.pushed_sha }}
         run: |
           echo "::warning::Taking back the bot's earlier approval did not finish, so it may still stand on PR #$PR after the push of $PUSHED_SHA. A person must check the PR's reviews." | tee -a "$GITHUB_STEP_SUMMARY"
-          printf '%s\n' "⚠️ The bot could not finish taking back its approval of the commit before \`${PUSHED_SHA:0:7}\`, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head." > "$RUNNER_TEMP/withdraw-warning.md"
-          echo "incomplete=true" >> "$GITHUB_OUTPUT"
+          WARNING="⚠️ The bot could not finish taking back its approval of the commit before \`${PUSHED_SHA:0:7}\`, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
+          printf '%s\n' "$WARNING" > "$RUNNER_TEMP/withdraw-warning.md"
+          echo "warning=$WARNING" >> "$GITHUB_OUTPUT"
       - name: Finalize and publish the trusted ledger update
         id: finalize
         env:
@@ -525,6 +527,7 @@ jobs:
           fi
           gh pr comment "$PR" --repo "$REPO" \
             --body-file "$RUNNER_TEMP/address-final/summary.md" >/dev/null
+          echo "summary_posted=true" >> "$GITHUB_OUTPUT"
       - name: Approve when the ledger is fully addressed and no person is needed
         if: inputs.auto_approve && steps.engine.outputs.name == 'agent-review'
         uses: CruGlobal/agent-review/.github/actions/approve@main
@@ -559,21 +562,25 @@ jobs:
           REASON: ${{ needs.model.outputs.failure_reason }}
           MODEL_RESULT: ${{ needs.model.result }}
           PUSHED_SHA: ${{ needs.publish.outputs.pushed_sha }}
-          WITHDRAW_INCOMPLETE: ${{ needs.publish.outputs.withdraw_incomplete }}
+          WITHDRAW_WARNING: ${{ needs.publish.outputs.withdraw_warning }}
           LEDGER_UPDATED: ${{ needs.publish.outputs.ledger_updated }}
+          SUMMARY_POSTED: ${{ needs.publish.outputs.summary_posted }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           {
             if [ -n "$PUSHED_SHA" ]; then
-              if [ "$LEDGER_UPDATED" = true ]; then
+              if [ "$SUMMARY_POSTED" = true ]; then
+                LEDGER='The findings ledger and its summary comment were updated.'
+              elif [ "$LEDGER_UPDATED" = true ]; then
                 LEDGER='The findings ledger was updated, but its summary comment was not posted.'
               else
                 LEDGER='The findings ledger was not updated.'
               fi
               printf '%s\n' "⚠️ The agent-review address command did not finish, but it already pushed commit \`${PUSHED_SHA:0:7}\` to this branch. Review that commit before you go on, and revert it with \`git revert ${PUSHED_SHA:0:7}\` if anything looks wrong. $LEDGER"
-              if [ "$WITHDRAW_INCOMPLETE" = true ]; then
-                printf '\n%s\n' "The bot could not finish taking back its approval of the commit before \`${PUSHED_SHA:0:7}\`, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
+              # The summary comment already carries the warning when it was posted.
+              if [ -n "$WITHDRAW_WARNING" ] && [ "$SUMMARY_POSTED" != true ]; then
+                printf '\n%s\n' "$WITHDRAW_WARNING"
               fi
             else
               printf '%s\n\n' '⚠️ The agent-review address command did not complete — **nothing was changed**.'

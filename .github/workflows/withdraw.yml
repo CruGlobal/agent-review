@@ -45,12 +45,30 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ inputs.pr_number }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # Never fails the job. Comments only when the action left its pending
+        # mark (it read the reviews and did not finish), so an outage before
+        # that warns here alone, and keeps one comment per PR, edited each time.
         run: |
-          set -euo pipefail
+          set +e
           echo "::warning::agent-review withdraw did not finish, so the bot's approval of an older commit may still stand on PR #$PR. A person must check the PR's reviews." | tee -a "$GITHUB_STEP_SUMMARY"
-          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 1
+          [ -e "$RUNNER_TEMP/agent-review-withdraw.pending" ] || exit 0
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 0
           {
+            printf '%s\n' '<!-- agent-review-withdraw -->'
             printf '%s\n\n' "⚠️ agent-review could not finish taking back the bot's approval of an older commit after the latest change to this PR, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
-            printf '%s\n' "[View the run log]($RUN_URL)"
+            printf '%s\n' "[View the latest run log]($RUN_URL)"
           } > "$RUNNER_TEMP/withdraw-warning.md"
-          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/withdraw-warning.md" > /dev/null
+          if ! IDS=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | startswith("<!-- agent-review-withdraw -->"))) | .id'); then
+            echo "::warning::could not read the comments on PR #$PR, so it was not told."
+            exit 0
+          fi
+          ID=${IDS%%$'\n'*}
+          if [ -n "$ID" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$ID" -F body=@"$RUNNER_TEMP/withdraw-warning.md" > /dev/null \
+              || echo "::warning::could not update the agent-review comment on PR #$PR."
+          else
+            gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/withdraw-warning.md" > /dev/null \
+              || echo "::warning::could not comment on PR #$PR."
+          fi
+          exit 0
