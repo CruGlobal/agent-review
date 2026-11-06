@@ -242,6 +242,8 @@ jobs:
   publish:
     needs: model
     runs-on: ubuntu-latest
+    outputs:
+      pushed_sha: ${{ steps.push.outputs.pushed_sha }}
     permissions:
       actions: write
       contents: write
@@ -458,13 +460,24 @@ jobs:
           echo "pushed_sha=$PUSHED_SHA" >> "$GITHUB_OUTPUT"
       # A push with the workflow token starts no pull_request_target run, so the
       # caller's withdraw job never sees this commit. This runs before anything
-      # else that could fail the job after the push.
+      # else that could fail the job after the push, and a hung run must not
+      # hold up the ledger update.
       - name: Take back the bot's approval of the commit before this push
+        id: withdraw
         if: steps.push.outputs.pushed_sha != ''
+        timeout-minutes: 5
+        continue-on-error: true
         uses: CruGlobal/agent-review/.github/actions/withdraw@main
         with:
           pr_number: ${{ inputs.pr_number }}
           expected_head: ${{ steps.push.outputs.pushed_sha }}
+      - name: Warn when the bot's earlier approval may still stand
+        if: steps.push.outputs.pushed_sha != '' && steps.withdraw.outcome != 'success'
+        env:
+          PR: ${{ inputs.pr_number }}
+          PUSHED_SHA: ${{ steps.push.outputs.pushed_sha }}
+        run: |
+          echo "::warning::Taking back the bot's earlier approval did not finish, so it may still stand on PR #$PR after the push of $PUSHED_SHA. A person must check the PR's reviews." | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Finalize and publish the trusted ledger update
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -532,18 +545,23 @@ jobs:
           PR: ${{ inputs.pr_number }}
           REASON: ${{ needs.model.outputs.failure_reason }}
           MODEL_RESULT: ${{ needs.model.result }}
+          PUSHED_SHA: ${{ needs.publish.outputs.pushed_sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           {
-            printf '%s\n\n' '⚠️ The agent-review address command did not complete — **nothing was changed**.'
-            if [ -n "$REASON" ]; then
-              printf '%s\n\n' "$REASON"
-              printf '%s\n' 'Use `@claude fix 1, 3` or `@claude dismiss 2 [false-positive]: reason`, separating mixed clauses with `;`.'
-            elif [ "$MODEL_RESULT" = 'failure' ]; then
-              printf '%s\n' 'The request could not be prepared or the produced patch failed validation.'
+            if [ -n "$PUSHED_SHA" ]; then
+              printf '%s\n' "⚠️ The agent-review address command did not finish, but it already pushed commit \`${PUSHED_SHA:0:7}\` to this branch. Review that commit before you go on, and revert it with \`git revert ${PUSHED_SHA:0:7}\` if anything looks wrong. The findings ledger was not updated."
             else
-              printf '%s\n' 'The request was authorized but publishing was refused — the PR head, base, or the report itself moved while the command ran. Re-issue the command to retry against current state.'
+              printf '%s\n\n' '⚠️ The agent-review address command did not complete — **nothing was changed**.'
+              if [ -n "$REASON" ]; then
+                printf '%s\n\n' "$REASON"
+                printf '%s\n' 'Use `@claude fix 1, 3` or `@claude dismiss 2 [false-positive]: reason`, separating mixed clauses with `;`.'
+              elif [ "$MODEL_RESULT" = 'failure' ]; then
+                printf '%s\n' 'The request could not be prepared or the produced patch failed validation.'
+              else
+                printf '%s\n' 'The request was authorized but publishing was refused — the PR head, base, or the report itself moved while the command ran. Re-issue the command to retry against current state.'
+              fi
             fi
             printf '\n%s\n' "[View the run log]($RUN_URL)"
           } > "$RUNNER_TEMP/address-failure.md"

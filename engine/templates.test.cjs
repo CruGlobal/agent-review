@@ -2018,21 +2018,38 @@ test('the approve template withdraws on new commits from pull_request_target and
     'an edit to the title or body alone runs nothing',
   );
   assert.equal(withdraw.uses, 'CruGlobal/agent-review/.github/workflows/withdraw.yml@main');
-  assert.deepEqual(withdraw.with, { pr_number: '${{ github.event.pull_request.number }}' });
+  // head.sha is a commit SHA from the event. It only reaches the action as an
+  // input, which refuses anything but 40 hex characters and uses it as data
+  // (compared, fetched by SHA), never in a script or a checkout.
+  assert.deepEqual(withdraw.with, {
+    pr_number: '${{ github.event.pull_request.number }}',
+    expected_head: '${{ github.event.pull_request.head.sha }}',
+  });
   assert.deepEqual(withdraw.permissions, { contents: 'read', 'pull-requests': 'write' });
-  for (const unsafe of ['actions/checkout', 'head.ref', 'head_ref', 'head.sha', 'run:', 'secrets']) {
+  for (const unsafe of ['actions/checkout', 'head.ref', 'head_ref', 'head.label', 'run:', 'secrets']) {
     assert.ok(!text.includes(unsafe), `the pull_request_target caller must not use ${unsafe}`);
   }
+  assert.deepEqual(
+    text.split('\n').filter((l) => l.includes('head.sha')).map((l) => l.trim()),
+    ['expected_head: ${{ github.event.pull_request.head.sha }}'],
+    'the head SHA goes only to expected_head',
+  );
 });
 
 test('withdraw.yml and its action read the PR through the API and never check out its code', () => {
   const { parse } = require('yaml');
   const wf = parse(readFileSync(join(ROOT, '.github/workflows/withdraw.yml'), 'utf8'));
   const on = wf.on || wf[true];
-  assert.deepEqual(on.workflow_call.inputs, { pr_number: { type: 'string', required: true } });
+  assert.deepEqual(Object.keys(on.workflow_call.inputs), ['pr_number', 'expected_head']);
+  assert.deepEqual(on.workflow_call.inputs.pr_number, { type: 'string', required: true });
+  assert.equal(on.workflow_call.inputs.expected_head.required, false, '1.1.2 callers pass no expected_head');
+  assert.equal(on.workflow_call.inputs.expected_head.default, '');
   assert.deepEqual(Object.keys(wf.jobs), ['withdraw']);
   assert.deepEqual(wf.jobs.withdraw.steps, [
-    { uses: 'CruGlobal/agent-review/.github/actions/withdraw@main', with: { pr_number: '${{ inputs.pr_number }}' } },
+    {
+      uses: 'CruGlobal/agent-review/.github/actions/withdraw@main',
+      with: { pr_number: '${{ inputs.pr_number }}', expected_head: '${{ inputs.expected_head }}' },
+    },
   ]);
 
   const action = parse(readFileSync(join(ROOT, '.github/actions/withdraw/action.yml'), 'utf8'));
@@ -2066,10 +2083,12 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['/agent-review:re-review', 'the dismissal says what to run next'],
     ['cd "$WORK"', 'git stays out of a checkout in the workspace'],
     ["grep -qE 'HTTP (401|404|422)|Resource not accessible'", 'errors a retry cannot fix are not retried'],
+    ['WHY="GitHub never showed the pushed commit ${EXPECTED_HEAD:0:7} as the PR\'s head, so it could not check the approval"', 'without a fresh head, every approval of another commit is taken back'],
   ]) {
     assert.ok(run.includes(part) || run.includes(part.replace('git ', 'g ')), why);
   }
-  for (const banned of ['git checkout', 'g checkout', 'worktree', 'git clone', '-c http', 'git config', 'g config', 'gh pr ']) {
+  // Every ref GitHub keeps for a PR can lag a push and show the old approved commit.
+  for (const banned of ['git checkout', 'g checkout', 'worktree', 'git clone', '-c http', 'git config', 'g config', 'gh pr ', 'git/ref']) {
     assert.ok(!run.includes(banned), `the action must not use ${banned}`);
   }
   assert.ok(!/\b[A-Z_]+=\(/.test(run), 'no array assignments, for bash 3.2');
@@ -2099,6 +2118,50 @@ test('interact takes back the bot\'s approval right after it pushes, since that 
   // GitHub moves the PR head a moment after the push; the action waits for this commit.
   assert.deepEqual(steps[withdraw].with, { pr_number: '${{ inputs.pr_number }}', expected_head: '${{ steps.push.outputs.pushed_sha }}' });
   assert.ok(withdraw < at((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main'), 'before the approve step');
+  // A hung fetch must not hold up the ledger update for hours.
+  assert.equal(steps[withdraw].id, 'withdraw');
+  assert.ok(Number.isInteger(steps[withdraw]['timeout-minutes']) && steps[withdraw]['timeout-minutes'] <= 10, 'a short timeout');
+  assert.equal(steps[withdraw]['continue-on-error'], true);
+  const warn = steps[withdraw + 1];
+  assert.equal(warn.if, "steps.push.outputs.pushed_sha != '' && steps.withdraw.outcome != 'success'", 'a withdraw that did not finish is said out loud');
+  assert.ok(warn.run.includes('::warning::') && !warn.run.includes('${{'), 'a warning built from env only');
+  const job = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs.publish;
+  assert.equal(job.outputs.pushed_sha, '${{ steps.push.outputs.pushed_sha }}', 'report-failure learns what was pushed');
+});
+
+test('interact\'s failure report says when a commit was already pushed, and "nothing was changed" only when not', (t) => {
+  const { parse } = require('yaml');
+  const { mkdtempSync, writeFileSync, readFileSync: read } = require('node:fs');
+  const { spawnSync } = require('node:child_process');
+  const job = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs['report-failure'];
+  const step = job.steps[0];
+  assert.equal(step.env.PUSHED_SHA, '${{ needs.publish.outputs.pushed_sha }}');
+  const bash = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+  if (!bash) return t.skip('bash is not installed');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-report-failure-'));
+  try {
+    writeFileSync(join(dir, 'gh'), '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$OUT"; shift; done\n', { mode: 0o755 });
+    const say = (env) => {
+      const r = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        env: { PATH: `${dir}:/usr/bin:/bin`, RUNNER_TEMP: dir, OUT: join(dir, 'body.md'), GH_TOKEN: 't', REPO: 'o/r', PR: '7', REASON: '', MODEL_RESULT: 'success', PUSHED_SHA: '', RUN_URL: 'https://x/run', ...env },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      return read(join(dir, 'body.md'), 'utf8');
+    };
+    const pushed = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12' });
+    assert.ok(!pushed.includes('nothing was changed'), pushed);
+    assert.ok(pushed.includes('it already pushed commit `abcdef1`'), pushed);
+    assert.ok(pushed.includes('`git revert abcdef1`'), pushed);
+    assert.ok(pushed.includes('[View the run log](https://x/run)'), pushed);
+    const refused = say({});
+    assert.ok(refused.includes('**nothing was changed**'), refused);
+    assert.ok(refused.includes('publishing was refused'), refused);
+    const unparsed = say({ REASON: 'Could not parse "fix one".', MODEL_RESULT: 'failure' });
+    assert.ok(unparsed.includes('**nothing was changed**') && unparsed.includes('Could not parse "fix one".'), unparsed);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('the docs and skills know the approve template and the review-side auto_approve knob', () => {
@@ -2123,7 +2186,7 @@ test('the docs and skills know the approve template and the review-side auto_app
   assert.ok(readme.includes("git merge-tree --write-tree <approved> <head's merge base>"), 'README must give the exact keep rule');
   assert.ok(readme.includes('`pull_request_target`'), 'README must name the withdraw trigger and why');
   assert.ok(update.includes('`withdraw` job'), 'update-files must explain the new job when it updates the approve file');
-  assert.ok(update.includes('v1.1.2'), 'update-files must not copy a pin older than withdraw.yml onto the withdraw job');
+  assert.ok(update.includes('only from v1.1.3 on'), 'update-files must not copy a pin older than the withdraw.yml the template needs onto the withdraw job');
 });
 
 test('the review skill runs the incremental path locally on the `incremental` argument', () => {
@@ -4796,13 +4859,17 @@ test('a push that only merged the base branch moves the last report to the new h
       assert.ok(!ci.output.includes('Diff range:'), `${shell}: nothing is reviewed`);
 
       // The author can push to any branch but the default one, or retarget the PR to one, and merge it in.
-      for (const [label, branches] of [
-        ['CI, a clean merge of a base that is not the default branch', { PR_BASE_BRANCH: 'feature', DEFAULT_BRANCH: 'main' }],
-        ['CI, a clean merge when the default branch is unknown', { PR_BASE_BRANCH: 'main', DEFAULT_BRANCH: '' }],
+      const NOT_DEFAULT = "its base is not the repo's default branch, so this is a full review";
+      const UNKNOWN = "gh could not tell whether its base is the repo's default branch, so this is a full review";
+      for (const [label, branches, says, never] of [
+        ['CI, a clean merge of a base that is not the default branch', { PR_BASE_BRANCH: 'feature', DEFAULT_BRANCH: 'main' }, NOT_DEFAULT, UNKNOWN],
+        ['a clean merge when the default branch is unknown', { PR_BASE_BRANCH: 'main', DEFAULT_BRANCH: '' }, UNKNOWN, NOT_DEFAULT],
+        ['a clean merge when the base branch is unknown', { PR_BASE_BRANCH: '', DEFAULT_BRANCH: 'main' }, UNKNOWN, NOT_DEFAULT],
       ]) {
         const notDefault = run(label, { ...CI, HEAD_REF: merged, ...branches });
         reviewed(notDefault, label);
-        assert.ok(notDefault.output.includes("its base is not the repo's default branch, so this is a full review"), `${shell}, ${label}: ${notDefault.output}`);
+        assert.ok(notDefault.output.includes(says), `${shell}, ${label}: ${notDefault.output}`);
+        assert.ok(!notDefault.output.includes(never), `${shell}, ${label}: ${notDefault.output}`);
         assert.ok(notDefault.wanted['review_env.sh'].includes('CARRY_LEDGER="true"'), `${shell}, ${label}: the full review keeps the findings ledger`);
       }
       const cancelOffDefault = run('CI, commits that cancel out on a base that is not the default branch', { ...CI, HEAD_REF: cancelled, PR_BASE_BRANCH: 'feature' });

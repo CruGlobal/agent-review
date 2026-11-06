@@ -401,7 +401,11 @@ if [ -n "$INCREMENTAL" ]; then
     echo "⚠️  The PR has more than one merge base with its base branch, so this is a full review. Merging the base branch again makes later reviews incremental."
     INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ] && [ -z "$ON_DEFAULT" ]; then
-    echo "⚠️  The PR's fork point moved, and its base is not the repo's default branch, so this is a full review."
+    if [ -z "$DEFAULT_BRANCH" ] || [ -z "$PR_BASE_BRANCH" ]; then
+      echo "⚠️  The PR's fork point moved, and gh could not tell whether its base is the repo's default branch, so this is a full review."
+    else
+      echo "⚠️  The PR's fork point moved, and its base is not the repo's default branch, so this is a full review."
+    fi
     INCREMENTAL="" LAST_REVIEWED="" CARRY_LEDGER="true"
   elif [ -n "$ALL_BASES" ] && [ "$LAST_FORK" != "$PR_BASE" ]; then
     echo "⚠️  The PR merged its base branch since $LAST_REVIEWED along with other changes, so this is a full review."

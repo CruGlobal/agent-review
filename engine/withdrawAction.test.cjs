@@ -78,6 +78,9 @@ case "$METHOD $URL" in
   "GET repos/o/r/issues/7/timeline?per_page=100")
     has fail-timeline && { echo "gh: Server Error (HTTP 500)" >&2; exit 1; }
     emit "$FIX/timeline.json" ;;
+  "GET repos/o/r/contents/.github/workflows/agent-review.yml?ref="*)
+    has caller.json || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }
+    emit "$FIX/caller.json" ;;
   "PUT repos/o/r/pulls/7/reviews/"*"/dismissals")
     has fail-dismiss-403 && { echo "gh: Resource not accessible by integration (HTTP 403)" >&2; exit 1; }
     has fail-dismiss-rate && { echo "gh: API rate limit exceeded for installation (HTTP 403)" >&2; exit 1; }
@@ -286,13 +289,16 @@ function setup() {
 }
 
 // The fixture's default branch is the PR's base unless a scenario says otherwise.
-const pr = ({ head, base = 'main', state = 'open', defaultBranch = base, labels = [] }) =>
+const pr = ({ head, base = 'main', state = 'open', defaultBranch = base, labels = [], headRepo = 'o/r', headBranch = 'pr-branch' }) =>
   JSON.stringify({
     state,
-    head: { sha: head },
+    head: { sha: head, ref: headBranch, repo: { full_name: headRepo } },
     base: { ref: base, repo: { default_branch: defaultBranch } },
     labels: labels.map((name) => ({ name })),
   });
+// The repo's CI caller, as the contents API returns it.
+const STOCK_CALLER = fs.readFileSync(path.join(ROOT, 'templates/workflows/agent-review.yml'), 'utf8');
+const callerJson = (text) => JSON.stringify({ content: Buffer.from(text).toString('base64').replace(/(.{60})/g, '$1\n') });
 const APPROVED_AT = '2026-11-02T12:00:00Z';
 const review = (id, commit, { login = BOT, state = 'APPROVED', body = BODY, submitted = APPROVED_AT } = {}) => ({
   id,
@@ -321,6 +327,8 @@ function run(
     expectedHead = '',
     event = 'pull_request_target',
     action = 'synchronize',
+    headRepo,
+    caller,
   },
 ) {
   const dir = path.join(TMP, 'runs', name.replace(/[^a-z0-9]+/gi, '-').slice(0, 60));
@@ -328,13 +336,14 @@ function run(
   const runner = path.join(dir, 'tmp');
   for (const d of [fix, runner]) fs.mkdirSync(d, { recursive: true });
   const all = {
-    'pr.json': pr({ head, base, state, defaultBranch, labels }),
+    'pr.json': pr({ head, base, state, defaultBranch, labels, headRepo }),
+    ...(caller !== undefined ? { 'caller.json': callerJson(caller) } : {}),
     // Two pages, as gh --paginate prints them.
     'reviews.json': JSON.stringify(reviews.slice(0, 1)) + JSON.stringify(reviews.slice(1)),
     'timeline.json': JSON.stringify([{ event: 'commented' }]) + JSON.stringify(timeline),
-    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch, labels }) } : {}),
+    ...(later ? { 'pr-later.json': pr({ head: later, base, defaultBranch, labels, headRepo }) } : {}),
     // The PR as GitHub shows it for the first `count` reads, before the head moves to the push.
-    ...(stale ? { 'pr-stale.json': pr({ head: stale.head, base, defaultBranch, labels }), 'stale-reads': String(stale.count) } : {}),
+    ...(stale ? { 'pr-stale.json': pr({ head: stale.head, base, defaultBranch, labels, headRepo }), 'stale-reads': String(stale.count) } : {}),
     ...files,
   };
   for (const [f, v] of Object.entries(all)) fs.writeFileSync(path.join(fix, f), v);
@@ -447,12 +456,30 @@ const SCENARIOS = {
       assert.match(o.summary, new RegExp(`Withdrew the bot's approval of ${C.X} on PR #7 \\(review 21\\): the PR changed beyond merging in the default branch\\.`));
     },
   ],
-  'on a push to a PR with the review label, the message says the CI review runs again': [
-    () => ({ head: C.NEW, labels: ['agent-review'], reviews: [review(21, C.X)] }),
+  'on a push to a labelled PR in a repo with the stock CI caller, the message says the CI review runs again': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, reviews: [review(21, C.X)] }),
     (o) => {
       assert.equal(o.messages.length, 1);
       assert.ok(o.messages[0].endsWith(' The CI review runs again on its own, and the bot approves again when it passes.'), o.messages[0]);
+      assert.ok(o.ghCalls.some((l) => l.includes('contents/.github/workflows/agent-review.yml?ref=main')), 'the caller is read from the default branch');
     },
+  ],
+  'a fork PR never gets a CI review, so the message asks for a re-review': [
+    () => ({ head: C.NEW, labels: ['agent-review'], caller: STOCK_CALLER, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].includes('Run /agent-review:re-review'), o.messages[0]),
+  ],
+  'a CI caller with its own label gate gets the re-review wording': [
+    () => ({
+      head: C.NEW,
+      labels: ['agent-review'],
+      caller: STOCK_CALLER.replace("contains(github.event.pull_request.labels.*.name, 'agent-review') &&", "contains(github.event.pull_request.labels.*.name, 'ai-review') &&"),
+      reviews: [review(21, C.X)],
+    }),
+    (o) => assert.ok(o.messages[0].includes('Run /agent-review:re-review'), o.messages[0]),
+  ],
+  'a repo with no CI caller gets the re-review wording, though the PR has the label': [
+    () => ({ head: C.NEW, labels: ['agent-review'], reviews: [review(21, C.X)] }),
+    (o) => assert.ok(o.messages[0].includes('Run /agent-review:re-review'), o.messages[0]),
   ],
   'a base change on a labelled PR starts no CI review, so the message asks for a re-review': [
     () => ({ head: C.NEW, action: 'edited', labels: ['agent-review'], reviews: [review(21, C.X)] }),
@@ -474,12 +501,67 @@ const SCENARIOS = {
       assert.ok(o.messages[0].includes('Run /agent-review:re-review'), 'a workflow-token push starts no CI review');
     },
   ],
-  'an interact push GitHub never shows is judged anyway, with a loud warning': [
+  'a pushed head GitHub never shows: the old approval is withdrawn, though the API still shows its commit': [
     () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X)] }),
     (o) => {
-      assert.deepEqual(o.dismissed, [21], 'the stale head is not read again, so it cannot keep the old approval');
-      assert.match(o.stdout, new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7\\.`, 'm'));
-      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls');
+      assert.deepEqual(o.dismissed, [21], 'a stale read cannot keep the old approval');
+      assert.match(
+        o.stdout,
+        new RegExp(`^::warning::GitHub still does not show ${C.NEW}, which was just pushed, as the head of PR #7, so every bot approval of another commit is taken back without checking it\\.$`, 'm'),
+      );
+      assert.equal(o.ghCalls.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length, 21, 'one read and twenty polls, and no read before dismissing');
+      assert.ok(!o.ghCalls.some((l) => l.includes('/git/ref')), 'no PR or branch ref is read');
+      assert.deepEqual(o.gitCalls, [], 'no commit check runs');
+      assert.ok(o.messages[0].includes(`because GitHub never showed the pushed commit ${C.NEW.slice(0, 7)} as the PR's head, so it could not check the approval.`), o.messages[0]);
+    },
+  ],
+  'a pushed head GitHub never shows: an approval of a newer commit built on it is withdrawn too': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.MERGE_THEN_NEW, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.MERGE_THEN_NEW)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a pushed head GitHub never shows: an approval of the pushed commit itself is kept': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, event: 'issue_comment', action: 'created', reviews: [review(21, C.X), review(22, C.NEW)] }),
+    (o) => assert.deepEqual(o.dismissed, [21], 'only the approval of another commit goes'),
+  ],
+  'a pushed head GitHub never shows: a force-push back to an older commit withdraws the approval of the newer one': [
+    // The bot approved D, then the author force-pushed back to E, an ancestor of D.
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.MERGE_THEN_NEW, count: 1000 }, reviews: [review(21, C.MERGE_THEN_NEW)] }),
+    (o) => assert.deepEqual(o.dismissed, [21]),
+  ],
+  'a pushed head GitHub never shows: an approval the keep rule would keep is withdrawn too': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.X, count: 1000 }, reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21], 'a clean merge of main, but the head could not be confirmed');
+      assert.deepEqual(o.gitCalls, []);
+    },
+  ],
+  'a fork PR whose pushed head GitHub never shows is judged the same way, and the fork is never read': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1000 }, headRepo: 'someone/r', reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.ghCalls.some((l) => l.includes('repos/someone/')), 'the fork is never read');
+    },
+  ],
+  'with the head shown in time, a force-push back to an older commit withdraws the approval of the newer one': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, reviews: [review(21, C.MERGE_THEN_NEW)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.stdout.includes('::warning::'));
+      assert.match(o.summary, /\(review 21\): the PR changed beyond merging in the default branch\./);
+    },
+  ],
+  'with the head shown in time, the keep rule still keeps a clean merge of the default branch': [
+    () => ({ head: C.MERGE1, expectedHead: C.MERGE1, stale: { head: C.X, count: 1 }, reviews: [review(21, C.X)] }),
+    (o) => {
+      kept(o);
+      assert.ok(!o.stdout.includes('::warning::'));
+    },
+  ],
+  'a pull_request_target run with the event\'s head waits for a lagging API': [
+    () => ({ head: C.NEW, expectedHead: C.NEW, stale: { head: C.X, count: 1 }, reviews: [review(21, C.X)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      assert.ok(!o.stdout.includes('::warning::'));
     },
   ],
   'an expected head that is not a SHA is refused': [
