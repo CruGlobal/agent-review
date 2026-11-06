@@ -244,6 +244,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       pushed_sha: ${{ steps.push.outputs.pushed_sha }}
+      withdraw_incomplete: ${{ steps.withdraw-warn.outputs.incomplete }}
+      ledger_updated: ${{ steps.finalize.outputs.ledger_updated }}
     permissions:
       actions: write
       contents: write
@@ -471,14 +473,21 @@ jobs:
         with:
           pr_number: ${{ inputs.pr_number }}
           expected_head: ${{ steps.push.outputs.pushed_sha }}
+          previous_head: ${{ needs.model.outputs.expected_head }}
+      # The action's `complete` is empty after a timeout and false when it was
+      # trapped or left an approval, so anything but true warns.
       - name: Warn when the bot's earlier approval may still stand
-        if: steps.push.outputs.pushed_sha != '' && steps.withdraw.outcome != 'success'
+        id: withdraw-warn
+        if: steps.push.outputs.pushed_sha != '' && steps.withdraw.outputs.complete != 'true'
         env:
           PR: ${{ inputs.pr_number }}
           PUSHED_SHA: ${{ steps.push.outputs.pushed_sha }}
         run: |
           echo "::warning::Taking back the bot's earlier approval did not finish, so it may still stand on PR #$PR after the push of $PUSHED_SHA. A person must check the PR's reviews." | tee -a "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "⚠️ The bot could not finish taking back its approval of the commit before \`${PUSHED_SHA:0:7}\`, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head." > "$RUNNER_TEMP/withdraw-warning.md"
+          echo "incomplete=true" >> "$GITHUB_OUTPUT"
       - name: Finalize and publish the trusted ledger update
+        id: finalize
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -510,6 +519,10 @@ jobs:
           node "$RUNTIME_DIR/dist/agent-review.cjs" "${FINALIZE_ARGS[@]}"
           gh api -X PATCH "repos/$REPO/issues/comments/$REPORT_COMMENT_ID" \
             -F body=@"$RUNNER_TEMP/address-final/report.md" >/dev/null
+          echo "ledger_updated=true" >> "$GITHUB_OUTPUT"
+          if [ -s "$RUNNER_TEMP/withdraw-warning.md" ]; then
+            { printf '\n'; cat "$RUNNER_TEMP/withdraw-warning.md"; } >> "$RUNNER_TEMP/address-final/summary.md"
+          fi
           gh pr comment "$PR" --repo "$REPO" \
             --body-file "$RUNNER_TEMP/address-final/summary.md" >/dev/null
       - name: Approve when the ledger is fully addressed and no person is needed
@@ -546,12 +559,22 @@ jobs:
           REASON: ${{ needs.model.outputs.failure_reason }}
           MODEL_RESULT: ${{ needs.model.result }}
           PUSHED_SHA: ${{ needs.publish.outputs.pushed_sha }}
+          WITHDRAW_INCOMPLETE: ${{ needs.publish.outputs.withdraw_incomplete }}
+          LEDGER_UPDATED: ${{ needs.publish.outputs.ledger_updated }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           {
             if [ -n "$PUSHED_SHA" ]; then
-              printf '%s\n' "⚠️ The agent-review address command did not finish, but it already pushed commit \`${PUSHED_SHA:0:7}\` to this branch. Review that commit before you go on, and revert it with \`git revert ${PUSHED_SHA:0:7}\` if anything looks wrong. The findings ledger was not updated."
+              if [ "$LEDGER_UPDATED" = true ]; then
+                LEDGER='The findings ledger was updated, but its summary comment was not posted.'
+              else
+                LEDGER='The findings ledger was not updated.'
+              fi
+              printf '%s\n' "⚠️ The agent-review address command did not finish, but it already pushed commit \`${PUSHED_SHA:0:7}\` to this branch. Review that commit before you go on, and revert it with \`git revert ${PUSHED_SHA:0:7}\` if anything looks wrong. $LEDGER"
+              if [ "$WITHDRAW_INCOMPLETE" = true ]; then
+                printf '\n%s\n' "The bot could not finish taking back its approval of the commit before \`${PUSHED_SHA:0:7}\`, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
+              fi
             else
               printf '%s\n\n' '⚠️ The agent-review address command did not complete — **nothing was changed**.'
               if [ -n "$REASON" ]; then

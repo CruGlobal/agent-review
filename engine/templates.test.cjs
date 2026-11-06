@@ -2045,22 +2045,46 @@ test('withdraw.yml and its action read the PR through the API and never check ou
   assert.equal(on.workflow_call.inputs.expected_head.required, false, '1.1.2 callers pass no expected_head');
   assert.equal(on.workflow_call.inputs.expected_head.default, '');
   assert.deepEqual(Object.keys(wf.jobs), ['withdraw']);
-  assert.deepEqual(wf.jobs.withdraw.steps, [
-    {
-      uses: 'CruGlobal/agent-review/.github/actions/withdraw@main',
-      with: { pr_number: '${{ inputs.pr_number }}', expected_head: '${{ inputs.expected_head }}' },
-    },
-  ]);
+  const [withdrawStep, tellStep, ...rest] = wf.jobs.withdraw.steps;
+  assert.deepEqual(rest, []);
+  assert.deepEqual(withdrawStep, {
+    id: 'withdraw',
+    uses: 'CruGlobal/agent-review/.github/actions/withdraw@main',
+    'timeout-minutes': 10,
+    'continue-on-error': true,
+    with: { pr_number: '${{ inputs.pr_number }}', expected_head: '${{ inputs.expected_head }}' },
+  });
+  assert.ok(withdrawStep['timeout-minutes'] < wf.jobs.withdraw['timeout-minutes'], 'a hung withdraw still reaches the next step');
+  assert.equal(tellStep.if, "steps.withdraw.outputs.complete != 'true'", 'a timed-out, trapped, or refused run is said on the PR');
+  assert.ok(!tellStep.run.includes('${{'), 'the comment is built from env only');
+  assert.ok(tellStep.run.includes('gh pr comment "$PR" --repo "$REPO" --body-file'));
 
   const action = parse(readFileSync(join(ROOT, '.github/actions/withdraw/action.yml'), 'utf8'));
   assert.equal(action.runs.using, 'composite');
-  assert.deepEqual(Object.keys(action.inputs), ['pr_number', 'expected_head']);
+  assert.deepEqual(Object.keys(action.inputs), ['pr_number', 'expected_head', 'previous_head']);
   assert.equal(action.inputs.expected_head.default, '', 'withdraw.yml callers read the head from the API');
+  assert.equal(action.inputs.previous_head.default, '', 'only interact passes the commit it pushed on top of');
+  assert.equal(action.outputs.complete.value, '${{ steps.withdraw.outputs.complete }}');
   assert.deepEqual(action.runs.steps.map((s) => s.uses).filter(Boolean), [], 'no checkout, of the PR or anything else');
   const step = action.runs.steps.find((s) => s.run);
-  assert.deepEqual(Object.keys(step.env).sort(), ['EVENT_ACTION', 'EVENT_NAME', 'EXPECTED_HEAD', 'GH_TOKEN', 'PR', 'REPO', 'SERVER_URL']);
-  assert.equal(step.env.PR, '${{ inputs.pr_number }}');
-  assert.equal(step.env.EXPECTED_HEAD, '${{ inputs.expected_head }}');
+  assert.equal(step.id, 'withdraw');
+  // The event's before and after, its PR snapshot, and the actor come from the
+  // github context, so 1.1.3 callers get them with no new input.
+  assert.deepEqual(step.env, {
+    GH_TOKEN: '${{ github.token }}',
+    REPO: '${{ github.repository }}',
+    PR: '${{ inputs.pr_number }}',
+    EXPECTED_HEAD: '${{ inputs.expected_head }}',
+    PREVIOUS_HEAD: '${{ inputs.previous_head }}',
+    SERVER_URL: '${{ github.server_url }}',
+    EVENT_NAME: '${{ github.event_name }}',
+    EVENT_ACTION: '${{ github.event.action }}',
+    EVENT_BEFORE: '${{ github.event.before }}',
+    EVENT_AFTER: '${{ github.event.after }}',
+    EVENT_HEAD: '${{ github.event.pull_request.head.sha }}',
+    EVENT_UPDATED_AT: '${{ github.event.pull_request.updated_at }}',
+    ACTOR: '${{ github.actor }}',
+  });
   const run = step.run;
   assert.ok(!run.includes('${{'), 'every value reaches the script through env');
   for (const [part, why] of [
@@ -2072,7 +2096,7 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['select(.user.login == "github-actions[bot]" and .state == "APPROVED")', 'only bot approvals'],
     ['ours and (startswith("## AI Review Auto-Approval") | not)', 'only agent-review\'s own approvals'],
     ['or startswith("Auto-approved: the agent-review report for this head passes")', 'approvals from before the marker count as ours'],
-    ['select(.commit_id != $head)', 'never an approval of the head'],
+    ['select(.commit_id != $head or ', 'never an approval of the judged head'],
     ['DEFAULT_BRANCH=$(jq -r \'.base.repo.default_branch // empty\' "$WORK/pr.json")', 'the default branch comes from the repo, not the PR'],
     ['[ "$BASE_REF" != "$DEFAULT_BRANCH" ]', 'only merges of the default branch can keep an approval'],
     ['select(.event == "base_ref_changed" or ((.event // "") | startswith("automatic_base_change")))', 'a base change, GitHub\'s own included, is read from the timeline'],
@@ -2083,7 +2107,12 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ['/agent-review:re-review', 'the dismissal says what to run next'],
     ['cd "$WORK"', 'git stays out of a checkout in the workspace'],
     ["grep -qE 'HTTP (401|404|422)|Resource not accessible'", 'errors a retry cannot fix are not retried'],
-    ['WHY="GitHub never showed the pushed commit ${EXPECTED_HEAD:0:7} as the PR\'s head, so it could not check the approval"', 'without a fresh head, every approval of another commit is taken back'],
+    ['WHY="GitHub did not show ${EXPECTED_HEAD:0:7} as the PR\'s head in time, so it could not check the approval"', 'without a fresh head, every approval of another commit is taken back'],
+    ["'$read > $event'", 'only a strictly later GitHub time places a read after the event'],
+    ['[ "$EVENT_HEAD" = "$EXPECTED_HEAD" ]', 'the event\'s time counts only for the head it was taken at'],
+    ['elif [ -n "$PREVIOUS" ] && [ "$head" = "$PREVIOUS" ]; then', 'a read of the commit before the push is never trusted'],
+    ['select(.commit_id != $head or ($kept_after != "" and (.submitted_at // "") <= $kept_after))', 'after a later change, only the newer head\'s approval from after the event stays'],
+    ['read_pr || true', 'a failed read while waiting is not fatal'],
   ]) {
     assert.ok(run.includes(part) || run.includes(part.replace('git ', 'g ')), why);
   }
@@ -2095,6 +2124,52 @@ test('withdraw.yml and its action read the PR through the API and never check ou
   const writes = run.split('\n').filter((line) => /\bapi -X /.test(line));
   assert.equal(writes.length, 1, 'the dismissal is the only API write');
   assert.match(writes[0].trim(), /^if api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
+});
+
+test('withdraw.yml tells the PR when the bot\'s approval may still stand', (t) => {
+  const { parse } = require('yaml');
+  const { writeFileSync, readFileSync: read, existsSync } = require('node:fs');
+  const { spawnSync } = require('node:child_process');
+  const step = parse(readFileSync(join(ROOT, '.github/workflows/withdraw.yml'), 'utf8')).jobs.withdraw.steps[1];
+  assert.deepEqual(step.env, {
+    GH_TOKEN: '${{ github.token }}',
+    REPO: '${{ github.repository }}',
+    PR: '${{ inputs.pr_number }}',
+    RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}',
+  });
+  const bash = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
+  if (!bash) return t.skip('bash is not installed');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-withdraw-tell-'));
+  try {
+    writeFileSync(join(dir, 'gh'), '#!/bin/sh\necho "$*" > "$ARGS"\nwhile [ $# -gt 0 ]; do [ "$1" = --body-file ] && cp "$2" "$OUT"; shift; done\n', { mode: 0o755 });
+    const tell = (pr) =>
+      spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
+        encoding: 'utf8',
+        env: {
+          PATH: `${dir}:/usr/bin:/bin`,
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
+          OUT: join(dir, 'body.md'),
+          ARGS: join(dir, 'args'),
+          GH_TOKEN: 't',
+          REPO: 'o/r',
+          PR: pr,
+          RUN_URL: 'https://x/run',
+        },
+      });
+    const r = tell('7');
+    assert.equal(r.status, 0, r.stderr);
+    assert.match(r.stdout, /^::warning::agent-review withdraw did not finish, so the bot's approval of an older commit may still stand on PR #7\./m);
+    const body = read(join(dir, 'body.md'), 'utf8');
+    assert.ok(body.includes('so that approval may still stand'), body);
+    assert.ok(body.includes('[View the run log](https://x/run)'), body);
+    assert.ok(read(join(dir, 'args'), 'utf8').startsWith('pr comment 7 --repo o/r --body-file '));
+    rmSync(join(dir, 'args'));
+    assert.notEqual(tell('7 --repo x/y').status, 0, 'a PR number that is not a number is refused');
+    assert.ok(!existsSync(join(dir, 'args')), 'and gh is never called');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('CI reviews get the base and default branch names, so a base merge is skipped only on the default branch', () => {
@@ -2116,17 +2191,34 @@ test('interact takes back the bot\'s approval right after it pushes, since that 
   assert.equal(withdraw, push + 1, 'nothing that can fail the job sits between the push and the withdraw step');
   assert.equal(steps[withdraw].if, "steps.push.outputs.pushed_sha != ''");
   // GitHub moves the PR head a moment after the push; the action waits for this commit.
-  assert.deepEqual(steps[withdraw].with, { pr_number: '${{ inputs.pr_number }}', expected_head: '${{ steps.push.outputs.pushed_sha }}' });
+  assert.deepEqual(steps[withdraw].with, {
+    pr_number: '${{ inputs.pr_number }}',
+    expected_head: '${{ steps.push.outputs.pushed_sha }}',
+    previous_head: '${{ needs.model.outputs.expected_head }}',
+  });
   assert.ok(withdraw < at((s) => s.uses === 'CruGlobal/agent-review/.github/actions/approve@main'), 'before the approve step');
   // A hung fetch must not hold up the ledger update for hours.
   assert.equal(steps[withdraw].id, 'withdraw');
   assert.ok(Number.isInteger(steps[withdraw]['timeout-minutes']) && steps[withdraw]['timeout-minutes'] <= 10, 'a short timeout');
   assert.equal(steps[withdraw]['continue-on-error'], true);
   const warn = steps[withdraw + 1];
-  assert.equal(warn.if, "steps.push.outputs.pushed_sha != '' && steps.withdraw.outcome != 'success'", 'a withdraw that did not finish is said out loud');
+  assert.equal(
+    warn.if,
+    "steps.push.outputs.pushed_sha != '' && steps.withdraw.outputs.complete != 'true'",
+    'a withdraw that timed out, was trapped, or left an approval is said out loud',
+  );
+  assert.equal(warn.id, 'withdraw-warn');
   assert.ok(warn.run.includes('::warning::') && !warn.run.includes('${{'), 'a warning built from env only');
+  assert.ok(warn.run.includes('> "$RUNNER_TEMP/withdraw-warning.md"') && warn.run.includes('echo "incomplete=true" >> "$GITHUB_OUTPUT"'));
+  const finalize = steps[withdraw + 2];
+  assert.equal(finalize.id, 'finalize');
+  const appended = finalize.run.indexOf('cat "$RUNNER_TEMP/withdraw-warning.md"; } >> "$RUNNER_TEMP/address-final/summary.md"');
+  assert.ok(appended > 0 && appended < finalize.run.indexOf('gh pr comment'), 'the warning reaches the PR summary comment');
+  assert.ok(finalize.run.indexOf('echo "ledger_updated=true"') > finalize.run.indexOf('gh api -X PATCH'), 'the ledger counts as updated only after the PATCH');
   const job = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs.publish;
   assert.equal(job.outputs.pushed_sha, '${{ steps.push.outputs.pushed_sha }}', 'report-failure learns what was pushed');
+  assert.equal(job.outputs.withdraw_incomplete, '${{ steps.withdraw-warn.outputs.incomplete }}');
+  assert.equal(job.outputs.ledger_updated, '${{ steps.finalize.outputs.ledger_updated }}');
 });
 
 test('interact\'s failure report says when a commit was already pushed, and "nothing was changed" only when not', (t) => {
@@ -2136,6 +2228,8 @@ test('interact\'s failure report says when a commit was already pushed, and "not
   const job = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs['report-failure'];
   const step = job.steps[0];
   assert.equal(step.env.PUSHED_SHA, '${{ needs.publish.outputs.pushed_sha }}');
+  assert.equal(step.env.WITHDRAW_INCOMPLETE, '${{ needs.publish.outputs.withdraw_incomplete }}');
+  assert.equal(step.env.LEDGER_UPDATED, '${{ needs.publish.outputs.ledger_updated }}');
   const bash = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
   if (!bash) return t.skip('bash is not installed');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-report-failure-'));
@@ -2144,7 +2238,21 @@ test('interact\'s failure report says when a commit was already pushed, and "not
     const say = (env) => {
       const r = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
         encoding: 'utf8',
-        env: { PATH: `${dir}:/usr/bin:/bin`, RUNNER_TEMP: dir, OUT: join(dir, 'body.md'), GH_TOKEN: 't', REPO: 'o/r', PR: '7', REASON: '', MODEL_RESULT: 'success', PUSHED_SHA: '', RUN_URL: 'https://x/run', ...env },
+        env: {
+          PATH: `${dir}:/usr/bin:/bin`,
+          RUNNER_TEMP: dir,
+          OUT: join(dir, 'body.md'),
+          GH_TOKEN: 't',
+          REPO: 'o/r',
+          PR: '7',
+          REASON: '',
+          MODEL_RESULT: 'success',
+          PUSHED_SHA: '',
+          WITHDRAW_INCOMPLETE: '',
+          LEDGER_UPDATED: '',
+          RUN_URL: 'https://x/run',
+          ...env,
+        },
       });
       assert.equal(r.status, 0, r.stderr);
       return read(join(dir, 'body.md'), 'utf8');
@@ -2154,6 +2262,12 @@ test('interact\'s failure report says when a commit was already pushed, and "not
     assert.ok(pushed.includes('it already pushed commit `abcdef1`'), pushed);
     assert.ok(pushed.includes('`git revert abcdef1`'), pushed);
     assert.ok(pushed.includes('[View the run log](https://x/run)'), pushed);
+    assert.ok(pushed.includes('The findings ledger was not updated.'), pushed);
+    assert.ok(!pushed.includes('may still stand'), pushed);
+    const posted = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12', LEDGER_UPDATED: 'true', WITHDRAW_INCOMPLETE: 'true' });
+    assert.ok(posted.includes('The findings ledger was updated, but its summary comment was not posted.'), posted);
+    assert.ok(!posted.includes('was not updated'), posted);
+    assert.ok(posted.includes("The bot could not finish taking back its approval of the commit before `abcdef1`, so that approval may still stand."), posted);
     const refused = say({});
     assert.ok(refused.includes('**nothing was changed**'), refused);
     assert.ok(refused.includes('publishing was refused'), refused);

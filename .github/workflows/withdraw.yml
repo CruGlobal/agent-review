@@ -30,7 +30,27 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: CruGlobal/agent-review/.github/actions/withdraw@main
+      - id: withdraw
+        uses: CruGlobal/agent-review/.github/actions/withdraw@main
+        # Shorter than the job's, so a hung run still reaches the next step.
+        timeout-minutes: 10
+        continue-on-error: true
         with:
           pr_number: ${{ inputs.pr_number }}
           expected_head: ${{ inputs.expected_head }}
+      - name: Tell the PR when the bot's approval may still stand
+        if: steps.withdraw.outputs.complete != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr_number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          echo "::warning::agent-review withdraw did not finish, so the bot's approval of an older commit may still stand on PR #$PR. A person must check the PR's reviews." | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 1
+          {
+            printf '%s\n\n' "⚠️ agent-review could not finish taking back the bot's approval of an older commit after the latest change to this PR, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
+            printf '%s\n' "[View the run log]($RUN_URL)"
+          } > "$RUNNER_TEMP/withdraw-warning.md"
+          gh pr comment "$PR" --repo "$REPO" --body-file "$RUNNER_TEMP/withdraw-warning.md" > /dev/null

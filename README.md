@@ -86,10 +86,12 @@ approval after a push ("Dismiss stale pull request approvals" is off), new code 
 merge on an old approval. So `agent-review-approve.yml` also runs a small job on every push to
 the PR, when it is reopened, and when its base branch changes, and `@claude fix` does the same
 after it pushes. It dismisses the bot's own approval of an older commit, with a note that says
-why and what to do. On a PR from this repo with the `agent-review` label, in a repo whose CI
-caller keeps the template's label gate, a push or reopen starts the CI review again on its own.
-Otherwise run `/agent-review:re-review` (or `/agent-review:review`) and post the report. Either
-way, the bot approves again when the report passes for the new head.
+why and what to do. The note says the CI review runs again on its own only when it will: a
+push or reopen, of a PR from this repo with the `agent-review` label that Dependabot neither
+opened nor pushed, in a repo whose CI caller keeps the template's gates and approves
+(`auto_approve: true`, with advisory or enforce reports) both on the base branch and in the PR.
+Otherwise it says to run `/agent-review:re-review` (or `/agent-review:review`) and post the
+report. Either way, the bot approves again when the report passes for the new head.
 
 It keeps the approval only when the push merged in the repo's default branch (usually `main` or
 `master`) and nothing else, so the PR's own changes are still exactly the ones the bot approved.
@@ -104,7 +106,8 @@ approval:
   branch, and any push to a PR whose base is not the default branch.
 
 It never touches a person's approval, another workflow's approval (like Dependabot's), or the
-bot's approval of the PR's newest commit.
+bot's approval of the PR's newest commit once GitHub confirms which commit that is (see
+[Known limitations](#known-limitations) for when it cannot).
 
 When reviewers flag the same spot, their findings are combined into one and the scores are
 averaged, with two exceptions. A 7 or more keeps its score when it is combined with lower scores,
@@ -492,7 +495,9 @@ The `withdraw` job in `agent-review-approve.yml` runs on `pull_request_target` a
 runs on `synchronize`, on `reopened` (a push while the PR was closed moves its head with no
 `synchronize`), and on `edited` only when `changes.base` is set. An edit to the title or body
 alone runs nothing. It passes the event's head SHA as `expected_head`, so a first read of the PR
-that still shows the old head cannot hide the approval it must take back.
+that still shows the old head cannot hide the approval it must take back. The action reads the
+event's `before` and `after` and the event's own copy of the PR from the `github` context, so the
+caller passes nothing else.
 
 **Which approvals.** Only the bot's own approvals pinned to a commit other than the PR's current
 head: those that carry the `<!-- agent-review-approval -->` marker, and older ones that open
@@ -535,25 +540,49 @@ a PR cannot delete its own withdraw job. And its token can dismiss reviews on fo
 PRs. A `pull_request` caller would run the PR's own copy of the file and get a read-only token on
 forks. API errors are tried up to three times. If GitHub still refuses a dismissal (HTTP 403: a
 token without `pull-requests: write`, a rule that limits who can dismiss reviews, or a used-up
-rate limit), the job warns once and passes. It never fails red.
+rate limit), the job warns once and passes. It never fails red. The action sets a `complete`
+output only when it finished and left no approval it had to take back. When it did not (a
+timeout, an error it trapped, a refused dismissal), the withdraw job comments on the PR that the
+bot's approval may still stand, with a link to the run. The action step has a 10-minute timeout
+and `continue-on-error`, so a hung run still gets to that comment.
+
+**Waiting for GitHub to show the push.** GitHub moves the PR's head in its API a moment after a
+push, so the action waits up to a minute for the API to show `expected_head`. It places each
+read like this:
+
+- **The expected head:** the keep rule runs as above.
+- **The commit before the push** (the event's `before`, or the commit `@claude fix` pushed on
+  top of): GitHub has not caught up yet, so it keeps waiting.
+- **Another commit, on a read whose `updated_at` is later than the one in the event's own copy of
+  the PR:** a newer push came after this event (two quick pushes, or a slow runner). The run
+  stops waiting. It keeps only an approval of that newer head given after the event, and takes
+  back every other bot approval, the event's own head included, without the keep rule. The
+  newer push gets its own run, which judges what is left.
+- **Anything else,** including another commit on a read that is not later, or a failed read: it
+  keeps waiting. A failed read never replaces the last good one.
+
+If the minute runs out first, the action warns and takes back every bot approval of another
+commit than `expected_head`, without the keep rule or a read of the head. Only GitHub's own time
+can mark a read as newer, never its commits: a read that lags two pushes behind can show a third
+commit, every ref GitHub keeps for the PR can lag the same way, and no commit check can tell a
+newer push from a push back to an older commit.
 
 **`@claude fix` pushes.** `interact.yml` pushes with the workflow token, which starts no
 `pull_request_target` run. So its `publish` job runs the same withdraw action right after it
-pushes, before any later step can fail the job. It passes the pushed commit as `expected_head`.
-GitHub moves the PR's head a moment after a push, so the action waits up to a minute for the API
-to show it, and judges against that commit either way. If the API never shows it, the action
-warns and takes back every bot approval of another commit, without the keep rule or a read of
-the head. Every ref GitHub keeps for the PR can lag the same way, and no commit check can tell a
-newer push from a push back to an older commit, so nothing it could read would be safe to trust.
-The step has
-a 5-minute timeout and `continue-on-error`, so a hung fetch cannot hold up the ledger update.
-When it does not finish, the job warns that the earlier approval may still stand. If the job
-fails after the push, the failure comment names the pushed commit instead of saying nothing
-changed.
+pushes, before any later step can fail the job. It passes the pushed commit as `expected_head`
+and the commit it pushed on top of as `previous_head`. That push has no event of its own to time
+a read against, so only the pushed commit counts as shown: a read of any other commit waits, and
+after a minute every bot approval of another commit is taken back. The step has a 5-minute
+timeout and `continue-on-error`, so a hung fetch cannot hold up the ledger update. When it does
+not finish (a timeout, a trapped error, or an approval it could not take back), the job warns,
+and the PR's summary comment (or the failure comment, if the job fails later) says the earlier
+approval may still stand. If the job fails after the push, the failure comment names the pushed
+commit instead of saying nothing changed, and says whether the findings ledger was updated.
 
 **Race safety.** The withdraw job has its own concurrency group, `agent-review-withdraw-<PR>`, so
-a new approve run can never replace a waiting withdraw run. It never dismisses an approval of the
-head it read first, and it reads the head again right before each dismissal and keeps an
+a new approve run can never replace a waiting withdraw run. A newer withdraw run only replaces a
+waiting one, so the newest push's run always runs after the one in progress. Once GitHub shows the expected head, the job never dismisses an
+approval of it, and it reads the head again right before each dismissal and keeps an
 approval of that head. Withdraw and approve runs can overlap, which leaves one gap: a push
 between the approve action's last head check and its approval could start a withdraw run that
 reads the reviews before that approval exists. So the approve action reads the head once more
@@ -687,6 +716,13 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   newer push, one the keep rule would keep (a clean merge of the default branch), and one of the
   approved commit after a force-push straight back to it. Run a review again to get it back.
   Losing an approval here is the safe way to fail.
+- **A run that a newer push overtook keeps only that push's approval.** When two pushes land
+  close together, the first push's run sees the second and keeps only an approval of the newer
+  head given after its own event. An approval the keep rule would have kept against the newer
+  head (a clean merge of the default branch) is taken back, and the newer push's run cannot
+  restore it. A newer push in the same second as the event, or one that lands while a
+  `@claude fix` run is taking back its approval, makes the run wait the full minute instead,
+  since nothing can place those reads.
 - **A force-push back to an older commit takes back the newer commit's approval.** If the bot
   approved D and the author force-pushes back to an older E, D's approval is withdrawn, since E
   may lack a fix D had. That holds whether or not the API shows E in time.
