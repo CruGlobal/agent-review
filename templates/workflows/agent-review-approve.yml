@@ -1,4 +1,4 @@
-# agent-review-template-version: 1.1.4
+# agent-review-template-version: 1.1.5
 name: agent-review approve
 on:
   issue_comment:
