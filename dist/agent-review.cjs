@@ -20891,6 +20891,91 @@ var require_cliCommands = __commonJS({
   }
 });
 
+// engine/templateStatus.cjs
+var require_templateStatus = __commonJS({
+  "engine/templateStatus.cjs"(exports2, module2) {
+    "use strict";
+    var { createHash } = require("node:crypto");
+    var TEMPLATE_NAMES = Object.freeze([
+      "agent-review.yml",
+      "agent-review-interact.yml",
+      "agent-review-readiness.yml",
+      "agent-review-approve.yml"
+    ]);
+    var MARKER_LINE = /^# agent-review-template-version: (\d+\.\d+\.\d+)$/m;
+    var NO_MARKER = "pre-0.3.0";
+    function sha256(text) {
+      return createHash("sha256").update(text).digest("hex");
+    }
+    function readMarker(text) {
+      const m = typeof text === "string" ? text.match(MARKER_LINE) : null;
+      return m ? m[1] : null;
+    }
+    function compareVersions(a, b) {
+      const pa = a.split(".").map(Number);
+      const pb = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) {
+        if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+      }
+      return 0;
+    }
+    function unchangedSince({ manifest, name, version, templateText }) {
+      const released = manifest?.[version]?.[name];
+      if (typeof released !== "string") return false;
+      const rebuilt = templateText.replace(MARKER_LINE, `# agent-review-template-version: ${version}`);
+      return sha256(rebuilt) === released;
+    }
+    function templateFileStatus({ name, fileText, pluginVersion, manifest, templates }) {
+      const marker = readMarker(fileText);
+      const result = (status, reason) => ({ template: TEMPLATE_NAMES.includes(name) ? name : null, marker, status, reason });
+      if (!marker) return result("stale", "no template marker");
+      if (compareVersions(marker, pluginVersion) >= 0) return result("current", `marker v${marker} is not older than v${pluginVersion}`);
+      if (!TEMPLATE_NAMES.includes(name)) {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and ${name} is not one of the template files`);
+      }
+      const templateText = templates?.[name];
+      if (typeof templateText !== "string") {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and the ${name} template could not be read`);
+      }
+      if (manifest?.[pluginVersion]?.[name] !== sha256(templateText)) {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and the manifest does not match the v${pluginVersion} template, so its history cannot be checked`);
+      }
+      if (unchangedSince({ manifest, name, version: marker, templateText })) {
+        return result("current", `the template is unchanged since v${marker} apart from its marker`);
+      }
+      if (!manifest?.[marker]?.[name]) {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and the manifest has no v${marker} entry for ${name}`);
+      }
+      return result("stale", `the template changed after v${marker}`);
+    }
+    function templateStatusReport({ files, pluginVersion, manifest, templates }) {
+      const checked = files.map(({ file, name, text }) => ({
+        file,
+        ...templateFileStatus({ name, fileText: text, pluginVersion, manifest, templates })
+      }));
+      const stale = checked.filter((f) => f.status === "stale");
+      let oldest = null;
+      for (const f of stale) {
+        if (!f.marker) {
+          oldest = NO_MARKER;
+          break;
+        }
+        if (oldest === null || compareVersions(f.marker, oldest) < 0) oldest = f.marker;
+      }
+      return { version: pluginVersion, stale: stale.length > 0, oldest, files: checked };
+    }
+    module2.exports = {
+      TEMPLATE_NAMES,
+      NO_MARKER,
+      readMarker,
+      compareVersions,
+      unchangedSince,
+      templateFileStatus,
+      templateStatusReport
+    };
+  }
+});
+
 // engine/cli.cjs
 var require_cli = __commonJS({
   "engine/cli.cjs"(exports2, module2) {
@@ -20905,6 +20990,7 @@ var require_cli = __commonJS({
       rmSync,
       mkdirSync,
       statSync,
+      readdirSync,
       renameSync,
       lstatSync,
       openSync,
@@ -20986,6 +21072,7 @@ var require_cli = __commonJS({
       postSkillWrites,
       subagentStopWrites
     } = require_captureHook();
+    var { TEMPLATE_NAMES, templateStatusReport } = require_templateStatus();
     var { repoRoot, reviewDir } = require_paths();
     function writeStdoutSync(text) {
       const buf = Buffer.from(text, "utf8");
@@ -21350,6 +21437,7 @@ var require_cli = __commonJS({
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]";
     var REPORT_COMMENT_USAGE = "usage: agent-review report-comment --me <login> [--field body|id]";
+    var TEMPLATE_STATUS_USAGE = "usage: agent-review template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
     function diffFor(diffPath, rawPath, root, excludedPaths) {
       let raw;
@@ -21411,6 +21499,7 @@ var require_cli = __commonJS({
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
   report-comment --me <login> [--field body|id]   read every page of a PR's comments (gh api --paginate output) on stdin and print the body or id of the canonical report: the user's own marked comment, else github-actions[bot]'s (nothing when there is none; exit 1 on unreadable input)
+  template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
@@ -21873,6 +21962,63 @@ var require_cli = __commonJS({
             out(`human-check: ${e.message}`);
             return 1;
           }
+        }
+        case "template-status": {
+          const valueFlags = ["--templates", "--manifest", "--version"];
+          const given = rest;
+          const files = [];
+          for (let i = 0; i < given.length; i++) {
+            if (valueFlags.includes(given[i])) i++;
+            else files.push(given[i]);
+          }
+          const version = flag(rest, "--version");
+          if (files.some((f) => f.startsWith("--")) || valueFlags.some((name) => rest.includes(name) && flag(rest, name) === void 0) || version !== void 0 && !/^\d+\.\d+\.\d+$/.test(version)) {
+            out(TEMPLATE_STATUS_USAGE);
+            return 1;
+          }
+          const templatesDir = resolve(flag(rest, "--templates") || join(__dirname, "../templates/workflows"));
+          const manifestPath = resolve(flag(rest, "--manifest") || join(templatesDir, "template-manifest.json"));
+          let pluginVersion = version;
+          let manifest;
+          try {
+            pluginVersion ??= JSON.parse(readFileSync(join(__dirname, "../.claude-plugin/plugin.json"), "utf8")).version;
+            manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+          } catch (e) {
+            process.stderr.write(`template-status: ${e.message}
+`);
+            return 1;
+          }
+          const templates = {};
+          for (const name of TEMPLATE_NAMES) {
+            try {
+              templates[name] = readFileSync(join(templatesDir, name), "utf8");
+            } catch {
+            }
+          }
+          let paths = files.map((f) => resolve(C.ROOT, f));
+          if (paths.length === 0) {
+            const workflows = join(C.ROOT, ".github/workflows");
+            try {
+              paths = readdirSync(workflows).filter((f) => /^agent-review.*\.ya?ml$/.test(f)).sort().map((f) => join(workflows, f));
+            } catch {
+              paths = [];
+            }
+          }
+          const report = templateStatusReport({
+            files: paths.map((p) => {
+              let text = null;
+              try {
+                text = readFileSync(p, "utf8");
+              } catch {
+              }
+              return { file: relative(C.ROOT, p) || p, name: p.split("/").pop(), text };
+            }),
+            pluginVersion,
+            manifest,
+            templates
+          });
+          out(JSON.stringify(report));
+          return 0;
         }
         case "report-comment": {
           const me = flag(rest, "--me");

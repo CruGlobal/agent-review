@@ -2082,13 +2082,18 @@ relative to this skill file (the same way the report skeleton is located). Read 
 file) skips the note — it must never block or fail a review.
 
 **In CI** the plugin is pulled fresh every run, so the plugin itself is current — but the repo's
-copied workflow files can be stale. Read the `# agent-review-template-version: X.Y.Z` marker from
-each `.github/workflows/agent-review*.yml` in the repo under review. If any marker is missing or
-older than the plugin version, append a short footer note to the report (after the visible body,
-never inside the hidden markers):
+copied workflow files can be stale. Run `agent-review template-status` in the repo under review.
+It reads the `# agent-review-template-version: X.Y.Z` marker of each
+`.github/workflows/agent-review*.yml` and prints one JSON line. A file is stale when its marker is
+missing, or when the marker is older than the plugin version and the template changed after that
+version. A release that changes only the marker line leaves every copy current, so never compare
+the markers yourself. If it prints `"stale": true`, append a short footer note to the report (after
+the visible body, never inside the hidden markers), with `[OLDEST]` from its `oldest` field:
 
-> ⬆️ This repo's agent-review workflow files are from v[OLDEST or "pre-0.3.0"] (latest:
+> ⬆️ This repo's agent-review workflow files are from v[OLDEST] (latest:
 > v[PLUGIN_VERSION]). Run `/agent-review:update-files` in a Claude Code session to refresh them.
+
+`oldest` is `pre-0.3.0` when a file has no marker; write it as printed, without the `v`.
 
 **Locally** the opposite can be stale: compare the installed plugin against main —
 
@@ -2102,9 +2107,10 @@ LATEST=$(gh api repos/CruGlobal/agent-review/contents/.claude-plugin/plugin.json
 If `LATEST` is non-empty and `PLUGIN_VERSION` is older than it (semver comparison — never flag a
 mere difference, a dev install ahead of main is not stale), note it in the Stage 8 summary:
 "You are on agent-review v[PLUGIN_VERSION]; the latest is v[LATEST] — run
-`/plugin marketplace update cruglobal` to update." Also run the CI-style template-marker check
-against the local repo's workflow files and add the `/agent-review:update-files` note if they
-lag. If the repo has no `.github/workflows/agent-review*.yml` files at all, it doesn't use CI
+`/plugin marketplace update cruglobal` to update." Also run the CI-style
+`agent-review template-status` check against the local repo's workflow files and add the
+`/agent-review:update-files` note only if it prints `"stale": true`. If the repo has no
+`.github/workflows/agent-review*.yml` files at all (its `files` list is empty), it doesn't use CI
 review — skip the workflow-file note entirely rather than nagging about files that were never
 installed.
 
@@ -2280,8 +2286,8 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 [IF the installed plugin is older than main (local runs only):]
 ⬆️  agent-review update available: you are on v[PLUGIN_VERSION], latest is v[LATEST]
    → run `/plugin marketplace update cruglobal`
-[IF this repo's workflow files carry an older or missing template marker:]
-⬆️  agent-review workflow files are out of date (v[oldest marker, or "pre-0.3.0"] → v[PLUGIN_VERSION])
+[IF `agent-review template-status` printed "stale": true:]
+⬆️  agent-review workflow files are out of date (v[its `oldest`; pre-0.3.0 with no v] → v[PLUGIN_VERSION])
    → run `/agent-review:update-files`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```

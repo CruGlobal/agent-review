@@ -9,6 +9,7 @@ const {
   rmSync,
   mkdirSync,
   statSync,
+  readdirSync,
   renameSync,
   lstatSync,
   openSync,
@@ -90,6 +91,8 @@ const {
   postSkillWrites,
   subagentStopWrites,
 } = require('./captureHook.cjs');
+
+const { TEMPLATE_NAMES, templateStatusReport } = require('./templateStatus.cjs');
 
 const { repoRoot, reviewDir } = require('./paths.cjs');
 
@@ -522,6 +525,8 @@ function blobLines(root, commit, path) {
 const CODE_REVIEW_PROOF_USAGE =
   'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]';
 const REPORT_COMMENT_USAGE = 'usage: agent-review report-comment --me <login> [--field body|id]';
+const TEMPLATE_STATUS_USAGE =
+  'usage: agent-review template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]';
 const DIFF_FOR_USAGE = 'usage: agent-review diff-for --diff <f> --raw <f>';
 
 function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -586,6 +591,7 @@ const USAGE = `usage: agent-review <command>
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
   report-comment --me <login> [--field body|id]   read every page of a PR's comments (gh api --paginate output) on stdin and print the body or id of the canonical report: the user's own marked comment, else github-actions[bot]'s (nothing when there is none; exit 1 on unreadable input)
+  template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
@@ -1074,6 +1080,71 @@ function main(rawArgv) {
         out(`human-check: ${e.message}`);
         return 1;
       }
+    }
+    case 'template-status': {
+      const valueFlags = ['--templates', '--manifest', '--version'];
+      const given = rest;
+      const files = [];
+      for (let i = 0; i < given.length; i++) {
+        if (valueFlags.includes(given[i])) i++;
+        else files.push(given[i]);
+      }
+      const version = flag(rest, '--version');
+      if (
+        files.some((f) => f.startsWith('--')) ||
+        valueFlags.some((name) => rest.includes(name) && flag(rest, name) === undefined) ||
+        (version !== undefined && !/^\d+\.\d+\.\d+$/.test(version))
+      ) {
+        out(TEMPLATE_STATUS_USAGE);
+        return 1;
+      }
+      const templatesDir = resolve(flag(rest, '--templates') || join(__dirname, '../templates/workflows'));
+      const manifestPath = resolve(flag(rest, '--manifest') || join(templatesDir, 'template-manifest.json'));
+      let pluginVersion = version;
+      let manifest;
+      try {
+        pluginVersion ??= JSON.parse(readFileSync(join(__dirname, '../.claude-plugin/plugin.json'), 'utf8')).version;
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      } catch (e) {
+        process.stderr.write(`template-status: ${e.message}\n`);
+        return 1;
+      }
+      const templates = {};
+      for (const name of TEMPLATE_NAMES) {
+        try {
+          templates[name] = readFileSync(join(templatesDir, name), 'utf8');
+        } catch {
+          // A template that cannot be read leaves its copies stale.
+        }
+      }
+      let paths = files.map((f) => resolve(C.ROOT, f));
+      if (paths.length === 0) {
+        const workflows = join(C.ROOT, '.github/workflows');
+        try {
+          paths = readdirSync(workflows)
+            .filter((f) => /^agent-review.*\.ya?ml$/.test(f))
+            .sort()
+            .map((f) => join(workflows, f));
+        } catch {
+          paths = [];
+        }
+      }
+      const report = templateStatusReport({
+        files: paths.map((p) => {
+          let text = null;
+          try {
+            text = readFileSync(p, 'utf8');
+          } catch {
+            // An unreadable copy has no marker, so it counts as stale.
+          }
+          return { file: relative(C.ROOT, p) || p, name: p.split('/').pop(), text };
+        }),
+        pluginVersion,
+        manifest,
+        templates,
+      });
+      out(JSON.stringify(report));
+      return 0;
     }
     case 'report-comment': {
       const me = flag(rest, '--me');

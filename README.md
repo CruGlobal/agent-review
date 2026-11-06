@@ -661,8 +661,14 @@ pinned refs), shows the diff, and offers a PR. If the fresh caller says `advisor
 `.claude/review/config.yml` still says `rollout.mode: shadow`, it offers to change the config in
 the same PR, because the reusable workflow refuses a caller whose mode disagrees with config.
 Reviews flag both kinds of staleness automatically: the report gains a footer when a repo's
-workflow files carry an older `# agent-review-template-version:` marker, and local runs note when
-the installed plugin is behind the latest version.
+workflow files are behind the templates, and local runs note when the installed plugin is behind
+the latest version. `agent-review template-status` makes the workflow-file call. A copy is stale
+when its `# agent-review-template-version:` marker is missing, or older than the plugin and the
+template changed after that version. A release that changes only the marker line leaves every
+copy current, so it never asks teammates to run `/agent-review:update-files`. The repo's own copy
+is never compared byte for byte, since it keeps its own settings; the check rebuilds the old
+release from today's template with the older marker and compares its hash with the one
+`template-manifest.json` recorded for that release.
 
 ## Versioning & releases
 
@@ -671,7 +677,10 @@ the `# agent-review-template-version:` marker in every `templates/workflows/*.ym
 and `templates/workflows/template-manifest.json` pins each template's exact contents to that
 version (`npm test` enforces all of it — editing a template fails the suite until the version is
 bumped and the manifest restamped; rewriting a released manifest entry in place would evade the
-test, but that edit is loud in code review, unlike a forgotten bump). To cut a release:
+test, but that edit is loud in code review, unlike a forgotten bump). The manifest is also the
+template history `agent-review template-status` reads, so a release records nothing else for it:
+a release whose templates change only their marker leaves older copies current on its own. To cut
+a release:
 
 1. Bump the version in `.claude-plugin/plugin.json`, `package.json`, and the four template
    markers; run `npm install --package-lock-only` (syncs the version mirrored in

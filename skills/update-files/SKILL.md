@@ -31,6 +31,8 @@ for f in agent-review.yml agent-review-interact.yml agent-review-readiness.yml a
   gh api "repos/CruGlobal/agent-review/contents/templates/workflows/$f" --jq .content \
     | base64 -d > "$UPDATE_DIR/$f"
 done
+gh api "repos/CruGlobal/agent-review/contents/templates/workflows/template-manifest.json" --jq .content \
+  | base64 -d > "$UPDATE_DIR/template-manifest.json"
 LATEST=$(gh api repos/CruGlobal/agent-review/contents/.claude-plugin/plugin.json --jq .content \
   | base64 -d | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).version))')
 echo "Latest agent-review version: $LATEST"
@@ -58,10 +60,24 @@ compare or offer `agent-review.yml`, `agent-review-interact.yml`, or `agent-revi
 and say they were skipped because the repo is local-only. Then see Stage 4 for CI files that are
 still installed. Stage 3 applies to the approve file only.
 
+Then judge every installed copy against the fetched templates. Put the version Stage 1 printed
+in place of `<latest>`:
+
+```bash
+agent-review template-status --templates /tmp/agent_review_templates --version <latest>
+```
+
+It prints one JSON line with a `files` entry for each `.github/workflows/agent-review*.yml`. A copy
+is `current` when its `# agent-review-template-version:` marker is not older than the latest
+version, or when the template has not changed apart from that marker line since the copy's
+version (the fetched `template-manifest.json` holds each release's template hashes). So a release
+that changes only the marker leaves every copy current. Never compare the markers yourself. If
+the command fails, say so and treat every installed copy as stale.
+
 For each fetched template, look for the matching file in `.github/workflows/`:
 
-- **File exists**: read its `# agent-review-template-version:` marker (missing marker =
-  pre-0.3.0). If the marker already equals the latest version, report "up to date" and skip it.
+- **File exists**: if its `status` is `current`, report "up to date" with its `reason` and skip
+  it. Otherwise it is stale (a missing marker means pre-0.3.0): refresh it as below.
 - **File missing**: the repo never installed that piece. Offer it, don't force it — ask the
   user whether to add it, and default to skipping `agent-review-readiness.yml` (the rollout
   gate) unless they want it. The approve file is the default yes in every repo, because it

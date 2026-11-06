@@ -342,6 +342,9 @@ test('the review skill checks for stale consumer workflows and stale local plugi
   assert.ok(skill.includes('is older than'), 'staleness must compare older-than, never mere difference — a dev branch ahead of main is not stale');
   assert.ok(!skill.includes('differs from `PLUGIN_VERSION`'), 'the differs-from predicate misfires when local is ahead of main');
   assert.ok(skill.includes('[IF the installed plugin is older'), 'the summary must gate the plugin line and the workflow-file line independently');
+  assert.ok(skill.includes('Run `agent-review template-status` in the repo under review.'), 'the engine judges the copied workflow files');
+  assert.ok(skill.includes('[IF `agent-review template-status` printed "stale": true:]'), 'the summary line follows the engine verdict');
+  assert.ok(!skill.includes('If any marker is missing or\nolder than the plugin version'), 'a marker-only release must not flag a copy');
 });
 
 test('the update-files skill preserves consumer knobs and stamps the new marker', () => {
@@ -352,6 +355,9 @@ test('the update-files skill preserves consumer knobs and stamps the new marker'
   assert.ok(skill.includes('gh api "repos/CruGlobal/agent-review/contents'), 'must fetch templates from the source repo on GitHub');
   assert.ok(!skill.includes('plugins/cache'), 'must fetch templates from GitHub, not the local plugin cache');
   assert.ok(skill.includes('git diff'), 'must show the consumer the diff before anything is committed');
+  assert.ok(skill.includes('contents/templates/workflows/template-manifest.json'), 'must fetch the manifest with the templates');
+  assert.ok(skill.includes('agent-review template-status --templates'), 'the engine judges each copy against the fetched templates');
+  assert.ok(!skill.includes('If the marker already equals the latest version'), 'an older marker with an unchanged template is current');
 });
 
 test('the local e2e harness exists and derives its contract from the CI workflow', () => {
