@@ -90,8 +90,9 @@ why and what to do. The note says the CI review runs again on its own only when 
 push or reopen, of a PR from this repo with the `agent-review` label that Dependabot neither
 opened nor pushed and that has no merge conflict, in a repo whose CI caller keeps the template's
 gates and approves (`auto_approve: true`, with advisory or enforce reports). The caller is read
-from the base branch, and also from the PR when the PR changes it. Otherwise it says to run `/agent-review:re-review` (or `/agent-review:review`) and post the
-report. Either way, the bot approves again when the report passes for the new head.
+from the base branch, and also from the PR when the PR changes it. Otherwise it says to run
+`/agent-review:re-review` (or `/agent-review:review`) and post the report. Either way, the bot
+approves again when the report passes for the new head.
 
 It keeps the approval only when the push merged in the repo's default branch (usually `main` or
 `master`) and nothing else, so the PR's own changes are still exactly the ones the bot approved.
@@ -543,8 +544,10 @@ token without `pull-requests: write`, a rule that limits who can dismiss reviews
 rate limit), the job warns once and passes. It never fails red. The action sets a `complete`
 output only when it finished and left no approval it had to take back. When it did not, the job
 warns. If the run had already read the reviews (so an approval may really be left, or the reviews
-could not be read), the job also posts one comment on the PR that the bot's approval may still
-stand, with a link to the run. Later runs edit that same comment instead of adding more. A run
+could not be read), the job also comments on the PR. The comment lists each bot approval that
+may still stand (its commit and review number), with a link to the run, and a hidden marker
+holds that set of reviews. A later run with the same set edits the latest such comment; a new
+set posts a new comment, so each new stale approval notifies once, not once per push. A run
 stopped before it read the reviews, as in an API outage, only warns. The action step has a
 10-minute timeout and `continue-on-error`, so a hung run still gets to the warning.
 
@@ -572,7 +575,8 @@ newer push from a push back to an older commit.
 
 A read that shows the PR closed or merged stops the run only when it was placed (the expected
 head, or a newer push) and its `updated_at` is later than the event's. An older read can still
-show the PR closed after a reopen.
+show the PR closed after a reopen. A `@claude fix` run has no event time, so there any closed
+read that shows the pushed commit stops the run.
 
 **`@claude fix` pushes.** `interact.yml` pushes with the workflow token, which starts no
 `pull_request_target` run. So its `publish` job runs the same withdraw action right after it
@@ -593,12 +597,13 @@ waiting one, so the newest push's run usually runs after the one in progress (se
 [Known limitations](#known-limitations) for when runs queue out of order). Once GitHub shows the
 expected head, the job never dismisses an approval of it. It reads the head again right before
 each dismissal, and keeps an approval of the commit that read shows only when that read's
-`updated_at` is later than the read it trusted: a lagging re-read can still show the approved
-commit. Withdraw and approve runs can overlap, which leaves one gap: a push
-between the approve action's last head check and its approval could start a withdraw run that
-reads the reviews before that approval exists. So the approve action reads the head once more
-after approving, and takes back an approval of a head that moved. An approval that is already
-dismissed when withdraw reaches it is noted, not warned about.
+`updated_at` is later than both the read it trusted and the event: a lagging re-read can still
+show the approved commit, and a head can return to an older commit. Withdraw and approve runs
+can overlap, which leaves one gap: a push between the approve action's last head check and its
+approval could start a withdraw run that reads the reviews before that approval exists. So the
+approve action reads the head once more after approving, and takes back an approval of a head
+that moved. An approval that is already dismissed when withdraw reaches it is noted, not warned
+about.
 
 **With CI reviews.** A repo that also runs `agent-review.yml` starts both on a push. The withdraw
 job runs at once and takes back the stale approval. The CI review takes minutes, then its approve

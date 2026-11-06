@@ -98,6 +98,7 @@ case "$METHOD $URL" in
     for f in "\${FIELDS[@]}"; do
       case "$f" in message=*) printf '%s\\n' "\${f#message=}" >> "$FIX/../dismiss-messages.txt" ;; esac
     done
+    [ -e "$FIX/../pending-at-dismiss" ] || cp "$RUNNER_TEMP/agent-review-withdraw.pending" "$FIX/../pending-at-dismiss" 2>/dev/null
     echo '{}' ;;
   *) echo "fake gh: unhandled $METHOD $URL" >&2; exit 98 ;;
 esac
@@ -444,7 +445,12 @@ function run(
         summary: read('summary.md'),
         outputs: read('output.txt').split('\n').filter(Boolean),
         prReads: lines.filter((l) => l.startsWith('api ¦ repos/o/r/pulls/7 ¦ ')).length,
+        // The pending list as it stood at the first dismissal that went through.
+        leftAtDismiss: read('pending-at-dismiss').split('\n').filter(Boolean),
         pending: fs.existsSync(path.join(runner, 'agent-review-withdraw.pending')),
+        left: fs.existsSync(path.join(runner, 'agent-review-withdraw.pending'))
+          ? fs.readFileSync(path.join(runner, 'agent-review-withdraw.pending'), 'utf8').split('\n').filter(Boolean)
+          : null,
         leftovers: fs.readdirSync(runner).filter((f) => f !== 'agent-review-withdraw.pending'),
       });
     });
@@ -889,6 +895,20 @@ const SCENARIOS = {
       complete(o);
     },
   ],
+  'a seen read from before the event cannot let a re-read from before the event keep an approval': [
+    // The head went E, then D (approved), then back to E as this event. The seen read is from E's first
+    // time as the head, and the re-read lags to D's time: later than the seen read, not than the event.
+    () => ({
+      head: C.MERGE1,
+      ...sync(C.MERGE_THEN_NEW, C.MERGE1),
+      reads: [{ head: C.MERGE1, updatedAt: '2026-11-05T09:00:00Z' }, { head: C.MERGE_THEN_NEW, updatedAt: '2026-11-05T09:30:00Z' }],
+      reviews: [review(21, C.MERGE_THEN_NEW, { submitted: '2026-11-05T09:20:00Z' })],
+    }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21]);
+      complete(o);
+    },
+  ],
   'interact: a re-read of the approved commit in the same second as the trusted read does not keep it': [
     () => ({
       head: C.NEW,
@@ -1152,7 +1172,24 @@ const SCENARIOS = {
       kept(o);
       assert.match(o.stdout, /^::warning::could not read the head of PR #7 again, so the bot's approval of [0-9a-f]{40} was not withdrawn \(review 21\)\. A person must dismiss it\.$/m);
       incomplete(o);
-      assert.equal(o.pending, true);
+      assert.deepEqual(o.left, [`21 ${C.X}`]);
+    },
+  ],
+  'until the dismissals end, every candidate is listed, so a run stopped midway leaves them named': [
+    () => ({ head: C.NEW, reviews: [review(21, C.X), review(22, C.MERGE1)] }),
+    (o) => {
+      assert.deepEqual(o.dismissed, [21, 22]);
+      assert.deepEqual(o.leftAtDismiss, [`21 ${C.X}`, `22 ${C.MERGE1}`]);
+      complete(o);
+    },
+  ],
+  'only the approvals actually left are listed for the PR': [
+    // X's approval is kept by the keep rule; NEW's needs a re-read, which fails.
+    () => ({ head: C.MERGE1, reviews: [review(21, C.X), review(22, C.NEW)], files: { 'fail-pr-later': '' } }),
+    (o) => {
+      kept(o);
+      incomplete(o);
+      assert.deepEqual(o.left, [`22 ${C.NEW}`]);
     },
   ],
   'a token that may not dismiss skips cleanly with one warning, without retrying': [
@@ -1160,7 +1197,7 @@ const SCENARIOS = {
     (o) => {
       assert.equal(o.writes.length, 1, 'stops after the first refusal');
       incomplete(o);
-      assert.equal(o.pending, true, 'an approval it could not take back is marked for the PR');
+      assert.deepEqual(o.left, [`21 ${C.X}`, `22 ${C.MERGE1}`], 'the refused approval and every one after it are listed');
       assert.equal(warnings(o).length, 1);
       assert.match(
         warnings(o)[0],
@@ -1181,6 +1218,7 @@ const SCENARIOS = {
       assert.deepEqual(o.dismissed, [21, 21, 21, 22, 22, 22]);
       assert.equal(o.stdout.split('\n').filter((l) => l.startsWith('::warning::could not withdraw')).length, 2);
       incomplete(o);
+      assert.deepEqual(o.left, [`21 ${C.X}`, `22 ${C.MERGE1}`]);
     },
   ],
   'an approval that is already dismissed is noted, not warned about': [
@@ -1206,7 +1244,7 @@ const SCENARIOS = {
       noGit(o);
       assert.match(o.stdout, /^::warning::agent-review withdraw could not check PR #7 \(\S+ failed\), so no approval was withdrawn\.$/m);
       incomplete(o);
-      assert.equal(o.pending, true, 'unreadable reviews are marked for the PR');
+      assert.deepEqual(o.left, [], 'unreadable reviews are marked for the PR, with no review to name');
     },
   ],
   'a closed PR is left alone': [

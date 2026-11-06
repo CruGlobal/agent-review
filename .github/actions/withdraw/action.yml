@@ -10,7 +10,9 @@ description: >-
   back every bot approval it cannot check. Sets `complete` to true only when it
   finished and left no approval it had to take back. Leaves
   $RUNNER_TEMP/agent-review-withdraw.pending only when it read the reviews and
-  did not finish, so a caller can tell a person.
+  did not finish, so a caller can tell a person. It lists "<review id> <commit>"
+  for each bot approval that may still stand, and is empty when the reviews
+  could not be read.
 inputs:
   pr_number:
     description: Pull request number
@@ -195,8 +197,10 @@ runs:
         fi
         KEPT_AFTER=""
         if [ "$PLACE" = moved ]; then KEPT_AFTER=$EVENT_PR_TIME; fi
-        # A re-read before a dismissal is trusted only when it is later than this.
+        # A re-read before a dismissal is trusted only when it is later than this,
+        # and never than the event: a head can return to an older commit.
         TRUSTED_AT=$(jq -r '.updated_at // empty' "$WORK/pr.json")
+        if later_than "$EVENT_PR_TIME" "$TRUSTED_AT"; then TRUSTED_AT=$EVENT_PR_TIME; fi
         STATE=$(jq -r '.state // empty' "$WORK/pr.json")
         BASE_REF=$(jq -r '.base.ref // empty' "$WORK/pr.json")
         DEFAULT_BRANCH=$(jq -r '.base.repo.default_branch // empty' "$WORK/pr.json")
@@ -236,6 +240,9 @@ runs:
           COMPLETE=true
           exit 0
         fi
+        # Until the loop ends, every candidate may still stand.
+        awk '{ print $1, $2 }' "$WORK/candidates.txt" > "$PENDING"
+        : > "$WORK/left.txt"
 
         # When the base last changed comes from the timeline, which the author
         # cannot edit; GitHub's own retarget after a base branch is deleted
@@ -397,6 +404,7 @@ runs:
               || ! read -r NOW_HEAD NOW_AT <<< "$NOW" || ! is_sha "$NOW_HEAD"; then
               warn "could not read the head of PR #$PR again, so the bot's approval of $COMMIT was not withdrawn (review $REVIEW_ID). A person must dismiss it."
               LEFT=true
+              echo "$REVIEW_ID $COMMIT" >> "$WORK/left.txt"
               continue
             fi
             if [ "$NOW_HEAD" = "$COMMIT" ] && later_than "${NOW_AT:-}" "$TRUSTED_AT"; then
@@ -419,12 +427,14 @@ runs:
           elif grep -qF '(HTTP 403)' "$WORK/api.err"; then
             warn "GitHub refused to let this workflow dismiss reviews on PR #$PR (HTTP 403), so the bot's approvals of older commits stay. The token may lack pull-requests: write, a rule may limit who can dismiss reviews, or the API rate limit may be used up. A person must dismiss them."
             LEFT=true
+            { echo "$REVIEW_ID $COMMIT"; awk '{ print $1, $2 }' <&3; } >> "$WORK/left.txt"
             break
           elif [ "$(api "repos/$REPO/pulls/$PR/reviews/$REVIEW_ID" --jq .state)" = DISMISSED ]; then
             note "The bot's approval of $COMMIT on PR #$PR was already dismissed (review $REVIEW_ID)."
           else
             warn "could not withdraw the bot's approval of $COMMIT on PR #$PR (review $REVIEW_ID). A person must dismiss it."
             LEFT=true
+            echo "$REVIEW_ID $COMMIT" >> "$WORK/left.txt"
           fi
         done 3< "$WORK/candidates.txt"
-        if [ "$LEFT" = false ]; then COMPLETE=true; fi
+        if [ "$LEFT" = false ]; then COMPLETE=true; else cp "$WORK/left.txt" "$PENDING"; fi

@@ -47,25 +47,35 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         # Never fails the job. Comments only when the action left its pending
         # mark (it read the reviews and did not finish), so an outage before
-        # that warns here alone, and keeps one comment per PR, edited each time.
+        # that warns here alone. The marker names the reviews left standing:
+        # the same set edits the latest comment, a new set posts a new one.
         run: |
           set +e
           echo "::warning::agent-review withdraw did not finish, so the bot's approval of an older commit may still stand on PR #$PR. A person must check the PR's reviews." | tee -a "$GITHUB_STEP_SUMMARY"
-          [ -e "$RUNNER_TEMP/agent-review-withdraw.pending" ] || exit 0
+          PENDING="$RUNNER_TEMP/agent-review-withdraw.pending"
+          [ -e "$PENDING" ] || exit 0
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 0
+          LEFT=$(grep -E '^[0-9]+ [0-9a-f]{40}$' "$PENDING" | sort -n -u)
+          MARKER="<!-- agent-review-withdraw ids=$(printf '%s\n' "$LEFT" | cut -d' ' -f1 | paste -s -d, -) -->"
           {
-            printf '%s\n' '<!-- agent-review-withdraw -->'
-            printf '%s\n\n' "⚠️ agent-review could not finish taking back the bot's approval of an older commit after the latest change to this PR, so that approval may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
-            printf '%s\n' "[View the latest run log]($RUN_URL)"
+            printf '%s\n' "$MARKER"
+            if [ -n "$LEFT" ]; then
+              printf '%s\n\n' "⚠️ agent-review could not take back these approvals from \`github-actions\` after the latest change to this PR, so they may still stand:"
+              printf '%s\n' "$LEFT" | while read -r REVIEW COMMIT; do printf -- "- the approval of \`%s\` (review %s)\n" "${COMMIT:0:7}" "$REVIEW"; done
+              printf '\n%s\n\n' "Check this PR's reviews, and dismiss any of them that is not for the current head."
+            else
+              printf '%s\n\n' "⚠️ agent-review could not read this PR's reviews after the latest change to it, so the bot's approval of an older commit may still stand. Check this PR's reviews, and dismiss any agent-review approval from \`github-actions\` that is not for the current head."
+            fi
+            printf '%s\n' "[View the run log]($RUN_URL)"
           } > "$RUNNER_TEMP/withdraw-warning.md"
-          if ! IDS=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
-            --jq '.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | startswith("<!-- agent-review-withdraw -->"))) | .id'); then
+          if ! FOUND=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
+            --jq '.[] | select(.user.login == "github-actions[bot]" and ((.body // "") | startswith("<!-- agent-review-withdraw "))) | "\(.id) \(.body | split("\n")[0] | rtrimstr("\r"))"'); then
             echo "::warning::could not read the comments on PR #$PR, so it was not told."
             exit 0
           fi
-          ID=${IDS%%$'\n'*}
-          if [ -n "$ID" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$ID" -F body=@"$RUNNER_TEMP/withdraw-warning.md" > /dev/null \
+          LATEST=${FOUND##*$'\n'}
+          if [[ "${LATEST%% *}" =~ ^[0-9]+$ ]] && [ "${LATEST#* }" = "$MARKER" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/${LATEST%% *}" -F body=@"$RUNNER_TEMP/withdraw-warning.md" > /dev/null \
               || echo "::warning::could not update the agent-review comment on PR #$PR."
           else
             gh api "repos/$REPO/issues/$PR/comments" -F body=@"$RUNNER_TEMP/withdraw-warning.md" > /dev/null \

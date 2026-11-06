@@ -2111,6 +2111,8 @@ test('withdraw.yml and its action read the PR through the API and never check ou
     ["later_than() { is_time \"$1\" && is_time \"$2\" && [ \"$(jq -n --arg a \"$1\" --arg b \"$2\" '$a > $b')\" = true ]; }", 'only a strictly later GitHub time places a read'],
     ['elif [ -n "$EVENT_PR_TIME" ] && is_sha "$head" && later_than "$updated" "$EVENT_PR_TIME"; then', 'a read is placed after the event only by its time'],
     ['if [ "$NOW_HEAD" = "$COMMIT" ] && later_than "${NOW_AT:-}" "$TRUSTED_AT"; then', 'a re-read keeps an approval only when it is later than the trusted read'],
+    ['if later_than "$EVENT_PR_TIME" "$TRUSTED_AT"; then TRUSTED_AT=$EVENT_PR_TIME; fi', 'and later than the event, since a head can return to an older commit'],
+    ["awk '{ print $1, $2 }' \"$WORK/candidates.txt\" > \"$PENDING\"", 'until the loop ends, every candidate is listed as possibly left'],
     ['&& { [ -z "$EVENT_PR_TIME" ] || later_than "$TRUSTED_AT" "$EVENT_PR_TIME"; }; then', 'an old read showing the PR closed never stops the run'],
     ['gh api "repos/$REPO/pulls/$PR" > "$WORK/pr.next" 2> "$WORK/api.err"', 'each poll read is tried once'],
     [': > "$PENDING"\napi "repos/$REPO/pulls/$PR/reviews?per_page=100"', 'the pending mark is set right before the reviews are read'],
@@ -2131,7 +2133,7 @@ test('withdraw.yml and its action read the PR through the API and never check ou
   assert.match(writes[0].trim(), /^if api -X PUT "repos\/\$REPO\/pulls\/\$PR\/reviews\/\$REVIEW_ID\/dismissals" /);
 });
 
-test('withdraw.yml tells the PR in one comment, only when an approval may still stand, and never fails', (t) => {
+test('withdraw.yml names the approvals left standing, posts a new comment only when they change, and never fails', (t) => {
   const { parse } = require('yaml');
   const { writeFileSync, readFileSync: read, existsSync } = require('node:fs');
   const { spawnSync } = require('node:child_process');
@@ -2144,9 +2146,13 @@ test('withdraw.yml tells the PR in one comment, only when an approval may still 
   });
   const bash = spawnSync('sh', ['-c', 'command -v bash'], { encoding: 'utf8' }).stdout.trim();
   if (!bash) return t.skip('bash is not installed');
+  if (spawnSync('sh', ['-c', 'command -v jq']).status !== 0) return t.skip('jq is not installed');
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-withdraw-tell-'));
+  const A = 'abcdef1234567890abcdef1234567890abcdef12';
+  const B = '1234567890abcdef1234567890abcdef12345678';
   try {
-    // Logs each call, serves the comment list from $IDS, and fails a call whose kind is in $FAIL.
+    // Logs each call, runs the step's own --jq filter on the comments in $COMMENTS, and fails a
+    // call whose kind is in $FAIL.
     writeFileSync(
       join(dir, 'gh'),
       [
@@ -2154,15 +2160,18 @@ test('withdraw.yml tells the PR in one comment, only when an approval may still 
         'echo "$*" >> "$LOG"',
         'kind=post; case "$*" in *"-X PATCH"*) kind=patch ;; *--paginate*) kind=list ;; esac',
         'case " $FAIL " in *" $kind "*) echo "gh: HTTP 403" >&2; exit 1 ;; esac',
-        '[ "$kind" = list ] && { printf "%s" "$IDS"; exit 0; }',
+        'if [ "$kind" = list ]; then while [ $# -gt 0 ]; do [ "$1" = --jq ] && { jq -r "$2" "$COMMENTS"; exit; }; shift; done; exit 1; fi',
         'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$OUT" ;; esac; done',
         '',
       ].join('\n'),
       { mode: 0o755 },
     );
-    const tell = ({ pr = '7', pending = true, ids = '', fail = '' } = {}) => {
+    const BOT = 'github-actions[bot]';
+    const comment = (id, body, login = BOT) => ({ id, user: login === null ? null : { login }, body });
+    const tell = ({ pr = '7', pending = `21 ${A}\n`, list = [], fail = '' } = {}) => {
+      writeFileSync(join(dir, 'comments.json'), JSON.stringify(list));
       for (const f of ['log', 'body.md', 'agent-review-withdraw.pending']) rmSync(join(dir, f), { force: true });
-      if (pending) writeFileSync(join(dir, 'agent-review-withdraw.pending'), '');
+      if (pending !== null) writeFileSync(join(dir, 'agent-review-withdraw.pending'), pending);
       // The runner's default shell for a run step.
       const r = spawnSync(bash, ['--noprofile', '--norc', '-eo', 'pipefail', '-c', step.run], {
         encoding: 'utf8',
@@ -2172,7 +2181,7 @@ test('withdraw.yml tells the PR in one comment, only when an approval may still 
           GITHUB_STEP_SUMMARY: join(dir, 'summary.md'),
           OUT: join(dir, 'body.md'),
           LOG: join(dir, 'log'),
-          IDS: ids,
+          COMMENTS: join(dir, 'comments.json'),
           FAIL: fail,
           GH_TOKEN: 't',
           REPO: 'o/r',
@@ -2185,26 +2194,49 @@ test('withdraw.yml tells the PR in one comment, only when an approval may still 
       const calls = existsSync(join(dir, 'log')) ? read(join(dir, 'log'), 'utf8').split('\n').filter(Boolean) : [];
       return { calls, body: existsSync(join(dir, 'body.md')) ? read(join(dir, 'body.md'), 'utf8') : '', stdout: r.stdout };
     };
+    const POST = 'api repos/o/r/issues/7/comments -F body=@';
 
     const first = tell();
     assert.equal(first.calls.length, 2, first.calls.join('\n'));
-    assert.ok(first.calls[0].startsWith('api repos/o/r/issues/7/comments?per_page=100 --paginate --jq '), 'it looks for its own comment first');
-    assert.ok(first.calls[1].startsWith('api repos/o/r/issues/7/comments -F body=@'), 'and posts one when there is none');
-    assert.ok(first.body.startsWith('<!-- agent-review-withdraw -->\n'), first.body);
-    assert.ok(first.body.includes('so that approval may still stand'), first.body);
-    assert.ok(first.body.includes('[View the latest run log](https://x/run)'), first.body);
+    assert.ok(first.calls[0].startsWith('api repos/o/r/issues/7/comments?per_page=100 --paginate --jq '), 'it looks for its own comments first');
+    assert.ok(first.calls[1].startsWith(POST), 'and posts one when there is none');
+    assert.ok(first.body.startsWith('<!-- agent-review-withdraw ids=21 -->\n'), first.body);
+    assert.ok(first.body.includes('- the approval of `abcdef1` (review 21)'), first.body);
+    assert.ok(first.body.includes('[View the run log](https://x/run)'), first.body);
 
-    const again = tell({ ids: '901\n902' });
-    assert.equal(again.calls.length, 2);
-    assert.ok(again.calls[1].startsWith('api -X PATCH repos/o/r/issues/comments/901 -F body=@'), 'a later run edits the same comment');
+    const same = tell({
+      list: [
+        comment(800, '<!-- agent-review-withdraw ids=9 -->\nolder'),
+        comment(850, '<!-- agent-review -->\nthe report'),
+        comment(901, '<!-- agent-review-withdraw ids=21 -->\r\nstored with CRLF'),
+        comment(950, '<!-- agent-review-withdraw ids=99 -->\nplanted by a person', 'alice'),
+        comment(960, '<!-- agent-review-withdraw ids=98 -->\nfrom a deleted user', null),
+        comment(970, null),
+      ],
+    });
+    assert.ok(same.calls[1].startsWith('api -X PATCH repos/o/r/issues/comments/901 -F body=@'), 'the same approvals edit the bot\'s latest comment');
+    const changed = tell({ list: [comment(901, '<!-- agent-review-withdraw ids=9 -->\nx')] });
+    assert.ok(changed.calls[1].startsWith(POST), 'a new set of approvals posts a new comment, which notifies');
+    const older = tell({ list: [comment(800, '<!-- agent-review-withdraw ids=21 -->\nx'), comment(901, '<!-- agent-review-withdraw ids=9 -->\nx')] });
+    assert.ok(older.calls[1].startsWith(POST), 'only the latest comment is ever edited');
 
-    assert.deepEqual(tell({ pending: false }).calls, [], 'a run stopped before the reviews were read, as in an outage, only warns');
+    const two = tell({ pending: `22 ${B}\nnot a review\n21 ${A}\n` });
+    assert.ok(two.body.startsWith('<!-- agent-review-withdraw ids=21,22 -->\n'), 'the set is sorted, and lines that are not a review id and commit are dropped');
+    assert.ok(two.body.includes('(review 21)') && two.body.includes('- the approval of `1234567` (review 22)'), two.body);
+    assert.ok(!two.body.includes('not a review'), two.body);
+
+    const unread = tell({ pending: '' });
+    assert.ok(unread.body.startsWith('<!-- agent-review-withdraw ids= -->\n'), unread.body);
+    assert.ok(unread.body.includes("could not read this PR's reviews"), unread.body);
+
+    assert.deepEqual(tell({ pending: null }).calls, [], 'a run stopped before the reviews were read, as in an outage, only warns');
     assert.deepEqual(tell({ pr: '7 --repo x/y' }).calls, [], 'a PR number that is not a number never reaches gh');
+    assert.ok(tell({ list: [comment('9x', '<!-- agent-review-withdraw ids=21 -->\nx')] }).calls[1].startsWith(POST), 'a comment id that is not a number is never put in a URL');
     const unlisted = tell({ fail: 'list' });
     assert.equal(unlisted.calls.length, 1, 'no comment is added when the existing ones cannot be read');
     assert.match(unlisted.stdout, /^::warning::could not read the comments on PR #7/m);
     assert.match(tell({ fail: 'post' }).stdout, /^::warning::could not comment on PR #7\./m);
-    assert.match(tell({ ids: '901', fail: 'patch' }).stdout, /^::warning::could not update the agent-review comment on PR #7\./m);
+    assert.match(tell({ list: [comment(901, '<!-- agent-review-withdraw ids=21 -->\nx')], fail: 'patch' }).stdout, /^::warning::could not update the agent-review comment on PR #7\./m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
