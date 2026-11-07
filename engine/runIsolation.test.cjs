@@ -124,7 +124,7 @@ test('two runs in two checkouts and two sessions keep their own folders, locks, 
     assert.equal(releasedA.code, 0, releasedA.stderr);
     assert.deepEqual(readdirSync(t.runA), ['agent_review_report.md']);
     assert.equal(readFileSync(join(t.runB, 'review_env.sh'), 'utf8'), 'B\n');
-    assert.ok(existsSync(join(t.runB, 'run.lock')));
+    assert.ok(readdirSync(t.runB).some((f) => /^run\.lock\.\d+$/.test(f)), "run B's lock stays");
     assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], two).code, 0, 'another session can now take checkout A');
   } finally {
     rmSync(t.base, { recursive: true, force: true });
@@ -150,7 +150,7 @@ test('a second review of the same checkout from another live session is refused 
     assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], { cap: t.cap, env: session('after-clear') }).code, 0, 'so does its process after /clear');
 
     const dead = { cap: t.cap, env: session('session-one', 2 ** 22 + 12345) };
-    rmSync(join(t.runA, 'run.lock'));
+    for (const f of readdirSync(t.runA).filter((f) => f.startsWith('run.lock.'))) rmSync(join(t.runA, f));
     assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], dead).code, 0);
     assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], two).code, 0, 'a lock whose Claude Code process is gone is free');
 

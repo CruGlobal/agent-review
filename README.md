@@ -656,7 +656,10 @@ bash block in the skills is a new shell, so each one works the folder out again 
 `RUN_DIR=$(agent-review run-dir) || exit 1` before it sources the run's `review_env.sh`, and it
 stops if the command fails rather than falling back to `/tmp`. Subagents start outside the repo
 and never see `$RUN_DIR`, so the lane prompts get the folder as a literal path (`{{RUN_DIR}}`,
-with `{{REPO_ROOT}}` to `cd` into), and the lane's engine commands take `--run-dir`.
+with `"{{REPO_ROOT}}"` to `cd` into), and the lane's engine commands take `--run-dir`. The first
+block prints both paths (`run folder:` and `checkout:`) for the model to fill in. `run-dir`
+refuses a checkout whose path holds `"`, `$`, a backtick, a backslash or a line break, which a
+double-quoted shell word cannot carry; spaces are fine.
 
 - **The lock.** `agent-review run-dir --lock <skill>` takes the checkout for that run. It holds
   while the Claude Code process that took it runs (`CLAUDE_PID`), for at most 6 hours. Within
@@ -664,12 +667,17 @@ with `{{REPO_ROOT}}` to `cd` into), and the lane's engine commands take `--run-d
   replaces any hold an earlier run left when it stopped, so a retry works. yolo-review takes the
   checkout with `--outer`: the review and address runs inside it keep its hold and leave the
   folder to it. If a review or address prints `kept` with no yolo-review running, an earlier
-  yolo-review of that session stopped before its end; `--release yolo-review` frees it. Another live session gets exit 4 and a message naming the holder.
-  Every other `agent-review run-dir` call refuses the same way, so a block run from another
-  session's checkout stops instead of writing into that run.
+  yolo-review of that session stopped before its end; `--release yolo-review` frees it. Another
+  live session gets exit 4 and a message naming the holder. Every other `agent-review run-dir`
+  call refuses the same way, so a block run from another session's checkout stops instead of
+  writing into that run. The lock is a series of files, `run.lock.1`, `run.lock.2`, and so on,
+  and the highest one counts. Taking the checkout creates the next one with `O_EXCL`, so when two
+  sessions find the same stale lock, only one of them gets it.
 - **The end of a run.** `agent-review run-dir --release <skill>` frees the checkout and deletes
   the run's files, keeping only `agent_review_report.md` and any fix scripts in
-  `automated_fixes/`; the next run of that checkout clears both. Only the skill that took the
+  `automated_fixes/`; the next run of that checkout clears both. The posted report names a fix
+  script only by its file name, since it lives on the reviewer's machine; the review's terminal
+  summary lists each one as `bash "<full path>"`. Only the skill that took the
   lock cleans up, so a review inside yolo-review leaves the folder to yolo-review. Cleanup only
   ever touches a folder directly under `runs/`, and never another session's live run.
   `--release --force` deletes the lock alone.

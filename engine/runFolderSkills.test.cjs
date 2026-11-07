@@ -28,8 +28,13 @@ const SYNTAX_CHECKED = [
   'skills/review/SKILL.md',
   'skills/review/code-review-engine.md',
   'skills/yolo-review/SKILL.md',
+  'skills/address/SKILL.md',
   'skills/update-files/SKILL.md',
 ];
+// Lines a skill asks the model to fill in before running the block, so they are not shell yet.
+const FILL_INS = {
+  'skills/address/SKILL.md': ['git add -- <each file you changed or created for these fixes>'],
+};
 const RUN_DIR_LINE = /^RUN_DIR=\$\(agent-review run-dir(?: --lock [a-z-]+(?: --outer)?)?\) \|\| exit 1; export RUN_DIR$/;
 
 function bashBlocks(text) {
@@ -83,7 +88,16 @@ test('the run folder is never expanded inside single quotes or a quoted heredoc'
 
 test('the run-folder skill blocks parse under bash and zsh', () => {
   for (const file of SYNTAX_CHECKED) {
-    for (const [i, block] of bashBlocks(read(file)).entries()) {
+    const fillIns = FILL_INS[file] || [];
+    const blocks = bashBlocks(read(file));
+    for (const line of fillIns) {
+      assert.strictEqual(blocks.filter((b) => b.split('\n').includes(line)).length, 1, `${file} still has the fill-in line ${line}`);
+    }
+    for (const [i, raw] of blocks.entries()) {
+      const block = raw
+        .split('\n')
+        .map((l) => (fillIns.includes(l) ? ': fill-in' : l))
+        .join('\n');
       for (const sh of shells()) {
         const r = spawnSync(sh, ['-n', '-c', block], { encoding: 'utf8' });
         assert.strictEqual(r.status, 0, `${file} block ${i + 1} does not parse in ${sh}: ${r.stderr}`);
@@ -97,7 +111,7 @@ test('the review takes the checkout first and frees it at the end or on any earl
   const init = skill.slice(skill.indexOf('### Initialize'), skill.indexOf('### Gather PR Context & Diff Manifest'));
   const first = bashBlocks(init)[0];
   assert.ok(first.startsWith('RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR\n'));
-  assert.ok(first.includes('\necho "run folder: $RUN_DIR"\n'), 'the model learns the literal path for prompts and its own writes');
+  assert.ok(first.includes('\necho "run folder: $RUN_DIR"\necho "checkout: $(git rev-parse --show-toplevel)"\n'), 'the model learns the literal paths for prompts and its own writes');
   for (const f of ['agent_review_report.md', 'agent_review_ledger.json', 'agent_review_status.json', 'agent_review_inline.json', 'agent_review_safety.json', 'agent_review_comment.md']) {
     assert.match(first, new RegExp(`^rm -f [^\\n]*"\\$RUN_DIR"/${f.replace('.', '\\.')}`, 'm'), `Initialize clears an earlier ${f}`);
   }
@@ -128,12 +142,44 @@ test('the review takes the checkout first and frees it at the end or on any earl
 test('lane prompts carry the run folder and the checkout, and the posted Apply line finds the folder itself', () => {
   for (const name of ['archetype.md', 'code-review-lane.md']) {
     const text = read(`templates/${name}`);
-    assert.ok(text.includes('begin every command with `cd {{REPO_ROOT}} &&`'), `${name} runs from the checkout`);
+    assert.ok(text.includes('begin every command with `cd "{{REPO_ROOT}}" &&`'), `${name} runs from the checkout, quoted`);
+    assert.ok(!/cd \{\{REPO_ROOT\}\}/.test(text), `${name} never leaves the checkout path unquoted`);
     assert.ok(text.includes('{{RUN_DIR}}/'), `${name} names files in the run folder`);
   }
   assert.ok(read('templates/ledger-match.md').includes('`{{RUN_DIR}}/ledger_candidates.json`'));
+});
+
+test('the posted report names fix scripts without a local path, and the terminal summary gives their paths', () => {
   const report = read('templates/report.md');
-  assert.ok(report.includes('Apply, from the PR\'s checkout: `bash "$(agent-review run-dir)/automated_fixes/fix_N_category.sh"`'));
+  const apply = report.split('\n').find((l) => l.startsWith('Apply:'));
+  assert.strictEqual(
+    apply,
+    "Apply: `/agent-review:address fix N`, or read and run `fix_N_category.sh` from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine.",
+  );
+  for (const local of ['$(', 'run-dir', '/tmp', '$RUN_DIR/automated', '{{RUN_DIR}}', '/Users/', 'agent-review-']) {
+    assert.ok(!apply.includes(local), `the posted Apply line carries no local path or command: ${local}`);
+  }
+  const skill = read('skills/review/SKILL.md');
+  const stage2b = skill.slice(skill.indexOf('## Stage 2B'), skill.indexOf('## Stage 3'));
+  assert.ok(
+    bashBlocks(stage2b)[0].includes('for fix in "$RUN_DIR"/automated_fixes/fix_*.sh; do\n    [ -f "$fix" ] && printf \'  bash "%s"\\n\' "$fix"\n  done'),
+    'Stage 2B prints each fix script by its literal, quoted path',
+  );
+  const stage8 = skill.slice(skill.indexOf('## Stage 8'), skill.indexOf('### Finish the run'));
+  assert.ok(stage8.includes('the `bash "<path>"` line Stage 2B printed, word for word'), 'the summary repeats those lines');
+
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar fix paths '));
+  try {
+    mkdirSync(join(dir, 'automated_fixes'));
+    writeFileSync(join(dir, 'automated_fixes', 'fix_1_style.sh'), '');
+    const loop = bashBlocks(stage2b)[0].match(/^ {2}for fix in[\s\S]*?^ {2}done$/m)[0];
+    for (const sh of shells()) {
+      const printed = execFileSync(sh, ['-c', loop], { encoding: 'utf8', env: { ...process.env, RUN_DIR: dir } });
+      assert.strictEqual(printed, `  bash "${dir}/automated_fixes/fix_1_style.sh"\n`, `${sh}: a path with spaces comes out quoted`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('CI keeps its run folder at /tmp: the model steps set AGENT_REVIEW_CI', () => {
@@ -164,4 +210,14 @@ test('apply_all.sh finds the fix scripts beside itself, from any folder', (t) =>
     rmSync(dir, { recursive: true, force: true });
   }
   assert.ok(skill.includes('rm -rf "$RUN_DIR"/automated_fixes\nmkdir -p "$RUN_DIR"/automated_fixes'), 'each run starts with no earlier fix scripts');
+});
+
+test('update-files removes its fetched templates on every way it stops, the every-file-current one included', () => {
+  const skill = read('skills/update-files/SKILL.md');
+  const flat = skill.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('If every file is current, say so, run the **Clean up** block at the end of this skill, and stop here.'));
+  const cleanup = skill.slice(skill.indexOf('## Clean up'));
+  assert.ok(cleanup.replace(/\s+/g, ' ').includes('Whenever this skill stops after Stage 1, for any reason'));
+  assert.deepStrictEqual(bashBlocks(cleanup), ['UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"']);
+  assert.ok(skill.indexOf('## Clean up') > skill.indexOf('### Diff and PR'), 'the cleanup is the last step');
 });

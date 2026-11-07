@@ -20938,17 +20938,15 @@ var require_runDir = __commonJS({
   "engine/runDir.cjs"(exports2, module2) {
     "use strict";
     var { execFileSync } = require("node:child_process");
-    var { createHash, randomBytes } = require("node:crypto");
+    var { createHash } = require("node:crypto");
     var {
       closeSync,
-      existsSync,
       lstatSync,
       mkdirSync,
       openSync,
       readFileSync,
       readdirSync,
       realpathSync,
-      renameSync,
       rmSync,
       rmdirSync,
       writeFileSync
@@ -20970,6 +20968,7 @@ var require_runDir = __commonJS({
       const name = basename(toplevel).replace(/[^A-Za-z0-9._-]/g, "_") || "repo";
       return `${name}-${createHash("sha256").update(toplevel).digest("hex").slice(0, 12)}`;
     }
+    var QUOTE_BREAKER = /["$`\\\r\n]/;
     function gitToplevel(root) {
       let top;
       try {
@@ -20984,6 +20983,13 @@ var require_runDir = __commonJS({
         throw new RunDirError(
           `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`
         );
+      }
+      for (const path of [top, realpathSync(top)]) {
+        if (QUOTE_BREAKER.test(path)) {
+          throw new RunDirError(
+            `the checkout path ${JSON.stringify(path)} holds a character a double-quoted shell word cannot carry (", $, \`, \\ or a line break), so review prompts could not name it safely: move or rename the checkout`
+          );
+        }
       }
       return realpathSync(top);
     }
@@ -21074,52 +21080,59 @@ var require_runDir = __commonJS({
       if (Number.isInteger(lock.claude_pid) && lock.claude_pid > 0 && !isAlive(lock.claude_pid)) return false;
       return true;
     }
-    function writeLock(path, lock, { exclusive }) {
-      const text = JSON.stringify(lock) + "\n";
-      if (exclusive) {
-        const fd = openSync(path, "wx", 384);
-        try {
-          writeFileSync(fd, text);
-        } finally {
-          closeSync(fd);
-        }
-        return;
+    var LOCK_GENERATION = /^run\.lock\.([1-9][0-9]*)$/;
+    function lockGenerations(dir) {
+      let names = [];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return [];
       }
-      const tmp = `${path}.${randomBytes(8).toString("hex")}.tmp`;
-      writeFileSync(tmp, text, { mode: 384, flag: "wx" });
-      renameSync(tmp, path);
+      return names.map((name) => LOCK_GENERATION.exec(name)).filter(Boolean).map((m) => Number(m[1])).sort((a, b) => a - b);
     }
-    function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive }) {
-      const path = join(dir, LOCK_FILE);
+    function lockPath(dir, generation) {
+      return join(dir, `${LOCK_FILE}.${generation}`);
+    }
+    function currentLock(dir) {
+      const generation = lockGenerations(dir).at(-1) ?? 0;
+      return { generation, lock: generation ? readJsonOrNull(lockPath(dir, generation)) : null };
+    }
+    function removeLocks(dir, below = Infinity) {
+      for (const generation of lockGenerations(dir)) {
+        if (generation < below) rmSync(lockPath(dir, generation), { force: true });
+      }
+    }
+    function createExclusive(path, text) {
+      const fd = openSync(path, "wx", 384);
+      try {
+        writeFileSync(fd, text);
+      } finally {
+        closeSync(fd);
+      }
+    }
+    function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive, afterRead = () => {
+    } }) {
       const me = holderFrom(env);
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const missing = !existsSync(path);
-        const existing = readJsonOrNull(path);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { generation, lock: existing } = currentLock(dir);
         const live = existing && lockIsLive(existing, nowSeconds, isAlive);
         if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
         if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
-        const lock = {
-          ...me,
-          skill,
-          outer,
-          checkout: toplevel,
-          created: nowSeconds,
-          nonce: randomBytes(8).toString("hex")
-        };
+        afterRead();
+        const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
         try {
-          writeLock(path, lock, { exclusive: missing });
+          createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + "\n");
         } catch (e) {
           if (e.code === "EEXIST") continue;
-          throw new RunDirError(`could not write ${path}: ${e.message}`);
+          throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
         }
-        const written = readJsonOrNull(path);
-        if (written && written.nonce === lock.nonce) return { ok: true, taken: true, lock };
+        removeLocks(dir, generation + 1);
+        return { ok: true, taken: true, lock };
       }
-      const winner = readJsonOrNull(path);
-      return { ok: false, lock: winner || {} };
+      return { ok: false, lock: currentLock(dir).lock || {} };
     }
     function foreignLock({ dir, env = process.env, nowSeconds, isAlive = pidAlive }) {
-      const lock = readJsonOrNull(join(dir, LOCK_FILE));
+      const { lock } = currentLock(dir);
       if (!lock || !lockIsLive(lock, nowSeconds, isAlive) || sameHolder(lock, holderFrom(env))) return null;
       return lock;
     }
@@ -21146,19 +21159,18 @@ var require_runDir = __commonJS({
         return;
       }
       for (const name of entries) {
-        if (name === LOCK_FILE) continue;
+        if (LOCK_GENERATION.test(name)) continue;
         const kept = KEPT_AFTER_RUN.includes(name) && (name !== "automated_fixes" || hasFixScripts(join(dir, name)));
         if (!kept) rmSync(join(dir, name), { recursive: true, force: true });
       }
-      rmSync(join(dir, LOCK_FILE), { force: true });
+      removeLocks(dir);
       try {
         rmdirSync(dir);
       } catch {
       }
     }
     function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidAlive }) {
-      const path = join(dir, LOCK_FILE);
-      const lock = readJsonOrNull(path);
+      const { lock } = currentLock(dir);
       const me = holderFrom(env);
       if (lock && lockIsLive(lock, nowSeconds, isAlive)) {
         if (!sameHolder(lock, me)) return { ok: false, lock };
@@ -21168,7 +21180,7 @@ var require_runDir = __commonJS({
       return { ok: true, cleaned: true };
     }
     function forceRelease(dir) {
-      rmSync(join(dir, LOCK_FILE), { force: true });
+      removeLocks(dir);
     }
     module2.exports = {
       RUNS_DIR,
@@ -21185,6 +21197,8 @@ var require_runDir = __commonJS({
       holderFrom,
       identified,
       sameHolder,
+      currentLock,
+      lockGenerations,
       pidAlive,
       lockIsLive,
       takeLock,

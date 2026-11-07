@@ -1,16 +1,14 @@
 'use strict';
 const { execFileSync } = require('node:child_process');
-const { createHash, randomBytes } = require('node:crypto');
+const { createHash } = require('node:crypto');
 const {
   closeSync,
-  existsSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
   realpathSync,
-  renameSync,
   rmSync,
   rmdirSync,
   writeFileSync,
@@ -38,6 +36,9 @@ function runDirName(toplevel) {
   return `${name}-${createHash('sha256').update(toplevel).digest('hex').slice(0, 12)}`;
 }
 
+// Prompts name the checkout as "{{REPO_ROOT}}" inside a double-quoted shell word.
+const QUOTE_BREAKER = /["$`\\\r\n]/;
+
 function gitToplevel(root) {
   let top;
   try {
@@ -52,6 +53,13 @@ function gitToplevel(root) {
     throw new RunDirError(
       `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`,
     );
+  }
+  for (const path of [top, realpathSync(top)]) {
+    if (QUOTE_BREAKER.test(path)) {
+      throw new RunDirError(
+        `the checkout path ${JSON.stringify(path)} holds a character a double-quoted shell word cannot carry (", $, \`, \\ or a line break), so review prompts could not name it safely: move or rename the checkout`,
+      );
+    }
   }
   return realpathSync(top);
 }
@@ -157,59 +165,78 @@ function lockIsLive(lock, nowSeconds, isAlive = pidAlive) {
   return true;
 }
 
-function writeLock(path, lock, { exclusive }) {
-  const text = JSON.stringify(lock) + '\n';
-  if (exclusive) {
-    const fd = openSync(path, 'wx', 0o600);
-    try {
-      writeFileSync(fd, text);
-    } finally {
-      closeSync(fd);
-    }
-    return;
+// The lock is a series of files, run.lock.1, run.lock.2, ..., and the highest one is the lock.
+// Taking the checkout means creating the next one with O_EXCL, so of any sessions that read the
+// same lock, exactly one can take it.
+const LOCK_GENERATION = /^run\.lock\.([1-9][0-9]*)$/;
+
+function lockGenerations(dir) {
+  let names = [];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
   }
-  const tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
-  writeFileSync(tmp, text, { mode: 0o600, flag: 'wx' });
-  renameSync(tmp, path);
+  return names
+    .map((name) => LOCK_GENERATION.exec(name))
+    .filter(Boolean)
+    .map((m) => Number(m[1]))
+    .sort((a, b) => a - b);
+}
+
+function lockPath(dir, generation) {
+  return join(dir, `${LOCK_FILE}.${generation}`);
+}
+
+// The checkout's lock: its generation (0 when there is none) and its contents (null when unreadable).
+function currentLock(dir) {
+  const generation = lockGenerations(dir).at(-1) ?? 0;
+  return { generation, lock: generation ? readJsonOrNull(lockPath(dir, generation)) : null };
+}
+
+function removeLocks(dir, below = Infinity) {
+  for (const generation of lockGenerations(dir)) {
+    if (generation < below) rmSync(lockPath(dir, generation), { force: true });
+  }
+}
+
+function createExclusive(path, text) {
+  const fd = openSync(path, 'wx', 0o600);
+  try {
+    writeFileSync(fd, text);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 // Takes the checkout's lock for `skill`. Never takes a live lock from another session. Inside this
 // session's own hold, a skill run by an outer skill (review inside yolo-review) leaves the hold to
 // it; any other hold this session left was a run that stopped, so it is replaced, and an outer
-// skill always replaces it.
-function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive }) {
-  const path = join(dir, LOCK_FILE);
+// skill always replaces it. `afterRead` runs between reading the lock and taking it, for tests.
+function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive, afterRead = () => {} }) {
   const me = holderFrom(env);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const missing = !existsSync(path);
-    const existing = readJsonOrNull(path);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { generation, lock: existing } = currentLock(dir);
     const live = existing && lockIsLive(existing, nowSeconds, isAlive);
     if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
     if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
-    const lock = {
-      ...me,
-      skill,
-      outer,
-      checkout: toplevel,
-      created: nowSeconds,
-      nonce: randomBytes(8).toString('hex'),
-    };
+    afterRead();
+    const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
     try {
-      writeLock(path, lock, { exclusive: missing });
+      createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + '\n');
     } catch (e) {
       if (e.code === 'EEXIST') continue;
-      throw new RunDirError(`could not write ${path}: ${e.message}`);
+      throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
     }
-    const written = readJsonOrNull(path);
-    if (written && written.nonce === lock.nonce) return { ok: true, taken: true, lock };
+    removeLocks(dir, generation + 1);
+    return { ok: true, taken: true, lock };
   }
-  const winner = readJsonOrNull(path);
-  return { ok: false, lock: winner || {} };
+  return { ok: false, lock: currentLock(dir).lock || {} };
 }
 
 // Another live session's lock on this checkout, or null.
 function foreignLock({ dir, env = process.env, nowSeconds, isAlive = pidAlive }) {
-  const lock = readJsonOrNull(join(dir, LOCK_FILE));
+  const { lock } = currentLock(dir);
   if (!lock || !lockIsLive(lock, nowSeconds, isAlive) || sameHolder(lock, holderFrom(env))) return null;
   return lock;
 }
@@ -245,11 +272,11 @@ function cleanRunDir(dir) {
     return;
   }
   for (const name of entries) {
-    if (name === LOCK_FILE) continue;
+    if (LOCK_GENERATION.test(name)) continue;
     const kept = KEPT_AFTER_RUN.includes(name) && (name !== 'automated_fixes' || hasFixScripts(join(dir, name)));
     if (!kept) rmSync(join(dir, name), { recursive: true, force: true });
   }
-  rmSync(join(dir, LOCK_FILE), { force: true });
+  removeLocks(dir);
   try {
     rmdirSync(dir);
   } catch {
@@ -260,8 +287,7 @@ function cleanRunDir(dir) {
 // Ends `skill`'s hold on the checkout. Only the skill that took the lock frees it and cleans the
 // folder, so a skill run by another (review inside yolo-review) leaves both to the outer one.
 function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidAlive }) {
-  const path = join(dir, LOCK_FILE);
-  const lock = readJsonOrNull(path);
+  const { lock } = currentLock(dir);
   const me = holderFrom(env);
   if (lock && lockIsLive(lock, nowSeconds, isAlive)) {
     if (!sameHolder(lock, me)) return { ok: false, lock };
@@ -272,7 +298,7 @@ function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidA
 }
 
 function forceRelease(dir) {
-  rmSync(join(dir, LOCK_FILE), { force: true });
+  removeLocks(dir);
 }
 
 module.exports = {
@@ -290,6 +316,8 @@ module.exports = {
   holderFrom,
   identified,
   sameHolder,
+  currentLock,
+  lockGenerations,
   pidAlive,
   lockIsLive,
   takeLock,

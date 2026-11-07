@@ -15,7 +15,7 @@ The diff for this review pass is {{DIFF_PATH}}. STEP 3 shows you the parts of it
 
 BEFORE YOU START:
 
-Your shell may start outside the repository, so begin every command with `cd {{REPO_ROOT}} &&`.
+Your shell may start outside the repository, so begin every command with `cd "{{REPO_ROOT}}" &&`.
 This review's files live in its run folder, {{RUN_DIR}}. Each `agent-review capture`,
 `capture-wait`, and `code-review-proof` command below names it with `--run-dir {{RUN_DIR}}`, so it
 reads this review's files even while other reviews run on this machine; keep that flag exactly as

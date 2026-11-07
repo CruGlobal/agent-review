@@ -102,7 +102,8 @@ neither does a file you write with the Write tool. So in every prompt you hand a
 file you write yourself, and every path you show the user, write the run folder's literal path
 where this skill says `$RUN_DIR`: the path Stage 0A's first block prints as `run folder: <path>`
 (`/tmp` in CI). Fill the templates' `{{RUN_DIR}}` the same way, and `{{REPO_ROOT}}` with the
-checkout's top folder (`git rev-parse --show-toplevel`).
+path the same block prints as `checkout:`. `agent-review run-dir` refuses a checkout whose path a
+double-quoted shell word cannot carry, so that path is safe inside the templates' quotes.
 
 ⚠️ **STOPPING EARLY**: whenever the run stops before Stage 8, for any reason (a ❌ line, a
 skip, a head already reviewed, a lane that failed twice), run Stage 8's **Finish the run** block
@@ -125,6 +126,7 @@ RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR
 . "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
 echo "run folder: $RUN_DIR"
+echo "checkout: $(git rev-parse --show-toplevel)"
 cat > "$RUN_DIR"/review_args.txt <<'REVIEW_ARGS_END_7f3a'
 REVIEW_ARGS_END_7f3a
 
@@ -1141,7 +1143,7 @@ filled copy:
 | `{{CONTEXT}}`           | A compact rendering of `$RUN_DIR/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
 | `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `$RUN_DIR/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
 | `{{RUN_DIR}}`           | The run folder's literal path, the one Stage 0A printed as `run folder:`. The lane writes its findings and fix scripts there, and reads the changed-file list from there. |
-| `{{REPO_ROOT}}`         | The checkout's top folder (`git rev-parse --show-toplevel`). The lane's shell may start outside the repository, so it runs every command from there. |
+| `{{REPO_ROOT}}`         | The checkout's top folder, the path Stage 0A printed as `checkout:`. The lane's shell may start outside the repository, so it runs every command from there. |
 | `{{DIFF_PATH}}`         | Read `$RUN_DIR/slice_manifest.json` (written right after the plan — see above) for this agent's `<id>` entry. `mode: "full"` → `$RUN_DIR/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `$RUN_DIR/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. **No manifest entry at all** (deep mode's config-only lanes — agents with no plan entry, so `agent-review slice` never sliced them) → treat it as a full-diff lane: fill `$RUN_DIR/pr_diff.txt`. |
 
 **`{{IMPACT}}` content** — the template splices this in immediately after instruction 5, so it must
@@ -1340,6 +1342,11 @@ echo "export FIX_COUNT=\"$FIX_COUNT\"" >> "$RUN_DIR"/review_env.sh
 
 if [ "$FIX_COUNT" -gt 0 ]; then
   echo "Found $FIX_COUNT automated fixes"
+  # The posted report names fix scripts only by file name; their paths are shown here, locally.
+  echo "Fix scripts (model-generated; read each before running it):"
+  for fix in "$RUN_DIR"/automated_fixes/fix_*.sh; do
+    [ -f "$fix" ] && printf '  bash "%s"\n' "$fix"
+  done
 
   # Organize by category (categories come from the agents' own Category: fields)
   echo "By Category:" > "$RUN_DIR"/fix_summary.txt
@@ -2313,6 +2320,8 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 **Suggested Fixes**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔧 [FIX_COUNT] fixes generated (dry-run by default; review before applying)
+[FOR EACH fix script, the `bash "<path>"` line Stage 2B printed, word for word:]
+   bash "[full path of fix_N_category.sh]"
 
 **Dependency Impact**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

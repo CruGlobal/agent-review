@@ -91,8 +91,9 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   user also wants locally posted reports to approve: that trusts a writer's posted report, a
   stronger grant than the CI path.
 
-If every file is current, say so and stop here. In a local-only repo, do not stop before the
-removal check in Stage 4 if any CI file is still installed.
+If every file is current, say so, run the **Clean up** block at the end of this skill, and stop
+here. In a local-only repo, do not stop before the removal check in Stage 4 if any CI file is
+still installed.
 
 ## Stage 3 — Carry over the repo's own settings
 
@@ -187,7 +188,10 @@ default branch directly, and never push without the user's go-ahead.
 If nothing changed after the merge, leave the working tree clean and say the repo was already
 current.
 
-Either way, finish by removing the fetched templates:
+## Clean up
+
+Whenever this skill stops after Stage 1, for any reason (every file current, nothing changed, the
+PR handed over, or an error), remove the fetched templates:
 
 ```bash
 UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"

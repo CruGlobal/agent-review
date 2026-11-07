@@ -16,7 +16,7 @@ SHA-PINNED CROSS-REPOSITORY CONTEXT:
 
 INSTRUCTIONS:
 
-Your shell may start outside the repository, so begin every command with `cd {{REPO_ROOT}} &&`.
+Your shell may start outside the repository, so begin every command with `cd "{{REPO_ROOT}}" &&`.
 This review's files live in {{RUN_DIR}}; use the paths below exactly as written.
 
 1. Read {{DIFF_PATH}} for the diff — your assigned slice of hunks matching your triggers for a

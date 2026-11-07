@@ -19,6 +19,8 @@ const { join, basename } = require('node:path');
 const os = require('node:os');
 const {
   LOCK_FILE,
+  currentLock,
+  lockGenerations,
   LOCK_MAX_AGE_SECONDS,
   RunDirError,
   runDirName,
@@ -175,12 +177,12 @@ test('takeLock takes a free checkout, lets its session back in, and refuses anot
     const first = takeLock({ dir, skill: 'review', toplevel: '/w/a', env: S1, nowSeconds: NOW, isAlive: alive });
     assert.equal(first.ok, true);
     assert.equal(first.taken, true);
-    const lock = JSON.parse(readFileSync(join(dir, LOCK_FILE), 'utf8'));
+    const lock = currentLock(dir).lock;
     assert.equal(lock.session_id, 'session-one');
     assert.equal(lock.claude_pid, 111);
     assert.equal(lock.skill, 'review');
     assert.equal(lock.checkout, '/w/a');
-    assert.equal(statSync(join(dir, LOCK_FILE)).mode & 0o777, 0o600);
+    assert.equal(statSync(join(dir, `${LOCK_FILE}.1`)).mode & 0o777, 0o600);
 
     const again = takeLock({ dir, skill: 'address', toplevel: '/w/a', env: S1, nowSeconds: NOW + 5, isAlive: alive });
     assert.deepEqual([again.ok, again.taken, again.lock.skill], [true, true, 'address'], 'a hold this session left is replaced');
@@ -197,13 +199,14 @@ test('takeLock takes a free checkout, lets its session back in, and refuses anot
 
     const takeover = takeLock({ dir, skill: 'review', toplevel: '/w/a', env: S2, nowSeconds: NOW + 5, isAlive: dead });
     assert.deepEqual([takeover.ok, takeover.taken], [true, true], 'a lock whose process is gone is free');
-    assert.equal(JSON.parse(readFileSync(join(dir, LOCK_FILE), 'utf8')).session_id, 'session-two');
+    assert.equal(currentLock(dir).lock.session_id, 'session-two');
+    assert.deepEqual(lockGenerations(dir), [3], 'each take is the next generation, and older ones go');
   });
 });
 
 test('a corrupt lock is free', () => {
   withTemp('ar-rundir-lock-', (dir) => {
-    writeFileSync(join(dir, LOCK_FILE), 'not json');
+    writeFileSync(join(dir, `${LOCK_FILE}.1`), 'not json');
     assert.equal(takeLock({ dir, skill: 'review', toplevel: null, env: S2, nowSeconds: NOW, isAlive: alive }).ok, true);
   });
 });
@@ -242,9 +245,9 @@ test('release leaves a hold another skill of this session took, and refuses anot
     const refused = releaseLock({ dir, skill: 'yolo-review', env: S2, nowSeconds: NOW, isAlive: alive });
     assert.equal(refused.ok, false);
     assert.ok(existsSync(join(dir, 'review_env.sh')), 'nothing was deleted');
-    assert.ok(existsSync(join(dir, LOCK_FILE)));
+    assert.notEqual(currentLock(dir).generation, 0);
     assert.equal(releaseLock({ dir, skill: 'yolo-review', env: S1, nowSeconds: NOW, isAlive: alive }).cleaned, true);
-    assert.equal(existsSync(join(dir, LOCK_FILE)), false);
+    assert.deepEqual(lockGenerations(dir), []);
   });
 });
 
@@ -263,7 +266,7 @@ test('an outer hold keeps the runs inside it from cleaning up, and replaces what
     const dir = runFolder(parent);
     const lock = (skill, outer = false) => takeLock({ dir, skill, toplevel: '/w/a', outer, env: S1, nowSeconds: NOW, isAlive: alive });
     const release = (skill) => releaseLock({ dir, skill, env: S1, nowSeconds: NOW, isAlive: alive });
-    const holder = () => JSON.parse(readFileSync(join(dir, LOCK_FILE), 'utf8')).skill;
+    const holder = () => currentLock(dir).lock.skill;
     // A review this session stopped before its end left its hold behind.
     assert.equal(lock('review').taken, true);
     // yolo-review replaces it, and the review and address it runs work inside its hold.
@@ -277,9 +280,82 @@ test('an outer hold keeps the runs inside it from cleaning up, and replaces what
       assert.ok(existsSync(join(dir, 'yolo_env.sh')), `${skill} never cleans yolo-review's files`);
     }
     assert.equal(release('yolo-review').cleaned, true);
-    assert.equal(existsSync(join(dir, LOCK_FILE)), false);
+    assert.deepEqual(lockGenerations(dir), []);
     // A yolo-review this session left is replaced by the next one, never kept by it.
     lock('yolo-review', true);
     assert.equal(lock('yolo-review', true).taken, true);
+  });
+});
+
+test('two sessions taking over the same stale lock: exactly one wins, whatever the interleaving', () => {
+  const S3 = { CLAUDE_CODE_SESSION_ID: 'session-three', CLAUDE_PID: '333' };
+  const take = (dir, env, afterRead) =>
+    takeLock({ dir, skill: 'review', toplevel: '/w/a', env, nowSeconds: NOW, isAlive: (pid) => pid !== 111, afterRead });
+  const staleLock = (dir) => writeFileSync(join(dir, `${LOCK_FILE}.4`), JSON.stringify({ session_id: 'session-one', claude_pid: 111, skill: 'review', created: NOW }));
+
+  // S2 reads the stale lock, then S3 reads it and takes it, and only then does S2 try.
+  withTemp('ar-rundir-race-', (dir) => {
+    staleLock(dir);
+    let inner;
+    const outer = take(dir, S2, () => {
+      inner = inner ?? take(dir, S3);
+    });
+    assert.deepEqual([inner.ok, inner.taken], [true, true], 'the session that took it first holds it');
+    assert.equal(outer.ok, false, 'the slower one is refused');
+    assert.equal(outer.lock.session_id, 'session-three');
+    assert.equal(currentLock(dir).lock.session_id, 'session-three');
+    assert.deepEqual(lockGenerations(dir), [5]);
+  });
+
+  // Both read the stale lock; S3 takes it and frees it again before S2 tries, so S2 then takes a free checkout.
+  withTemp('ar-rundir-race-', (parent) => {
+    const dir = runFolder(parent);
+    staleLock(dir);
+    let inner;
+    const outer = take(dir, S2, () => {
+      if (inner) return;
+      inner = take(dir, S3);
+      releaseLock({ dir, skill: 'review', env: S3, nowSeconds: NOW, isAlive: () => true });
+    });
+    assert.equal(inner.ok, true);
+    assert.deepEqual([outer.ok, outer.taken], [true, true]);
+    assert.equal(currentLock(dir).lock.session_id, 'session-two');
+  });
+
+  // Three sessions read the same stale lock: exactly one ends up holding it.
+  withTemp('ar-rundir-race-', (dir) => {
+    staleLock(dir);
+    const results = [];
+    const S4 = { CLAUDE_CODE_SESSION_ID: 'session-four', CLAUDE_PID: '444' };
+    results.push(take(dir, S2, () => {
+      if (results.length > 0) return;
+      results.push(take(dir, S3, () => {
+        if (results.length > 0) return;
+        results.push(take(dir, S4));
+      }));
+    }));
+    assert.equal(results.filter((r) => r.ok).length, 1, JSON.stringify(results));
+    assert.equal(currentLock(dir).lock.session_id, results.find((r) => r.ok).lock.session_id);
+  });
+});
+
+test('a checkout whose path a double-quoted shell word cannot carry has no run folder, and one with a space does', () => {
+  withTemp('ar-rundir-names-', (parent) => {
+    const repo = (name) => {
+      const root = join(parent, name);
+      mkdirSync(root);
+      execFileSync('git', ['init', '-q', root]);
+      return root;
+    };
+    for (const name of ['quote"d', 'dollar$HOME', 'back`tick', 'back\\slash']) {
+      assert.throws(
+        () => resolveRunDir({ root: repo(name), env: { AGENT_REVIEW_CAPTURE_DIR: '/tmp/cap' } }),
+        (e) => e instanceof RunDirError && /holds a character a double-quoted shell word cannot carry/.test(e.message),
+        name,
+      );
+    }
+    const spaced = resolveRunDir({ root: repo('with space'), env: { AGENT_REVIEW_CAPTURE_DIR: '/tmp/cap' } });
+    assert.equal(spaced.toplevel, join(parent, 'with space'));
+    assert.match(spaced.dir, /\/runs\/with_space-[0-9a-f]{12}$/, 'the run folder itself never holds the space');
   });
 });

@@ -94,7 +94,7 @@ this file) and fill its sixteen placeholders:
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{RUN_ID}}`              | `$REVIEW_ID`, the `<id>` in the `armed <id>: <args>` line |
 | `{{RUN_DIR}}`             | The run folder's literal path, the one `SKILL.md`'s Stage 0A printed as `run folder:`. The lane passes it to every engine command it runs, so it reads this run's capture and nobody else's. |
-| `{{REPO_ROOT}}`           | The checkout's top folder (`git rev-parse --show-toplevel`). The lane's shell may start outside the repository, so it runs every command from there. |
+| `{{REPO_ROOT}}`           | The checkout's top folder, the path `SKILL.md`'s Stage 0A printed as `checkout:`. The lane's shell may start outside the repository, so it runs every command from there. |
 | `{{ATTEMPT}}`             | `$CODE_REVIEW_ATTEMPT`, the value the block above prints as `code-review attempt:` (`$REVIEW_ID-1`); on a relaunch, the value Stage 2's relaunch block prints (`$REVIEW_ID-2`) |
 | `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `$RUN_DIR/review_env.sh`.                                                                                                                        |
 | `{{SKILL_ARGS}}`          | The args printed by `agent-review capture arm`, composed as `"$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"`. `MAX_FINDINGS_FLAG` is ` --max-findings <n>` when `plan.engine.maxFindings` is set, else ` --max-findings default`. Copy them exactly from the `armed <id>: <args>` line the block prints. |
