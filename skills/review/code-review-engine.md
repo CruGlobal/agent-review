@@ -13,7 +13,7 @@ Paths are relative to this file's directory, which is also `SKILL.md`'s.
 `matchedBy: "engine"`, `tier` set to the engine's model, and `rules` listing the rule docs of the
 lanes it replaces. The lanes in `engine.replaces` are not in `agents[]`.
 
-**The launch list.** Under the `code-review` engine, with `ENGINE` read from `/tmp/review_env.sh`, the
+**The launch list.** Under the `code-review` engine, with `ENGINE` read from `$RUN_DIR/review_env.sh`, the
 launch list is the plan's `agents[]`, exactly, in every mode. Do not add, drop, or reorder. Quick does
 not apply its 3-agent cap and deep does not add config-only lanes: the plan already holds the
 `code-review` lane, every `engine.always` lane, and every other triggered lane outside
@@ -41,23 +41,24 @@ and only for a Skill call whose args match the armed args exactly. The same bloc
 lane's diff:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
 if [ -z "$CODE_REVIEW_TARGET" ]; then
   echo "❌ No /code-review target. Run the learnings and impact block in SKILL.md's Stage 1 first."
   exit 1
 fi
-MAX_FINDINGS=$(node -e 'const e = require("/tmp/review_plan.json").engine || {}; console.log(e.maxFindings == null ? "" : String(e.maxFindings))')
+MAX_FINDINGS=$(node -e 'const e = require(process.env.RUN_DIR + "/review_plan.json").engine || {}; console.log(e.maxFindings == null ? "" : String(e.maxFindings))')
 MAX_FINDINGS_FLAG=" --max-findings ${MAX_FINDINGS:-default}"
 CODE_REVIEW_ARGS="$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"
 REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"
 if [ -z "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ] && [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   # The merge base, or the base branch's tip when there is none, as RANGE in SKILL.md.
   REVIEWED_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF" 2>/dev/null) || REVIEWED_BASE="$BASE_REF"
-  git diff "$REVIEWED_BASE" "$HEAD_REF" > /tmp/code_review_diff.txt
-  CODE_REVIEW_DIFF=/tmp/code_review_diff.txt
+  git diff "$REVIEWED_BASE" "$HEAD_REF" > "$RUN_DIR"/code_review_diff.txt
+  CODE_REVIEW_DIFF="$RUN_DIR"/code_review_diff.txt
 else
-  CODE_REVIEW_DIFF=/tmp/pr_diff.txt
+  CODE_REVIEW_DIFF="$RUN_DIR"/pr_diff.txt
   REVIEWED_BASE="${RANGE%%..*}"
 fi
 if [ -z "$REVIEWED_HEAD" ] || [ -z "$REVIEWED_BASE" ]; then
@@ -66,7 +67,7 @@ if [ -z "$REVIEWED_HEAD" ] || [ -z "$REVIEWED_BASE" ]; then
 fi
 CODE_REVIEW_ATTEMPT="$REVIEW_ID-1"
 agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS"
-cat >> /tmp/review_env.sh <<EOF
+cat >> "$RUN_DIR"/review_env.sh <<EOF
 export CODE_REVIEW_ARGS="$CODE_REVIEW_ARGS" CODE_REVIEW_DIFF="$CODE_REVIEW_DIFF" CODE_REVIEW_ATTEMPT="$CODE_REVIEW_ATTEMPT"
 export REVIEWED_HEAD="$REVIEWED_HEAD" REVIEWED_BASE="$REVIEWED_BASE"
 EOF
@@ -87,20 +88,22 @@ From here until Stage 2 judges this lane, capture stays armed. If the run stops 
 any reason, run `agent-review capture disarm` before you stop (Stage 2, step 5).
 
 Then read the plugin's `templates/code-review-lane.md` (`../../templates/code-review-lane.md` from
-this file) and fill its fourteen placeholders:
+this file) and fill its sixteen placeholders:
 
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{RUN_ID}}`              | `$REVIEW_ID`, the `<id>` in the `armed <id>: <args>` line |
+| `{{RUN_DIR}}`             | The run folder's literal path, the one `SKILL.md`'s Stage 0A printed as `run folder:`. The lane passes it to every engine command it runs, so it reads this run's capture and nobody else's. |
+| `{{REPO_ROOT}}`           | The checkout's top folder, the path `SKILL.md`'s Stage 0A printed as `checkout:`. The lane's shell may start outside the repository, so it runs every command from there. |
 | `{{ATTEMPT}}`             | `$CODE_REVIEW_ATTEMPT`, the value the block above prints as `code-review attempt:` (`$REVIEW_ID-1`); on a relaunch, the value Stage 2's relaunch block prints (`$REVIEW_ID-2`) |
-| `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `/tmp/review_env.sh`.                                                                                                                        |
+| `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `$RUN_DIR/review_env.sh`.                                                                                                                        |
 | `{{SKILL_ARGS}}`          | The args printed by `agent-review capture arm`, composed as `"$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"`. `MAX_FINDINGS_FLAG` is ` --max-findings <n>` when `plan.engine.maxFindings` is set, else ` --max-findings default`. Copy them exactly from the `armed <id>: <args>` line the block prints. |
 | `{{RETRY_NOTE}}`          | Empty on the first launch and on a relaunch with a new capture; the note from Stage 2 on a relaunch with the same capture |
 | `{{PROFILE_INSTRUCTION}}` | For `chill`: "This repository uses the chill profile, so the report hides findings below 4 that no other lane backs up. Score every finding honestly anyway; never drop or lower one for the profile." For `standard` and `assertive`: "Score every finding honestly." |
 | `{{RISK_CONTEXT}}`        | The same bullet block as the archetype's `{{RISK_CONTEXT}}`, for this lane (`Selected because: engine`, `Model tier: <its tier>`).                                                               |
-| `{{DIFF_PATH}}`           | The path the block above prints as `code-review diff:`. That is `/tmp/code_review_diff.txt` (`git diff "$REVIEWED_BASE" "$HEAD_REF"`, from the merge base, or from `BASE_REF` when there is none) for a full PR review, and `/tmp/pr_diff.txt` for incremental and range reviews |
+| `{{DIFF_PATH}}`           | The path the block above prints as `code-review diff:`. That is `$RUN_DIR/code_review_diff.txt` (`git diff "$REVIEWED_BASE" "$HEAD_REF"`, from the merge base, or from `BASE_REF` when there is none) for a full PR review, and `$RUN_DIR/pr_diff.txt` for incremental and range reviews |
 | `{{SCORING_RULES}}`       | The lane's `rules[]` (the `path_rules` this diff matches, then each enabled replaced lane's rule docs), rendered exactly like the archetype's `{{RULES}}`. `none` when `rules[]` is empty.       |
-| `{{LEARNINGS}}`           | Entries from `/tmp/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
+| `{{LEARNINGS}}`           | Entries from `$RUN_DIR/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** in `SKILL.md`'s Stage 1), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
 | `{{EXCLUDED_PATHS}}`      | The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.                                                                          |
 | `{{REVIEWED_HEAD}}`       | `$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR. Stage 2's proof reads the same saved value. |
@@ -123,7 +126,7 @@ Under the `code-review` engine, the `code-review` lane must also prove `/code-re
 and that it scored or dropped every raw finding. Judge it with the steps below, in place of the
 findings-file cross-check and the unchanged-prompt retry in `SKILL.md`'s Stage 2. The rest of that
 stage still holds: a lane that fails twice fails the run. Below, `<attempt>` is the attempt id the
-lane was launched with, saved as `CODE_REVIEW_ATTEMPT` in `/tmp/review_env.sh`: `$REVIEW_ID-1`, or
+lane was launched with, saved as `CODE_REVIEW_ATTEMPT` in `$RUN_DIR/review_env.sh`: `$REVIEW_ID-1`, or
 `$REVIEW_ID-2` after a relaunch.
 
 **1. Wait for the final line.** The lane's final line is one of three:
@@ -136,7 +139,8 @@ harness resumes the same lane when /code-review finishes. After an early handbac
 a Bash timeout of 600000 (10 minutes), and run it again each time it exits 3:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 agent-review capture-wait --run "$REVIEW_ID" --effort "$EFFORT"
 ```
 
@@ -150,21 +154,22 @@ judge its next final line. If none arrives by then, judge the lane on what it ha
   is missing or unusable. Relaunch with a new capture (step 3).
 - Anything else, including no final line after the wait in step 1: cross-check the lane, then run
   the proof below. The cross-check passes when the reply is the `done` line, and
-  `/tmp/code_review_findings.<attempt>.json` parses and its `findings.length` equals `<N>`.
+  `$RUN_DIR/code_review_findings.<attempt>.json` parses and its `findings.length` equals `<N>`.
 
 The proof checks the lane's three files against the saved /code-review result. When they pass, it
-also saves the findings file it checked, byte for byte, as `/tmp/agent_findings/code-review.json`,
+also saves the findings file it checked, byte for byte, as `$RUN_DIR/agent_findings/code-review.json`,
 the file consensus reads. When they fail, it removes that file. The proof reads each disproof's
 file as committed at the reviewed head, and takes the names of files whose path has no `/` from
-that commit and from the review's base commit. Both come from `/tmp/review_env.sh`, where Stage 1
+that commit and from the review's base commit. Both come from `$RUN_DIR/review_env.sh`, where Stage 1
 saved them as `REVIEWED_HEAD` and `REVIEWED_BASE`, the same values the lane's own check used. Run
-it as written; the attempt id comes from `/tmp/review_env.sh` too:
+it as written; the attempt id comes from `$RUN_DIR/review_env.sh` too:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 ATTEMPT="$CODE_REVIEW_ATTEMPT"
-agent-review code-review-proof --raw "/tmp/code_review_raw.$ATTEMPT.json" --findings "/tmp/code_review_findings.$ATTEMPT.json" --dropped "/tmp/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --base "$REVIEWED_BASE" --promote /tmp/agent_findings/code-review.json > /tmp/code_review_proof.json
-cat /tmp/code_review_proof.json
+agent-review code-review-proof --raw "$RUN_DIR/code_review_raw.$ATTEMPT.json" --findings "$RUN_DIR/code_review_findings.$ATTEMPT.json" --dropped "$RUN_DIR/code_review_dropped.$ATTEMPT.json" --run "$REVIEW_ID" --head "$REVIEWED_HEAD" --base "$REVIEWED_BASE" --promote "$RUN_DIR"/agent_findings/code-review.json > "$RUN_DIR"/code_review_proof.json
+cat "$RUN_DIR"/code_review_proof.json
 ```
 
 It prints one JSON line, `{ ok, stage, reason, count, mode, dropped }`, and exits 1 when `ok` is
@@ -185,9 +190,10 @@ lane has failed twice (step 5). Before either kind of relaunch below, run this b
 new attempt id and removes any findings file attempt 1's proof saved:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
-rm -f /tmp/agent_findings/code-review.json
-echo "export CODE_REVIEW_ATTEMPT=\"$REVIEW_ID-2\"" >> /tmp/review_env.sh
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
+rm -f "$RUN_DIR"/agent_findings/code-review.json
+echo "export CODE_REVIEW_ATTEMPT=\"$REVIEW_ID-2\"" >> "$RUN_DIR"/review_env.sh
 echo "code-review attempt: $REVIEW_ID-2"
 ```
 
@@ -206,7 +212,8 @@ it with steps 1 and 2.
   (step 5).
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS" || {
   echo "❌ review incomplete: the /code-review capture could not be re-armed, so no report was posted"
   exit 1
@@ -214,7 +221,7 @@ agent-review capture arm --run "$REVIEW_ID" --args "$CODE_REVIEW_ARGS" || {
 ```
 
 **4. Pass.** The proof already saved the passing attempt's findings as
-`/tmp/agent_findings/code-review.json`, exactly as it checked them. Do not copy or edit that file.
+`$RUN_DIR/agent_findings/code-review.json`, exactly as it checked them. Do not copy or edit that file.
 Disarm the capture:
 
 ```bash
@@ -232,7 +239,7 @@ Then stop the way `SKILL.md`'s Stage 2 says to for a lane that fails twice. At `
 the loud line is instead
 `❌ review incomplete: the code-review lane could not be checked, so no report was posted`, and
 when the re-arm failed, it is the line the re-arm block printed. Right after the loud line, print
-the proof's `reason` from `/tmp/code_review_proof.json`, or the lane's whole reply, reason included, when no proof ran for
+the proof's `reason` from `$RUN_DIR/code_review_proof.json`, or the lane's whole reply, reason included, when no proof ran for
 the last attempt; it names the fix or the mismatch.
 
 Run the same disarm block whenever the run stops after Stage 1 armed the capture and before this
@@ -241,7 +248,7 @@ reason.
 
 Under the `code-review` engine the progress line, like every other place a lane title is shown, titles
 the lane `Code Review (/code-review <effort>)`, since the plan gives it no `title`. Take `<effort>`
-from `/tmp/review_options.json`.
+from `$RUN_DIR/review_options.json`.
 
 ## Stage 6: the ledger matcher
 
@@ -253,11 +260,12 @@ whether each pair is the same problem. Scores are already final here, and a matc
 earlier entry.
 
 The ledger block in `SKILL.md` printed `ledger matching: <M> pairs` and saved M as `LEDGER_PAIRS`
-in `/tmp/review_env.sh`. When M is 0, that block already built the ledger, so skip this section.
+in `$RUN_DIR/review_env.sh`. When M is 0, that block already built the ledger, so skip this section.
 Otherwise there is no ledger yet, and these steps build it:
 
 1. Read the plugin's `templates/ledger-match.md` (`../../templates/ledger-match.md` from this file).
-   It has no placeholders.
+   Its one placeholder, `{{RUN_DIR}}`, is the run folder's literal path, the one `SKILL.md`'s
+   Stage 0A printed as `run folder:`.
 2. Launch the matcher with the Task tool, in a message of its own, after the ledger block in
    `SKILL.md` has finished:
 
@@ -265,46 +273,48 @@ Otherwise there is no ledger yet, and these steps build it:
    - **subagent_type**: `"agent-review:reviewer-sonnet"`, or `"general-purpose"` when the ledger
      block printed `routing: degraded`
    - **model**: `"sonnet"`
-   - **prompt**: the whole text of `ledger-match.md`, as written
+   - **prompt**: the whole text of `ledger-match.md`, with `{{RUN_DIR}}` filled
 
    Wait for its reply. Do not read, check, or change the file it writes; the next block does that.
 3. Build the ledger. If the Task tool errored, run this block, which ignores any answers the
    matcher wrote:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 echo "ledger matching skipped: the matcher Task errored"
-agent-review ledger --findings /tmp/review_filtered.json \
-  --previous /tmp/previous_agent_review_ledger.json \
-  --match-suggestions-by-location > /tmp/agent_review_ledger.json
+agent-review ledger --findings "$RUN_DIR"/review_filtered.json \
+  --previous "$RUN_DIR"/previous_agent_review_ledger.json \
+  --match-suggestions-by-location > "$RUN_DIR"/agent_review_ledger.json
 ```
 
 Otherwise run this one:
 
 ```bash
-. /tmp/review_env.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true
 LEDGER_SKIP=""
-if [ ! -s /tmp/ledger_matches.json ]; then
-  LEDGER_SKIP="the matcher wrote no /tmp/ledger_matches.json"
+if [ ! -s "$RUN_DIR"/ledger_matches.json ]; then
+  LEDGER_SKIP="the matcher wrote no $RUN_DIR/ledger_matches.json"
 fi
 if [ -z "$LEDGER_SKIP" ]; then
-  if agent-review ledger --findings /tmp/review_filtered.json \
-      --previous /tmp/previous_agent_review_ledger.json \
-      --match-suggestions-by-location --matches /tmp/ledger_matches.json \
-      > /tmp/agent_review_ledger.json 2> /tmp/ledger_matches_error.txt; then
-    MATCHED=$(node -e 'console.log(require("/tmp/ledger_matches.json").filter((m) => m.same).length)')
-    ANSWERED=$(node -e 'console.log(require("/tmp/ledger_matches.json").length)')
+  if agent-review ledger --findings "$RUN_DIR"/review_filtered.json \
+      --previous "$RUN_DIR"/previous_agent_review_ledger.json \
+      --match-suggestions-by-location --matches "$RUN_DIR"/ledger_matches.json \
+      > "$RUN_DIR"/agent_review_ledger.json 2> "$RUN_DIR"/ledger_matches_error.txt; then
+    MATCHED=$(node -e 'console.log(require(process.env.RUN_DIR + "/ledger_matches.json").filter((m) => m.same).length)')
+    ANSWERED=$(node -e 'console.log(require(process.env.RUN_DIR + "/ledger_matches.json").length)')
     echo "ledger matching: $MATCHED of $LEDGER_PAIRS pairs judged the same ($ANSWERED answered)"
   else
-    LEDGER_SKIP=$(head -1 /tmp/ledger_matches_error.txt | sed 's/^ledger: //')
+    LEDGER_SKIP=$(head -1 "$RUN_DIR"/ledger_matches_error.txt | sed 's/^ledger: //')
     LEDGER_SKIP="${LEDGER_SKIP:-the ledger refused the matches}"
   fi
 fi
 if [ -n "$LEDGER_SKIP" ]; then
   echo "ledger matching skipped: $LEDGER_SKIP"
-  agent-review ledger --findings /tmp/review_filtered.json \
-    --previous /tmp/previous_agent_review_ledger.json \
-    --match-suggestions-by-location > /tmp/agent_review_ledger.json
+  agent-review ledger --findings "$RUN_DIR"/review_filtered.json \
+    --previous "$RUN_DIR"/previous_agent_review_ledger.json \
+    --match-suggestions-by-location > "$RUN_DIR"/agent_review_ledger.json
 fi
 ```
 
@@ -317,13 +327,13 @@ new findings.
 
 - Under the `code-review` engine, the `code-review` lane has no `title` in the plan. Wherever a lane
   title is shown (the header's agents list, the summary table, the Stage 2 progress line), title it
-  `Code Review (/code-review <effort>)`, with `<effort>` from `/tmp/review_options.json`.
+  `Code Review (/code-review <effort>)`, with `<effort>` from `$RUN_DIR/review_options.json`.
 - Fill the `[IF engine is code-review]` block whenever `$ENGINE` is `code-review`, whether the engine
   came from the config or from an `engine=code-review` argument in a repo with no `engine` key. Engine,
-  effort and model, each with its `source`, come from `/tmp/review_options.json` (`engine`,
+  effort and model, each with its `source`, come from `$RUN_DIR/review_options.json` (`engine`,
   `effort`, `model`). `[engine source]` is `engine.source`, and the effort and model sources are
-  `effort.source` and `model.source`. `[N]` is `count` from `/tmp/code_review_proof.json`, `[M]` is
-  `findings.length` in `/tmp/agent_findings/code-review.json` (the passing attempt's findings,
+  `effort.source` and `model.source`. `[N]` is `count` from `$RUN_DIR/code_review_proof.json`, `[M]` is
+  `findings.length` in `$RUN_DIR/agent_findings/code-review.json` (the passing attempt's findings,
   which the proof saved there in Stage 2), and `[K]` is the length of the proof's `dropped` list. List one line
   per entry in that list, as `<file>:<line> <summary>: <why>` (just `<file>` before the summary
   when `line` is `null`), and omit the list when `K` is 0. Do not add a recipe tag.

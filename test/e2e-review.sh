@@ -14,8 +14,8 @@
 #
 # Usage: npm run test:e2e [-- --model <model>] [--max-turns <n>] [--keep]
 # Cost: one real model run (default claude-sonnet-5), typically 5-15 minutes.
-# Note: the skill contract uses fixed /tmp/agent_review_* and /tmp/review_*
-# paths, so this clears and reuses those on your machine.
+# Note: like CI, this runs the skill with AGENT_REVIEW_CI set, so its run
+# folder is /tmp itself; this clears and reuses those /tmp files on your machine.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

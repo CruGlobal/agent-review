@@ -9,6 +9,7 @@ const {
   rmSync,
   mkdirSync,
   statSync,
+  readdirSync,
   renameSync,
   lstatSync,
   openSync,
@@ -86,10 +87,29 @@ const {
   captureDir,
   captureDirProblem,
   armedState,
+  chooseArms,
+  sessionArms,
+  ambiguousMismatch,
+  RUNS_DIR,
   lastAssistantText,
   postSkillWrites,
   subagentStopWrites,
 } = require('./captureHook.cjs');
+const {
+  SKILL_NAME,
+  RunDirError,
+  resolveRunDir,
+  ensureRunDir,
+  holderFrom,
+  identified,
+  takeLock,
+  foreignLock,
+  heldMessage,
+  releaseLock,
+  forceRelease,
+} = require('./runDir.cjs');
+
+const { TEMPLATE_NAMES, templateStatusReport } = require('./templateStatus.cjs');
 
 const { repoRoot, reviewDir } = require('./paths.cjs');
 
@@ -337,43 +357,95 @@ function appendStop(path, stop) {
   }
 }
 
+// The run folders a hook reads: AGENT_REVIEW_RUN_DIR when set, else every folder under
+// <captureDir>/runs. The 1.1.4 arm in <captureDir> itself is never read.
+function hookRunDirs(env = process.env) {
+  if (env.AGENT_REVIEW_RUN_DIR) return [env.AGENT_REVIEW_RUN_DIR];
+  const root = captureDir(env);
+  const runs = join(root, RUNS_DIR);
+  if (captureDirError(root) || captureDirError(runs)) return [];
+  try {
+    return readdirSync(runs, { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => join(runs, d.name));
+  } catch {
+    return [];
+  }
+}
+
+function liveRunArms(now, env = process.env) {
+  const arms = [];
+  for (const dir of hookRunDirs(env)) {
+    if (captureDirError(dir)) continue;
+    const arm = readJsonOrNull(join(dir, CAPTURE_FILES.arm));
+    if (armedState(arm, now)) arms.push({ dir, arm });
+  }
+  return arms;
+}
+
 // Hooks run in every session that has the plugin installed, so this never prints, never throws,
-// and returns before reading stdin unless capture is armed.
+// and returns before reading stdin unless some run is armed.
 function runHook(name) {
   try {
-    const dir = captureDir();
-    if (captureDirError(dir)) return 0;
-    const file = (key) => join(dir, CAPTURE_FILES[key]);
-    const arm = readJsonOrNull(file('arm'));
     const now = nowSeconds();
-    if (!armedState(arm, now)) return 0;
-    const base = { payload: JSON.parse(readFileSync(0, 'utf8')), arm, now, readTranscript };
+    const arms = liveRunArms(now);
+    if (arms.length === 0) return 0;
+    const payload = JSON.parse(readFileSync(0, 'utf8'));
+    const base = { payload, now, readTranscript };
     // Each hook writes its own record before it reads the other's, so when a fork's stop races
     // post-skill, at least one of the two hooks sees both records and writes the capture.
     if (name === 'post-skill') {
-      const first = postSkillWrites({ ...base, stops: [] });
+      const choice = chooseArms({ arms, payload });
+      if (choice.kind === 'ambiguous') {
+        for (const { dir, arm } of choice.entries) {
+          const { mismatch } = ambiguousMismatch({ arm, payload, now });
+          writeFileAtomic(join(dir, CAPTURE_FILES.mismatch), JSON.stringify(mismatch));
+        }
+        return 0;
+      }
+      if (choice.kind === 'none') return 0;
+      const [{ dir, arm }] = choice.entries;
+      const file = (key) => join(dir, CAPTURE_FILES[key]);
+      const first = postSkillWrites({ ...base, arm, stops: [] });
       if (first.mismatch) writeFileAtomic(file('mismatch'), JSON.stringify(first.mismatch));
       if (first.pending) writeFileAtomic(file('pending'), JSON.stringify(first.pending));
       if (!first.pending && !first.capture) return 0;
-      const { capture } = postSkillWrites({ ...base, stops: readStops(file('stops')) });
+      const { capture } = postSkillWrites({ ...base, arm, stops: readStops(file('stops')) });
       if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
     } else if (name === 'subagent-stop') {
-      const { stop } = subagentStopWrites({ ...base, pending: null, capture: null });
-      if (!stop) return 0;
-      appendStop(file('stops'), stop);
-      const pending = readJsonOrNull(file('pending'));
-      if (!pending) return 0;
-      const { capture } = subagentStopWrites({
-        ...base,
-        pending,
-        capture: readJsonOrNull(file('capture')),
-      });
-      if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
+      for (const { dir, arm } of sessionArms({ arms, payload })) {
+        const file = (key) => join(dir, CAPTURE_FILES[key]);
+        const { stop } = subagentStopWrites({ ...base, arm, pending: null, capture: null });
+        if (!stop) continue;
+        appendStop(file('stops'), stop);
+        const pending = readJsonOrNull(file('pending'));
+        if (!pending) continue;
+        const { capture } = subagentStopWrites({
+          ...base,
+          arm,
+          pending,
+          capture: readJsonOrNull(file('capture')),
+        });
+        if (capture) writeFileAtomic(file('capture'), JSON.stringify(capture));
+      }
     }
   } catch {
     return 0;
   }
   return 0;
+}
+
+// Only the commands that start a run's files create its folder; readers refuse a missing one.
+function runDirFor(C, rawArgv, { create = false, env = process.env } = {}) {
+  const flagDir = flag(rawArgv, '--run-dir');
+  if (rawArgv.includes('--run-dir') && flagDir === undefined) throw new RunDirError('--run-dir needs a path');
+  const resolved = resolveRunDir({ root: C.ROOT, env, flagDir });
+  return create ? ensureRunDir(resolved, env) : resolved;
+}
+
+// An arm only works where the hooks look for it.
+function hookReads(dir, env = process.env) {
+  return dir === env.AGENT_REVIEW_RUN_DIR || dirname(dir) === join(captureDir(env), RUNS_DIR);
 }
 
 const CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]`;
@@ -400,12 +472,15 @@ function captureHookGraceMs(env = process.env) {
 }
 
 const HOOKS_DID_NOT_RUN =
-  'the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed';
+  'the capture hooks saw no /code-review call for this run: restart Claude Code after installing or updating the plugin, check that plugin hooks are allowed, and check that /code-review was called from this session with the armed args';
 
 function mismatchReason(mismatch) {
   const rearm = 'the run must be re-armed with capture arm before /code-review is called again';
   if (mismatch.reason === 'no fork id') {
     return `/code-review ran in the background, but its Skill reply named no fork id, so its result cannot be captured; ${rearm}`;
+  }
+  if (mismatch.reason === 'ambiguous') {
+    return `/code-review was called with args ${JSON.stringify(mismatch.got)}, which more than one review in this session armed, so its result cannot be told apart; run those reviews one at a time; ${rearm}`;
   }
   if (mismatch.reason === 'wrong skill') {
     const builtIn = JSON.stringify(CODE_REVIEW_SKILL);
@@ -415,8 +490,7 @@ function mismatchReason(mismatch) {
 }
 
 // main() is synchronous, so the wait blocks the thread with Atomics.wait instead of a timer.
-function captureWait({ runId, effort, timeoutSeconds }) {
-  const dir = captureDir();
+function captureWait({ runId, effort, timeoutSeconds, dir }) {
   const file = (key) => join(dir, CAPTURE_FILES[key]);
   const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
   const pollMs = capturePollMs();
@@ -522,6 +596,9 @@ function blobLines(root, commit, path) {
 const CODE_REVIEW_PROOF_USAGE =
   'usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]';
 const REPORT_COMMENT_USAGE = 'usage: agent-review report-comment --me <login> [--field body|id]';
+const RUN_DIR_USAGE = 'usage: agent-review run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]';
+const TEMPLATE_STATUS_USAGE =
+  'usage: agent-review template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]';
 const DIFF_FOR_USAGE = 'usage: agent-review diff-for --diff <f> --raw <f>';
 
 function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -586,13 +663,16 @@ const USAGE = `usage: agent-review <command>
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
   report-comment --me <login> [--field body|id]   read every page of a PR's comments (gh api --paginate output) on stdin and print the body or id of the canonical report: the user's own marked comment, else github-actions[bot]'s (nothing when there is none; exit 1 on unreadable input)
+  template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
-  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
-  capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
+  run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --release ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (a hold another skill of this session took is left to it); --release --force deletes the lock whoever holds it
+  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run in its run folder: delete old capture files and write the arm file with this session's id (exit 1 when another live run of this session armed the same args)
+  capture disarm                 turn off /code-review result capture for this run folder: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
   capture-wait --run <id> --effort <${EFFORTS.join('|')}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args or skill mismatch, not armed, another effort, no hook file for the run within 60 seconds, or the effort's time limit passed)
-  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
+  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result into the run folder whose arm is from the same session with the same args (always exits 0, prints nothing)
+  global flags: --root <dir> (default: cwd), --review-dir <dir>, --run-dir <dir> (the run folder; default: this checkout's)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -607,12 +687,12 @@ const USAGE = `usage: agent-review <command>
   run [--base <ref>] [--scope <s>] [mode]   pre-flight + launch the Claude Code review
   help`;
 
-// Strips global `--root <v>` / `--review-dir <v>` tokens so subcommand parsing never sees them.
+// Strips global `--root <v>` / `--review-dir <v>` / `--run-dir <v>` tokens so subcommand parsing never sees them.
 function stripGlobalFlags(argv) {
   const out = [];
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
-    if (tok === '--root' || tok === '--review-dir') {
+    if (tok === '--root' || tok === '--review-dir' || tok === '--run-dir') {
       const v = argv[i + 1];
       if (v !== undefined && !v.startsWith('--')) i++;
       continue;
@@ -1075,6 +1155,137 @@ function main(rawArgv) {
         return 1;
       }
     }
+    case 'run-dir': {
+      const locking = rest.includes('--lock');
+      const releasing = rest.includes('--release');
+      const force = rest.includes('--force');
+      const outer = rest.includes('--outer');
+      const skill = flag(rest, locking ? '--lock' : '--release');
+      const tokens = [locking, releasing, skill !== undefined, force, outer].filter(Boolean).length;
+      const named = SKILL_NAME.test(skill || '');
+      if (
+        rest.length !== tokens ||
+        (outer && !locking) ||
+        (locking && (releasing || force || !named)) ||
+        (releasing && (force ? skill !== undefined : !named)) ||
+        (force && !releasing)
+      ) {
+        out(RUN_DIR_USAGE);
+        return 1;
+      }
+      const lockSkill = locking ? skill : undefined;
+      const releaseSkill = releasing ? skill : undefined;
+      let resolved;
+      try {
+        resolved = runDirFor(C, rawArgv, { create: true });
+      } catch (e) {
+        if (!(e instanceof RunDirError)) throw e;
+        process.stderr.write(`error: ${e.message}\n`);
+        return 1;
+      }
+      const { dir, toplevel } = resolved;
+      const now = nowSeconds();
+      // CI runners are isolated, and a folder named by a flag or AGENT_REVIEW_RUN_DIR is the caller's.
+      if (resolved.source !== 'checkout') {
+        if (!releasing) out(dir);
+        return 0;
+      }
+      const refuse = (lock) => {
+        process.stderr.write(`error: ${heldMessage(lock, { dir, toplevel, nowSeconds: now })}\n`);
+        return 4;
+      };
+      if (force) {
+        forceRelease(dir);
+        out(`released the lock on ${toplevel}`);
+        return 0;
+      }
+      if (releasing) {
+        const r = releaseLock({ dir, skill: releaseSkill, nowSeconds: now });
+        if (!r.ok) return refuse(r.lock);
+        out(r.cleaned ? `released ${toplevel} and cleaned ${dir}` : `kept ${dir}: this session's ${r.heldBy} run still holds it`);
+        return 0;
+      }
+      if (lockSkill) {
+        if (!identified(holderFrom())) {
+          process.stderr.write('warning: CLAUDE_CODE_SESSION_ID and CLAUDE_PID are not set, so this checkout is not locked\n');
+          out(dir);
+          return 0;
+        }
+        const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
+        if (!r.ok) return refuse(r.lock);
+        out(dir);
+        return 0;
+      }
+      const held = foreignLock({ dir, nowSeconds: now });
+      if (held) return refuse(held);
+      out(dir);
+      return 0;
+    }
+    case 'template-status': {
+      const valueFlags = ['--templates', '--manifest', '--version'];
+      const given = rest;
+      const files = [];
+      for (let i = 0; i < given.length; i++) {
+        if (valueFlags.includes(given[i])) i++;
+        else files.push(given[i]);
+      }
+      const version = flag(rest, '--version');
+      if (
+        files.some((f) => f.startsWith('--')) ||
+        valueFlags.some((name) => rest.includes(name) && flag(rest, name) === undefined) ||
+        (version !== undefined && !/^\d+\.\d+\.\d+$/.test(version))
+      ) {
+        out(TEMPLATE_STATUS_USAGE);
+        return 1;
+      }
+      const templatesDir = resolve(flag(rest, '--templates') || join(__dirname, '../templates/workflows'));
+      const manifestPath = resolve(flag(rest, '--manifest') || join(templatesDir, 'template-manifest.json'));
+      let pluginVersion = version;
+      let manifest;
+      try {
+        pluginVersion ??= JSON.parse(readFileSync(join(__dirname, '../.claude-plugin/plugin.json'), 'utf8')).version;
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      } catch (e) {
+        process.stderr.write(`template-status: ${e.message}\n`);
+        return 1;
+      }
+      const templates = {};
+      for (const name of TEMPLATE_NAMES) {
+        try {
+          templates[name] = readFileSync(join(templatesDir, name), 'utf8');
+        } catch {
+          // A template that cannot be read leaves its copies stale.
+        }
+      }
+      let paths = files.map((f) => resolve(C.ROOT, f));
+      if (paths.length === 0) {
+        const workflows = join(C.ROOT, '.github/workflows');
+        try {
+          paths = readdirSync(workflows)
+            .filter((f) => /^agent-review.*\.ya?ml$/.test(f))
+            .sort()
+            .map((f) => join(workflows, f));
+        } catch {
+          paths = [];
+        }
+      }
+      const report = templateStatusReport({
+        files: paths.map((p) => {
+          let text = null;
+          try {
+            text = readFileSync(p, 'utf8');
+          } catch {
+            // An unreadable copy has no marker, so it counts as stale.
+          }
+          return { file: relative(C.ROOT, p) || p, name: p.split('/').pop(), text };
+        }),
+        pluginVersion,
+        manifest,
+        templates,
+      });
+      out(JSON.stringify(report));
+      return 0;
+    }
     case 'report-comment': {
       const me = flag(rest, '--me');
       const field = flag(rest, '--field') || 'body';
@@ -1162,7 +1373,13 @@ function main(rawArgv) {
         base = commitIn(C.ROOT, baseArg);
         if (!base) return refuse('config', `--base ${JSON.stringify(baseArg)} is not a commit in ${C.ROOT}`);
       }
-      const dir = captureDir();
+      let dir;
+      try {
+        dir = runDirFor(C, rawArgv).dir;
+      } catch (e) {
+        if (e instanceof RunDirError) return refuse('config', e.message);
+        throw e;
+      }
       const dirError = captureDirError(dir);
       if (dirError) return refuse('capture', dirError);
       const capturePath = join(dir, CAPTURE_FILES.capture);
@@ -1233,24 +1450,43 @@ function main(rawArgv) {
         process.stderr.write(`error: ${reason}\n`);
         return 1;
       };
-      const dir = captureDir();
+      let resolved;
+      try {
+        resolved = runDirFor(C, rawArgv, { create: sub === 'arm' });
+      } catch (e) {
+        if (e instanceof RunDirError) return fail(e.message);
+        throw e;
+      }
+      const { dir } = resolved;
       const file = (key) => join(dir, CAPTURE_FILES[key]);
-      if (sub === 'arm') {
-        try {
-          mkdirSync(dir, { mode: 0o700 });
-        } catch (e) {
-          if (e.code !== 'EEXIST') return fail(`could not create capture dir ${dir}: ${e.message}`);
-        }
+      if (sub === 'arm' && !hookReads(dir)) {
+        return fail(`the capture hooks never read ${dir}, so capture cannot be armed there; arm it from the checkout being reviewed`);
       }
       const dirError = captureDirError(dir);
       if (dirError) return fail(dirError);
       if (sub === 'arm') {
+        const now = nowSeconds();
+        const session = holderFrom().session_id;
+        if (!session && resolved.source === 'checkout') {
+          return fail(
+            "CLAUDE_CODE_SESSION_ID is not set, so the capture hooks could not tell this review's /code-review call from another session's; update Claude Code, or run the review with engine=agent-review",
+          );
+        }
+        const clash = liveRunArms(now).find(
+          (e) => e.dir !== dir && e.arm.args === args && (e.arm.session_id || null) === session,
+        );
+        if (clash) {
+          return fail(
+            `another review in this session armed /code-review with the same args ${JSON.stringify(args)} (run folder ${clash.dir}). ` +
+              `Their results cannot be told apart, so run those reviews one at a time, or disarm the other with: agent-review capture disarm --run-dir ${clash.dir}`,
+          );
+        }
         for (const key of ['capture', 'pending', 'stops', 'mismatch']) {
           rmSync(file(key), { force: true });
         }
         writeFileAtomic(
           file('arm'),
-          JSON.stringify({ armed: true, run_id: runId, args, created: nowSeconds() }),
+          JSON.stringify({ armed: true, run_id: runId, args, session_id: session, created: now }),
         );
         out(`armed ${runId}: ${args}`);
         return 0;
@@ -1278,7 +1514,17 @@ function main(rawArgv) {
         out(CAPTURE_WAIT_USAGE);
         return 1;
       }
-      return captureWait({ runId, effort, timeoutSeconds });
+      let dir;
+      try {
+        dir = runDirFor(C, rawArgv).dir;
+      } catch (e) {
+        if (e instanceof RunDirError) {
+          out(JSON.stringify({ status: 'failed', reason: e.message, stop_count: null, mode: null }));
+          return CAPTURE_WAIT_EXIT.failed;
+        }
+        throw e;
+      }
+      return captureWait({ runId, effort, timeoutSeconds, dir });
     }
     case 'hook':
       return runHook(rest[0]);
@@ -1555,4 +1801,5 @@ module.exports = {
   planTmpPath,
   readTranscript,
   captureWaitTimeout,
+  hookRunDirs,
 };

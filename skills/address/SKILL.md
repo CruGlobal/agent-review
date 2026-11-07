@@ -114,10 +114,23 @@ CI restrictions:
 
 The remaining stages are local-only. Do not run them in CI mode.
 
+Every local block keeps its files in this checkout's run folder, the path Stage 0 prints as
+`run folder:`, so addressing one PR never touches another session's review or address run. Files
+you write yourself, such as the updated comment, go there by that literal path. Run every block from the PR's checkout. Stage 0's first block also takes the
+checkout (`--lock address`): if another session's review or address run holds it, the block
+prints who holds it and stops, and you stop too. Whenever this skill stops, at the end of Stage 5
+or earlier for any reason, run `agent-review run-dir --release address`. It frees the checkout and
+deletes this run's working files; when `/agent-review:yolo-review` took the checkout, it leaves
+both to yolo-review and prints `kept`. If it prints `kept` and no yolo-review started this run, an
+earlier yolo-review in this session stopped before its end: run
+`agent-review run-dir --release yolo-review` to free the checkout.
+
 ## Stage 0 — Load the ledger
 
 ```bash
-: > /tmp/address_env.sh
+RUN_DIR=$(agent-review run-dir --lock address) || exit 1; export RUN_DIR
+echo "run folder: $RUN_DIR"
+: > "$RUN_DIR"/address_env.sh
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 [ -n "$PR_NUMBER" ] || { echo "❌ No PR context — the ledger lives on a PR comment."; exit 1; }
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
@@ -129,15 +142,15 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --pagi
   | agent-review report-comment --me "$ME" --field id)
 [ -n "$COMMENT_ID" ] || { echo "❌ No marked review report on PR #$PR_NUMBER."; exit 1; }
 
-gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > /tmp/address_comment.md
-sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/address_comment.md | head -1 \
-  > /tmp/address_ledger.json
-[ -s /tmp/address_ledger.json ] || { echo "❌ Report has no findings ledger (pre-ledger report — re-run the review)."; exit 1; }
+gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > "$RUN_DIR"/address_comment.md
+sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' "$RUN_DIR"/address_comment.md | head -1 \
+  > "$RUN_DIR"/address_ledger.json
+[ -s "$RUN_DIR"/address_ledger.json ] || { echo "❌ Report has no findings ledger (pre-ledger report — re-run the review)."; exit 1; }
 
-cat >> /tmp/address_env.sh <<EOF
+cat >> "$RUN_DIR"/address_env.sh <<EOF
 export PR_NUMBER="$PR_NUMBER" REPO="$REPO" COMMENT_ID="$COMMENT_ID"
 EOF
-node -e 'for (const f of require("/tmp/address_ledger.json"))
+node -e 'for (const f of require(process.env.RUN_DIR + "/address_ledger.json"))
   console.log(`#${f.n} [${f.status}] ${f.severity}/10 ${f.file}${f.line ? ":"+f.line : ""} — ${f.message}`)'
 ```
 
@@ -167,13 +180,14 @@ findings are actually addressed. This mode judges; it does not edit code.
 ## Stage 1 — Get the instruction
 
 **Argument mode** (any argument other than `check` or `ci`): do not converse. Write the raw
-argument string to `/tmp/address_command.txt` and parse it through the engine — never by hand:
+argument string to `$RUN_DIR/address_command.txt` and parse it through the engine — never by hand:
 
 ```bash
-. /tmp/address_env.sh
-agent-review address parse --command /tmp/address_command.txt --lenient --ledger /tmp/address_ledger.json \
-  > /tmp/address_ops.json || { cat /tmp/address_ops.json; echo "Usage: fix 1,2 dismiss 3,4 [code]: reason · fix blockers · fix all"; exit 1; }
-node -e 'for (const o of require("/tmp/address_ops.json")) console.log(`#${o.n} ${o.action}${o.reasonCode ? " ["+o.reasonCode+"]: "+o.reason : o.action === "dismiss" ? " (reason pending)" : ""}`)'
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/address_env.sh"
+agent-review address parse --command "$RUN_DIR"/address_command.txt --lenient --ledger "$RUN_DIR"/address_ledger.json \
+  > "$RUN_DIR"/address_ops.json || { cat "$RUN_DIR"/address_ops.json; echo "Usage: fix 1,2 dismiss 3,4 [code]: reason · fix blockers · fix all"; exit 1; }
+node -e 'for (const o of require(process.env.RUN_DIR + "/address_ops.json")) console.log(`#${o.n} ${o.action}${o.reasonCode ? " ["+o.reasonCode+"]: "+o.reason : o.action === "dismiss" ? " (reason pending)" : ""}`)'
 ```
 
 The lenient grammar accepts `fix: 1,2`, whitespace between clauses, the `dimiss` typo, `fix all`
@@ -233,7 +247,8 @@ The block stops if a review file is staged; unstage anything else that is not yo
 `git restore --staged <file>`.
 
 ```bash
-. /tmp/address_env.sh
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/address_env.sh"
 git status --porcelain --untracked-files=all
 git add -- <each file you changed or created for these fixes>
 if git diff --cached --name-only | grep -E '^\.claude/review/(metrics|index)/'; then
@@ -248,7 +263,7 @@ git diff --cached --name-only
 git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}" || exit 1   # e.g. "1 3 5" — never "#N", it cross-references unrelated PRs
 git push || exit 1
 FIX_SHA=$(git rev-parse --short HEAD)
-echo "export FIX_SHA=\"$FIX_SHA\"" >> /tmp/address_env.sh
+echo "export FIX_SHA=\"$FIX_SHA\"" >> "$RUN_DIR"/address_env.sh
 ```
 
 Confirm with the user before pushing. In argument mode, push without confirming: the argument is
@@ -257,7 +272,7 @@ re-review of exactly these commits — that is the verification loop, not a cost
 
 ## Stage 3 — Update the ledger
 
-Update `/tmp/address_ledger.json`: fixed items get `"status": "fixed", "sha": "<FIX_SHA>"`;
+Update `$RUN_DIR/address_ledger.json`: fixed items get `"status": "fixed", "sha": "<FIX_SHA>"`;
 dismissed items get `"status": "dismissed", "by": "<actor>", "reasonCode": "<taxonomy-code>",
 `"reason": "<explanation>"`. Then rewrite
 the comment — mutate ONLY these three things, leaving every other byte untouched:
@@ -274,8 +289,9 @@ the comment — mutate ONLY these three things, leaving every other byte untouch
 Then:
 
 ```bash
-. /tmp/address_env.sh
-gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID" -F body=@/tmp/address_comment_updated.md
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/address_env.sh"
+gh api -X PATCH "repos/$REPO/issues/comments/$COMMENT_ID" -F body=@"$RUN_DIR"/address_comment_updated.md
 ```
 
 ## Stage 4 — Record outcomes in the learning layer
@@ -285,9 +301,10 @@ records) feed the feedback store. Build a pending-file from the acted-on ledger 
 ingest it:
 
 ```bash
-. /tmp/address_env.sh
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR/address_env.sh"
 node -e '
-const entries = require("/tmp/address_acted.json");  // the entries acted on this run
+const entries = require(process.env.RUN_DIR + "/address_acted.json");  // the entries acted on this run
 const lines = entries.map(f => ({
   reviewId: "address-" + process.env.PR_NUMBER,
   id: f.id, signature: f.signature, agent: f.agent, category: f.category,
@@ -299,9 +316,9 @@ const lines = entries.map(f => ({
 const yaml = "reviewId: address-" + process.env.PR_NUMBER + "\nfindings:\n" + lines.map(l =>
   "  - " + JSON.stringify({...l, outcome: l.outcome,
     dismissal_reason: l.dismissalReason || "", reason: l.dismissalDetail || ""})).join("\n");
-require("fs").writeFileSync("/tmp/address_pending.yml", yaml);
+require("fs").writeFileSync(process.env.RUN_DIR + "/address_pending.yml", yaml);
 '
-agent-review feedback /tmp/address_pending.yml
+agent-review feedback "$RUN_DIR"/address_pending.yml
 git add .claude/review/learnings/feedback.jsonl && git commit -m "chore(review): record finding outcomes" && git push
 ```
 
@@ -312,7 +329,7 @@ of the base branch keeps both sides' lines.)
 
 ## Stage 5 — Report back
 
-Summarize the result in the session and remind the user of anything still open. When fixes were
+Run `agent-review run-dir --release address`, then summarize the result in the session and remind the user of anything still open. When fixes were
 pushed, lead with an explicit request to review the commit. Then read
 `agent-review config get reviews_run`: when `reviews_run` is `local`, no CI review exists, so tell
 the author to run `/agent-review:re-review` and do not promise a CI re-review (the report's head marker

@@ -68,13 +68,13 @@ the wrong finding:]
 ```
 
 [Local mode only — never in CI, nothing is executed there:]
-Apply: `bash /tmp/automated_fixes/fix_N_category.sh` (omit `--yes` first for a dry run)
+Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.
 
 </details>
 
 <details><summary>📦 Dependency impact</summary>
 
-[blastRadius, direct dependents, and topImpacted table from /tmp/review_impact.json; say
+[blastRadius, direct dependents, and topImpacted table from $RUN_DIR/review_impact.json; say
 "index disabled" when Stage 1B was skipped]
 
 **Breaking changes** [omit this subsection when none were detected]: [removed exports or other
