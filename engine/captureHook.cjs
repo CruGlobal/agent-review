@@ -67,14 +67,11 @@ function skillCall(payload) {
 }
 
 // A hook's session_id is the main session's id for subagents at any depth and equals the Bash
-// CLAUDE_CODE_SESSION_ID, so a call reaches only arms its own session made (or one with no session
-// id). Within a session only the args tell runs apart.
+// CLAUDE_CODE_SESSION_ID, so a call reaches only arms its own session made. Within a session only
+// the args tell runs apart.
 function chooseArms({ arms, payload } = {}) {
-  if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return { kind: 'none', entries: [] };
-  const session = nonEmpty(payload.session_id) ? payload.session_id : null;
-  const candidates = arms.filter(
-    (e) => isObject(e) && isObject(e.arm) && (!nonEmpty(e.arm.session_id) || e.arm.session_id === session),
-  );
+  const candidates = sessionArms({ arms, payload });
+  if (candidates.length === 0) return { kind: 'none', entries: [] };
   const { skill, args } = skillCall(payload);
   const builtIn = skill === CODE_REVIEW_SKILL;
   if (!builtIn && !skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return { kind: 'none', entries: [] };
@@ -88,11 +85,16 @@ function chooseArms({ arms, payload } = {}) {
   return same.length === 1 ? { kind: 'mismatch', entries: same } : { kind: 'none', entries: [] };
 }
 
-// The arms a subagent stop in this session may belong to.
+function sessionOf(v) {
+  return nonEmpty(v) ? v : null;
+}
+
+// The arms a subagent call or stop may belong to: those its own session made. A missing session id
+// matches only another missing one.
 function sessionArms({ arms, payload } = {}) {
   if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return [];
-  const session = nonEmpty(payload.session_id) ? payload.session_id : null;
-  return arms.filter((e) => isObject(e) && isObject(e.arm) && (!nonEmpty(e.arm.session_id) || e.arm.session_id === session));
+  const session = sessionOf(payload.session_id);
+  return arms.filter((e) => isObject(e) && isObject(e.arm) && sessionOf(e.arm.session_id) === session);
 }
 
 function ambiguousMismatch({ arm, payload, now }) {

@@ -1706,10 +1706,10 @@ function readCaptureJson(dir, name) {
   return JSON.parse(readFileSync(join(dir, name), 'utf8'));
 }
 
-function armCapture(dir, args = 'xhigh 12') {
+function armCapture(dir, args = 'xhigh 12', session = undefined) {
   writeFileSync(
     join(dir, 'agent_review_capture.json'),
-    JSON.stringify({ armed: true, run_id: 'r1', args, created: Math.floor(Date.now() / 1000) }),
+    JSON.stringify({ armed: true, run_id: 'r1', args, ...(session ? { session_id: session } : {}), created: Math.floor(Date.now() / 1000) }),
   );
 }
 
@@ -1798,7 +1798,7 @@ test('capture arm clears old capture files and writes the arm file', () => {
 test('post-skill then subagent-stop write a capture end to end', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
   try {
-    armCapture(dir);
+    armCapture(dir, 'xhigh 12', 's1');
     const quiet = { code: 0, stdout: '', stderr: '' };
     const skill = {
       hook_event_name: 'PostToolUse',
@@ -1813,7 +1813,7 @@ test('post-skill then subagent-stop write a capture end to end', () => {
     assert.equal(readCaptureJson(dir, 'code_review_capture.pending.json').fork_id, 'f1');
     assert.equal(existsSync(join(dir, 'code_review_capture.json')), false);
 
-    const helper = { hook_event_name: 'SubagentStop', agent_id: 'helper9', agent_type: '', last_assistant_message: 'helper', agent_transcript_path: '/t/h.jsonl' };
+    const helper = { hook_event_name: 'SubagentStop', session_id: 's1', agent_id: 'helper9', agent_type: '', last_assistant_message: 'helper', agent_transcript_path: '/t/h.jsonl' };
     assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(helper) }), quiet);
     assert.equal(existsSync(join(dir, 'code_review_capture.json')), false, 'a non-matching stop only buffers');
 
@@ -1822,7 +1822,7 @@ test('post-skill then subagent-stop write a capture end to end', () => {
       JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '- lib/cart.rb:50: wrong discount' }] } }),
       JSON.stringify({ type: 'attachment' }),
     ].join('\n') + '\n');
-    const forkStop = { hook_event_name: 'SubagentStop', agent_id: 'f1', agent_type: 'general-purpose', last_assistant_message: '', agent_transcript_path: transcript };
+    const forkStop = { hook_event_name: 'SubagentStop', session_id: 's1', agent_id: 'f1', agent_type: 'general-purpose', last_assistant_message: '', agent_transcript_path: transcript };
     assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(forkStop) }), quiet);
     const capture = readCaptureJson(dir, 'code_review_capture.json');
     assert.deepEqual(

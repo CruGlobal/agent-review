@@ -162,10 +162,11 @@ test('a lock is live while its Claude Code process runs, for at most 6 hours', (
 test('a holder is this session, or this process when no session id is set', () => {
   assert.deepEqual(holderFrom(S1), { session_id: 'session-one', claude_pid: 111 });
   assert.deepEqual(holderFrom({ CLAUDE_CODE_SESSION_ID: ' ', CLAUDE_PID: 'x' }), { session_id: null, claude_pid: null });
-  assert.equal(sameHolder({ session_id: 'session-one', claude_pid: 999 }, holderFrom(S1)), true, 'the session decides');
-  assert.equal(sameHolder({ session_id: 'session-two', claude_pid: 111 }, holderFrom(S1)), false);
+  assert.equal(sameHolder({ session_id: 'session-one', claude_pid: 999 }, holderFrom(S1)), true, 'the same session');
+  assert.equal(sameHolder({ session_id: 'session-two', claude_pid: 111 }, holderFrom(S1)), true, 'the same process after /clear');
+  assert.equal(sameHolder({ session_id: 'session-two', claude_pid: 222 }, holderFrom(S1)), false);
   assert.equal(sameHolder({ session_id: null, claude_pid: 7 }, holderFrom({ CLAUDE_PID: '7' })), true);
-  assert.equal(sameHolder({ session_id: 's', claude_pid: 7 }, holderFrom({ CLAUDE_PID: '7' })), false);
+  assert.equal(sameHolder({ session_id: 's', claude_pid: 8 }, holderFrom({ CLAUDE_PID: '7' })), false);
   assert.equal(sameHolder({ session_id: null, claude_pid: null }, holderFrom({})), false, 'nobody is the same as an unknown holder');
 });
 
@@ -182,7 +183,7 @@ test('takeLock takes a free checkout, lets its session back in, and refuses anot
     assert.equal(statSync(join(dir, LOCK_FILE)).mode & 0o777, 0o600);
 
     const again = takeLock({ dir, skill: 'address', toplevel: '/w/a', env: S1, nowSeconds: NOW + 5, isAlive: alive });
-    assert.deepEqual([again.ok, again.taken, again.lock.skill], [true, false, 'review'], 're-entry keeps the first skill');
+    assert.deepEqual([again.ok, again.taken, again.lock.skill], [true, true, 'address'], 'a hold this session left is replaced');
 
     const other = takeLock({ dir, skill: 'review', toplevel: '/w/a', env: S2, nowSeconds: NOW + 5, isAlive: alive });
     assert.equal(other.ok, false);
@@ -191,7 +192,7 @@ test('takeLock takes a free checkout, lets its session back in, and refuses anot
     assert.equal(foreignLock({ dir, env: S1, nowSeconds: NOW + 5, isAlive: alive }), null);
 
     const message = heldMessage(other.lock, { dir, toplevel: '/w/a', nowSeconds: NOW + 125 });
-    assert.match(message, /^another agent-review review run holds this checkout \(\/w\/a\): session session-one, started 2 minutes ago\./);
+    assert.match(message, /^another agent-review address run holds this checkout \(\/w\/a\): session session-one, started 2 minutes ago\./);
     assert.match(message, /agent-review run-dir --release --force/);
 
     const takeover = takeLock({ dir, skill: 'review', toplevel: '/w/a', env: S2, nowSeconds: NOW + 5, isAlive: dead });
@@ -236,7 +237,7 @@ test('release by the skill that took the lock cleans the folder but keeps the re
 test('release leaves a hold another skill of this session took, and refuses another live session', () => {
   withTemp('ar-rundir-clean-', (parent) => {
     const dir = runFolder(parent);
-    takeLock({ dir, skill: 'yolo-review', toplevel: '/w/a', env: S1, nowSeconds: NOW, isAlive: alive });
+    takeLock({ dir, skill: 'yolo-review', toplevel: '/w/a', outer: true, env: S1, nowSeconds: NOW, isAlive: alive });
     assert.deepEqual(releaseLock({ dir, skill: 'review', env: S1, nowSeconds: NOW, isAlive: alive }), { ok: true, cleaned: false, heldBy: 'yolo-review' });
     const refused = releaseLock({ dir, skill: 'yolo-review', env: S2, nowSeconds: NOW, isAlive: alive });
     assert.equal(refused.ok, false);
@@ -254,5 +255,31 @@ test('cleanup refuses any folder that is not directly under runs', () => {
     assert.throws(() => cleanRunDir('/tmp'), /not a run folder/);
     assert.ok(existsSync(join(parent, 'keep.txt')));
     assert.equal(basename(parent).startsWith('ar-rundir-clean-'), true);
+  });
+});
+
+test('an outer hold keeps the runs inside it from cleaning up, and replaces whatever its session left', () => {
+  withTemp('ar-rundir-outer-', (parent) => {
+    const dir = runFolder(parent);
+    const lock = (skill, outer = false) => takeLock({ dir, skill, toplevel: '/w/a', outer, env: S1, nowSeconds: NOW, isAlive: alive });
+    const release = (skill) => releaseLock({ dir, skill, env: S1, nowSeconds: NOW, isAlive: alive });
+    const holder = () => JSON.parse(readFileSync(join(dir, LOCK_FILE), 'utf8')).skill;
+    // A review this session stopped before its end left its hold behind.
+    assert.equal(lock('review').taken, true);
+    // yolo-review replaces it, and the review and address it runs work inside its hold.
+    assert.equal(lock('yolo-review', true).taken, true);
+    assert.equal(holder(), 'yolo-review');
+    writeFileSync(join(dir, 'yolo_env.sh'), 'export PR_NUMBER=1\n');
+    for (const skill of ['review', 'address', 'review']) {
+      const inner = lock(skill);
+      assert.deepEqual([inner.ok, inner.taken], [true, false], `${skill} re-enters`);
+      assert.deepEqual(release(skill), { ok: true, cleaned: false, heldBy: 'yolo-review' }, `${skill} leaves the folder`);
+      assert.ok(existsSync(join(dir, 'yolo_env.sh')), `${skill} never cleans yolo-review's files`);
+    }
+    assert.equal(release('yolo-review').cleaned, true);
+    assert.equal(existsSync(join(dir, LOCK_FILE)), false);
+    // A yolo-review this session left is replaced by the next one, never kept by it.
+    lock('yolo-review', true);
+    assert.equal(lock('yolo-review', true).taken, true);
   });
 });

@@ -19,16 +19,17 @@ re-reviews cheap.
 ## Steps
 
 Each block keeps its files in this checkout's run folder (the path `agent-review run-dir`
-prints), so run every block from the PR's checkout. Step 1 takes the checkout for the whole yolo
-run (`--lock yolo-review`); the review and address runs it starts work inside that hold and leave
-the folder to it. When this skill stops, after step 7 or earlier on any ❌, run
+prints, and step 1 shows as `run folder:`), so run every block from the PR's checkout. Step 1
+takes the checkout for the whole yolo run (`--lock yolo-review --outer`); the review and address
+runs it starts work inside that hold and leave the folder to it. When this skill stops, after step 7 or earlier on any ❌, run
 `agent-review run-dir --release yolo-review`: it frees the checkout and deletes the run's working
 files. If step 1 prints that another session's run holds the checkout, stop and show that line.
 
 1. **Preconditions** — run this block; stop on any ❌.
 
    ```bash
-   RUN_DIR=$(agent-review run-dir --lock yolo-review) || exit 1; export RUN_DIR
+   RUN_DIR=$(agent-review run-dir --lock yolo-review --outer) || exit 1; export RUN_DIR
+   echo "run folder: $RUN_DIR"
    PR_NUMBER=$(gh pr view --json number -q .number 2>/dev/null)
    [ -n "$PR_NUMBER" ] || { echo "❌ No PR for this branch — open one first (gh pr create)."; exit 1; }
    [ -z "$(git status --porcelain)" ] || { echo "❌ Working tree is dirty — commit or stash first; yolo reviews and fixes committed code only."; exit 1; }

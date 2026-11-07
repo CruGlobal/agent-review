@@ -64,11 +64,12 @@ function skillCall({ sessionId, agentId = 'lane-1', args = ARGS, skill = 'code-r
 
 const read = (dir, name) => JSON.parse(readFileSync(join(dir, name), 'utf8'));
 
+// Two live sessions are two Claude Code processes: this test process and its parent.
 test('two runs in two checkouts and two sessions keep their own folders, locks, state and results', () => {
   const t = setup();
   try {
     const one = { cap: t.cap, env: session('session-one') };
-    const two = { cap: t.cap, env: session('session-two') };
+    const two = { cap: t.cap, env: session('session-two', process.ppid) };
     const lockA = cli(t.a, ['run-dir', '--lock', 'review'], one);
     const lockB = cli(t.b, ['run-dir', '--lock', 'review'], two);
     assert.deepEqual([lockA.code, lockA.stdout, lockA.stderr], [0, `${t.runA}\n`, '']);
@@ -134,7 +135,7 @@ test('a second review of the same checkout from another live session is refused 
   const t = setup();
   try {
     const one = { cap: t.cap, env: session('session-one') };
-    const two = { cap: t.cap, env: session('session-two') };
+    const two = { cap: t.cap, env: session('session-two', process.ppid) };
     assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], one).code, 0);
     writeFileSync(join(t.runA, 'review_env.sh'), 'A\n');
     for (const args of [['run-dir', '--lock', 'review'], ['run-dir'], ['run-dir', '--release', 'review']]) {
@@ -146,6 +147,7 @@ test('a second review of the same checkout from another live session is refused 
     }
     assert.equal(readFileSync(join(t.runA, 'review_env.sh'), 'utf8'), 'A\n', 'the refused session changed nothing');
     assert.equal(cli(t.a, ['run-dir', '--lock', 're-review'], one).code, 0, 'the holding session gets back in');
+    assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], { cap: t.cap, env: session('after-clear') }).code, 0, 'so does its process after /clear');
 
     const dead = { cap: t.cap, env: session('session-one', 2 ** 22 + 12345) };
     rmSync(join(t.runA, 'run.lock'));
@@ -263,7 +265,7 @@ test('in CI the run folder is /tmp, with no lock and nothing cleaned', () => {
 test('run-dir refuses bad arguments and a shell outside any checkout', () => {
   const t = setup();
   try {
-    for (const bad of [['--lock'], ['--lock', 'Review'], ['--release'], ['--release', 'review', '--force'], ['--force'], ['--lock', 'review', '--release', 'review'], ['extra']]) {
+    for (const bad of [['--lock'], ['--lock', 'Review'], ['--release'], ['--release', 'review', '--force'], ['--force'], ['--lock', 'review', '--release', 'review'], ['extra'], ['--outer'], ['--release', 'review', '--outer']]) {
       const r = cli(t.a, ['run-dir', ...bad], { cap: t.cap, env: session('s') });
       assert.equal(r.code, 1, bad.join(' '));
       assert.match(r.stdout, /^usage: agent-review run-dir/, bad.join(' '));
@@ -272,6 +274,84 @@ test('run-dir refuses bad arguments and a shell outside any checkout', () => {
     assert.equal(outside.code, 1);
     assert.match(outside.stderr, /^error: .* is not inside a git checkout/);
     assert.equal(outside.stdout, '');
+  } finally {
+    rmSync(t.base, { recursive: true, force: true });
+  }
+});
+
+test('capture refuses to arm in a checkout with no session id, since another session could not be told apart', () => {
+  const t = setup();
+  try {
+    const r = cli(t.a, ['capture', 'arm', '--run', 'r', '--args', ARGS], { cap: t.cap, env: { CLAUDE_PID: String(process.pid) } });
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /^error: CLAUDE_CODE_SESSION_ID is not set, so the capture hooks could not tell/);
+    assert.equal(existsSync(join(t.runA, 'agent_review_capture.json')), false);
+  } finally {
+    rmSync(t.base, { recursive: true, force: true });
+  }
+});
+
+test('a review this session left behind never lets the review inside yolo-review clean up yolo-review', () => {
+  const t = setup();
+  try {
+    const one = { cap: t.cap, env: session('session-one') };
+    assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], one).code, 0, 'a review that then stopped without releasing');
+    assert.equal(cli(t.a, ['run-dir', '--lock', 'yolo-review', '--outer'], one).code, 0);
+    writeFileSync(join(t.runA, 'yolo_env.sh'), 'export PR_NUMBER=7\n');
+    for (const skill of ['review', 'address']) {
+      assert.equal(cli(t.a, ['run-dir', '--lock', skill], one).code, 0);
+      const kept = cli(t.a, ['run-dir', '--release', skill], one);
+      assert.deepEqual([kept.code, kept.stdout], [0, `kept ${t.runA}: this session's yolo-review run still holds it\n`]);
+      assert.equal(readFileSync(join(t.runA, 'yolo_env.sh'), 'utf8'), 'export PR_NUMBER=7\n');
+    }
+    assert.equal(cli(t.a, ['run-dir', '--lock', 'review'], { cap: t.cap, env: session('session-two', process.ppid) }).code, 4, 'yolo-review still holds the checkout');
+    assert.equal(cli(t.a, ['run-dir', '--release', 'yolo-review'], one).code, 0);
+    assert.equal(existsSync(join(t.runA, 'yolo_env.sh')), false);
+  } finally {
+    rmSync(t.base, { recursive: true, force: true });
+  }
+});
+
+// Runs the light hook entry with a preload that records whether the bundle was loaded.
+function hookEntryLoads(cap, input) {
+  const probe = mkdtempSync(join(os.tmpdir(), 'ar-hook-probe-'));
+  try {
+    const loaded = join(probe, 'loaded.json');
+    writeFileSync(join(probe, 'record.cjs'), `process.on('exit', () => require('node:fs').writeFileSync(${JSON.stringify(loaded)}, JSON.stringify(Object.keys(require.cache))));\n`);
+    const r = spawnSync(process.execPath, ['--require', join(probe, 'record.cjs'), HOOK_ENTRY, 'post-skill'], {
+      input,
+      encoding: 'utf8',
+      env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: cap, AGENT_REVIEW_RUN_DIR: '', CLAUDE_CODE_SESSION_ID: '', CLAUDE_PID: '' },
+    });
+    assert.deepEqual([r.status, r.stdout, r.stderr], [0, '', '']);
+    return JSON.parse(readFileSync(loaded, 'utf8')).some((m) => m.endsWith(join('dist', 'agent-review.cjs')));
+  } finally {
+    rmSync(probe, { recursive: true, force: true });
+  }
+}
+
+test('the light hook entry scans runs/ and loads the bundle only when some run there is armed', () => {
+  const t = setup();
+  try {
+    const { mkdirSync, symlinkSync } = require('node:fs');
+    const input = JSON.stringify(skillCall({ sessionId: 'session-one', result: 'x' }));
+    assert.equal(hookEntryLoads(t.cap, input), false, 'no capture dir at all');
+    mkdirSync(join(t.cap, 'runs', 'released-0123456789ab'), { recursive: true, mode: 0o700 });
+    writeFileSync(join(t.cap, 'runs', 'released-0123456789ab', 'agent_review_report.md'), 'kept report');
+    writeFileSync(join(t.cap, 'agent_review_capture.json'), JSON.stringify({ armed: true, run_id: 'old', args: ARGS, created: Math.floor(Date.now() / 1000) }));
+    assert.equal(hookEntryLoads(t.cap, input), false, 'a released run and a 1.1.4 arm load nothing');
+    assert.equal(cli(t.a, ['capture', 'arm', '--run', 'run-a', '--args', ARGS], { cap: t.cap, env: session('session-one') }).code, 0);
+    assert.equal(hookEntryLoads(t.cap, input), true, 'a live arm under runs/ loads the bundle');
+    assert.equal(read(t.runA, 'code_review_capture.json').result, 'x');
+
+    writeFileSync(join(t.cap, 'runs', 'a-file'), '');
+    symlinkSync(t.runA, join(t.cap, 'runs', 'a-link'));
+    const { hookRunDirs: light } = require(HOOK_ENTRY);
+    const { hookRunDirs: bundle } = require('./cli.cjs');
+    for (const env of [{ AGENT_REVIEW_CAPTURE_DIR: t.cap }, { AGENT_REVIEW_CAPTURE_DIR: t.cap, AGENT_REVIEW_RUN_DIR: '/tmp/pinned' }, { AGENT_REVIEW_CAPTURE_DIR: join(t.base, 'none') }]) {
+      assert.deepEqual(light(env).sort(), bundle(env).sort(), `the light entry reads the same run folders: ${JSON.stringify(env)}`);
+    }
+    assert.deepEqual(light({ AGENT_REVIEW_CAPTURE_DIR: t.cap }).sort(), [join(t.cap, 'runs', 'released-0123456789ab'), t.runA].sort(), 'files and symlinks are skipped');
   } finally {
     rmSync(t.base, { recursive: true, force: true });
   }

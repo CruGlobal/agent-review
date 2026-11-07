@@ -578,8 +578,9 @@ test('chooseArms keeps each session to its own arms and tells runs apart by args
   assert.deepEqual(pick({ ...call('s1', 'xhigh 12'), session_id: undefined }), ['none', []], 'no session id reaches only session-less arms');
   assert.deepEqual(pick(call('s1', 'xhigh 12'), [a, arm('d', 'xhigh 12', 's1')]), ['ambiguous', ['a', 'd']]);
   assert.deepEqual(pick(call('s1', 'high 12'), [a, arm('d', 'xhigh 12', 's1')]), ['none', []], 'a wrong call two runs could own fails neither');
-  const legacy = arm('e', 'xhigh 56', null);
-  assert.deepEqual(pick(call('s9', 'xhigh 56'), [legacy]), ['match', ['e']], 'an arm with no session id takes any session');
+  const sessionless = arm('e', 'xhigh 56', null);
+  assert.deepEqual(pick(call('s9', 'xhigh 56'), [sessionless]), ['none', []], 'an arm with no session id never takes a session call');
+  assert.deepEqual(pick({ ...call('s9', 'xhigh 56'), session_id: undefined }, [sessionless]), ['match', ['e']], 'it matches only a call with no session id');
 });
 
 test('sessionArms picks the arms a subagent stop of this session may belong to', () => {
@@ -588,6 +589,7 @@ test('sessionArms picks the arms a subagent stop of this session may belong to',
     { dir: '/b', arm: { ...ARM, session_id: 's2' } },
     { dir: '/c', arm: { ...ARM } },
   ];
-  assert.deepEqual(sessionArms({ arms, payload: { session_id: 's1', agent_id: 'x' } }).map((e) => e.dir), ['/a', '/c']);
+  assert.deepEqual(sessionArms({ arms, payload: { session_id: 's1', agent_id: 'x' } }).map((e) => e.dir), ['/a']);
+  assert.deepEqual(sessionArms({ arms, payload: { agent_id: 'x' } }).map((e) => e.dir), ['/c']);
   assert.deepEqual(sessionArms({ arms, payload: { session_id: 's1' } }), []);
 });

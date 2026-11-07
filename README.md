@@ -302,8 +302,9 @@ asks for tests, which is why those reviewers stay on.
 hook writes it into the review's own run folder (see "Where a run keeps its files"), under
 `/tmp/agent-review-<uid>`, which only your user can open (mode 0700, owned by you, checked before
 every read and write). The hooks act only while a review has armed capture, and an arm expires
-after 6 hours. The arm records the Claude Code session that made it, and a hook only ever writes
-into a run its own session armed: the hook's `session_id` is the main session's id even for a
+after 6 hours. The arm records the Claude Code session that made it (`capture arm` refuses
+when `CLAUDE_CODE_SESSION_ID` is not set), and a hook only ever writes into a run its own session
+armed: the hook's `session_id` is the main session's id even for a
 subagent's Skill call, and it equals `CLAUDE_CODE_SESSION_ID` in that session's shells. So a
 `/code-review` in another session never touches your review. Within one session, the args tell
 runs apart: a call with a run's exact args is that run's, and a wrong `/code-review` call (another
@@ -658,9 +659,12 @@ and never see `$RUN_DIR`, so the lane prompts get the folder as a literal path (
 with `{{REPO_ROOT}}` to `cd` into), and the lane's engine commands take `--run-dir`.
 
 - **The lock.** `agent-review run-dir --lock <skill>` takes the checkout for that run. It holds
-  while the Claude Code process that took it runs (`CLAUDE_PID`), for at most 6 hours. The same
-  session can take it again, so yolo-review can run review and address inside its own hold, and
-  a retry after a stop works. Another live session gets exit 4 and a message naming the holder.
+  while the Claude Code process that took it runs (`CLAUDE_PID`), for at most 6 hours. Within
+  the same session, or the same process after `/clear` gave it a new session id, a new run
+  replaces any hold an earlier run left when it stopped, so a retry works. yolo-review takes the
+  checkout with `--outer`: the review and address runs inside it keep its hold and leave the
+  folder to it. If a review or address prints `kept` with no yolo-review running, an earlier
+  yolo-review of that session stopped before its end; `--release yolo-review` frees it. Another live session gets exit 4 and a message naming the holder.
   Every other `agent-review run-dir` call refuses the same way, so a block run from another
   session's checkout stops instead of writing into that run.
 - **The end of a run.** `agent-review run-dir --release <skill>` frees the checkout and deletes

@@ -86,7 +86,7 @@ later stage needs is persisted to `$RUN_DIR/review_env.sh` at the moment it is c
 later block starts by sourcing that file. Keep this discipline or later stages will silently
 operate on empty strings.
 
-⚠️ **THE RUN FOLDER** — every file this review writes lives in its own run folder, never in a
+⚠️ **THE RUN FOLDER**: every file this review writes lives in its own run folder, never in a
 fixed `/tmp` path, so reviews running at the same time on this machine, from any session or
 checkout, never share state. `agent-review run-dir` prints the folder of the checkout the shell is
 in (`/tmp` itself in CI), so every block works it out again on its first line, with
@@ -97,13 +97,14 @@ it, `cd` there first. If `agent-review run-dir` fails, stop and show its error: 
 another live session's review already holds it, the block prints who holds it and stops, and you
 must stop too and show that message.
 
-Subagents start in another shell, often outside the repository, and never see `$RUN_DIR`. In every
-prompt you hand a subagent, and in every path you show the user, write the run folder's literal
-path (the value `agent-review run-dir` printed) where this skill says `$RUN_DIR`, and fill the
-templates' `{{RUN_DIR}}` the same way and `{{REPO_ROOT}}` with the checkout's top folder
-(`git rev-parse --show-toplevel`).
+Subagents start in another shell, often outside the repository, and never see `$RUN_DIR`, and
+neither does a file you write with the Write tool. So in every prompt you hand a subagent, every
+file you write yourself, and every path you show the user, write the run folder's literal path
+where this skill says `$RUN_DIR`: the path Stage 0A's first block prints as `run folder: <path>`
+(`/tmp` in CI). Fill the templates' `{{RUN_DIR}}` the same way, and `{{REPO_ROOT}}` with the
+checkout's top folder (`git rev-parse --show-toplevel`).
 
-⚠️ **STOPPING EARLY** — whenever the run stops before Stage 8, for any reason (a ❌ line, a
+⚠️ **STOPPING EARLY**: whenever the run stops before Stage 8, for any reason (a ❌ line, a
 skip, a head already reviewed, a lane that failed twice), run Stage 8's **Finish the run** block
 before you stop, after any capture disarm the code-review engine asks for. It frees the checkout
 and deletes this run's working files, keeping only the report and any fix scripts.
@@ -123,6 +124,7 @@ the arguments inert:
 RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR
 . "$RUN_DIR/review_env.sh" 2>/dev/null || true
 set -e
+echo "run folder: $RUN_DIR"
 cat > "$RUN_DIR"/review_args.txt <<'REVIEW_ARGS_END_7f3a'
 REVIEW_ARGS_END_7f3a
 
@@ -198,6 +200,9 @@ echo ""
 rm -f "$RUN_DIR"/consensus_decisions.json "$RUN_DIR"/consensus_raw.json "$RUN_DIR"/consensus_findings.json
 rm -f "$RUN_DIR"/agent_findings/*.json 2>/dev/null || true
 rm -f "$RUN_DIR"/agent_review_card_scan.json "$RUN_DIR"/agent_review_human_rules.json
+# The report, its markers' files, and the posted comment are this run's alone.
+rm -f "$RUN_DIR"/agent_review_report.md "$RUN_DIR"/agent_review_ledger.json "$RUN_DIR"/agent_review_status.json
+rm -f "$RUN_DIR"/agent_review_inline.json "$RUN_DIR"/agent_review_safety.json "$RUN_DIR"/agent_review_comment.md
 # No earlier run's /code-review files or armed capture may carry into this run. Under zsh a glob
 # with no match fails its whole command and prints an error, so each glob gets its own quiet line.
 { rm -f "$RUN_DIR"/code_review_raw.*.json; } 2>/dev/null || true
@@ -1135,7 +1140,7 @@ filled copy:
 | `{{EVIDENCE}}`          | A compact rendering of `$RUN_DIR/review_evidence.json`: every static finding as `ruleId severity file:line message`, then every failed or pending CI check with its URL and at most five annotations. Say `none` when empty. Do not paste unbounded check output. |
 | `{{CONTEXT}}`           | A compact rendering of `$RUN_DIR/review_context.json`: each repository id, pinned SHA, description, root, and its inventory-listed paths. Say `none` when no repositories are available. Never list or inspect files outside the inventory. |
 | `{{AGENT_ID}}`          | The agent's `id` from the review plan. Stage 2 reads this lane's findings back from `$RUN_DIR/agent_findings/<id>.json`, and every finding the agent writes must carry this same id in its `agent` field. |
-| `{{RUN_DIR}}`           | The run folder's literal path, the value `agent-review run-dir` printed. The lane writes its findings and fix scripts there, and reads the changed-file list from there. |
+| `{{RUN_DIR}}`           | The run folder's literal path, the one Stage 0A printed as `run folder:`. The lane writes its findings and fix scripts there, and reads the changed-file list from there. |
 | `{{REPO_ROOT}}`         | The checkout's top folder (`git rev-parse --show-toplevel`). The lane's shell may start outside the repository, so it runs every command from there. |
 | `{{DIFF_PATH}}`         | Read `$RUN_DIR/slice_manifest.json` (written right after the plan — see above) for this agent's `<id>` entry. `mode: "full"` → `$RUN_DIR/pr_diff.txt` (the whole diff — the lane is `always`/`escalates`/`architecture`). `mode: "sliced"` → `$RUN_DIR/agent_slices/<id>.diff` (may have `hunks: 0` for a header-only binary/mode/rename section — still fill it, the lane still launches). `mode: "empty"` → do not launch this lane at all (see below); there is no `{{DIFF_PATH}}` to fill. **No manifest entry at all** (deep mode's config-only lanes — agents with no plan entry, so `agent-review slice` never sliced them) → treat it as a full-diff lane: fill `$RUN_DIR/pr_diff.txt`. |
 
@@ -2350,8 +2355,10 @@ It frees the checkout for the next review and deletes this run's working files. 
 report (`agent_review_report.md`) and, when this run wrote any, the fix scripts in
 `automated_fixes/`, so the paths in the summary still work until the next review of this checkout
 clears them. When the checkout was taken by a skill that runs this one, such as
-`/agent-review:yolo-review`, it leaves the folder to that skill and prints `kept`. In CI it does
-nothing. If it prints that another session's run holds the checkout, show that line: this run's
+`/agent-review:yolo-review`, it leaves the folder to that skill and prints `kept`. If it prints
+`kept` and no yolo-review started this review, an earlier yolo-review in this session stopped
+before its end: run `agent-review run-dir --release yolo-review` to free the checkout. In CI it
+does nothing. If it prints that another session's run holds the checkout, show that line: this run's
 blocks were run from the wrong checkout.
 
 ---

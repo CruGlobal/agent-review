@@ -19230,11 +19230,8 @@ var require_captureHook = __commonJS({
       };
     }
     function chooseArms({ arms, payload } = {}) {
-      if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return { kind: "none", entries: [] };
-      const session = nonEmpty(payload.session_id) ? payload.session_id : null;
-      const candidates = arms.filter(
-        (e) => isObject(e) && isObject(e.arm) && (!nonEmpty(e.arm.session_id) || e.arm.session_id === session)
-      );
+      const candidates = sessionArms({ arms, payload });
+      if (candidates.length === 0) return { kind: "none", entries: [] };
       const { skill, args } = skillCall(payload);
       const builtIn = skill === CODE_REVIEW_SKILL;
       if (!builtIn && !skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return { kind: "none", entries: [] };
@@ -19247,10 +19244,13 @@ var require_captureHook = __commonJS({
       const same = target === null ? [] : candidates.filter((e) => argsTarget(e.arm.args) === target);
       return same.length === 1 ? { kind: "mismatch", entries: same } : { kind: "none", entries: [] };
     }
+    function sessionOf(v) {
+      return nonEmpty(v) ? v : null;
+    }
     function sessionArms({ arms, payload } = {}) {
       if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return [];
-      const session = nonEmpty(payload.session_id) ? payload.session_id : null;
-      return arms.filter((e) => isObject(e) && isObject(e.arm) && (!nonEmpty(e.arm.session_id) || e.arm.session_id === session));
+      const session = sessionOf(payload.session_id);
+      return arms.filter((e) => isObject(e) && isObject(e.arm) && sessionOf(e.arm.session_id) === session);
     }
     function ambiguousMismatch({ arm, payload, now }) {
       const { args } = skillCall(payload);
@@ -21057,9 +21057,8 @@ var require_runDir = __commonJS({
     }
     function sameHolder(lock, me) {
       if (!isObject(lock)) return false;
-      if (me.session_id) return lock.session_id === me.session_id;
-      if (me.claude_pid) return !lock.session_id && lock.claude_pid === me.claude_pid;
-      return false;
+      if (me.session_id && lock.session_id === me.session_id) return true;
+      return me.claude_pid !== null && lock.claude_pid === me.claude_pid;
     }
     function pidAlive(pid) {
       try {
@@ -21090,16 +21089,23 @@ var require_runDir = __commonJS({
       writeFileSync(tmp, text, { mode: 384, flag: "wx" });
       renameSync(tmp, path);
     }
-    function takeLock({ dir, skill, toplevel, env = process.env, nowSeconds, isAlive = pidAlive }) {
+    function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive }) {
       const path = join(dir, LOCK_FILE);
       const me = holderFrom(env);
       for (let attempt = 0; attempt < 2; attempt++) {
         const missing = !existsSync(path);
         const existing = readJsonOrNull(path);
-        if (existing && lockIsLive(existing, nowSeconds, isAlive)) {
-          return sameHolder(existing, me) ? { ok: true, taken: false, lock: existing } : { ok: false, lock: existing };
-        }
-        const lock = { ...me, skill, checkout: toplevel, created: nowSeconds, nonce: randomBytes(8).toString("hex") };
+        const live = existing && lockIsLive(existing, nowSeconds, isAlive);
+        if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+        if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
+        const lock = {
+          ...me,
+          skill,
+          outer,
+          checkout: toplevel,
+          created: nowSeconds,
+          nonce: randomBytes(8).toString("hex")
+        };
         try {
           writeLock(path, lock, { exclusive: missing });
         } catch (e) {
@@ -21798,7 +21804,7 @@ var require_cli = __commonJS({
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]";
     var REPORT_COMMENT_USAGE = "usage: agent-review report-comment --me <login> [--field body|id]";
-    var RUN_DIR_USAGE = "usage: agent-review run-dir [--lock <skill> | --release <skill> | --release --force]";
+    var RUN_DIR_USAGE = "usage: agent-review run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]";
     var TEMPLATE_STATUS_USAGE = "usage: agent-review template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
     function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -21864,7 +21870,7 @@ var require_cli = __commonJS({
   template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
-  run-dir [--lock <skill> | --release <skill> | --release --force]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, or re-enters this session's hold; --release ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (a hold another skill of this session took is left to it); --release --force deletes the lock whoever holds it
+  run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --release ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (a hold another skill of this session took is left to it); --release --force deletes the lock whoever holds it
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run in its run folder: delete old capture files and write the arm file with this session's id (exit 1 when another live run of this session armed the same args)
   capture disarm                 turn off /code-review result capture for this run folder: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -22331,10 +22337,11 @@ var require_cli = __commonJS({
           const locking = rest.includes("--lock");
           const releasing = rest.includes("--release");
           const force = rest.includes("--force");
+          const outer = rest.includes("--outer");
           const skill = flag(rest, locking ? "--lock" : "--release");
-          const tokens = [locking, releasing, skill !== void 0, force].filter(Boolean).length;
+          const tokens = [locking, releasing, skill !== void 0, force, outer].filter(Boolean).length;
           const named = SKILL_NAME.test(skill || "");
-          if (rest.length !== tokens || locking && (releasing || force || !named) || releasing && (force ? skill !== void 0 : !named) || force && !releasing) {
+          if (rest.length !== tokens || outer && !locking || locking && (releasing || force || !named) || releasing && (force ? skill !== void 0 : !named) || force && !releasing) {
             out(RUN_DIR_USAGE);
             return 1;
           }
@@ -22377,7 +22384,7 @@ var require_cli = __commonJS({
               out(dir);
               return 0;
             }
-            const r = takeLock({ dir, skill: lockSkill, toplevel, nowSeconds: now });
+            const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
             if (!r.ok) return refuse(r.lock);
             out(dir);
             return 0;
@@ -22592,13 +22599,14 @@ var require_cli = __commonJS({
 `);
             return 1;
           };
-          let dir;
+          let resolved;
           try {
-            dir = runDirFor(C, rawArgv, { create: sub === "arm" }).dir;
+            resolved = runDirFor(C, rawArgv, { create: sub === "arm" });
           } catch (e) {
             if (e instanceof RunDirError) return fail(e.message);
             throw e;
           }
+          const { dir } = resolved;
           const file = (key) => join(dir, CAPTURE_FILES[key]);
           if (sub === "arm" && !hookReads(dir)) {
             return fail(`the capture hooks never read ${dir}, so capture cannot be armed there; arm it from the checkout being reviewed`);
@@ -22608,8 +22616,13 @@ var require_cli = __commonJS({
           if (sub === "arm") {
             const now = nowSeconds();
             const session = holderFrom().session_id;
+            if (!session && resolved.source === "checkout") {
+              return fail(
+                "CLAUDE_CODE_SESSION_ID is not set, so the capture hooks could not tell this review's /code-review call from another session's; update Claude Code, or run the review with engine=agent-review"
+              );
+            }
             const clash = liveRunArms(now).find(
-              (e) => e.dir !== dir && e.arm.args === args && (!session || !e.arm.session_id || e.arm.session_id === session)
+              (e) => e.dir !== dir && e.arm.args === args && (e.arm.session_id || null) === session
             );
             if (clash) {
               return fail(
@@ -22939,7 +22952,8 @@ ${USAGE}`);
       resolveMinSupport,
       planTmpPath,
       readTranscript,
-      captureWaitTimeout
+      captureWaitTimeout,
+      hookRunDirs
     };
   }
 });

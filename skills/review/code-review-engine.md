@@ -93,7 +93,7 @@ this file) and fill its sixteen placeholders:
 | Placeholder               | Fill with                                                                                                                                                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{RUN_ID}}`              | `$REVIEW_ID`, the `<id>` in the `armed <id>: <args>` line |
-| `{{RUN_DIR}}`             | The run folder's literal path, the value `agent-review run-dir` prints. The lane passes it to every engine command it runs, so it reads this run's capture and nobody else's. |
+| `{{RUN_DIR}}`             | The run folder's literal path, the one `SKILL.md`'s Stage 0A printed as `run folder:`. The lane passes it to every engine command it runs, so it reads this run's capture and nobody else's. |
 | `{{REPO_ROOT}}`           | The checkout's top folder (`git rev-parse --show-toplevel`). The lane's shell may start outside the repository, so it runs every command from there. |
 | `{{ATTEMPT}}`             | `$CODE_REVIEW_ATTEMPT`, the value the block above prints as `code-review attempt:` (`$REVIEW_ID-1`); on a relaunch, the value Stage 2's relaunch block prints (`$REVIEW_ID-2`) |
 | `{{EFFORT}}`              | `plan.engine.effort`, the same value as `EFFORT` in `$RUN_DIR/review_env.sh`.                                                                                                                        |
@@ -264,8 +264,8 @@ in `$RUN_DIR/review_env.sh`. When M is 0, that block already built the ledger, s
 Otherwise there is no ledger yet, and these steps build it:
 
 1. Read the plugin's `templates/ledger-match.md` (`../../templates/ledger-match.md` from this file).
-   Its one placeholder, `{{RUN_DIR}}`, is the run folder's literal path, the value
-   `agent-review run-dir` prints.
+   Its one placeholder, `{{RUN_DIR}}`, is the run folder's literal path, the one `SKILL.md`'s
+   Stage 0A printed as `run folder:`.
 2. Launch the matcher with the Task tool, in a message of its own, after the ledger block in
    `SKILL.md` has finished:
 

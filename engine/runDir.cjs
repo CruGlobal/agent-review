@@ -24,7 +24,7 @@ const CI_RUN_DIR = '/tmp';
 // Skills paste the run folder into prompts, JS strings and unquoted shell words.
 const SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
 const SKILL_NAME = /^[a-z][a-z-]{0,31}$/;
-// What a finished run leaves for the person who ran it; the next run in the checkout clears both.
+// What a finished run leaves for the person who ran it; the review's Initialize clears both.
 const KEPT_AFTER_RUN = Object.freeze(['agent_review_report.md', 'automated_fixes']);
 
 class RunDirError extends Error {}
@@ -133,11 +133,11 @@ function identified(me) {
   return me.session_id !== null || me.claude_pid !== null;
 }
 
+// One Claude Code process runs one session at a time, and /clear gives it a new session id.
 function sameHolder(lock, me) {
   if (!isObject(lock)) return false;
-  if (me.session_id) return lock.session_id === me.session_id;
-  if (me.claude_pid) return !lock.session_id && lock.claude_pid === me.claude_pid;
-  return false;
+  if (me.session_id && lock.session_id === me.session_id) return true;
+  return me.claude_pid !== null && lock.claude_pid === me.claude_pid;
 }
 
 function pidAlive(pid) {
@@ -173,18 +173,27 @@ function writeLock(path, lock, { exclusive }) {
   renameSync(tmp, path);
 }
 
-// Takes the checkout's lock for `skill`, or re-enters it when this session already holds it (a
-// skill that runs another, or a retry after a stop). Never takes a live lock from another session.
-function takeLock({ dir, skill, toplevel, env = process.env, nowSeconds, isAlive = pidAlive }) {
+// Takes the checkout's lock for `skill`. Never takes a live lock from another session. Inside this
+// session's own hold, a skill run by an outer skill (review inside yolo-review) leaves the hold to
+// it; any other hold this session left was a run that stopped, so it is replaced, and an outer
+// skill always replaces it.
+function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive }) {
   const path = join(dir, LOCK_FILE);
   const me = holderFrom(env);
   for (let attempt = 0; attempt < 2; attempt++) {
     const missing = !existsSync(path);
     const existing = readJsonOrNull(path);
-    if (existing && lockIsLive(existing, nowSeconds, isAlive)) {
-      return sameHolder(existing, me) ? { ok: true, taken: false, lock: existing } : { ok: false, lock: existing };
-    }
-    const lock = { ...me, skill, checkout: toplevel, created: nowSeconds, nonce: randomBytes(8).toString('hex') };
+    const live = existing && lockIsLive(existing, nowSeconds, isAlive);
+    if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+    if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
+    const lock = {
+      ...me,
+      skill,
+      outer,
+      checkout: toplevel,
+      created: nowSeconds,
+      nonce: randomBytes(8).toString('hex'),
+    };
     try {
       writeLock(path, lock, { exclusive: missing });
     } catch (e) {

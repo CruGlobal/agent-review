@@ -114,19 +114,22 @@ CI restrictions:
 
 The remaining stages are local-only. Do not run them in CI mode.
 
-Every local block keeps its files in this checkout's run folder, the path
-`agent-review run-dir` prints, so addressing one PR never touches another session's review or
-address run. Run every block from the PR's checkout. Stage 0's first block also takes the
+Every local block keeps its files in this checkout's run folder, the path Stage 0 prints as
+`run folder:`, so addressing one PR never touches another session's review or address run. Files
+you write yourself, such as the updated comment, go there by that literal path. Run every block from the PR's checkout. Stage 0's first block also takes the
 checkout (`--lock address`): if another session's review or address run holds it, the block
 prints who holds it and stops, and you stop too. Whenever this skill stops, at the end of Stage 5
 or earlier for any reason, run `agent-review run-dir --release address`. It frees the checkout and
 deletes this run's working files; when `/agent-review:yolo-review` took the checkout, it leaves
-both to yolo-review.
+both to yolo-review and prints `kept`. If it prints `kept` and no yolo-review started this run, an
+earlier yolo-review in this session stopped before its end: run
+`agent-review run-dir --release yolo-review` to free the checkout.
 
 ## Stage 0 — Load the ledger
 
 ```bash
 RUN_DIR=$(agent-review run-dir --lock address) || exit 1; export RUN_DIR
+echo "run folder: $RUN_DIR"
 : > "$RUN_DIR"/address_env.sh
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 [ -n "$PR_NUMBER" ] || { echo "❌ No PR context — the ledger lives on a PR comment."; exit 1; }

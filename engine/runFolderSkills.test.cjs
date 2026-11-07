@@ -30,7 +30,7 @@ const SYNTAX_CHECKED = [
   'skills/yolo-review/SKILL.md',
   'skills/update-files/SKILL.md',
 ];
-const RUN_DIR_LINE = /^RUN_DIR=\$\(agent-review run-dir(?: --lock [a-z-]+)?\) \|\| exit 1; export RUN_DIR$/;
+const RUN_DIR_LINE = /^RUN_DIR=\$\(agent-review run-dir(?: --lock [a-z-]+(?: --outer)?)?\) \|\| exit 1; export RUN_DIR$/;
 
 function bashBlocks(text) {
   return [...text.matchAll(/^( *)```bash\n([\s\S]*?)\n\1```$/gm)].map((m) =>
@@ -95,23 +95,31 @@ test('the run-folder skill blocks parse under bash and zsh', () => {
 test('the review takes the checkout first and frees it at the end or on any early stop', () => {
   const skill = read('skills/review/SKILL.md');
   const init = skill.slice(skill.indexOf('### Initialize'), skill.indexOf('### Gather PR Context & Diff Manifest'));
-  assert.ok(bashBlocks(init)[0].startsWith('RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR\n'));
+  const first = bashBlocks(init)[0];
+  assert.ok(first.startsWith('RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR\n'));
+  assert.ok(first.includes('\necho "run folder: $RUN_DIR"\n'), 'the model learns the literal path for prompts and its own writes');
+  for (const f of ['agent_review_report.md', 'agent_review_ledger.json', 'agent_review_status.json', 'agent_review_inline.json', 'agent_review_safety.json', 'agent_review_comment.md']) {
+    assert.match(first, new RegExp(`^rm -f [^\\n]*"\\$RUN_DIR"/${f.replace('.', '\\.')}`, 'm'), `Initialize clears an earlier ${f}`);
+  }
   const stage8 = skill.slice(skill.indexOf('## Stage 8'), skill.indexOf('## Notes'));
   assert.deepStrictEqual(bashBlocks(stage8), ['agent-review run-dir --release review'], 'Stage 8 ends by releasing the checkout');
   const flat = skill.replace(/\s+/g, ' ');
   for (const needle of [
     'whenever the run stops before Stage 8, for any reason (a ❌ line, a skip, a head already reviewed, a lane that failed twice), run Stage 8\'s **Finish the run** block before you stop',
     'If `agent-review run-dir` fails, stop and show its error: never fall back to `/tmp`.',
-    "In every prompt you hand a subagent, and in every path you show the user, write the run folder's literal path",
+    "So in every prompt you hand a subagent, every file you write yourself, and every path you show the user, write the run folder's literal path where this skill says `$RUN_DIR`: the path Stage 0A's first block prints as `run folder: <path>`",
   ]) {
     assert.ok(flat.includes(needle), `SKILL.md must say ${JSON.stringify(needle)}`);
   }
   const yolo = read('skills/yolo-review/SKILL.md');
-  assert.ok(bashBlocks(yolo)[0].startsWith('RUN_DIR=$(agent-review run-dir --lock yolo-review) || exit 1; export RUN_DIR\n'));
+  assert.ok(bashBlocks(yolo)[0].startsWith('RUN_DIR=$(agent-review run-dir --lock yolo-review --outer) || exit 1; export RUN_DIR\necho "run folder: $RUN_DIR"\n'));
   assert.ok(yolo.includes('first run `agent-review run-dir --release yolo-review`'));
   const address = read('skills/address/SKILL.md');
   const local = address.slice(address.indexOf('## Local mode'));
-  assert.ok(bashBlocks(local)[0].startsWith('RUN_DIR=$(agent-review run-dir --lock address) || exit 1; export RUN_DIR\n'));
+  assert.ok(bashBlocks(local)[0].startsWith('RUN_DIR=$(agent-review run-dir --lock address) || exit 1; export RUN_DIR\necho "run folder: $RUN_DIR"\n'));
+  for (const text of [skill, local]) {
+    assert.ok(text.replace(/\s+/g, ' ').includes('If it prints `kept` and no yolo-review started this'), 'a stray kept says how to free the checkout');
+  }
   assert.ok(local.includes('Run `agent-review run-dir --release address`, then summarize'));
   const ci = address.slice(address.indexOf('## CI mode'), address.indexOf('## Local mode'));
   assert.ok(!ci.includes('run-dir'), 'CI address keeps its workflow-given files');
