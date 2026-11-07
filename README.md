@@ -677,7 +677,10 @@ double-quoted shell word cannot carry; spaces are fine.
   the run's files, keeping only `agent_review_report.md` and any fix scripts in
   `automated_fixes/`; the next run of that checkout clears both. The posted report names a fix
   script only by its file name, since it lives on the reviewer's machine; the review's terminal
-  summary lists each one as `bash "<full path>"`. Only the skill that took the
+  summary lists each one as `bash "<full path>"`. Fix script names come from the model, so any
+  `fix_*` file not named `fix_<number>_<category>.sh` is removed before it is counted, listed, or
+  applied. A lock file is written to a temp file and linked into place, so no reader ever sees it
+  empty or half written. Only the skill that took the
   lock cleans up, so a review inside yolo-review leaves the folder to yolo-review. Cleanup only
   ever touches a folder directly under `runs/`, and never another session's live run.
   `--release --force` deletes the lock alone.

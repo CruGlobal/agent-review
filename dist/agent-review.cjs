@@ -20938,9 +20938,10 @@ var require_runDir = __commonJS({
   "engine/runDir.cjs"(exports2, module2) {
     "use strict";
     var { execFileSync } = require("node:child_process");
-    var { createHash } = require("node:crypto");
+    var { createHash, randomBytes } = require("node:crypto");
     var {
       closeSync,
+      linkSync,
       lstatSync,
       mkdirSync,
       openSync,
@@ -21102,16 +21103,35 @@ var require_runDir = __commonJS({
         if (generation < below) rmSync(lockPath(dir, generation), { force: true });
       }
     }
-    function createExclusive(path, text) {
-      const fd = openSync(path, "wx", 384);
+    function createExclusive(path, text, beforeLink = () => {
+    }) {
+      const tmp = `${path}.tmp-${randomBytes(8).toString("hex")}`;
+      const fd = openSync(tmp, "wx", 384);
       try {
-        writeFileSync(fd, text);
+        try {
+          writeFileSync(fd, text);
+        } finally {
+          closeSync(fd);
+        }
+        beforeLink();
+        linkSync(tmp, path);
       } finally {
-        closeSync(fd);
+        rmSync(tmp, { force: true });
       }
     }
-    function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive, afterRead = () => {
-    } }) {
+    function takeLock({
+      dir,
+      skill,
+      toplevel,
+      outer = false,
+      env = process.env,
+      nowSeconds,
+      isAlive = pidAlive,
+      afterRead = () => {
+      },
+      beforeLink = () => {
+      }
+    }) {
       const me = holderFrom(env);
       for (let attempt = 0; attempt < 3; attempt++) {
         const { generation, lock: existing } = currentLock(dir);
@@ -21121,7 +21141,7 @@ var require_runDir = __commonJS({
         afterRead();
         const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
         try {
-          createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + "\n");
+          createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + "\n", beforeLink);
         } catch (e) {
           if (e.code === "EEXIST") continue;
           throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);

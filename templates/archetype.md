@@ -173,6 +173,9 @@ EOF
 chmod +x {{RUN_DIR}}/automated_fixes/fix_N_[category].sh
 ```
 
+Name the script `fix_<N>_<category>.sh`, with `<N>` a number and `<category>` in lowercase letters,
+digits, `-`, or `_`; the review removes a fix script with any other name.
+
 Only generate a fix when the change is mechanical and you are confident it is correct. Skip the
 fix (report the finding alone) for anything requiring design judgment.
 

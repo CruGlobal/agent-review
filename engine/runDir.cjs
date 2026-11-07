@@ -1,8 +1,9 @@
 'use strict';
 const { execFileSync } = require('node:child_process');
-const { createHash } = require('node:crypto');
+const { createHash, randomBytes } = require('node:crypto');
 const {
   closeSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -200,20 +201,40 @@ function removeLocks(dir, below = Infinity) {
   }
 }
 
-function createExclusive(path, text) {
-  const fd = openSync(path, 'wx', 0o600);
+// A lock file appears whole or not at all: the lock is written to a temp file first, then linked
+// into place, which fails if that generation exists.
+function createExclusive(path, text, beforeLink = () => {}) {
+  const tmp = `${path}.tmp-${randomBytes(8).toString('hex')}`;
+  const fd = openSync(tmp, 'wx', 0o600);
   try {
-    writeFileSync(fd, text);
+    try {
+      writeFileSync(fd, text);
+    } finally {
+      closeSync(fd);
+    }
+    beforeLink();
+    linkSync(tmp, path);
   } finally {
-    closeSync(fd);
+    rmSync(tmp, { force: true });
   }
 }
 
 // Takes the checkout's lock for `skill`. Never takes a live lock from another session. Inside this
 // session's own hold, a skill run by an outer skill (review inside yolo-review) leaves the hold to
 // it; any other hold this session left was a run that stopped, so it is replaced, and an outer
-// skill always replaces it. `afterRead` runs between reading the lock and taking it, for tests.
-function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowSeconds, isAlive = pidAlive, afterRead = () => {} }) {
+// skill always replaces it. `afterRead` and `beforeLink` let tests run another session's steps
+// between reading the lock and creating the next one.
+function takeLock({
+  dir,
+  skill,
+  toplevel,
+  outer = false,
+  env = process.env,
+  nowSeconds,
+  isAlive = pidAlive,
+  afterRead = () => {},
+  beforeLink = () => {},
+}) {
   const me = holderFrom(env);
   for (let attempt = 0; attempt < 3; attempt++) {
     const { generation, lock: existing } = currentLock(dir);
@@ -223,7 +244,7 @@ function takeLock({ dir, skill, toplevel, outer = false, env = process.env, nowS
     afterRead();
     const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
     try {
-      createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + '\n');
+      createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + '\n', beforeLink);
     } catch (e) {
       if (e.code === 'EEXIST') continue;
       throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);

@@ -4,7 +4,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
-const { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = require('node:fs');
+const { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = require('node:fs');
 const { join } = require('node:path');
 const os = require('node:os');
 
@@ -154,7 +154,7 @@ test('the posted report names fix scripts without a local path, and the terminal
   const apply = report.split('\n').find((l) => l.startsWith('Apply:'));
   assert.strictEqual(
     apply,
-    "Apply: `/agent-review:address fix N`, or read and run `fix_N_category.sh` from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine.",
+    "Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.",
   );
   for (const local of ['$(', 'run-dir', '/tmp', '$RUN_DIR/automated', '{{RUN_DIR}}', '/Users/', 'agent-review-']) {
     assert.ok(!apply.includes(local), `the posted Apply line carries no local path or command: ${local}`);
@@ -220,4 +220,32 @@ test('update-files removes its fetched templates on every way it stops, the ever
   assert.ok(cleanup.replace(/\s+/g, ' ').includes('Whenever this skill stops after Stage 1, for any reason'));
   assert.deepStrictEqual(bashBlocks(cleanup), ['UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"']);
   assert.ok(skill.indexOf('## Clean up') > skill.indexOf('### Diff and PR'), 'the cleanup is the last step');
+});
+
+test('Stage 2B counts, lists and applies only fix scripts named fix_<number>_<category>.sh, in bash and zsh', () => {
+  const skill = read('skills/review/SKILL.md');
+  const block = bashBlocks(skill.slice(skill.indexOf('## Stage 2B'), skill.indexOf('## Stage 3')))[0];
+  assert.ok(block.startsWith('RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR\n'));
+  const hostile = ['fix_2_a"b.sh', 'fix_3_$(touch pwned).sh', 'fix_4_back`id`tick.sh', 'fix_5_Upper.sh', 'fix_x_style.sh', 'fix_6_ok.sh\nevil.sh', 'fix_7_sp ace.sh'];
+  for (const sh of shells()) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-fix-names-'));
+    try {
+      const fixes = join(dir, 'automated_fixes');
+      mkdirSync(fixes);
+      writeFileSync(join(fixes, 'fix_1_data-integrity.sh'), '#!/bin/bash\n');
+      for (const name of hostile) writeFileSync(join(fixes, name), '#!/bin/bash\n');
+      writeFileSync(join(dir, 'review_env.sh'), '');
+      const script = block.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${dir}'; export RUN_DIR`);
+      const out = execFileSync(sh, ['-c', script], { cwd: dir, encoding: 'utf8' });
+      assert.deepEqual(readdirSync(fixes).sort(), ['apply_all.sh', 'fix_1_data-integrity.sh'], `${sh}: every other fix_* name is removed`);
+      assert.equal(out.split('\n').filter((l) => l.startsWith('⚠️  removed a fix script')).length, hostile.length, `${sh}: each removal is reported`);
+      assert.deepEqual(out.split('\n').filter((l) => l.startsWith('  bash ')), [`  bash "${fixes}/fix_1_data-integrity.sh"`], `${sh}: only the safe script is listed`);
+      assert.equal(readFileSync(join(dir, 'review_env.sh'), 'utf8'), 'export FIX_COUNT="1"\n', `${sh}: only the safe script is counted`);
+      assert.equal(existsSync(join(dir, 'pwned')), false, `${sh}: no name ever ran`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const archetype = read('templates/archetype.md').replace(/\s+/g, ' ');
+  assert.ok(archetype.includes('Name the script `fix_<N>_<category>.sh`, with `<N>` a number and `<category>` in lowercase letters, digits, `-`, or `_`; the review removes a fix script with any other name.'));
 });

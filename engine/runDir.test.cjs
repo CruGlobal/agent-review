@@ -359,3 +359,46 @@ test('a checkout whose path a double-quoted shell word cannot carry has no run f
     assert.match(spaced.dir, /\/runs\/with_space-[0-9a-f]{12}$/, 'the run folder itself never holds the space');
   });
 });
+
+test('a lock file never appears empty or partial, so a session that is still writing one is never "no lock"', () => {
+  const S3 = { CLAUDE_CODE_SESSION_ID: 'session-three', CLAUDE_PID: '333' };
+  withTemp('ar-rundir-whole-', (dir) => {
+    writeFileSync(join(dir, `${LOCK_FILE}.4`), JSON.stringify({ session_id: 'session-one', claude_pid: 111, skill: 'review', created: NOW }));
+    const isAlive = (pid) => pid !== 111;
+    const seen = [];
+    let inner;
+    const outer = takeLock({
+      dir,
+      skill: 'review',
+      toplevel: '/w/a',
+      env: S2,
+      nowSeconds: NOW,
+      isAlive,
+      beforeLink: () => {
+        // S2 has written its lock and not yet put it in place: every lock file S3 can see is whole.
+        for (const generation of lockGenerations(dir)) {
+          seen.push(JSON.parse(readFileSync(join(dir, `${LOCK_FILE}.${generation}`), 'utf8')).session_id);
+        }
+        inner = inner ?? takeLock({ dir, skill: 'review', toplevel: '/w/a', env: S3, nowSeconds: NOW, isAlive });
+      },
+    });
+    assert.deepEqual(seen, ['session-one'], 'only the stale lock, and it parses');
+    assert.deepEqual([inner.ok, inner.taken], [true, true]);
+    assert.equal(outer.ok, false, 'the session still writing loses to the one that finished first');
+    assert.equal(currentLock(dir).lock.session_id, 'session-three');
+    assert.deepEqual(readdirSync(dir).sort(), [`${LOCK_FILE}.5`], 'no temp file is left behind');
+  });
+});
+
+test('a leftover temp lock file is never read as a lock, and cleanup removes it', () => {
+  withTemp('ar-rundir-tmp-', (parent) => {
+    const dir = runFolder(parent);
+    writeFileSync(join(dir, `${LOCK_FILE}.7.tmp-0123456789abcdef`), '');
+    assert.deepEqual(currentLock(dir), { generation: 0, lock: null });
+    assert.equal(takeLock({ dir, skill: 'review', toplevel: '/w/a', env: S1, nowSeconds: NOW, isAlive: alive }).taken, true);
+    assert.deepEqual(lockGenerations(dir), [1]);
+    assert.equal(releaseLock({ dir, skill: 'review', env: S1, nowSeconds: NOW, isAlive: alive }).cleaned, true);
+    assert.deepEqual(readdirSync(dir).sort(), ['agent_review_report.md', 'automated_fixes'].filter((f) => existsSync(join(dir, f))));
+    assert.ok(!readdirSync(dir).some((f) => f.startsWith(LOCK_FILE)), 'no lock or temp lock file survives cleanup');
+  });
+});
