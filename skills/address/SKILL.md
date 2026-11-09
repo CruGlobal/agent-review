@@ -135,7 +135,7 @@ RUN_DIR=$(agent-review run-dir --lock address) || exit 1; export RUN_DIR
 echo "run folder: $RUN_DIR"
 : > "$RUN_DIR"/address_env.sh
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
-[ -n "$PR_NUMBER" ] || { echo "❌ No PR context — the ledger lives on a PR comment."; exit 1; }
+[ -n "$PR_NUMBER" ] || { echo "❌ No PR context: the ledger lives on a PR comment."; exit 1; }
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
 agent-review run-dir --lock-pr "$REPO#$PR_NUMBER" >/dev/null || exit 1
 
@@ -149,13 +149,13 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --pagi
 gh api "repos/$REPO/issues/comments/$COMMENT_ID" --jq .body | tr -d '\r' > "$RUN_DIR"/address_comment.md
 sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' "$RUN_DIR"/address_comment.md | head -1 \
   > "$RUN_DIR"/address_ledger.json
-[ -s "$RUN_DIR"/address_ledger.json ] || { echo "❌ Report has no findings ledger (pre-ledger report — re-run the review)."; exit 1; }
+[ -s "$RUN_DIR"/address_ledger.json ] || { echo "❌ Report has no findings ledger (pre-ledger report, so re-run the review)."; exit 1; }
 
 cat >> "$RUN_DIR"/address_env.sh <<EOF
 export PR_NUMBER="$PR_NUMBER" REPO="$REPO" COMMENT_ID="$COMMENT_ID"
 EOF
 node -e 'for (const f of require(process.env.RUN_DIR + "/address_ledger.json"))
-  console.log(`#${f.n} [${f.status}] ${f.severity}/10 ${f.file}${f.line ? ":"+f.line : ""} — ${f.message}`)'
+  console.log(`#${f.n} [${f.status}] ${f.severity}/10 ${f.file}${f.line ? ":"+f.line : ""} · ${f.message}`)'
 ```
 
 ## Check mode — verify your own rework (`check` argument)

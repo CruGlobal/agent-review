@@ -20172,7 +20172,7 @@ var require_addressState = __commonJS({
       }
       if (operations.length === 0) {
         throw new Error(
-          `no actionable findings \u2014 ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join("; ")}`
+          `no actionable findings: ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join("; ")}`
         );
       }
       return validateRequest({
@@ -20302,13 +20302,13 @@ var require_addressState = __commonJS({
       const prefix = entry.severity >= 7 ? "- [ ]" : "-";
       if (entry.status === "fixed") {
         const fixedPrefix = entry.severity >= 7 ? "- [x]" : "-";
-        return `${fixedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u2705 fixed in ${String(entry.sha).slice(0, 7)}`;
+        return `${fixedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \xB7 ~~${message}~~ \xB7 \u2705 fixed in ${String(entry.sha).slice(0, 7)}`;
       }
       if (entry.status === "dismissed") {
         const dismissedPrefix = entry.severity >= 7 ? "- [x]" : "-";
-        return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
+        return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \xB7 ~~${message}~~ \xB7 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
       }
-      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_${reopenedText(entry)}`;
+      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \xB7 ${message} _(${entry.agent})_${reopenedText(entry)}`;
     }
     function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       const request = validateRequest(requestInput);
@@ -20371,11 +20371,11 @@ var require_addressState = __commonJS({
       const lines = [];
       if (appliedFixes.length) {
         lines.push(
-          `\u{1F50E} @${request.actor} \u2014 I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(", ")}. **Please review that commit before continuing** \u2014 these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
+          `\u{1F50E} @${request.actor}: I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(", ")}. **Please review that commit before continuing.** These are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
           ""
         );
       } else {
-        lines.push(`@${request.actor} \u2014 the agent-review address request completed.`, "");
+        lines.push(`@${request.actor}: the agent-review address request completed.`, "");
       }
       if (dismissed.length) lines.push(`Dismissed: ${dismissed.map((n) => `\`#${n}\``).join(", ")} using the maintainer-provided reasons.`);
       const notApplied = (result.fixes || []).filter((fix) => fix.status === "not-applied");

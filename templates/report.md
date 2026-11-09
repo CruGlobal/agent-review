@@ -1,37 +1,37 @@
 <!-- This skeleton is filled by skills/review/SKILL.md. The CI posting step then prepends the
-real hidden state markers before the comment is published — see skills/review/SKILL.md's posting
+real hidden state markers before the comment is published: see skills/review/SKILL.md's posting
 step for the exact format. Once posted they must stay byte-exact: addressState and the
 publish-step validation parse them with anchored per-line regexes, each expecting exactly one
 match. -->
 
 [DO NOT write literal agent-review-head, agent-review-rollout, agent-review-ledger, or
-agent-review-status HTML comment lines anywhere in the filled report body — the CI posting step
+agent-review-status HTML comment lines anywhere in the filled report body: the CI posting step
 prepends its own single copy of each after this skeleton is filled, and a duplicate line breaks
 address parsing ("report must contain exactly one findings ledger/status marker").]
 
 🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL][ · ⚠️ irreversible][ · 👤 needs a person]
-[one-line: rollout mode ($AGENT_REVIEW_ROLLOUT_MODE, default advisory — in shadow, say plainly
+[one-line: rollout mode ($AGENT_REVIEW_ROLLOUT_MODE, default advisory: in shadow, say plainly
 this report cannot approve or block the PR) · [N] agents run ([list of launched agent titles])
 · incremental since [short SHA] if scoped · [N] debate rounds if run]
 
-## BLOCKERS — fix or dismiss to pass
+## BLOCKERS: fix or dismiss to pass
 
-[FOR EACH severity ≥7 ledger entry, ordered by severity descending — use the ledger's own `n`,
+[FOR EACH severity ≥7 ledger entry, ordered by severity descending: use the ledger's own `n`,
 NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve the wrong finding:]
-[IF status open — add the ↩️ part only when the entry has `previousDismissal`, leaving out any
+[IF status open: add the ↩️ part only when the entry has `previousDismissal`, leaving out any
 of its parts that are missing:]
 
-- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]
+- [ ] **`#[N]`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]
       ↳ evidence: [≤8 lines/600 chars, may include one hunk excerpt]
       ↳ fix: [≤2 lines or unified diff ≤10 lines]
 
 [IF status fixed:]
 
-- [x] **`#[N]`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]
+- [x] **`#[N]`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · ✅ fixed in [short sha]
 
 [IF status dismissed:]
 
-- [x] **`#[N]`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]
+- [x] **`#[N]`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · 🚫 dismissed by @[user] [[reason code]]: [reason]
 
 [IF no severity ≥7 entries exist at all:] ✅ No blockers.
 
@@ -43,31 +43,31 @@ of its parts that are missing:]
 
 ## OTHER FINDINGS ([N])
 
-[FOR EACH severity <7 ledger entry, ordered by severity descending, ONE line, no sub-bullets —
+[FOR EACH severity <7 ledger entry, ordered by severity descending, ONE line, no sub-bullets:
 use the ledger's own `n`, NEVER renumber: a renumbered blocker makes `@claude dismiss 1` resolve
 the wrong finding:]
-[IF status open — the ↩️ part as above:]
+[IF status open: the ↩️ part as above:]
 
-- **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]
+- **`#[N]`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]
 
 [IF status fixed:]
 
-- **`#[N]`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]
+- **`#[N]`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · ✅ fixed in [short sha]
 
 [IF status dismissed:]
 
-- **`#[N]`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]
+- **`#[N]`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · 🚫 dismissed by @[user] [[reason code]]: [reason]
 
 <details><summary>🔧 Fix suggestions ([N])</summary>
 
 [IF FIX_COUNT is 0:] No automated fixes for this review.
-[FOR EACH suggested fix:] **`#[N]`** — [Title]: `[file:line]`
+[FOR EACH suggested fix:] **`#[N]`** · [Title]: `[file:line]`
 
 ```diff
 [≤10-line unified diff]
 ```
 
-[Local mode only — never in CI, nothing is executed there:]
+[Local mode only: never in CI, nothing is executed there:]
 Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.
 
 </details>
@@ -85,7 +85,7 @@ breaking changes as reported by the agents]
 <details><summary>📊 Review detail & stats</summary>
 
 **Generated**: [timestamp] · **Day**: [day of week] · **Files changed**: [N] (+[X] -[Y] lines)
-**Risk score**: [X]/[max] — [LOW/MEDIUM/HIGH/CRITICAL] · **Required reviewer**: [role for that level]
+**Risk score**: [X]/[max] · [LOW/MEDIUM/HIGH/CRITICAL] · **Required reviewer**: [role for that level]
 [IF FRIDAY/WEEKEND:] ⚠️ **[DAY] deployment**: [appropriate warning based on risk score]
 
 **Risk factors detected**: [list specific factors, or "none"]
@@ -98,7 +98,7 @@ breaking changes as reported by the agents]
 - CI snapshot: [N passed, N failed, N pending; name failed/pending checks with links]
 - Cross-repo context: [available repo ids + pinned short SHAs, or "none"]
 
-[IF routing degraded:] ⚠️ routing degraded — ran on the default model
+[IF routing degraded:] ⚠️ routing degraded: ran on the default model
 
 **Agent summary** [one row per launched agent, using each agent's `title`, in launch order]
 (bands: Critical 9-10 · High 7-8 · Important 5-6 · Suggestions 3-4):
@@ -110,7 +110,7 @@ breaking changes as reported by the agents]
 
 **Per-agent perspectives on blockers** [FOR EACH blocker, the agents that flagged it]:
 
-- `#[N]` — [Agent 1] (Severity: [X]/10): [their specific concern] · [Agent 2] (Severity:
+- `#[N]` · [Agent 1] (Severity: [X]/10): [their specific concern] · [Agent 2] (Severity:
   [Y]/10): [their specific concern]
 
 [IF engine is code-review]
@@ -157,15 +157,15 @@ keeps this comment in sync. Valid codes: `false-positive`, `intentional`, `pre-e
 
 Every finding above is numbered. Severity ≥ 7 findings carry a checkbox and must each be **fixed or
 dismissed** before this review counts as passed; lower severities are advisory. Interact from a
-PR comment — `@claude fix 1, 3` · `@claude dismiss 2 [false-positive]: <one-line reason>`
-(a reason code and explanation are required) — or locally with `/agent-review:address`. Valid
+PR comment: `@claude fix 1, 3` · `@claude dismiss 2 [false-positive]: <one-line reason>`
+(a reason code and explanation are required), or locally with `/agent-review:address`. Valid
 codes: `false-positive`, `intentional`, `pre-existing`, `deferred`, `duplicate`,
 `insufficient-evidence`, `other`.
 
-- `@claude fix 1, 3, 5` — AI applies those fixes on this branch and checks them off
-- `@claude dismiss 2 [intentional]: matches legacy import behavior` — checks it off with your
+- `@claude fix 1, 3, 5`: AI applies those fixes on this branch and checks them off
+- `@claude dismiss 2 [intentional]: matches legacy import behavior`: checks it off with your
   reason; repeated dismissals of the same finding class teach the review to stop raising it
-- `@claude fix 1, 3; dismiss 2 [false-positive]: guarded by the caller` — mixed operations use a
+- `@claude fix 1, 3; dismiss 2 [false-positive]: guarded by the caller`: mixed operations use a
   semicolon between clauses
 
 Or locally: `/agent-review:address` pulls this ledger into a Claude Code session.
@@ -177,5 +177,5 @@ developer, not dismissed reflexively.]
 
 </details>
 
-[version-check footer line, when stale — unchanged from current: appended after the visible body,
+[version-check footer line, when stale: unchanged from current: appended after the visible body,
 never inside the hidden markers]

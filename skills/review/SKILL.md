@@ -228,11 +228,11 @@ export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
 export ENGINE="$ENGINE" EFFORT="$EFFORT" REVIEWS_RUN="$REVIEWS_RUN"
 EOF
 
-[ -n "$CI_MODE" ] && echo "🤖 CI MODE — non-interactive, no metrics, no fix execution"
+[ -n "$CI_MODE" ] && echo "🤖 CI MODE: non-interactive, no metrics, no fix execution"
 echo "export CI_MODE=\"$CI_MODE\"" >> "$RUN_DIR"/review_env.sh
 
 # --- Detect a local incremental request ---
-[ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL — only commits since the last posted review"
+[ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ] && echo "♻️  INCREMENTAL: only commits since the last posted review"
 echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> "$RUN_DIR"/review_env.sh
 
 # --- Initialize Directories ---
@@ -264,7 +264,7 @@ set -e
 # resolve and returns nothing; the workflow therefore exports $PR_NUMBER, which wins. Locally
 # (on a PR branch) the fallback resolves it from the branch instead.
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null || true)}"
-[ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context — local review"
+[ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context: local review"
 
 # Take the PR too, so no other session reviews or addresses it from another checkout meanwhile.
 if [ -n "$PR_NUMBER" ]; then
@@ -278,7 +278,7 @@ REVIEW_ID="${PR_NUMBER:-local}-$(date +%Y%m%d-%H%M%S)"
 # PR metadata if we're on a PR (harmless when we're not). `${PR_NUMBER:+"$PR_NUMBER"}` passes the
 # number when we have one and expands to NOTHING when we don't — never an empty argument.
 gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number,title,baseRefName,headRefName,additions,deletions,changedFiles 2>/dev/null \
-  || echo "Not in a PR branch — falling back to the configured base branch"
+  || echo "Not in a PR branch. Falling back to the configured base branch"
 
 DAY_OF_WEEK=$(date +%A)
 echo "Today is: $DAY_OF_WEEK"
@@ -308,10 +308,10 @@ INCREMENTAL="" LAST_REVIEWED=""
 if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
   LOCAL_HEAD=$(git rev-parse HEAD)
   if [ -n "$HEAD_REF" ] && [ "$LOCAL_HEAD" != "$HEAD_REF" ] && git merge-base --is-ancestor "$HEAD_REF" "$LOCAL_HEAD" 2>/dev/null; then
-    echo "❌ Local HEAD is ahead of the PR head ($HEAD_REF) — push first, then re-run. The review records the PR head and the approval workflow compares against it."
+    echo "❌ Local HEAD is ahead of the PR head ($HEAD_REF). Push first, then re-run. The review records the PR head and the approval workflow compares against it."
     exit 1
   fi
-  [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty — only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
+  [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty: only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
 fi
 PREV_COMMENT=""
 if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
@@ -336,12 +336,12 @@ if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER
       if [ -s "${AGENT_REVIEW_PREVIOUS_COMMENT:-}" ] && [ -n "${AGENT_REVIEW_COMMENT_OUT:-}" ]; then
         cp "$AGENT_REVIEW_PREVIOUS_COMMENT" "$AGENT_REVIEW_COMMENT_OUT" || true
       fi
-      echo "✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting."
+      echo "✅ Head $HEAD_REF already reviewed. Nothing new since the last report. Exiting."
       exit 0
     fi
     INCREMENTAL="true"
   elif [ -n "$LAST_REVIEWED" ]; then
-    echo "⚠️  Recorded reviewed SHA $LAST_REVIEWED is not an ancestor of $HEAD_REF (force push?) — full review."
+    echo "⚠️  Recorded reviewed SHA $LAST_REVIEWED is not an ancestor of $HEAD_REF (force push?). Doing a full review."
     LAST_REVIEWED=""
   fi
 fi
@@ -422,7 +422,7 @@ if [ -n "$INCREMENTAL" ]; then
   KEPT_TREE="" NOTE=""
   if [ -n "$ALL_BASES" ] && [ "$ALL_BASES" = "$PR_BASE" ] && [ "$LAST_FORK" = "$PR_BASE" ]; then
     KEPT_TREE=$(git rev-parse "$LAST_REVIEWED^{tree}")
-    NOTE="✅ No net changes since the last reviewed head — nothing to review. Exiting."
+    NOTE="✅ No net changes since the last reviewed head. Nothing to review. Exiting."
   elif [ "$ALL_BASES" = "$PR_BASE" ] && [ -n "$LAST_FORK" ] && [ -n "$ON_DEFAULT" ]; then
     # merge-tree writes the trees it builds. A throwaway object store under /tmp, the only place
     # the CI sandbox can write, keeps them out of .git. A conflict or any error leaves no tree.
@@ -456,7 +456,7 @@ fi
 
 if [ -n "$INCREMENTAL" ]; then
   RANGE="$LAST_REVIEWED..$HEAD_REF"
-  echo "♻️  INCREMENTAL REVIEW — commits since previously reviewed $LAST_REVIEWED"
+  echo "♻️  INCREMENTAL REVIEW: commits since previously reviewed $LAST_REVIEWED"
 elif [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   RANGE="$PR_BASE..$HEAD_REF"
 else
@@ -508,7 +508,7 @@ cp "$RUN_DIR"/pr_full_diff.txt "$RUN_DIR"/pr_card_scan_diff.txt
 # An incremental run with an unchanged tree stopped above, so an empty diff here means a bad base
 # ref or a change git config hides from the diff.
 if [ ! -s "$RUN_DIR"/changed_files.txt ]; then
-  echo "❌ No changed files in $RANGE — nothing to review. Check the base ref."
+  echo "❌ No changed files in $RANGE. Nothing to review. Check the base ref."
   exit 1
 fi
 wc -l < "$RUN_DIR"/changed_files.txt
@@ -681,7 +681,7 @@ RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 . "$RUN_DIR/review_env.sh" 2>/dev/null || true
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 if [ -z "$PR_NUMBER" ]; then
-  echo "⚠️  No PR number available — report left at $RUN_DIR/agent_review_report.md"
+  echo "⚠️  No PR number available. Report left at $RUN_DIR/agent_review_report.md"
 else
   # Line 2 records the head SHA this report covers — the next CI run reads it back to review
   # only the commits since (see the incremental block in Stage 0). Line 3 carries the findings
@@ -719,7 +719,7 @@ for (const name of ["ledger", "status"]) {
     throw new Error(name + " marker is missing from the comment header");
 }
 console.log("marker self-check OK");
-' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
+' || { echo "❌ marker JSON invalid. REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
 
   # In the reusable workflow, the model never receives a GitHub token. It only
   # stages a comment; a deterministic post-step validates the reviewed head and
@@ -866,12 +866,12 @@ if [ "$MODE" = "auto" ]; then
       # carried-forward open blocker from a prior run still blocks, so surface it here rather
       # than letting a zero-risk delta read as silently clean.
       OPEN_BLOCKERS=$(node -e 'const l=require(process.env.RUN_DIR + "/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
-      { echo "🎚️ **agent-review: skipped** — risk score 0 (no reviewable risk in this diff)."
+      { echo "🎚️ **agent-review: skipped**: risk score 0 (no reviewable risk in this diff)."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null \
-          && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
+          && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open. See the ledger below."
         skip_notes "${AGENT_REVIEW_PREVIOUS_COMMENT:-}"
       } > "$RUN_DIR"/agent_review_report.md
-      echo "AUTO MODE: skip (score 0) — post $RUN_DIR/agent_review_report.md via the CI posting step, then exit."
+      echo "AUTO MODE: skip (score 0). Post $RUN_DIR/agent_review_report.md via the CI posting step, then exit."
     elif [ -n "$INCREMENTAL_REQUESTED" ]; then
       # Same carry-forward as CI: keep the previous ledger, reversibility, and needs-a-person
       # state, recompute status, and post a skip note so the head marker advances and the next
@@ -895,13 +895,13 @@ if [ "$MODE" = "auto" ]; then
       agent-review ledger --findings "$RUN_DIR"/review_filtered.json --previous "$RUN_DIR"/previous_agent_review_ledger.json > "$RUN_DIR"/agent_review_ledger.json
       agent-review status --ledger "$RUN_DIR"/agent_review_ledger.json --plan "$RUN_DIR"/review_gate_plan.json --safety "$RUN_DIR"/agent_review_safety.json --human "$RUN_DIR"/agent_review_human_rules.json --card-scan "$RUN_DIR"/agent_review_card_scan.json --evidence "$RUN_DIR"/review_evidence.json "${HEAD_ARGS[@]}" > "$RUN_DIR"/agent_review_status.json
       OPEN_BLOCKERS=$(node -e 'const l=require(process.env.RUN_DIR + "/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
-      { echo "🎚️ **agent-review: skipped** — no reviewable risk in the delta since the last review."
-        [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open — see the ledger below."
+      { echo "🎚️ **agent-review: skipped**: no reviewable risk in the delta since the last review."
+        [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open. See the ledger below."
         skip_notes "$RUN_DIR"/previous_agent_review_comment.md
       } > "$RUN_DIR"/agent_review_report.md
-      echo "AUTO MODE: skip (score 0) — post $RUN_DIR/agent_review_report.md via Stage 7, then exit."
+      echo "AUTO MODE: skip (score 0). Post $RUN_DIR/agent_review_report.md via Stage 7, then exit."
     else
-      echo "AUTO MODE: risk score 0 — nothing worth a review pass. Run 'quick' explicitly to force one."
+      echo "AUTO MODE: risk score 0. Nothing worth a review pass. Run 'quick' explicitly to force one."
     fi
   else
     [ "$RESOLVED" = "skip" ] && RESOLVED="standard"   # static findings exist — deterministic evidence outranks a 0-risk skip
@@ -1123,7 +1123,7 @@ if [ "$(agent-review config get index.enabled 2>/dev/null)" = "true" ]; then
   fi
   cat "$RUN_DIR"/review_impact.json
 else
-  echo "ℹ️  Index disabled in config.yml — skipping impact analysis."
+  echo "ℹ️  Index disabled in config.yml. Skipping impact analysis."
 fi
 echo "✅ Dependency analysis complete"
 ```
@@ -1390,7 +1390,7 @@ set -euo pipefail
 # fix_*.sh are model-generated from PR content and UNTRUSTED — review each before applying.
 FIXES=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" != "--yes" ]; then
-  echo "DRY RUN — review each fix, then re-run with --yes to apply. Nothing applied yet."
+  echo "DRY RUN: review each fix, then re-run with --yes to apply. Nothing applied yet."
   for fix in "$FIXES"/fix_*.sh; do
     [ -f "$fix" ] || continue
     echo ""; echo "===== $(basename "$fix") ====="; cat "$fix"
@@ -1788,7 +1788,7 @@ echo "✅ Review history updated"
 Write the consensus findings as a JSON array to `$RUN_DIR/consensus_findings.json`. Each entry is
 shaped `{ agent, category, severity, file, line, message, confidence, evidence, recommendation }`.
 For severity ≥ 7, `confidence` must be `High`, `line` must anchor to an added/modified line, and
-`evidence` must name the verified execution path or violated contract. Then emit the findings and
+`evidence` must name the verified execution path or violated contract. Do not use em dashes in finding messages, summaries or headings that get posted. Then emit the findings and
 apply approved learnings when that layer is enabled, then build the hidden findings ledger from
 the result — both steps are read-only engine calls with no required decision in between, so one
 shell handles them (see **Build the findings ledger** below for what the second half does):
@@ -2132,7 +2132,7 @@ and `[IF …]` / `[FOR EACH …]` directives tell you exactly what goes where. H
   empty or absent.
 
 Fill the skeleton top-down and state each finding exactly once: open blockers in
-"BLOCKERS — fix or dismiss to pass" (with their evidence and fix lines), every
+"BLOCKERS: fix or dismiss to pass" (with their evidence and fix lines), every
 other ledger entry as a single line in "OTHER FINDINGS". Never restate a finding
 in another section — per-agent perspectives inside "Review detail & stats" refer
 to findings by `#N`, they do not repeat the message. Everything below OTHER
@@ -2237,7 +2237,7 @@ RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 . "$RUN_DIR/review_env.sh" 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
 : > "$RUN_DIR"/agent_review_post_result.txt
 if [ -z "${PR_NUMBER:-}" ]; then
-  echo "💾 Saved locally, no PR — report at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
+  echo "💾 Saved locally, no PR: report at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
 else
   REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
   # The rollout marker decides whether an approver may act on this report. Locally it comes
@@ -2277,7 +2277,7 @@ for (const name of ["ledger", "status"]) {
     throw new Error(name + " marker is missing from the comment header");
 }
 console.log("marker self-check OK");
-' || { echo "❌ marker JSON invalid — REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
+' || { echo "❌ marker JSON invalid. REGENERATE the comment using ONLY the node commands above (never hand-write marker lines), then re-run this block"; exit 1; }
 
   # Create-or-update ONLY a report comment this user posted. Never edit the bot's CI
   # report: that would put hand-posted text under the bot's login (which the CI and
@@ -2293,11 +2293,11 @@ console.log("marker self-check OK");
   if [ -n "$EXISTING" ]; then
     gh api -X PATCH "repos/$REPO/issues/comments/$EXISTING" -F body=@"$RUN_DIR"/agent_review_comment.md >/dev/null \
       && echo "✅ Updated your review comment ($EXISTING) on PR #$PR_NUMBER" | tee "$RUN_DIR"/agent_review_post_result.txt \
-      || echo "❌ post failed — could not update comment $EXISTING; report left at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
+      || echo "❌ post failed: could not update comment $EXISTING; report left at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
   else
     gh pr comment "$PR_NUMBER" --body-file "$RUN_DIR"/agent_review_comment.md >/dev/null \
       && echo "✅ Review posted to PR #$PR_NUMBER" | tee "$RUN_DIR"/agent_review_post_result.txt \
-      || echo "❌ post failed — could not comment on PR #$PR_NUMBER; report left at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
+      || echo "❌ post failed: could not comment on PR #$PR_NUMBER; report left at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
   fi
 fi
 

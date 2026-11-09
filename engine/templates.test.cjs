@@ -257,7 +257,7 @@ test('review workflow reports back to the PR when the review job fails', () => {
   // on that path too, not claim "no report was posted" unconditionally.
   assert.ok(failure.includes('did not complete'));
   assert.ok(failure.includes('may be missing or partially posted'));
-  assert.ok(failure.includes('check for an agent-review comment'));
+  assert.ok(failure.includes('Check for an agent-review comment'));
   assert.ok(failure.includes('made no code changes'));
   assert.ok(failure.includes('agent-review'), 'must tell the maintainer which label to cycle');
   assert.ok(failure.includes('github.event.pull_request.number'));
@@ -407,7 +407,7 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
   // One verdict line up top, right after the hidden markers.
   assert.ok(report.includes('🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL]'));
   // Visible blocks: blockers with evidence + fix sub-lines, then one-liner findings.
-  assert.ok(report.includes('## BLOCKERS — fix or dismiss to pass'));
+  assert.ok(report.includes('## BLOCKERS: fix or dismiss to pass'));
   assert.ok(report.includes('↳ evidence:'));
   assert.ok(report.includes('↳ fix:'));
   assert.ok(report.includes('## OTHER FINDINGS'));
@@ -434,7 +434,7 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
     assert.ok(!report.includes(heading), `legacy severity/debate section "${heading}" must not restate ledger findings`);
   }
   // Machine contracts survive byte-identical.
-  assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_'));
+  assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_'));
   // The skeleton may document the hidden markers in prose, but must never itself contain a
   // marker-shaped line — the CI posting step prepends the one real copy of each, and a
   // duplicate breaks addressState's "exactly one ledger/status marker" parsing.
@@ -461,12 +461,12 @@ test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-fo
   const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
   const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
   assert.deepEqual(matchedLines, [
-    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
-    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
-    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · ✅ fixed in [short sha]',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · 🚫 dismissed by @[user] [[reason code]]: [reason]',
+    '- **`#7`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
+    '- **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · ✅ fixed in [short sha]',
+    '- **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · 🚫 dismissed by @[user] [[reason code]]: [reason]',
   ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
 });
 
@@ -474,7 +474,7 @@ test('the review skill fills the caveman report and enforces the soft byte targe
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('soft target 25,000 bytes'), 'Stage 6 must state the new soft size target');
   assert.ok(skill.includes('state each finding exactly once'), 'fill rules must forbid restating findings across sections');
-  assert.ok(skill.includes('BLOCKERS — fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
+  assert.ok(skill.includes('BLOCKERS: fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
   // Stale instructions from the pre-caveman layout must not survive: they contradict the
   // verdict+blockers skeleton and would mislead the model filling it.
   assert.ok(!skill.includes('AUTOMATED FIXES AVAILABLE'), 'the old AUTOMATED FIXES AVAILABLE section name must not survive');
@@ -1601,9 +1601,9 @@ test('the consolidated CI-path blocks keep every fail-closed exit message verbat
   for (const message of [
     '❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first.',
     "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml.",
-    '❌ No changed files in $RANGE — nothing to review. Check the base ref.',
-    '✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting.',
-    '✅ No net changes since the last reviewed head — nothing to review. Exiting.',
+    '❌ No changed files in $RANGE. Nothing to review. Check the base ref.',
+    '✅ Head $HEAD_REF already reviewed. Nothing new since the last report. Exiting.',
+    '✅ No net changes since the last reviewed head. Nothing to review. Exiting.',
   ]) {
     assert.ok(skill.includes(message), `fail-closed message missing or altered: ${message}`);
   }
@@ -1616,7 +1616,7 @@ test('the review gates load the config without the code-review engine checks', (
     'engine=agent-review and CI must still run when the code-review engine settings are wrong; agent-review options reports them',
   );
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
-  assert.ok(yolo.includes('agent-review config show >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }'));
+  assert.ok(yolo.includes('agent-review config show >/dev/null || { echo "❌ No review config. Run /agent-review:init first."; exit 1; }'));
   for (const text of [review, yolo]) {
     assert.ok(!bashBlocks(text).includes('agent-review config validate'), 'config validate fails on code-review engine problems');
   }
@@ -2371,10 +2371,10 @@ test('interact\'s failure report says when a commit was already pushed, and "not
     assert.ok(posted.includes('The findings ledger and its summary comment were updated.'), posted);
     assert.ok(!posted.includes('was not posted') && !posted.includes(WARNING), 'a posted summary already carried the warning');
     const refused = say({});
-    assert.ok(refused.includes('**nothing was changed**'), refused);
+    assert.ok(refused.includes('**Nothing was changed**'), refused);
     assert.ok(refused.includes('publishing was refused'), refused);
     const unparsed = say({ REASON: 'Could not parse "fix one".', MODEL_RESULT: 'failure' });
-    assert.ok(unparsed.includes('**nothing was changed**') && unparsed.includes('Could not parse "fix one".'), unparsed);
+    assert.ok(unparsed.includes('**Nothing was changed**') && unparsed.includes('Could not parse "fix one".'), unparsed);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -5666,4 +5666,49 @@ test('README lists the person-must-approve rule, drops irreversible from the sto
   }
   const own = r.slice(r.indexOf('## PCI and repos that always need a person'), r.indexOf('## Set up a repo (once)'));
   assert.ok(own.length > 0 && !own.includes('\u2014'), 'the human approval section uses no em dashes');
+});
+
+function walkMarkdown(dir) {
+  const { readdirSync, statSync } = require('node:fs');
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) return walkMarkdown(path);
+    return name.endsWith('.md') ? [path] : [];
+  });
+}
+
+test('posted text carries no em dash', () => {
+  const EM = '—';
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(!report.includes(EM), 'templates/report.md must carry no em dash');
+  const postsText = (line) => /^\s*(echo|printf)\b/.test(line) || /(&&|\|\||\{)\s*(echo|printf)\s+['"]/.test(line)
+    || line.includes('BODY=') || line.includes('--body');
+  const files = [
+    join(ROOT, '.github/workflows/review.yml'),
+    join(ROOT, '.github/workflows/interact.yml'),
+    join(ROOT, '.github/actions/approve/action.yml'),
+    ...walkMarkdown(join(ROOT, 'skills')),
+  ];
+  for (const file of files) {
+    const bad = readFileSync(file, 'utf8').split('\n')
+      .map((line, i) => ({ line, at: i + 1 }))
+      .filter(({ line }) => line.includes(EM) && postsText(line));
+    assert.deepEqual(bad, [], `${relative(ROOT, file)} posts or prints an em dash`);
+  }
+  const source = readFileSync(join(ROOT, 'engine/addressState.cjs'), 'utf8');
+  const literals = source.split('\n')
+    .filter((line) => line.includes(EM) && !/^\s*\/\//.test(line));
+  assert.deepEqual(literals, [], 'engine/addressState.cjs string literals must carry no em dash');
+});
+
+test('model prompts ask for no em dashes in posted text', () => {
+  const ask = 'Do not use em dashes';
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage6 = stageSlice(skill, '## Stage 6 — Generate Review Report', '## Stage 7');
+  assert.ok(stage6.includes(ask), 'review Stage 6 must carry the ask');
+  for (const file of ['templates/archetype.md', 'templates/code-review-lane.md']) {
+    assert.ok(readFileSync(join(ROOT, file), 'utf8').includes(ask), `${file} must carry the ask`);
+  }
+  assert.ok(readFileSync(ARCHETYPE, 'utf8').includes(FINAL_LINE_CONTRACT), 'archetype keeps the final-line contract');
+  assert.ok(laneText().includes(FINAL_LINE_CONTRACT), 'lane template keeps the final-line contract');
 });

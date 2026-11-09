@@ -108,20 +108,20 @@ EOF
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "🧭 /agent-review:init"
-echo "• Phase 1 codebase scan — 1 subagent"
+echo "• Phase 1 codebase scan: 1 subagent"
 if [ -n "$MIGRATE" ]; then
-  echo "• Migrate mode — no scan, no history mining"
+  echo "• Migrate mode: no scan, no history mining"
 elif [ -n "$SKIP_HISTORY" ]; then
-  echo "• Phase 2 PR-history mining — SKIPPED (--skip-history)"
+  echo "• Phase 2 PR-history mining: SKIPPED (--skip-history)"
 else
-  echo "• Phase 2 PR-history mining — up to $PRS merged PRs across $BATCHES parallel subagents"
+  echo "• Phase 2 PR-history mining: up to $PRS merged PRs across $BATCHES parallel subagents"
   echo "  Rough cost: ~\$0.30-0.60 per 10-PR batch (larger diffs cost more)"
   printf '  Estimated total: ~$%s.%02d-%s.%02d\n' \
     $((BATCHES * 30 / 100)) $((BATCHES * 30 % 100)) \
     $((BATCHES * 60 / 100)) $((BATCHES * 60 % 100))
 fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-[ -n "$OVER_CAP" ] && echo "⚠️  --prs $PRS exceeds the 100-PR fan-out cap — see below before continuing"
+[ -n "$OVER_CAP" ] && echo "⚠️  --prs $PRS exceeds the 100-PR fan-out cap. See below before continuing"
 ```
 
 If `OVER_CAP` is set, **stop and ask the user** before mining. Offer: (a) mine the 100 most recent
@@ -175,7 +175,7 @@ detection silently never fires again. Run both checks, in this order:
 # 1. Mechanical: no legacy keys and no v1 marker may survive. This must print NOTHING.
 if grep -n 'supabase_migration_change\|next_config_security_change\|version: 1' \
      .claude/review/config.yml; then
-  echo "❌ MIGRATION INCOMPLETE — the lines above are still v1. Finish the mapping and re-run;"
+  echo "❌ MIGRATION INCOMPLETE: the lines above are still v1. Finish the mapping and re-run;"
   echo "   do NOT commit. A bumped version with a leftover legacy key validates clean but"
   echo "   permanently disables that detection."
   exit 1
@@ -239,7 +239,7 @@ git rev-parse HEAD > "$RUN_DIR"/init_now_head.txt
 git status --porcelain > "$RUN_DIR"/init_now_status.txt
 diff "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_now_head.txt \
   && diff "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_now_status.txt \
-  && echo "✅ clean — nothing written since baseline"
+  && echo "✅ clean: nothing written since baseline"
 ```
 
 Both diffs silent → continue. Any output → **drift**. Then:
