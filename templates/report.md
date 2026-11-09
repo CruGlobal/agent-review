@@ -68,7 +68,7 @@ the wrong finding:]
 ```
 
 [Local mode only: never in CI, nothing is executed there:]
-Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.
+Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch, and marks the finding fixed in the findings ledger on the PR comment with the fix commit. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.
 
 </details>
 

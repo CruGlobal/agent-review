@@ -226,8 +226,9 @@ test('the posted report names fix scripts without a local path, and the terminal
   const apply = report.split('\n').find((l) => l.startsWith('Apply:'));
   assert.strictEqual(
     apply,
-    "Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.",
+    "Apply: `/agent-review:address fix N` applies the fix, then commits and pushes it to the PR branch, and marks the finding fixed in the findings ledger on the PR comment with the fix commit. Or read and run `fix_N_category.sh` yourself, from the reviewer's terminal summary, which lists each fix script by its full path. Fix scripts stay on the reviewer's machine and change nothing until run.",
   );
+  assert.ok(apply.includes('findings ledger'), 'the Apply line says address updates the ledger');
   for (const local of ['$(', 'run-dir', '/tmp', '$RUN_DIR/automated', '{{RUN_DIR}}', '/Users/', 'agent-review-']) {
     assert.ok(!apply.includes(local), `the posted Apply line carries no local path or command: ${local}`);
   }
@@ -369,6 +370,42 @@ test('Stage 2B counts, lists and applies only fix scripts named fix_<number>_<ca
   assert.ok(archetype.includes('Name the script `fix_<N>_<category>.sh`, with `<N>` a number and `<category>` in lowercase letters, digits, `-`, or `_`; the review removes a fix script with any other name.'));
 });
 
+test('Stage 2B says why a fix script name was dropped and which name would work, in bash and zsh', () => {
+  const skill = read('skills/review/SKILL.md');
+  const block = bashBlocks(skill.slice(skill.indexOf('## Stage 2B'), skill.indexOf('## Stage 3')))[0];
+  const hostile = ['fix_3_Security.sh', 'fix_8_$(touch pwned).sh', 'fix_9_a\nb.sh', 'fix_x_style.sh'];
+  for (const sh of shells()) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-fix-why-'));
+    try {
+      const fixes = join(dir, 'automated_fixes');
+      mkdirSync(fixes);
+      writeFileSync(join(fixes, 'fix_1_data-integrity.sh'), '#!/bin/bash\n');
+      for (const name of hostile) writeFileSync(join(fixes, name), '#!/bin/bash\n');
+      writeFileSync(join(dir, 'review_env.sh'), '');
+      const script = block.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${dir}'; export RUN_DIR`);
+      const out = execFileSync(sh, ['-c', script], { cwd: dir, encoding: 'utf8' });
+      const warnings = out.split('\n').filter((l) => l.startsWith('⚠️  removed a fix script'));
+      assert.equal(warnings.length, hostile.length, `${sh}: one warning line per removal, on one line: ${out}`);
+      const upper = warnings.find((l) => l.includes('fix_3_Security.sh'));
+      assert.ok(upper, `${sh}: the warning names the file: ${out}`);
+      assert.ok(upper.includes('"fix_3_Security.sh"'), `${sh}: the name is quoted`);
+      assert.ok(upper.includes('fix_<number>_<category>.sh'), `${sh}: the rule is stated`);
+      assert.ok(upper.includes('lowercase letters, digits, _ or -'), `${sh}: the category rule is stated`);
+      assert.ok(upper.includes('rename it to "fix_3_security.sh"'), `${sh}: the lowercase name is suggested`);
+      const nosuggest = warnings.find((l) => l.includes('fix_x_style.sh'));
+      assert.ok(!nosuggest.includes('rename it to'), `${sh}: no rename is suggested when lowercasing would not help`);
+      const inert = warnings.find((l) => l.includes('touch pwned'));
+      assert.ok(inert.includes('"fix_8_$(touch pwned).sh"'), `${sh}: the hostile name prints inside quotes`);
+      assert.ok(warnings.some((l) => l.includes('fix_9_a\\nb.sh')), `${sh}: a line break prints escaped`);
+      assert.equal(existsSync(join(dir, 'pwned')), false, `${sh}: no name ever ran`);
+      assert.deepEqual(readdirSync(fixes).sort(), ['apply_all.sh', 'fix_1_data-integrity.sh'], `${sh}: the files are still removed, never renamed`);
+      assert.equal(readFileSync(join(dir, 'review_env.sh'), 'utf8'), 'export FIX_COUNT="1"\n', `${sh}: the counts hold`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('Stage 2B removes a symlinked fix script before it is counted or listed, in bash and zsh', () => {
   const skill = read('skills/review/SKILL.md');
   const block = bashBlocks(skill.slice(skill.indexOf('## Stage 2B'), skill.indexOf('## Stage 3')))[0];
@@ -385,7 +422,7 @@ test('Stage 2B removes a symlinked fix script before it is counted or listed, in
       const out = execFileSync(sh, ['-c', script], { cwd: dir, encoding: 'utf8' });
       assert.deepEqual(readdirSync(fixes).sort(), ['apply_all.sh', 'fix_2_style.sh'], `${sh}: the link is removed`);
       assert.equal(existsSync(join(dir, 'target.sh')), true, `${sh}: its target survives`);
-      assert.ok(out.includes('removed a fix script that is a symlink: fix_1_x.sh'), `${sh}: ${out}`);
+      assert.ok(out.includes('removed a fix script that is a symlink: "fix_1_x.sh"'), `${sh}: ${out}`);
       assert.deepEqual(out.split('\n').filter((l) => l.startsWith('  bash ')), [`  bash "${fixes}/fix_2_style.sh"`], `${sh}: the link is not listed`);
       assert.equal(readFileSync(join(dir, 'review_env.sh'), 'utf8'), 'export FIX_COUNT="1"\n', `${sh}: the link is not counted`);
     } finally {

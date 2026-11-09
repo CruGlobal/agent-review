@@ -1358,12 +1358,14 @@ for (const name of names) {
   if (!name.startsWith("fix_")) continue;
   if (fs.lstatSync(dir + "/" + name).isSymbolicLink()) {
     fs.rmSync(dir + "/" + name, { force: true });
-    console.log("⚠️  removed a fix script that is a symlink: " + name);
+    console.log("⚠️  removed a fix script that is a symlink: " + JSON.stringify(name));
     continue;
   }
   if (/^fix_[0-9]+_[a-z0-9_-]+\.sh$/.test(name)) continue;
   fs.rmSync(dir + "/" + name, { recursive: true, force: true });
-  console.log("⚠️  removed a fix script whose name is not fix_<number>_<category>.sh");
+  const lower = name.toLowerCase();
+  const fix = /^fix_[0-9]+_[a-z0-9_-]+\.sh$/.test(lower) ? "; rename it to " + JSON.stringify(lower) : "";
+  console.log("⚠️  removed a fix script named " + JSON.stringify(name) + ": a name must be fix_<number>_<category>.sh, with the category only lowercase letters, digits, _ or -" + fix);
 }
 '
 
