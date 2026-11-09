@@ -249,3 +249,38 @@ test('Stage 2B counts, lists and applies only fix scripts named fix_<number>_<ca
   const archetype = read('templates/archetype.md').replace(/\s+/g, ' ');
   assert.ok(archetype.includes('Name the script `fix_<N>_<category>.sh`, with `<N>` a number and `<category>` in lowercase letters, digits, `-`, or `_`; the review removes a fix script with any other name.'));
 });
+
+test('the review and address take the PR after the checkout, and free the checkout when another run holds it', () => {
+  const review = read('skills/review/SKILL.md');
+  const blocks = bashBlocks(review);
+  const checkoutAt = blocks.findIndex((b) => b.includes('agent-review run-dir --lock review)'));
+  const gatherAt = blocks.findIndex((b) => /^PR_NUMBER=/m.test(b));
+  assert.ok(checkoutAt >= 0 && gatherAt > checkoutAt, 'the PR is taken in a later block than the checkout');
+  const address = read('skills/address/SKILL.md');
+  const local = address.slice(address.indexOf('## Local mode'));
+  const stage0 = bashBlocks(local)[0];
+  assert.ok(stage0.startsWith('RUN_DIR=$(agent-review run-dir --lock address)'));
+
+  const takes = (block, repoSet, repoVar) => {
+    const lines = block.split('\n');
+    const at = lines.findIndex((l) => l.includes('agent-review run-dir --lock-pr'));
+    assert.ok(at >= 0, 'the block takes the PR');
+    assert.strictEqual(lines.filter((l) => l.includes('--lock-pr')).length, 1);
+    assert.match(lines[at], new RegExp(`--lock-pr "\\$${repoVar}#\\$PR_NUMBER" >/dev/null \\|\\| exit 1$`), 'a failed take stops the block');
+    assert.ok(lines.findIndex((l) => l.startsWith(repoSet)) < at, 'the repo is known before the PR is taken');
+    return lines.slice(0, at + 1);
+  };
+  const reviewBlock = blocks[gatherAt];
+  const reviewLines = takes(reviewBlock, 'PR_NUMBER=', 'PR_REPO');
+  assert.ok(reviewBlock.includes('PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"'));
+  const guard = reviewLines.findIndex((l) => l.trim() === 'if [ -n "$PR_NUMBER" ]; then');
+  assert.ok(guard >= 0 && guard < reviewLines.length - 1 && reviewBlock.split('\n')[reviewLines.length] === 'fi', 'review takes the PR only when PR_NUMBER is set');
+  takes(stage0, 'REPO=', 'REPO');
+
+  const flatReview = review.replace(/\s+/g, ' ');
+  const flatAddress = local.replace(/\s+/g, ' ');
+  assert.ok(flatReview.includes('Show that message, run `agent-review run-dir --release review` to free this checkout, and stop.'));
+  assert.ok(flatAddress.includes('Show that message, run `agent-review run-dir --release address` to free this checkout, and stop.'));
+  const yolo = read('skills/yolo-review/SKILL.md').replace(/\s+/g, ' ');
+  assert.ok(yolo.includes('The hold covers the PR too'));
+});

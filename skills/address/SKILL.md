@@ -118,7 +118,10 @@ Every local block keeps its files in this checkout's run folder, the path Stage 
 `run folder:`, so addressing one PR never touches another session's review or address run. Files
 you write yourself, such as the updated comment, go there by that literal path. Run every block from the PR's checkout. Stage 0's first block also takes the
 checkout (`--lock address`): if another session's review or address run holds it, the block
-prints who holds it and stops, and you stop too. Whenever this skill stops, at the end of Stage 5
+prints who holds it and stops, and you stop too. The block then takes the PR itself
+(`--lock-pr`): when another live session's run holds that PR, it prints who holds it and stops.
+Show that message, run `agent-review run-dir --release address` to free this checkout, and stop.
+Whenever this skill stops, at the end of Stage 5
 or earlier for any reason, run `agent-review run-dir --release address`. It frees the checkout and
 deletes this run's working files; when `/agent-review:yolo-review` took the checkout, it leaves
 both to yolo-review and prints `kept`. If it prints `kept` and no yolo-review started this run, an
@@ -134,6 +137,7 @@ echo "run folder: $RUN_DIR"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 [ -n "$PR_NUMBER" ] || { echo "❌ No PR context — the ledger lives on a PR comment."; exit 1; }
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+agent-review run-dir --lock-pr "$REPO#$PR_NUMBER" >/dev/null || exit 1
 
 # Local canonical comment: this user's own marked comment when one exists, else the bot's.
 # Anyone else's could be a forged report.

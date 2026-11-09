@@ -95,7 +95,9 @@ in (`/tmp` itself in CI), so every block works it out again on its first line, w
 it, `cd` there first. If `agent-review run-dir` fails, stop and show its error: never fall back to
 `/tmp`. Stage 0A's first block also takes the checkout for this review (`--lock review`); when
 another live session's review already holds it, the block prints who holds it and stops, and you
-must stop too and show that message.
+must stop too and show that message. The Gather PR Context block then takes the PR itself
+(`--lock-pr`): when another live session's run holds that PR, the block prints who holds it and
+stops. Show that message, run `agent-review run-dir --release review` to free this checkout, and stop.
 
 Subagents start in another shell, often outside the repository, and never see `$RUN_DIR`, and
 neither does a file you write with the Write tool. So in every prompt you hand a subagent, every
@@ -263,6 +265,12 @@ set -e
 # (on a PR branch) the fallback resolves it from the branch instead.
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null || true)}"
 [ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context — local review"
+
+# Take the PR too, so no other session reviews or addresses it from another checkout meanwhile.
+if [ -n "$PR_NUMBER" ]; then
+  PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+  agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
+fi
 
 # One id per review run, so successive runs never clobber each other's pending findings.
 REVIEW_ID="${PR_NUMBER:-local}-$(date +%Y%m%d-%H%M%S)"

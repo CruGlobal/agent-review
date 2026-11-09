@@ -21,7 +21,7 @@ re-reviews cheap.
 Each block keeps its files in this checkout's run folder (the path `agent-review run-dir`
 prints, and step 1 shows as `run folder:`), so run every block from the PR's checkout. Step 1
 takes the checkout for the whole yolo run (`--lock yolo-review --outer`); the review and address
-runs it starts work inside that hold and leave the folder to it. When this skill stops, after step 7 or earlier on any ❌, run
+runs it starts work inside that hold and leave the folder to it. The hold covers the PR too: the review inside it takes the PR lock for yolo-review, and it stays held through address until the release. When this skill stops, after step 7 or earlier on any ❌, run
 `agent-review run-dir --release yolo-review`: it frees the checkout and deletes the run's working
 files. If step 1 prints that another session's run holds the checkout, stop and show that line.
 
