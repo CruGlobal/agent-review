@@ -1359,7 +1359,7 @@ for (const name of names) {
 }
 '
 
-FIX_COUNT=$(find "$RUN_DIR"/automated_fixes -name "fix_*.sh" 2>/dev/null | wc -l | tr -d ' ')
+FIX_COUNT=$(find "$RUN_DIR"/automated_fixes -maxdepth 1 -type f -name "fix_*.sh" 2>/dev/null | wc -l | tr -d ' ')
 echo "export FIX_COUNT=\"$FIX_COUNT\"" >> "$RUN_DIR"/review_env.sh
 
 if [ "$FIX_COUNT" -gt 0 ]; then
@@ -1389,10 +1389,14 @@ if [ "$FIX_COUNT" -gt 0 ]; then
 set -euo pipefail
 # fix_*.sh are model-generated from PR content and UNTRUSTED — review each before applying.
 FIXES=$(cd "$(dirname "$0")" && pwd)
+SAFE_NAME='^fix_[0-9]+_[a-z0-9_-]+\.sh$'
 if [ "${1:-}" != "--yes" ]; then
   echo "DRY RUN: review each fix, then re-run with --yes to apply. Nothing applied yet."
   for fix in "$FIXES"/fix_*.sh; do
     [ -f "$fix" ] || continue
+    if ! [[ "$(basename "$fix")" =~ $SAFE_NAME ]]; then
+      echo "skipped a fix script whose name is not fix_<number>_<category>.sh"; continue
+    fi
     echo ""; echo "===== $(basename "$fix") ====="; cat "$fix"
   done
   echo ""; echo "To apply after review:  bash $FIXES/apply_all.sh --yes"
@@ -1401,6 +1405,9 @@ fi
 echo "Applying all automated fixes..."
 for fix in "$FIXES"/fix_*.sh; do
   if [ -f "$fix" ]; then
+    if ! [[ "$(basename "$fix")" =~ $SAFE_NAME ]]; then
+      echo "skipped a fix script whose name is not fix_<number>_<category>.sh"; continue
+    fi
     echo "Applying: $(basename "$fix")"
     bash "$fix"
   fi

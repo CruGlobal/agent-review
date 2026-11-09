@@ -165,6 +165,7 @@ jobs:
         if: steps.prepare.outputs.has_fixes == 'true'
         uses: anthropics/claude-code-action@v1
         env:
+          AGENT_REVIEW_CI: '1'
           ADDRESS_REQUEST_FILE: ${{ runner.temp }}/address-request.json
           ADDRESS_REPORT_FILE: ${{ runner.temp }}/address-report.md
           # The sandbox (forced on by env scrubbing) only permits writes under

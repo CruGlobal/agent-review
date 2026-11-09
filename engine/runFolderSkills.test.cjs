@@ -225,6 +225,10 @@ test('CI keeps its run folder at /tmp: the model steps set AGENT_REVIEW_CI', () 
   assert.ok(read('test/e2e-review.sh').includes('AGENT_REVIEW_CI=1'), 'the local copy of CI runs in CI mode too');
   const interact = read('.github/workflows/interact.yml');
   assert.ok(interact.includes('ADDRESS_RESULT_OUT: /tmp/address-result.json'), 'CI address writes where the workflow says');
+  const modelStep = interact.slice(interact.indexOf('uses: anthropics/claude-code-action@v1'));
+  const env = modelStep.slice(modelStep.indexOf('env:'), modelStep.indexOf('with:'));
+  assert.ok(env.includes("AGENT_REVIEW_CI: '1'"), 'the interact model step sets AGENT_REVIEW_CI');
+  assert.strictEqual(interact.split('anthropics/claude-code-action@v1').length, 2, 'interact has one model step');
 });
 
 test('apply_all.sh finds the fix scripts beside itself, from any folder', (t) => {
@@ -246,6 +250,49 @@ test('apply_all.sh finds the fix scripts beside itself, from any folder', (t) =>
     rmSync(dir, { recursive: true, force: true });
   }
   assert.ok(skill.includes('rm -rf "$RUN_DIR"/automated_fixes\nmkdir -p "$RUN_DIR"/automated_fixes'), 'each run starts with no earlier fix scripts');
+});
+
+test('Stage 2B counts only fix scripts directly in automated_fixes', () => {
+  const skill = read('skills/review/SKILL.md');
+  const block = bashBlocks(skill.slice(skill.indexOf('## Stage 2B'), skill.indexOf('## Stage 3')))[0];
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-fix-depth-'));
+  try {
+    const fixes = join(dir, 'automated_fixes');
+    mkdirSync(join(fixes, 'sub'), { recursive: true });
+    writeFileSync(join(fixes, 'fix_1_style.sh'), '#!/bin/bash\n');
+    writeFileSync(join(fixes, 'sub', 'fix_2_style.sh'), '#!/bin/bash\n');
+    writeFileSync(join(dir, 'review_env.sh'), '');
+    const script = block.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${dir}'; export RUN_DIR`);
+    const out = execFileSync('bash', ['-c', script], { cwd: dir, encoding: 'utf8' });
+    assert.equal(readFileSync(join(dir, 'review_env.sh'), 'utf8'), 'export FIX_COUNT="1"\n', out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('apply_all.sh skips a fix script whose name is not fix_<number>_<category>.sh', () => {
+  const skill = read('skills/review/SKILL.md');
+  const script = skill.match(/apply_all\.sh << 'EOF'\n([\s\S]*?)\nEOF\n/)[1];
+  for (const sh of shells()) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-apply-names-'));
+    try {
+      const fixes = join(dir, 'automated_fixes');
+      mkdirSync(fixes);
+      writeFileSync(join(fixes, 'apply_all.sh'), `${script}\n`, { mode: 0o755 });
+      writeFileSync(join(fixes, 'fix_1_style.sh'), `#!/bin/bash\ntouch "${join(dir, 'good')}"\n`, { mode: 0o755 });
+      writeFileSync(join(fixes, 'fix_2_Bad.sh'), `#!/bin/bash\ntouch "${join(dir, 'bad')}"\n`, { mode: 0o755 });
+      const dry = execFileSync(sh, [join(fixes, 'apply_all.sh')], { cwd: dir, encoding: 'utf8' });
+      assert.ok(dry.includes('===== fix_1_style.sh ====='), `${sh}: ${dry}`);
+      assert.ok(!dry.includes('===== fix_2_Bad.sh ====='), `${sh}: the badly named script is not printed`);
+      assert.ok(dry.includes('skipped a fix script whose name is not fix_<number>_<category>.sh'), `${sh}: the skip is reported`);
+      const applied = execFileSync(sh, [join(fixes, 'apply_all.sh'), '--yes'], { cwd: dir, encoding: 'utf8' });
+      assert.equal(existsSync(join(dir, 'good')), true, `${sh}: the good script ran`);
+      assert.equal(existsSync(join(dir, 'bad')), false, `${sh}: the badly named script did not run`);
+      assert.ok(applied.includes('skipped a fix script whose name is not fix_<number>_<category>.sh'), applied);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test('update-files removes its fetched templates on every way it stops, the every-file-current one included', () => {
