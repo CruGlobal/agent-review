@@ -542,7 +542,11 @@ test('finding lines put a middle dot between location and message', () => {
 });
 
 test('address still finds and rewrites a finding line posted with an em dash', () => {
-  const posted = report();
+  const posted = report([
+    finding(),
+    finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' }),
+    finding({ n: 3, id: 'f3', signature: 'sig-3', file: 'app/view.js' }),
+  ]) + `- [ ] **#3** · 9/10 · \`app/view.js:12\` ${EM_DASH} authorization is missing _(security)_\n`;
   assert.ok(posted.includes(` ${EM_DASH} authorization is missing`), 'the fixture is a 1.1.5 line');
   const done = runAddress(
     posted,
@@ -551,5 +555,6 @@ test('address still finds and rewrites a finding line posted with an em dash', (
   );
   assert.match(done.report, /^- \[x\] \*\*`#1`\*\* · 9\/10 · `app\/controller\.js:12` · ~~authorization is missing~~ · ✅ fixed in ccccccc$/m);
   assert.match(done.report, /^- \[x\] \*\*`#2`\*\* · 9\/10 · `app\/model\.js:12` · ~~authorization is missing~~ · 🚫 dismissed by @dr-bizz/m);
+  assert.match(done.report, /^- \[ \] \*\*`#3`\*\* · 9\/10 · `app\/view\.js:12` · authorization is missing _\(security\)_$/m);
   assert.ok(!done.report.includes(EM_DASH), 'no old separator is left behind');
 });

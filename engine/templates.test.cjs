@@ -2356,7 +2356,7 @@ test('interact\'s failure report says when a commit was already pushed, and "not
       return read(join(dir, 'body.md'), 'utf8');
     };
     const pushed = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12' });
-    assert.ok(!pushed.includes('nothing was changed'), pushed);
+    assert.ok(!/nothing was changed/i.test(pushed), pushed);
     assert.ok(pushed.includes('it already pushed commit `abcdef1`'), pushed);
     assert.ok(pushed.includes('`git revert abcdef1`'), pushed);
     assert.ok(pushed.includes('[View the run log](https://x/run)'), pushed);
@@ -2415,7 +2415,7 @@ test('the review skill runs the incremental path locally on the `incremental` ar
   assert.ok(!skill.includes('*" incremental "*)'), 'the skill must not re-parse incremental from the raw arguments');
   assert.ok(skill.includes('if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then'), 'the incremental gate must accept the local request');
   assert.ok(!skill.includes('# Incremental re-review (CI only)'), 'the CI-only comment is stale');
-  assert.ok(skill.includes('push first'), 'unpushed local commits must stop an incremental review');
+  assert.ok(skill.includes('Local HEAD is ahead of the PR head ($HEAD_REF). Push first, then re-run.'), 'unpushed local commits must stop an incremental review');
   assert.ok(skill.includes('only committed changes are reviewed'), 'a dirty tree must warn');
   assert.ok(skill.includes("bot's comment remains the CI ledger"), 'must explain the bot-canonical case');
   // A zero-risk local delta advances the head marker instead of stopping silently.
@@ -5681,18 +5681,24 @@ test('posted text carries no em dash', () => {
   const EM = '—';
   const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
   assert.ok(!report.includes(EM), 'templates/report.md must carry no em dash');
-  const postsText = (line) => /^\s*(echo|printf)\b/.test(line) || /(&&|\|\||\{)\s*(echo|printf)\s+['"]/.test(line)
-    || line.includes('BODY=') || line.includes('--body');
+  // A trailing shell comment is not printed, so it is cut off before the check.
+  const postsText = (raw) => {
+    const line = raw.replace(/\s+#\s.*$/, '');
+    return line.includes(EM) && (/^\s*(echo|printf)\b/.test(line) || /(&&|\|\||\{)\s*(echo|printf)\s+['"]/.test(line)
+      || /^\s*[A-Z_]+=['"]/.test(line) || line.includes('BODY=') || line.includes('--body'));
+  };
   const files = [
     join(ROOT, '.github/workflows/review.yml'),
     join(ROOT, '.github/workflows/interact.yml'),
     join(ROOT, '.github/actions/approve/action.yml'),
+    join(ROOT, '.github/actions/withdraw/action.yml'),
+    join(ROOT, '.github/workflows/approve.yml'),
     ...walkMarkdown(join(ROOT, 'skills')),
   ];
   for (const file of files) {
     const bad = readFileSync(file, 'utf8').split('\n')
       .map((line, i) => ({ line, at: i + 1 }))
-      .filter(({ line }) => line.includes(EM) && postsText(line));
+      .filter(({ line }) => postsText(line));
     assert.deepEqual(bad, [], `${relative(ROOT, file)} posts or prints an em dash`);
   }
   const source = readFileSync(join(ROOT, 'engine/addressState.cjs'), 'utf8');

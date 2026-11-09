@@ -177,5 +177,5 @@ developer, not dismissed reflexively.]
 
 </details>
 
-[version-check footer line, when stale: unchanged from current: appended after the visible body,
+[version-check footer line, when stale, unchanged from current, appended after the visible body,
 never inside the hidden markers]

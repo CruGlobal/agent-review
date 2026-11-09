@@ -866,7 +866,7 @@ if [ "$MODE" = "auto" ]; then
       # carried-forward open blocker from a prior run still blocks, so surface it here rather
       # than letting a zero-risk delta read as silently clean.
       OPEN_BLOCKERS=$(node -e 'const l=require(process.env.RUN_DIR + "/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
-      { echo "🎚️ **agent-review: skipped**: risk score 0 (no reviewable risk in this diff)."
+      { echo "🎚️ **agent-review: skipped** · risk score 0 (no reviewable risk in this diff)."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null \
           && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open. See the ledger below."
         skip_notes "${AGENT_REVIEW_PREVIOUS_COMMENT:-}"
@@ -895,7 +895,7 @@ if [ "$MODE" = "auto" ]; then
       agent-review ledger --findings "$RUN_DIR"/review_filtered.json --previous "$RUN_DIR"/previous_agent_review_ledger.json > "$RUN_DIR"/agent_review_ledger.json
       agent-review status --ledger "$RUN_DIR"/agent_review_ledger.json --plan "$RUN_DIR"/review_gate_plan.json --safety "$RUN_DIR"/agent_review_safety.json --human "$RUN_DIR"/agent_review_human_rules.json --card-scan "$RUN_DIR"/agent_review_card_scan.json --evidence "$RUN_DIR"/review_evidence.json "${HEAD_ARGS[@]}" > "$RUN_DIR"/agent_review_status.json
       OPEN_BLOCKERS=$(node -e 'const l=require(process.env.RUN_DIR + "/agent_review_ledger.json"); console.log(l.filter((e) => e.status === "open" && e.severity >= 7).length)' 2>/dev/null || echo 0)
-      { echo "🎚️ **agent-review: skipped**: no reviewable risk in the delta since the last review."
+      { echo "🎚️ **agent-review: skipped** · no reviewable risk in the delta since the last review."
         [ "${OPEN_BLOCKERS:-0}" -gt 0 ] 2>/dev/null && echo "⚠️ $OPEN_BLOCKERS previously-found blocker(s) remain open. See the ledger below."
         skip_notes "$RUN_DIR"/previous_agent_review_comment.md
       } > "$RUN_DIR"/agent_review_report.md
