@@ -19,6 +19,7 @@ const RUN_FOLDER_FILES = [
   'skills/yolo-review/SKILL.md',
   'skills/address/SKILL.md',
   'skills/update-files/SKILL.md',
+  'skills/init/SKILL.md',
   'templates/archetype.md',
   'templates/code-review-lane.md',
   'templates/ledger-match.md',
@@ -30,10 +31,12 @@ const SYNTAX_CHECKED = [
   'skills/yolo-review/SKILL.md',
   'skills/address/SKILL.md',
   'skills/update-files/SKILL.md',
+  'skills/init/SKILL.md',
 ];
 // Lines a skill asks the model to fill in before running the block, so they are not shell yet.
 const FILL_INS = {
   'skills/address/SKILL.md': ['git add -- <each file you changed or created for these fixes>'],
+  'skills/init/SKILL.md': ['gh pr diff <n>                      # only when a lens needs the actual code'],
 };
 const RUN_DIR_LINE = /^RUN_DIR=\$\(agent-review run-dir(?: --lock [a-z-]+(?: --outer)?)?\) \|\| exit 1; export RUN_DIR$/;
 
@@ -60,7 +63,7 @@ test('no review skill, lane prompt or report names a fixed /tmp file', () => {
 });
 
 test('every block that uses the run folder finds it first, and stops when it cannot', () => {
-  for (const file of ['skills/review/SKILL.md', 'skills/review/code-review-engine.md', 'skills/yolo-review/SKILL.md', 'skills/address/SKILL.md']) {
+  for (const file of ['skills/review/SKILL.md', 'skills/review/code-review-engine.md', 'skills/yolo-review/SKILL.md', 'skills/address/SKILL.md', 'skills/init/SKILL.md']) {
     for (const block of bashBlocks(read(file))) {
       if (!/\$RUN_DIR|process\.env\.RUN_DIR/.test(block)) continue;
       const first = block.split('\n').find((l) => l.trim() !== '' && !l.trim().startsWith('#'));
@@ -137,6 +140,33 @@ test('the review takes the checkout first and frees it at the end or on any earl
   assert.ok(local.includes('Run `agent-review run-dir --release address`, then summarize'));
   const ci = address.slice(address.indexOf('## CI mode'), address.indexOf('## Local mode'));
   assert.ok(!ci.includes('run-dir'), 'CI address keeps its workflow-given files');
+});
+
+test('init takes the checkout first and frees it at the end or on any early stop', () => {
+  const skill = read('skills/init/SKILL.md');
+  const blocks = bashBlocks(skill);
+  assert.ok(blocks[0].startsWith('RUN_DIR=$(agent-review run-dir --lock init) || exit 1; export RUN_DIR\necho "run folder: $RUN_DIR"\n'), 'the first block takes the checkout and prints the literal folder');
+  assert.strictEqual(blocks.filter((b) => b.includes('--lock')).length, 1, 'only the first block takes the checkout');
+  assert.ok(!skill.includes('agent_review_init'), 'no state file is left at a fixed name');
+  for (const name of ['init.sh', 'init_baseline_head.txt', 'init_baseline_status.txt', 'init_now_head.txt', 'init_now_status.txt', 'init_prs.json', 'init_stage.txt', 'init_changed.txt']) {
+    assert.ok(skill.includes(`"$RUN_DIR"/${name}`), `init keeps ${name} in the run folder`);
+  }
+  const guard = blocks.find((b) => b.includes('[ -f "$RUN_DIR"/init_baseline_head.txt ]'));
+  assert.ok(guard.startsWith('RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR\n'), 'the baseline block finds the folder first');
+  const recheck = blocks.find((b) => b.includes('"$RUN_DIR"/init_now_head.txt'));
+  assert.ok(recheck.includes('diff "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_now_head.txt') && recheck.includes('diff "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_now_status.txt'), 'the guard still compares baseline to now');
+  const report = skill.indexOf('### 3F');
+  assert.deepStrictEqual(bashBlocks(skill.slice(skill.indexOf('### Finish the run'))), ['agent-review run-dir --release init'], 'the last block releases the checkout');
+  assert.ok(skill.indexOf('### Finish the run') > report, 'the release comes after the report');
+  const flat = skill.replace(/\s+/g, ' ');
+  for (const needle of [
+    'whenever init stops before it finishes, for any reason (a refusal to continue, a `--migrate` run, a "no" at the 3B gate, a failed check), run the **Finish the run** block before you stop',
+    'If `agent-review run-dir` fails, stop and show its error: never fall back to `/tmp`.',
+    'when another live session already holds this checkout, the block prints who holds it and stops, and you must stop too and show that message',
+    "no subagent brief here names a state file. If you add one that does, write the run folder's literal path in it",
+  ]) {
+    assert.ok(flat.includes(needle), `SKILL.md must say ${JSON.stringify(needle)}`);
+  }
 });
 
 test('lane prompts carry the run folder and the checkout, and the posted Apply line finds the folder itself', () => {

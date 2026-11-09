@@ -3085,8 +3085,8 @@ test('init writes engine and reviews_run only for a non-default answer', () => {
   assert.equal(guarded.length, 2, 'the 3C copy block and the 3E git add block');
   for (const block of guarded) {
     // The answer is saved in 3A, so the block sources it and never reads config back.
-    assert.ok(block.includes('. /tmp/agent_review_init.sh'), `the guard block sources the saved answer:\n${block}`);
-    assert.ok(block.indexOf('. /tmp/agent_review_init.sh') < block.indexOf('if [ "$REVIEWS_RUN"'), 'the source comes before the guard');
+    assert.ok(block.includes('. "$RUN_DIR"/init.sh'), `the guard block sources the saved answer:\n${block}`);
+    assert.ok(block.indexOf('. "$RUN_DIR"/init.sh') < block.indexOf('if [ "$REVIEWS_RUN"'), 'the source comes before the guard');
   }
   assert.ok(
     flat.includes('The copies run only when the `REVIEWS_RUN` answer saved in 3A is `local-and-ci`; anything else, including an empty value, copies nothing.'),
@@ -3104,9 +3104,9 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
   assert.ok(block, 'init has the .gitignore and .gitattributes block');
-  assert.ok(init.includes('rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt'), 'Stage 0 clears both lists');
+  assert.ok(init.includes('rm -f "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_stage.txt "$RUN_DIR"/init_changed.txt'), 'Stage 0 clears both lists');
   const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
-  const staging = commit.slice(commit.indexOf('if [ -f /tmp/agent_review_init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
+  const staging = commit.slice(commit.indexOf('if [ -f "$RUN_DIR"/init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
   assert.ok(staging.includes('git add -- "$f"'), '3E stages from the list');
   assert.ok(!/\.(gitignore|gitattributes|dockerignore)/.test(commit.slice(0, commit.indexOf(staging)).split('\n').filter((l) => l.startsWith('git add')).join('\n')), '3E never adds those files by name');
   for (const shell of availableShells(t)) {
@@ -3116,7 +3116,7 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
       const repo = join(dir, 'repo');
       mkdirSync(tmp);
       mkdirSync(repo);
-      const at = (text) => text.replaceAll('/tmp/', `${tmp}/`);
+      const at = (text) => (/^RUN_DIR=/m.test(text) ? text.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${tmp}'; export RUN_DIR`) : `RUN_DIR='${tmp}'; export RUN_DIR\n${text}`);
       const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
       git('init', '-q');
       writeFileSync(join(repo, '.gitignore'), 'node_modules/'); // no trailing newline
@@ -3228,7 +3228,7 @@ test('init never copies or stages the CI workflows outside a local-and-ci guard'
   for (const block of blocks) {
     assert.ok(!/^\s*REVIEWS_RUN=local-and-ci\b/m.test(block), 'REVIEWS_RUN must never be hardcoded to local-and-ci');
     if (block.includes(guard)) {
-      assert.ok(block.includes('. /tmp/agent_review_init.sh'), 'REVIEWS_RUN must come from the env file saved in 3A');
+      assert.ok(block.includes('. "$RUN_DIR"/init.sh'), 'REVIEWS_RUN must come from the env file saved in 3A');
       assert.ok(!block.includes('config get reviews_run'), 'REVIEWS_RUN must not be read back from a config that may not load yet');
     }
   }
@@ -4317,7 +4317,7 @@ const skillText = (name) => readFileSync(join(ROOT, `skills/${name}/SKILL.md`), 
 test('init 3C and 3E decide CI copying from the REVIEWS_RUN answer saved in 3A, not from config get', () => {
   const init = skillText('init');
   const threeA = stageSlice(init, '### 3A', '### 3B');
-  assert.ok(/export REVIEWS_RUN=/.test(threeA) && threeA.includes('>> /tmp/agent_review_init.sh'), '3A persists REVIEWS_RUN to the env file');
+  assert.ok(/export REVIEWS_RUN=/.test(threeA) && threeA.includes('>> "$RUN_DIR"/init.sh'), '3A persists REVIEWS_RUN to the env file');
   const rest = stageSlice(init, '### 3C', '### 3F');
   assert.ok(!rest.includes('config get reviews_run'), '3C-3E must not read reviews_run back from a config that may not load yet');
   assert.ok(rest.includes('if [ "$REVIEWS_RUN" = "local-and-ci" ]; then'), '3C and 3E gate on REVIEWS_RUN');
@@ -4330,7 +4330,7 @@ test('init keeps the approval answer in BOT_APPROVES and flips auto_approve with
   const threeC = stageSlice(init, '### 3C', '### 3D');
   const block = [...threeC.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]).find((b) => b.includes('auto_approve: false'));
   assert.ok(block, 'the approval-off block exists');
-  assert.ok(block.includes('. /tmp/agent_review_init.sh'), 'it sources the env file');
+  assert.ok(block.includes('. "$RUN_DIR"/init.sh'), 'it sources the env file');
   assert.ok(block.includes('if [ "$BOT_APPROVES" = "no" ]; then'), 'wrapped in the answer');
   assert.ok(/sed [^\n]*> "\$tmp"/.test(block) && block.includes('cat "$tmp" > "$w"'), 'sed to a temp file, then write back in place (keeps the mode)');
   assert.ok(!block.includes('-i.bak') && !block.includes('.bak'), 'no .bak files');

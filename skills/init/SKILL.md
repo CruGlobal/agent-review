@@ -45,9 +45,34 @@ substitute the absolute path you resolved before running them.
 
 ---
 
+## The run folder
+
+Every file this init writes lives in its own run folder, never in a fixed `/tmp` path, so two
+inits on this machine, from any session or checkout, never share state. `agent-review run-dir`
+prints the folder of the checkout the shell is in, so every block that uses a state file works it
+out again on its first line, with `RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR`.
+Run every block from the checkout being bootstrapped: if the shell is not in it, `cd` there first.
+If `agent-review run-dir` fails, stop and show its error: never fall back to `/tmp`. Stage 0's
+first block also takes the checkout for this init (`--lock init`); when another live session
+already holds this checkout, the block prints who holds it and stops, and you must stop too and
+show that message.
+
+Subagents start in another shell, often outside the repository, and never see `$RUN_DIR`. Today
+no subagent brief here names a state file. If you add one that does, write the run folder's literal
+path in it: the path Stage 0's first block prints as `run folder: <path>`.
+
+⚠️ **STOPPING EARLY**: whenever init stops before it finishes, for any reason (a refusal to
+continue, a `--migrate` run, a "no" at the 3B gate, a failed check), run the **Finish the run**
+block before you stop. It is the last block of this skill. It frees the checkout and deletes this
+run's working files.
+
+---
+
 ## Stage 0 — Arguments & preflight
 
 ```bash
+RUN_DIR=$(agent-review run-dir --lock init) || exit 1; export RUN_DIR
+echo "run folder: $RUN_DIR"
 PRS=50; MIGRATE=""; SKIP_HISTORY=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -70,11 +95,11 @@ BATCHES=$(( (PRS + 9) / 10 ))
 # ⚠️ CROSS-STAGE STATE — each bash block below is a SEPARATE shell; shell variables do NOT
 # survive between blocks. Everything a later stage needs goes in this file, and every later
 # block starts by sourcing it. TPL is the plugin templates dir — substitute the real path.
-: > /tmp/agent_review_init.sh
+: > "$RUN_DIR"/init.sh
 # Clear any read-only-guard baseline left by a previous run — the guard's `[ -f ] ||` capture
 # would otherwise reuse a stale snapshot for this run's drift checks.
-rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt
-cat >> /tmp/agent_review_init.sh <<EOF
+rm -f "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_stage.txt "$RUN_DIR"/init_changed.txt
+cat >> "$RUN_DIR"/init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
 export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
 export TPL="<absolute path to the plugin's templates/ directory>"
@@ -104,7 +129,7 @@ confirm the larger run explicitly, accepting the cost and the wider fan-out. Do 
 10 batch subagents without that explicit confirmation.
 
 If the user explicitly confirms the larger run, recompute `BATCHES` **without** the 10-batch clamp
-— `BATCHES=$(( (PRS + 9) / 10 ))` — and re-persist it to `/tmp/agent_review_init.sh` before Phase 2
+(`BATCHES=$(( (PRS + 9) / 10 ))`), and re-persist it to `"$RUN_DIR"/init.sh` before Phase 2
 fans out. Without that recompute the confirmation is a no-op and mining still stops at 100 PRs.
 
 ```bash
@@ -182,12 +207,13 @@ Phase 1 drafter in a normal run, or the Phase 2 fan-out when `--skip-history` is
 only the first one takes effect:
 
 ```bash
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 # ONE baseline per run. The `[ -f ] ||` guard is load-bearing — see below.
-[ -f /tmp/agent_review_init_baseline_head.txt ] || {
-  git rev-parse HEAD > /tmp/agent_review_init_baseline_head.txt
-  git status --porcelain > /tmp/agent_review_init_baseline_status.txt
+[ -f "$RUN_DIR"/init_baseline_head.txt ] || {
+  git rev-parse HEAD > "$RUN_DIR"/init_baseline_head.txt
+  git status --porcelain > "$RUN_DIR"/init_baseline_status.txt
 }
-wc -l < /tmp/agent_review_init_baseline_status.txt
+wc -l < "$RUN_DIR"/init_baseline_status.txt
 ```
 
 **Never re-baseline mid-run.** The Phase 1 drafter runs *concurrently* with the Phase 2 fan-out, so
@@ -198,7 +224,7 @@ would be a no-op against a commit the drafter had already made. One baseline, ta
 was dispatched, is the only snapshot that can be trusted.
 
 (If a *previous* init run left these files behind, the guard would reuse a stale baseline. Delete
-both files at Stage 0, alongside `: > /tmp/agent_review_init.sh`, so each run starts fresh.)
+both files at Stage 0, alongside `: > "$RUN_DIR"/init.sh`, so each run starts fresh.)
 
 The porcelain snapshot deliberately records the user's **pre-existing** untracked files. They are
 not ours to touch, and the recovery steps below depend on knowing which untracked paths were there
@@ -208,10 +234,11 @@ first.
 gate**. Every re-check compares current state against that one original baseline:
 
 ```bash
-git rev-parse HEAD > /tmp/agent_review_init_now_head.txt
-git status --porcelain > /tmp/agent_review_init_now_status.txt
-diff /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_now_head.txt \
-  && diff /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_now_status.txt \
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+git rev-parse HEAD > "$RUN_DIR"/init_now_head.txt
+git status --porcelain > "$RUN_DIR"/init_now_status.txt
+diff "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_now_head.txt \
+  && diff "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_now_status.txt \
   && echo "✅ clean — nothing written since baseline"
 ```
 
@@ -442,7 +469,8 @@ fails. Skipping is fine: the ongoing learning loop fills the gap over time. Say 
 ### Preflight
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 [ -n "$SKIP_HISTORY" ] && { echo "SKIP: --skip-history"; exit 0; }
 command -v gh >/dev/null 2>&1 || { echo "SKIP: gh CLI not installed"; exit 0; }
 gh auth status >/dev/null 2>&1 || { echo "SKIP: gh not authenticated"; exit 0; }
@@ -450,11 +478,11 @@ gh auth status >/dev/null 2>&1 || { echo "SKIP: gh not authenticated"; exit 0; }
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) \
   || { echo "SKIP: no GitHub repo access"; exit 0; }
 gh pr list --state merged --limit "$PRS" --json number,title,author,mergedAt \
-  > /tmp/agent_review_init_prs.json 2>/dev/null \
+  > "$RUN_DIR"/init_prs.json 2>/dev/null \
   || { echo "SKIP: could not list merged PRs"; exit 0; }
 
 COUNT=$(gh pr list --state merged --limit "$PRS" --json number --jq 'length')
-echo "export REPO=\"$REPO\" COUNT=\"$COUNT\"" >> /tmp/agent_review_init.sh
+echo "export REPO=\"$REPO\" COUNT=\"$COUNT\"" >> "$RUN_DIR"/init.sh
 echo "repo=$REPO merged PRs available=$COUNT"
 ```
 
@@ -464,7 +492,8 @@ PRs is still worth mining; just expect fewer candidates to clear the evidence th
 ### Batch and fan out
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 # Most recent first, clamped to the batch cap from Stage 0 (10 batches × 10 PRs).
 gh pr list --state merged --limit "$PRS" --json number --jq '.[].number' \
   | head -n $((BATCHES * 10)) \
@@ -672,16 +701,17 @@ recommendation. Do not skip a question because the recommendation looks obvious.
 Save the Where-reviews-run and approval answers where later blocks can read them. Each bash
 block is a separate shell, so these go in the same env file as the other cross-stage state. Use
 `local` or `local-and-ci` for `REVIEWS_RUN` and `yes` or `no` for `BOT_APPROVES`; this writes
-only to `/tmp`, not to the repo. Save `no` for `BOT_APPROVES` whenever `rollout.mode` is `shadow`,
+only to the run folder, not to the repo. Save `no` for `BOT_APPROVES` whenever `rollout.mode` is `shadow`,
 whatever the user answered, since shadow makes every caller `auto_approve: false`. Re-run it if
 the user changes either answer at the 3B gate:
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 REVIEWS_RUN="<local|local-and-ci>"; BOT_APPROVES="<yes|no>"
 case "$REVIEWS_RUN" in local|local-and-ci) ;; *) echo "❌ REVIEWS_RUN must be local or local-and-ci, got: $REVIEWS_RUN"; exit 1 ;; esac
 case "$BOT_APPROVES" in yes|no) ;; *) echo "❌ BOT_APPROVES must be yes or no, got: $BOT_APPROVES"; exit 1 ;; esac
-echo "export REVIEWS_RUN=\"$REVIEWS_RUN\" BOT_APPROVES=\"$BOT_APPROVES\"" >> /tmp/agent_review_init.sh
+echo "export REVIEWS_RUN=\"$REVIEWS_RUN\" BOT_APPROVES=\"$BOT_APPROVES\"" >> "$RUN_DIR"/init.sh
 ```
 
 Draft a development evaluation suite in memory: at least five realistic seeded defects drawn from
@@ -756,7 +786,8 @@ Then ask, plainly: *"Approve writing these files? (yes / edit <what> / no)"*
 Only after explicit approval:
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 mkdir -p .claude/review/rules .claude/review/learnings \
   .claude/review/evals/patches .claude/review/evals/results .github/workflows
 ```
@@ -767,7 +798,8 @@ mkdir -p .claude/review/rules .claude/review/learnings \
   for `local`, skip them and the `ANTHROPIC_API_KEY` step.
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 cp "$TPL/workflows/agent-review-approve.yml" .github/workflows/agent-review-approve.yml
 printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 : > .claude/review/learnings/feedback.jsonl
@@ -783,14 +815,15 @@ the bootstrap commit only when it had no other changes before init touched it, s
 someone's unrelated edits:
 
 ```bash
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 add_line() {
   [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
-  if [ -z "$(git status --porcelain -- "$1")" ] && ! grep -qxF -- "$1" /tmp/agent_review_init_stage.txt 2>/dev/null; then
-    printf '%s\n' "$1" >> /tmp/agent_review_init_stage.txt
+  if [ -z "$(git status --porcelain -- "$1")" ] && ! grep -qxF -- "$1" "$RUN_DIR"/init_stage.txt 2>/dev/null; then
+    printf '%s\n' "$1" >> "$RUN_DIR"/init_stage.txt
   fi
   [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
   printf '%s\n' "$2" >> "$1"
-  grep -qxF -- "$1" /tmp/agent_review_init_changed.txt 2>/dev/null || printf '%s\n' "$1" >> /tmp/agent_review_init_changed.txt
+  grep -qxF -- "$1" "$RUN_DIR"/init_changed.txt 2>/dev/null || printf '%s\n' "$1" >> "$RUN_DIR"/init_changed.txt
 }
 add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
@@ -806,7 +839,8 @@ from `config.yml`: the config can reference files that are written later in this
 may not load yet.
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   cp "$TPL/workflows/agent-review.yml" .github/workflows/agent-review.yml
   cp "$TPL/workflows/agent-review-interact.yml" .github/workflows/agent-review-interact.yml
@@ -821,7 +855,8 @@ fi
   mode also set `rollout_mode: shadow` on the review caller.
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 # only when the answer was no (also run it for rollout.mode: shadow); touches only installed files
 if [ "$BOT_APPROVES" = "no" ]; then
   for f in agent-review-approve agent-review-interact agent-review; do
@@ -840,7 +875,8 @@ fi
   re-run safe. A failure (no permission, offline) only prints a warning and setup continues:
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 if [ "$BOT_APPROVES" = "yes" ]; then
   gh label create needs-human-approval --color B60205 --description "agent-review: a person must approve this PR" --force \
     || echo "⚠️ Could not create the needs-human-approval label. Run it by hand: gh label create needs-human-approval --color B60205 --description \"agent-review: a person must approve this PR\" --force"
@@ -858,7 +894,8 @@ fi
   is there and leaves every other key untouched:
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 node -e '
 const fs = require("fs");
 const p = ".claude/settings.json";
@@ -894,17 +931,18 @@ The cache regenerates on demand and is git-ignored, so it stays out of the commi
 ### 3E — Commit
 
 ```bash
-. /tmp/agent_review_init.sh 2>/dev/null || true
+RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+. "$RUN_DIR"/init.sh 2>/dev/null || true
 git add .claude/review .claude/settings.json .github/workflows/agent-review-approve.yml
 # Only the files whose one change is the lines 3C added.
-if [ -f /tmp/agent_review_init_stage.txt ]; then
-  while IFS= read -r f; do git add -- "$f"; done < /tmp/agent_review_init_stage.txt
+if [ -f "$RUN_DIR"/init_stage.txt ]; then
+  while IFS= read -r f; do git add -- "$f"; done < "$RUN_DIR"/init_stage.txt
 fi
-if [ -f /tmp/agent_review_init_changed.txt ]; then
+if [ -f "$RUN_DIR"/init_changed.txt ]; then
   while IFS= read -r f; do
-    grep -qxF -- "$f" /tmp/agent_review_init_stage.txt 2>/dev/null \
+    grep -qxF -- "$f" "$RUN_DIR"/init_stage.txt 2>/dev/null \
       || echo "⚠️ $f had other changes before init, so its new lines are not staged. Commit them yourself."
-  done < /tmp/agent_review_init_changed.txt
+  done < "$RUN_DIR"/init_changed.txt
 fi
 if [ "$REVIEWS_RUN" = "local-and-ci" ]; then
   git add .github/workflows/agent-review.yml .github/workflows/agent-review-interact.yml \
@@ -942,6 +980,22 @@ Next:
 6. As reviews accumulate, run /agent-review:learn to ratify learnings into rules.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
+
+---
+
+### Finish the run
+
+Run this last, after the report, and whenever init stops early (see **STOPPING EARLY** near the
+top):
+
+```bash
+agent-review run-dir --release init
+```
+
+It frees the checkout for the next init and deletes this run's working files, which hold nothing
+the repo needs: everything init wants kept was written to the repo in 3C. If it prints that another
+session's run holds the checkout, show that line: this run's blocks were run from the wrong
+checkout.
 
 ---
 
