@@ -666,7 +666,7 @@ double-quoted shell word cannot carry; spaces are fine.
 - **The lock.** `agent-review run-dir --lock <skill>` takes the checkout for that run. It holds
   while the Claude Code process that took it runs (`CLAUDE_PID`), for at most 6 hours. Within
   the same session, or the same process after `/clear` gave it a new session id, a new run
-  replaces any hold an earlier run left when it stopped, and frees the PRs that run took, so a
+  replaces any hold an earlier run left when it stopped, and frees the PRs this session took from this checkout, so a
   retry works. yolo-review takes the
   checkout with `--outer`: the review and address runs inside it keep its hold and leave the
   folder to it. If a review or address prints `kept` with no yolo-review running, an earlier

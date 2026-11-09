@@ -138,6 +138,7 @@ echo "run folder: $RUN_DIR"
 PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null)}"
 [ -n "$PR_NUMBER" ] || { echo "❌ No PR context: the ledger lives on a PR comment."; exit 1; }
 REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+[ -n "$REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }
 agent-review run-dir --lock-pr "$REPO#$PR_NUMBER" >/dev/null || exit 1
 
 # Local canonical comment: this user's own marked comment when one exists, else the bot's.

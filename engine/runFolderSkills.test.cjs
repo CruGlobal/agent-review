@@ -369,6 +369,31 @@ test('Stage 2B counts, lists and applies only fix scripts named fix_<number>_<ca
   assert.ok(archetype.includes('Name the script `fix_<N>_<category>.sh`, with `<N>` a number and `<category>` in lowercase letters, digits, `-`, or `_`; the review removes a fix script with any other name.'));
 });
 
+test('Stage 2B removes a symlinked fix script before it is counted or listed, in bash and zsh', () => {
+  const skill = read('skills/review/SKILL.md');
+  const block = bashBlocks(skill.slice(skill.indexOf('## Stage 2B'), skill.indexOf('## Stage 3')))[0];
+  for (const sh of shells()) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-fix-link-'));
+    try {
+      const fixes = join(dir, 'automated_fixes');
+      mkdirSync(fixes);
+      writeFileSync(join(fixes, 'fix_2_style.sh'), '#!/bin/bash\n');
+      writeFileSync(join(dir, 'target.sh'), '#!/bin/bash\n');
+      symlinkSync(join(dir, 'target.sh'), join(fixes, 'fix_1_x.sh'));
+      writeFileSync(join(dir, 'review_env.sh'), '');
+      const script = block.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${dir}'; export RUN_DIR`);
+      const out = execFileSync(sh, ['-c', script], { cwd: dir, encoding: 'utf8' });
+      assert.deepEqual(readdirSync(fixes).sort(), ['apply_all.sh', 'fix_2_style.sh'], `${sh}: the link is removed`);
+      assert.equal(existsSync(join(dir, 'target.sh')), true, `${sh}: its target survives`);
+      assert.ok(out.includes('removed a fix script that is a symlink: fix_1_x.sh'), `${sh}: ${out}`);
+      assert.deepEqual(out.split('\n').filter((l) => l.startsWith('  bash ')), [`  bash "${fixes}/fix_2_style.sh"`], `${sh}: the link is not listed`);
+      assert.equal(readFileSync(join(dir, 'review_env.sh'), 'utf8'), 'export FIX_COUNT="1"\n', `${sh}: the link is not counted`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('the review and address take the PR after the checkout, and free the checkout when another run holds it', () => {
   const review = read('skills/review/SKILL.md');
   const blocks = bashBlocks(review);
@@ -406,7 +431,7 @@ esac`,
   gh: `case "$*" in
   "pr view --json number -q .number") echo 7 ;;
   "pr view 7 --json headRefOid -q .headRefOid") echo bbb ;;
-  "repo view --json nameWithOwner -q .nameWithOwner") echo o/r ;;
+  "repo view --json nameWithOwner -q .nameWithOwner") [ -z "$REPO_FAILS" ] || exit 1; echo o/r ;;
   *) exit 9 ;;
 esac`,
   git: `case "$1" in
@@ -439,6 +464,15 @@ test('yolo-review takes the PR in step 1, after the outer lock and before anythi
     assert.equal(held.stderr, 'error: another agent-review review run holds PR o/r#7\n', `${sh}: the holder message is shown`);
     assert.ok(!held.calls.some((c) => c.startsWith('git push')), `${sh}: nothing is pushed: ${held.calls}`);
   }
+
+  for (const sh of shells()) {
+    const noRepo = runWithStubs(sh, step1, YOLO_STUBS, { REPO_FAILS: '1' });
+    assert.equal(noRepo.code, 1, `${sh}: a failed repo lookup stops the block`);
+    assert.ok(noRepo.stdout.includes('❌ could not tell which repository this PR is in (gh repo view failed)'), `${sh}: ${noRepo.stdout}${noRepo.stderr}`);
+    assert.ok(!noRepo.calls.some((c) => c.startsWith('git push') || c.startsWith('agent-review run-dir --lock-pr')), `${sh}: nothing is pushed or locked: ${noRepo.calls}`);
+  }
+  const address = read('skills/address/SKILL.md');
+  assert.ok(address.includes('[ -n "$REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }'), 'address stops on a failed repo lookup too');
 
   const flat = skill.replace(/\s+/g, ' ');
   for (const needle of [

@@ -1348,14 +1348,20 @@ RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 echo "🔧 Extracting automated fixes from agent reports..."
 
 # Fix script names come from the model and PR content. Only fix_<number>_<category>.sh is counted,
-# listed, or applied; any other fix_* name is removed before it can reach a printed command.
+# listed, or applied; any other fix_* name, and any fix_* symlink, is removed before it can reach a printed command.
 node -e '
 const fs = require("fs");
 const dir = process.env.RUN_DIR + "/automated_fixes";
 let names = [];
 try { names = fs.readdirSync(dir); } catch {}
 for (const name of names) {
-  if (!name.startsWith("fix_") || /^fix_[0-9]+_[a-z0-9_-]+\.sh$/.test(name)) continue;
+  if (!name.startsWith("fix_")) continue;
+  if (fs.lstatSync(dir + "/" + name).isSymbolicLink()) {
+    fs.rmSync(dir + "/" + name, { force: true });
+    console.log("⚠️  removed a fix script that is a symlink: " + name);
+    continue;
+  }
+  if (/^fix_[0-9]+_[a-z0-9_-]+\.sh$/.test(name)) continue;
   fs.rmSync(dir + "/" + name, { recursive: true, force: true });
   console.log("⚠️  removed a fix script whose name is not fix_<number>_<category>.sh");
 }

@@ -38,6 +38,7 @@ holds the checkout, show that line and stop: this run took nothing, so there is 
    PR_NUMBER=$(gh pr view --json number -q .number 2>/dev/null)
    [ -n "$PR_NUMBER" ] || { echo "❌ No PR for this branch. Open one first (gh pr create)."; exit 1; }
    PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+   [ -n "$PR_REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }
    agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
    [ -z "$(git status --porcelain)" ] || { echo "❌ Working tree is dirty. Commit or stash first; yolo reviews and fixes committed code only."; exit 1; }
    HEAD_REF=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
