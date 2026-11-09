@@ -534,6 +534,14 @@ test('the review takes no PR lock in CI, so a missing GITHUB_REPOSITORY never st
     assert.deepEqual([ci.code, ci.stdout, ci.calls], [0, 'reached\n', []], `${sh}: ${ci.stderr}`);
     const local = runWithStubs(sh, `set -e\nPR_NUMBER=7\nCI_MODE=\n${section}\necho reached`, stubs, { GH_WORKS: '1' });
     assert.deepEqual([local.code, local.calls], [0, ['gh repo view --json nameWithOwner -q .nameWithOwner', 'agent-review run-dir --lock-pr o/r#7']], `${sh}: ${local.stderr}`);
+    const noRepo = runWithStubs(sh, `set -e\nPR_NUMBER=7\nCI_MODE=\n${section}\necho reached`, stubs);
+    assert.deepEqual(
+      [noRepo.code, noRepo.stdout, noRepo.calls],
+      [1, '❌ could not tell which repository this PR is in (gh repo view failed)\n', ['gh repo view --json nameWithOwner -q .nameWithOwner']],
+      `${sh}: a failed repo lookup says so and takes no PR lock: ${noRepo.stderr}`,
+    );
+    const emptyRepo = runWithStubs(sh, `set -e\nPR_NUMBER=7\nCI_MODE=\n${section}\necho reached`, { ...stubs, gh: 'exit 0' });
+    assert.deepEqual([emptyRepo.code, emptyRepo.calls.includes('agent-review run-dir --lock-pr #7')], [1, false], `${sh}: an empty repo is never locked as "#7"`);
   }
 });
 

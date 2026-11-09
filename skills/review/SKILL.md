@@ -270,7 +270,8 @@ PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null || tru
 
 # Take the PR too, so no other session reviews or addresses it from another checkout meanwhile.
 if [ -n "$PR_NUMBER" ] && [ -z "$CI_MODE" ]; then
-  PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+  PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}" || PR_REPO=""
+  [ -n "$PR_REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }
   agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
 fi
 

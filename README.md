@@ -686,7 +686,7 @@ double-quoted shell word cannot carry; spaces are fine.
   empty or half written. Only the skill that took the
   lock cleans up, so a review inside yolo-review leaves the folder to yolo-review. Cleanup only
   ever touches a folder directly under `runs/`, and never another session's live run.
-  `--release --force` deletes the lock alone.
+  `--release --force` deletes the locks alone.
 - **One run per PR.** Two worktrees of one repo have two run folders, so the checkout lock alone
   would let both review the same PR. `agent-review run-dir --lock-pr <owner/repo#n>` also takes
   the PR, once review (after it knows the PR), address (Stage 0) or yolo-review (step 1, before
@@ -695,11 +695,12 @@ double-quoted shell word cannot carry; spaces are fine.
   --release --force --pr <owner/repo#n>`. A second worktree is refused the same way even within
   one session. The refused skill frees its own checkout and stops. The PR belongs to the skill
   that holds the checkout, so yolo-review keeps the PR through its review and address runs and
-  frees it when it releases. When `--release <skill>` ends the hold, it frees every PR this
-  session took from this checkout. `--release --force` without `--pr` frees a checkout; with
-  `--pr` it frees only that PR, from any folder. CI and `AGENT_REVIEW_RUN_DIR` runs take no PR
-  lock. A PR lock lives under `/tmp/agent-review-<uid>/locks/` and follows the same live-process
-  and 6-hour rules as the checkout lock.
+  frees it when it releases. When `--release <skill>` ends the hold, it first frees every PR this
+  session took from this checkout. `--release --force` without `--pr` frees a checkout and every
+  PR taken from it, whoever holds them; with `--pr` it frees only that PR, from any folder. CI
+  and `AGENT_REVIEW_RUN_DIR` runs take no PR lock. A PR lock lives under
+  `/tmp/agent-review-<uid>/locks/` and follows the same live-process and 6-hour rules as the
+  checkout lock.
 - **Pruning.** `agent-review run-dir --lock` removes run folders untouched for 7 days with no
   live lock, and PR lock folders whose lock is dead. It follows no symlink and touches only
   folders this user owns.

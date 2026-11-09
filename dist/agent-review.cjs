@@ -20959,6 +20959,7 @@ var require_runDir = __commonJS({
     var LOCKS_DIR = "locks";
     var PRUNE_AGE_SECONDS = 604800;
     var NEW_LOCK_FOLDER_SECONDS = 60;
+    var TEMP_LOCK_SECONDS = 60;
     var PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
     var CI_RUN_DIR = "/tmp";
     var SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
@@ -21086,6 +21087,7 @@ var require_runDir = __commonJS({
       return true;
     }
     var LOCK_GENERATION = /^run\.lock\.([1-9][0-9]*)$/;
+    var LOCK_TEMP = /^run\.lock\.[1-9][0-9]*\.tmp-[0-9a-f]{16}$/;
     function lockGenerations(dir) {
       let names = [];
       try {
@@ -21132,13 +21134,15 @@ var require_runDir = __commonJS({
       env = process.env,
       nowSeconds,
       isAlive = pidAlive,
+      remake = () => makeDir(dir),
       afterRead = () => {
       },
       beforeLink = () => {
       }
     }) {
       const me = holderFrom(env);
-      for (let attempt = 0; attempt < 3; attempt++) {
+      const attempts = 3;
+      for (let attempt = 0; attempt < attempts; attempt++) {
         const { generation, lock: existing } = currentLock(dir);
         const live = existing && lockIsLive(existing, nowSeconds, isAlive);
         if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
@@ -21150,6 +21154,10 @@ var require_runDir = __commonJS({
           createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + "\n", beforeLink);
         } catch (e) {
           if (e.code === "EEXIST") continue;
+          if (e.code === "ENOENT" && attempt < attempts - 1) {
+            remake();
+            continue;
+          }
           throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
         }
         removeLocks(dir, generation + 1);
@@ -21178,30 +21186,42 @@ var require_runDir = __commonJS({
       if (!m) throw new RunDirError(`a PR must be named <owner>/<repo>#<number>: ${JSON.stringify(pr)}`);
       return join(captureDir(env), LOCKS_DIR, `${m[1]}_${m[2]}_${m[3]}`.toLowerCase());
     }
+    function ensurePrLockDir(env, pr) {
+      const dir = prLockDir(env, pr);
+      const root = captureDir(env);
+      for (const d of [root, join(root, LOCKS_DIR), dir]) makeDir(d);
+      return dir;
+    }
     function takePrLock({ runDir, pr, env = process.env, nowSeconds, isAlive = pidAlive }) {
       const dir = prLockDir(env, pr);
       const { lock: checkout } = currentLock(runDir);
       if (!checkout || !lockIsLive(checkout, nowSeconds, isAlive) || !sameHolder(checkout, holderFrom(env))) {
         return { ok: false, reason: "not-held" };
       }
-      const root = captureDir(env);
-      for (const d of [root, join(root, LOCKS_DIR), dir]) makeDir(d);
-      const r = takeLock({ dir, skill: checkout.skill, toplevel: checkout.checkout, pr, env, nowSeconds, isAlive });
+      const remake = () => ensurePrLockDir(env, pr);
+      remake();
+      const r = takeLock({ dir, skill: checkout.skill, toplevel: checkout.checkout, pr, env, nowSeconds, isAlive, remake });
       return { ok: r.ok, lock: r.lock };
     }
-    function releasePrLocks({ env = process.env, toplevel, nowSeconds, isAlive = pidAlive }) {
+    function freePrLocks(env, toplevel, accept) {
       const root = captureDir(env);
       const locks = join(root, LOCKS_DIR);
-      if (dirProblem(root) || dirProblem(locks)) return;
-      const me = holderFrom(env);
+      if (dirProblem(root) || dirProblem(locks)) return [];
+      const freed = [];
       for (const name of readdirSync(locks)) {
         const dir = join(locks, name);
         if (dirProblem(dir)) continue;
         const { generation, lock } = currentLock(dir);
-        if (lock && lock.checkout === toplevel && lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me)) {
+        if (lock && lock.checkout === toplevel && accept(lock)) {
           removeLocks(dir, generation + 1);
+          freed.push({ dir, pr: typeof lock.pr === "string" && PR_REF.test(lock.pr) ? lock.pr : null });
         }
       }
+      return freed;
+    }
+    function releasePrLocks({ env = process.env, toplevel, nowSeconds, isAlive = pidAlive }) {
+      const me = holderFrom(env);
+      return freePrLocks(env, toplevel, (lock) => lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me));
     }
     function forceReleasePr(env, pr) {
       const dir = prLockDir(env, pr);
@@ -21226,6 +21246,13 @@ var require_runDir = __commonJS({
         return stat.isDirectory() && stat.uid === uid ? stat : null;
       } catch {
         return null;
+      }
+    }
+    function removeOldTempLocks(dir, nowSeconds) {
+      for (const name of readdirSync(dir)) {
+        if (!LOCK_TEMP.test(name)) continue;
+        const stat = lstatSync(join(dir, name));
+        if (stat.isFile() && nowSeconds - stat.mtimeMs / 1e3 > TEMP_LOCK_SECONDS) rmSync(join(dir, name), { force: true });
       }
     }
     function newestMtimeSeconds(dir, stat) {
@@ -21260,6 +21287,7 @@ var require_runDir = __commonJS({
             } else {
               if (generation === 0 && nowSeconds - stat.mtimeMs / 1e3 < NEW_LOCK_FOLDER_SECONDS) continue;
               removeLocks(dir, generation + 1);
+              removeOldTempLocks(dir, nowSeconds);
               rmdirSync(dir);
             }
             removed.push(dir);
@@ -21303,18 +21331,23 @@ var require_runDir = __commonJS({
       } catch {
       }
     }
-    function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidAlive }) {
+    function releaseLock({ dir, skill, toplevel, env = process.env, nowSeconds, isAlive = pidAlive, beforeClean = () => {
+    } }) {
       const { lock } = currentLock(dir);
       const me = holderFrom(env);
       if (lock && lockIsLive(lock, nowSeconds, isAlive)) {
         if (!sameHolder(lock, me)) return { ok: false, lock };
         if (lock.skill !== skill) return { ok: true, cleaned: false, heldBy: lock.skill };
       }
+      if (toplevel !== void 0) releasePrLocks({ env, toplevel, nowSeconds, isAlive });
+      beforeClean();
       cleanRunDir(dir);
       return { ok: true, cleaned: true };
     }
-    function forceRelease(dir) {
+    function forceRelease({ dir, toplevel, env = process.env }) {
+      const freed = freePrLocks(env, toplevel, () => true);
       removeLocks(dir);
+      return freed;
     }
     module2.exports = {
       RUNS_DIR,
@@ -21345,6 +21378,7 @@ var require_runDir = __commonJS({
       releaseLock,
       forceRelease,
       prLockDir,
+      ensurePrLockDir,
       takePrLock,
       releasePrLocks,
       forceReleasePr,
@@ -22033,7 +22067,7 @@ var require_cli = __commonJS({
   template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
-  run-dir [--lock <skill> [--outer] | --lock-pr <owner/repo#n> | --release <skill> | --release --force [--pr <owner/repo#n>]]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left and freeing the PRs this session took from this checkout, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --lock-pr also takes that PR for the skill that holds this session's checkout, so a run in another checkout cannot take it too, even one of this session (exit 1 when this session does not hold the checkout, exit 4 when another live session's run, or this session's run in another checkout, holds the PR); --release ends <skill>'s hold, then frees every PR this session took from this checkout and deletes the run's files except agent_review_report.md and automated_fixes/ (when another skill of this session holds the checkout, all of that is left to it); --release --force deletes the checkout's lock whoever holds it, and with --pr deletes only that PR's lock, from any folder
+  run-dir [--lock <skill> [--outer] | --lock-pr <owner/repo#n> | --release <skill> | --release --force [--pr <owner/repo#n>]]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left and freeing the PRs this session took from this checkout, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --lock-pr also takes that PR for the skill that holds this session's checkout, so a run in another checkout cannot take it too, even one of this session (exit 1 when this session does not hold the checkout, exit 4 when another live session's run, or this session's run in another checkout, holds the PR); --release frees every PR this session took from this checkout, then ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (when another skill of this session holds the checkout, all of that is left to it); --release --force deletes the checkout's lock and the lock of every PR taken from this checkout, whoever holds them, and with --pr deletes only that PR's lock, from any folder
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run in its run folder: delete old capture files and write the arm file with this session's id (exit 1 when another live run of this session armed the same args)
   capture disarm                 turn off /code-review result capture for this run folder: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -22546,14 +22580,14 @@ var require_cli = __commonJS({
             return 4;
           };
           if (force) {
-            forceRelease(dir);
+            const freed = forceRelease({ dir, toplevel });
             out(`released the lock on ${toplevel}`);
+            for (const { dir: prDir, pr: pr2 } of freed) out(pr2 ? `released the lock on PR ${pr2}` : `released the PR lock in ${prDir}`);
             return 0;
           }
           if (releasing) {
-            const r = releaseLock({ dir, skill: releaseSkill, nowSeconds: now });
+            const r = releaseLock({ dir, skill: releaseSkill, toplevel, nowSeconds: now });
             if (!r.ok) return refuse(r.lock);
-            if (r.cleaned) releasePrLocks({ toplevel, nowSeconds: now });
             out(r.cleaned ? `released ${toplevel} and cleaned ${dir}` : `kept ${dir}: this session's ${r.heldBy} run still holds it`);
             return 0;
           }
@@ -22582,7 +22616,7 @@ var require_cli = __commonJS({
               out(dir);
               return 0;
             }
-            const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
+            const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now, remake: () => ensureRunDir(resolved) });
             if (!r.ok) return refuse(r.lock);
             if (r.replacedOwn) releasePrLocks({ toplevel, nowSeconds: now });
             pruneRuns({ nowSeconds: now, keep: dir });

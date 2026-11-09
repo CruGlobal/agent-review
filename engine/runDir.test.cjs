@@ -36,7 +36,9 @@ const {
   heldMessage,
   cleanRunDir,
   releaseLock,
+  forceRelease,
   prLockDir,
+  ensurePrLockDir,
   takePrLock,
   releasePrLocks,
   forceReleasePr,
@@ -879,5 +881,175 @@ test('prune keeps a PR lock folder made under a minute ago that holds no lock ye
     age(older, 61);
     assert.deepEqual(prune(env).removed, [older]);
     assert.equal(existsSync(fresh), true);
+  });
+});
+
+test('prune removes a temp lock file a killed take left over a minute ago, and then the PR lock folder', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, locks } = pruneRoot(cap);
+    const dir = join(locks, 'a_b_1');
+    mkdirSync(dir, { mode: 0o700 });
+    const tmp = join(dir, `${LOCK_FILE}.1.tmp-0123456789abcdef`);
+    writeFileSync(tmp, JSON.stringify({ ...holderFrom(S2), skill: 'review', checkout: '/w/b', pr: 'a/b#1', created: NOW - 120 }));
+    age(tmp, 61);
+    age(dir, 61);
+    assert.deepEqual(prune(env).removed, [dir]);
+    assert.equal(existsSync(dir), false);
+
+    const withLock = join(locks, 'a_b_2');
+    mkdirSync(withLock, { mode: 0o700 });
+    writeFileSync(join(withLock, `${LOCK_FILE}.1`), JSON.stringify({ ...holderFrom(S2), skill: 'review', checkout: '/w/b', pr: 'a/b#2', created: NOW - 120 }));
+    writeFileSync(join(withLock, `${LOCK_FILE}.2.tmp-fedcba9876543210`), '');
+    age(join(withLock, `${LOCK_FILE}.2.tmp-fedcba9876543210`), 3600);
+    assert.deepEqual(prune(env, { isAlive: dead }).removed, [withLock], 'a dead lock and an old temp file go together');
+  });
+});
+
+test('prune keeps a temp lock file under a minute old, and the PR lock folder with it', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, locks } = pruneRoot(cap);
+    const dir = join(locks, 'a_b_1');
+    mkdirSync(dir, { mode: 0o700 });
+    const tmp = join(dir, `${LOCK_FILE}.1.tmp-0123456789abcdef`);
+    writeFileSync(tmp, '');
+    age(tmp, 10);
+    age(dir, 61);
+    assert.deepEqual(prune(env).removed, []);
+    assert.deepEqual(readdirSync(dir), [`${LOCK_FILE}.1.tmp-0123456789abcdef`], 'a take still between write and link keeps its file');
+  });
+});
+
+test('a lock folder removed between the read and the link is made again and taken', () => {
+  for (const seam of ['afterRead', 'beforeLink']) {
+    withTemp('ar-rundir-gone-', (cap) => {
+      const env = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+      const dir = join(cap, 'runs', 'repo-0123456789ab');
+      const resolved = { dir, source: 'checkout', toplevel: '/w/a' };
+      ensureRunDir(resolved, env);
+      let removed = 0;
+      const r = takeLock({
+        dir,
+        skill: 'review',
+        toplevel: '/w/a',
+        env,
+        nowSeconds: NOW,
+        isAlive: alive,
+        remake: () => ensureRunDir(resolved, env),
+        [seam]: () => {
+          if (removed++ === 0) rmSync(join(cap, 'runs'), { recursive: true });
+        },
+      });
+      assert.deepEqual([r.ok, r.taken], [true, true], seam);
+      for (const d of [join(cap, 'runs'), dir]) assert.equal(statSync(d).mode & 0o777, 0o700, `${seam}: ${d}`);
+      assert.equal(currentLock(dir).lock.session_id, 'session-one', seam);
+      assert.deepEqual(readdirSync(dir), [`${LOCK_FILE}.1`], `${seam}: no temp file is left behind`);
+    });
+  }
+
+  withTemp('ar-rundir-gone-', (cap) => {
+    const env = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const dir = ensurePrLockDir(env, PR);
+    let removed = 0;
+    const r = takeLock({
+      dir,
+      skill: 'review',
+      toplevel: '/w/a',
+      pr: PR,
+      env,
+      nowSeconds: NOW,
+      isAlive: alive,
+      remake: () => ensurePrLockDir(env, PR),
+      afterRead: () => {
+        if (removed++ === 0) rmSync(join(cap, 'locks'), { recursive: true });
+      },
+    });
+    assert.deepEqual([r.ok, r.taken], [true, true], 'a PR folder and its locks folder are made again');
+    for (const d of [join(cap, 'locks'), dir]) assert.equal(statSync(d).mode & 0o777, 0o700, d);
+  });
+
+  withTemp('ar-rundir-gone-', (cap) => {
+    const env = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const dir = ensurePrLockDir(env, PR);
+    let removed = 0;
+    const afterRead = () => {
+      if (removed++ === 0) rmSync(dir, { recursive: true });
+    };
+    const r = takeLock({ dir, skill: 'review', toplevel: '/w/a', pr: PR, env, nowSeconds: NOW, isAlive: alive, afterRead });
+    assert.deepEqual([r.ok, r.taken], [true, true], 'with no remake given, the folder itself is made again');
+    assert.equal(statSync(dir).mode & 0o777, 0o700);
+  });
+});
+
+test('a lock folder replaced by a symlink between the read and the link is refused', () => {
+  withTemp('ar-rundir-gone-', (cap) => {
+    const dir = join(cap, 'runs', 'repo-0123456789ab');
+    const elsewhere = join(cap, 'elsewhere');
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    mkdirSync(elsewhere, { mode: 0o700 });
+    let swapped = 0;
+    const take = () =>
+      takeLock({
+        dir,
+        skill: 'review',
+        toplevel: '/w/a',
+        env: S1,
+        nowSeconds: NOW,
+        isAlive: alive,
+        beforeLink: () => {
+          if (swapped++ > 0) return;
+          rmSync(dir, { recursive: true });
+          symlinkSync(elsewhere, dir);
+        },
+      });
+    assert.throws(take, (e) => e instanceof RunDirError && /repo-0123456789ab is a symlink/.test(e.message));
+    assert.deepEqual(readdirSync(elsewhere), [], 'nothing is written through the link');
+  });
+});
+
+test('a release frees the PRs it took before it frees the checkout, and only when it cleans', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, two, runA, prDir } = twoHeldCheckouts(cap);
+    takeLock({ dir: runA, skill: 'yolo-review', toplevel: '/w/a', outer: true, env: one, nowSeconds: NOW, isAlive: alive });
+    assert.equal(takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    const seen = [];
+    const release = (skill, env) =>
+      releaseLock({
+        dir: runA,
+        skill,
+        toplevel: '/w/a',
+        env,
+        nowSeconds: NOW,
+        isAlive: alive,
+        beforeClean: () => seen.push({ pr: lockGenerations(prDir), checkout: lockGenerations(runA).length > 0 }),
+      });
+    assert.equal(release('yolo-review', two).ok, false);
+    assert.deepEqual(release('review', one), { ok: true, cleaned: false, heldBy: 'yolo-review' });
+    assert.deepEqual([seen, lockGenerations(prDir)], [[], [1]], 'a refused or kept release frees no PR');
+
+    assert.deepEqual(release('yolo-review', one), { ok: true, cleaned: true });
+    assert.deepEqual(seen, [{ pr: [], checkout: true }], 'the PR is free while the checkout is still held');
+    assert.deepEqual(lockGenerations(runA), []);
+  });
+});
+
+test('a forced release frees the PRs taken from its checkout whoever holds them, and no others', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, two, runA, runB, prDir } = twoHeldCheckouts(cap);
+    assert.equal(takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    assert.equal(takePrLock({ runDir: runB, pr: 'CruGlobal/agent-review#49', env: two, nowSeconds: NOW, isAlive: alive }).ok, true);
+    const nameless = join(cap, 'locks', 'nameless');
+    mkdirSync(nameless, { mode: 0o700 });
+    writeFileSync(join(nameless, `${LOCK_FILE}.1`), JSON.stringify({ ...holderFrom(S2), skill: 'review', checkout: '/w/a', created: NOW }));
+    const elsewhere = join(cap, 'elsewhere');
+    mkdirSync(elsewhere, { mode: 0o700 });
+    writeFileSync(join(elsewhere, `${LOCK_FILE}.1`), JSON.stringify({ ...holderFrom(S1), skill: 'review', checkout: '/w/a', pr: 'a/b#1', created: NOW }));
+    symlinkSync(elsewhere, join(cap, 'locks', 'linked'));
+
+    const freed = forceRelease({ dir: runA, toplevel: '/w/a', env: two });
+    assert.deepEqual(freed.sort((x, y) => x.dir.localeCompare(y.dir)), [{ dir: prDir, pr: PR }, { dir: nameless, pr: null }]);
+    assert.deepEqual([lockGenerations(runA), lockGenerations(prDir), lockGenerations(nameless)], [[], [], []]);
+    assert.deepEqual(lockGenerations(prLockDir(one, 'CruGlobal/agent-review#49')), [1], "another checkout's PR stays");
+    assert.deepEqual(lockGenerations(runB), [1]);
+    assert.deepEqual(readdirSync(elsewhere), [`${LOCK_FILE}.1`], 'nothing is removed through a link');
   });
 });

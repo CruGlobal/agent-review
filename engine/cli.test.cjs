@@ -2959,3 +2959,26 @@ test('yolo-review holds the PR from before its review through address, and frees
     t.cleanup();
   }
 });
+
+test('run-dir --release --force frees the checkout and every PR taken from it, whoever holds them', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const PR_12 = 'o/r#12';
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_12], one).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', 'o/r#13'], one).code, 0);
+
+    const forced = runDirIn(t.a, t.cap, ['--release', '--force'], two);
+    assert.deepEqual([forced.code, forced.stdout, forced.stderr], [0, `released the lock on ${t.a}\nreleased the lock on PR ${PR_12}\n`, '']);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], two).code, 0);
+    const taken = runDirIn(t.a, t.cap, ['--lock-pr', PR_12], two);
+    assert.deepEqual([taken.code, taken.stderr], [0, ''], 'the forced run no longer holds its PR');
+    const other = join(t.cap, 'locks', 'o_r_13');
+    assert.equal(JSON.parse(readFileSync(join(other, readdirSync(other).find((f) => /^run\.lock\.\d+$/.test(f))), 'utf8')).checkout, t.b, 'a PR taken from another checkout stays');
+  } finally {
+    t.cleanup();
+  }
+});
