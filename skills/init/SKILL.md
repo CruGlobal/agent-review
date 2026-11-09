@@ -63,9 +63,9 @@ path in it: the path Stage 0's first block prints as `run folder: <path>`.
 
 ⚠️ **STOPPING EARLY**: whenever init stops before it finishes, for any reason (a refusal to
 continue, a `--migrate` run, a "no" at the 3B gate, a failed check), run the **Finish the run**
-block before you stop. The one exception is a read-only guard drift, which pauses init until the
-revert is done (see [the read-only guard](#the-read-only-guard)). It is the last block of this skill. It frees the checkout and deletes this
-run's working files.
+block before you stop. That last block of this skill frees the checkout and deletes this run's
+working files. The one exception is a read-only guard drift, which pauses init until the revert
+is done (see [the read-only guard](#the-read-only-guard)).
 
 ---
 

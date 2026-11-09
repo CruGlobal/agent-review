@@ -4,7 +4,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { execFileSync, spawnSync } = require('node:child_process');
-const { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = require('node:fs');
+const { readFileSync, readdirSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, symlinkSync } = require('node:fs');
 const { join } = require('node:path');
 const os = require('node:os');
 
@@ -51,6 +51,39 @@ function bashBlocks(text) {
 
 function shells() {
   return ['bash', 'zsh'].filter((sh) => spawnSync(sh, ['-c', 'true']).status === 0);
+}
+
+// Runs `script` in `sh` from a temp folder, with `stubs` (name to sh body) first on PATH and no
+// GITHUB_REPOSITORY. Each stub logs "<name> <args>" to the calls list; RUN_DIR_STUB is the folder.
+function runWithStubs(sh, script, stubs, env = {}) {
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-stubs-'));
+  try {
+    const bin = join(dir, 'bin');
+    const log = join(dir, 'calls.log');
+    mkdirSync(bin);
+    for (const [name, body] of Object.entries(stubs)) {
+      writeFileSync(join(bin, name), `#!/bin/sh\necho "${name} $*" >> "${log}"\n${body}\n`, { mode: 0o755 });
+    }
+    const base = { ...process.env };
+    delete base.GITHUB_REPOSITORY;
+    const r = spawnSync(sh, ['-c', script], { cwd: dir, encoding: 'utf8', env: { ...base, PATH: `${bin}:${process.env.PATH}`, RUN_DIR_STUB: dir, ...env } });
+    const calls = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr, calls };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+// The block's one `--lock-pr` line, stopping the block when it fails, after the line that sets the repo.
+function takesPr(block, repoSet, repoVar) {
+  const lines = block.split('\n');
+  const at = lines.findIndex((l) => l.includes('agent-review run-dir --lock-pr'));
+  assert.ok(at >= 0, 'the block takes the PR');
+  assert.strictEqual(lines.filter((l) => l.includes('--lock-pr')).length, 1);
+  assert.match(lines[at], new RegExp(`--lock-pr "\\$${repoVar}#\\$PR_NUMBER" >/dev/null \\|\\| exit 1$`), 'a failed take stops the block');
+  const repoAt = lines.findIndex((l) => l.trimStart().startsWith(repoSet));
+  assert.ok(repoAt >= 0 && repoAt < at, 'the repo is known before the PR is taken');
+  return lines.slice(0, at + 1);
 }
 
 test('no review skill, lane prompt or report names a fixed /tmp file', () => {
@@ -162,7 +195,10 @@ test('init takes the checkout first and frees it at the end or on any early stop
   const drift = flat.slice(flat.indexOf('Any output → **drift**'), flat.indexOf('**What this check cannot see**'));
   assert.ok(drift.includes('This pause is not a stop of the run: do not run **Finish the run** until the revert below is done'), 'a drift pause keeps the baseline files');
   assert.ok(drift.includes('the baseline SHA (the contents of `"$RUN_DIR"/init_baseline_head.txt`) written out in the message'), 'the human is shown the baseline SHA');
-  assert.ok(flat.includes('The one exception is a read-only guard drift, which pauses init until the revert is done'), 'the early-stop rule names the drift exception');
+  assert.ok(
+    flat.includes("run the **Finish the run** block before you stop. That last block of this skill frees the checkout and deletes this run's working files. The one exception is a read-only guard drift, which pauses init until the revert is done"),
+    'the early-stop rule says what Finish the run does, then names the drift exception',
+  );
   const prose = skill.replace(/^( *)```[\s\S]*?^\1```$/gm, '');
   assert.deepStrictEqual(prose.match(/(?<!"\$RUN_DIR"\/)\binit(\.sh|_[a-z_]+\.(txt|json))\b/g), null, 'prose names an init state file only behind the run folder');
   for (const needle of [
@@ -344,26 +380,128 @@ test('the review and address take the PR after the checkout, and free the checko
   const stage0 = bashBlocks(local)[0];
   assert.ok(stage0.startsWith('RUN_DIR=$(agent-review run-dir --lock address)'));
 
-  const takes = (block, repoSet, repoVar) => {
-    const lines = block.split('\n');
-    const at = lines.findIndex((l) => l.includes('agent-review run-dir --lock-pr'));
-    assert.ok(at >= 0, 'the block takes the PR');
-    assert.strictEqual(lines.filter((l) => l.includes('--lock-pr')).length, 1);
-    assert.match(lines[at], new RegExp(`--lock-pr "\\$${repoVar}#\\$PR_NUMBER" >/dev/null \\|\\| exit 1$`), 'a failed take stops the block');
-    assert.ok(lines.findIndex((l) => l.startsWith(repoSet)) < at, 'the repo is known before the PR is taken');
-    return lines.slice(0, at + 1);
-  };
   const reviewBlock = blocks[gatherAt];
-  const reviewLines = takes(reviewBlock, 'PR_NUMBER=', 'PR_REPO');
+  const reviewLines = takesPr(reviewBlock, 'PR_REPO=', 'PR_REPO');
   assert.ok(reviewBlock.includes('PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"'));
-  const guard = reviewLines.findIndex((l) => l.trim() === 'if [ -n "$PR_NUMBER" ]; then');
-  assert.ok(guard >= 0 && guard < reviewLines.length - 1 && reviewBlock.split('\n')[reviewLines.length] === 'fi', 'review takes the PR only when PR_NUMBER is set');
-  takes(stage0, 'REPO=', 'REPO');
+  const guard = reviewLines.findIndex((l) => l.trim() === 'if [ -n "$PR_NUMBER" ] && [ -z "$CI_MODE" ]; then');
+  assert.ok(guard >= 0 && guard < reviewLines.length - 1 && reviewBlock.split('\n')[reviewLines.length] === 'fi', 'review takes the PR only when PR_NUMBER is set, and never in CI');
+  takesPr(stage0, 'REPO=', 'REPO');
 
   const flatReview = review.replace(/\s+/g, ' ');
   const flatAddress = local.replace(/\s+/g, ' ');
   assert.ok(flatReview.includes('Show that message, run `agent-review run-dir --release review` to free this checkout, and stop.'));
+  assert.ok(flatReview.includes("Initialize has already cleared this checkout's earlier local report and fix scripts by then."), 'a review refused the PR says what it already cleared');
   assert.ok(flatAddress.includes('Show that message, run `agent-review run-dir --release address` to free this checkout, and stop.'));
   const yolo = read('skills/yolo-review/SKILL.md').replace(/\s+/g, ' ');
   assert.ok(yolo.includes('The hold covers the PR too'));
+});
+
+const YOLO_STUBS = {
+  'agent-review': `case "$*" in
+  "run-dir --lock yolo-review --outer") echo "$RUN_DIR_STUB" ;;
+  "run-dir --lock-pr "*) [ -z "$PR_HELD" ] || { echo "error: another agent-review review run holds PR $3" >&2; exit 4; } ;;
+  "config show") ;;
+  *) exit 9 ;;
+esac`,
+  gh: `case "$*" in
+  "pr view --json number -q .number") echo 7 ;;
+  "pr view 7 --json headRefOid -q .headRefOid") echo bbb ;;
+  "repo view --json nameWithOwner -q .nameWithOwner") echo o/r ;;
+  *) exit 9 ;;
+esac`,
+  git: `case "$1" in
+  status) ;;
+  rev-parse) echo aaa ;;
+  push) ;;
+  *) exit 9 ;;
+esac`,
+};
+
+test('yolo-review takes the PR in step 1, after the outer lock and before anything is pushed', () => {
+  const skill = read('skills/yolo-review/SKILL.md');
+  const step1 = bashBlocks(skill)[0];
+  const lines = takesPr(step1, 'PR_REPO=', 'PR_REPO');
+  assert.ok(lines[0].startsWith('RUN_DIR=$(agent-review run-dir --lock yolo-review --outer)'), 'after the outer lock');
+  assert.ok(lines.some((l) => l.startsWith('[ -n "$PR_NUMBER" ] ||')), 'once the PR number is known');
+  assert.ok(step1.split('\n').findIndex((l) => l.includes('git push')) >= lines.length, 'before the push');
+  assert.ok(step1.includes('PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"'));
+
+  for (const sh of shells()) {
+    const ran = runWithStubs(sh, step1, YOLO_STUBS);
+    assert.equal(ran.code, 0, `${sh}: ${ran.stdout}${ran.stderr}`);
+    const at = (call) => ran.calls.indexOf(call);
+    assert.ok(at('agent-review run-dir --lock yolo-review --outer') === 0, `${sh}: ${ran.calls}`);
+    assert.ok(at('agent-review run-dir --lock-pr o/r#7') > 0, `${sh}: ${ran.calls}`);
+    assert.ok(at('agent-review run-dir --lock-pr o/r#7') < at('git push'), `${sh}: the PR is held before the push: ${ran.calls}`);
+
+    const held = runWithStubs(sh, step1, YOLO_STUBS, { PR_HELD: '1' });
+    assert.equal(held.code, 1, `${sh}: a held PR stops the block`);
+    assert.equal(held.stderr, 'error: another agent-review review run holds PR o/r#7\n', `${sh}: the holder message is shown`);
+    assert.ok(!held.calls.some((c) => c.startsWith('git push')), `${sh}: nothing is pushed: ${held.calls}`);
+  }
+
+  const flat = skill.replace(/\s+/g, ' ');
+  for (const needle of [
+    'If step 1 prints that another agent-review run holds the PR, show that message, run `agent-review run-dir --release yolo-review`, and stop.',
+    'Whenever this skill stops, at step 7 or earlier for any reason, run `agent-review run-dir --release yolo-review`',
+  ]) {
+    assert.ok(flat.includes(needle), `yolo-review must say ${JSON.stringify(needle)}`);
+  }
+  assert.ok(!flat.includes('on any ❌, run'), 'the stop rule is not only for a ❌');
+});
+
+test('the review takes no PR lock in CI, so a missing GITHUB_REPOSITORY never stops it', () => {
+  const review = read('skills/review/SKILL.md');
+  const gather = bashBlocks(review).find((b) => /^PR_NUMBER=/m.test(b));
+  const lines = gather.split('\n');
+  const from = lines.findIndex((l) => l.startsWith('if [ -n "$PR_NUMBER" ]'));
+  const section = lines.slice(from, lines.indexOf('fi', from) + 1).join('\n');
+  assert.ok(section.includes('--lock-pr'), section);
+  const stubs = { 'agent-review': 'exit 0', gh: '[ -z "$GH_WORKS" ] && exit 1; echo o/r' };
+  for (const sh of shells()) {
+    const ci = runWithStubs(sh, `set -e\nPR_NUMBER=7\nCI_MODE=true\n${section}\necho reached`, stubs);
+    assert.deepEqual([ci.code, ci.stdout, ci.calls], [0, 'reached\n', []], `${sh}: ${ci.stderr}`);
+    const local = runWithStubs(sh, `set -e\nPR_NUMBER=7\nCI_MODE=\n${section}\necho reached`, stubs, { GH_WORKS: '1' });
+    assert.deepEqual([local.code, local.calls], [0, ['gh repo view --json nameWithOwner -q .nameWithOwner', 'agent-review run-dir --lock-pr o/r#7']], `${sh}: ${local.stderr}`);
+  }
+});
+
+test('apply_all.sh skips a symlinked fix script, in bash and zsh', () => {
+  const skill = read('skills/review/SKILL.md');
+  const script = skill.match(/apply_all\.sh << 'EOF'\n([\s\S]*?)\nEOF\n/)[1];
+  for (const sh of shells()) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-apply-link-'));
+    try {
+      const fixes = join(dir, 'automated_fixes');
+      mkdirSync(fixes);
+      writeFileSync(join(fixes, 'apply_all.sh'), `${script}\n`, { mode: 0o755 });
+      writeFileSync(join(dir, 'outside.sh'), `#!/bin/bash\ntouch "${join(dir, 'linked')}"\n`, { mode: 0o755 });
+      symlinkSync(join(dir, 'outside.sh'), join(fixes, 'fix_1_x.sh'));
+      writeFileSync(join(fixes, 'fix_2_style.sh'), `#!/bin/bash\ntouch "${join(dir, 'good')}"\n`, { mode: 0o755 });
+      const dry = execFileSync(sh, [join(fixes, 'apply_all.sh')], { cwd: dir, encoding: 'utf8' });
+      assert.ok(!dry.includes('===== fix_1_x.sh =====') && !dry.includes(join(dir, 'linked')), `${sh}: the linked script is not printed: ${dry}`);
+      assert.ok(dry.includes('skipped a fix script that is a symlink'), `${sh}: the skip is reported: ${dry}`);
+      assert.ok(dry.includes('===== fix_2_style.sh ====='), `${sh}: ${dry}`);
+      const applied = execFileSync(sh, [join(fixes, 'apply_all.sh'), '--yes'], { cwd: dir, encoding: 'utf8' });
+      assert.equal(existsSync(join(dir, 'linked')), false, `${sh}: the linked script did not run`);
+      assert.equal(existsSync(join(dir, 'good')), true, `${sh}: the real script ran`);
+      assert.ok(applied.includes('skipped a fix script that is a symlink'), `${sh}: ${applied}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('apply_all.sh matches fix script names in the C locale, in bash and zsh', () => {
+  const skill = read('skills/review/SKILL.md');
+  const script = skill.match(/apply_all\.sh << 'EOF'\n([\s\S]*?)\nEOF\n/)[1];
+  const fn = script.match(/^safe_name\(\) \{\n[\s\S]*?\n\}$/m);
+  assert.ok(fn, 'apply_all.sh checks each name with safe_name');
+  assert.equal(script.split('\n').filter((l) => l.includes('=~')).length, 1, 'safe_name holds the only regex match');
+  assert.equal(script.split('\n').filter((l) => l.trim() === 'if ! safe_name "$(basename "$fix")"; then').length, 2, 'both loops use it');
+  for (const sh of shells()) {
+    const probe = (body) => spawnSync(sh, ['-c', `SAFE_NAME='^.$'\n${body}`], { encoding: 'utf8', env: { ...process.env, LC_ALL: 'C.UTF-8' } }).status;
+    assert.equal(probe('[[ "é" =~ $SAFE_NAME ]]'), 0, `${sh}: under C.UTF-8 a plain match reads é as one character`);
+    assert.equal(probe(`${fn[0]}\nsafe_name "é"`), 1, `${sh}: safe_name reads it byte by byte`);
+  }
 });

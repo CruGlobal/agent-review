@@ -56,7 +56,7 @@ function gitToplevel(root) {
   }
   if (!top) {
     throw new RunDirError(
-      `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`,
+      `${root} is not inside a git checkout, so it has no run folder: run this from inside the checkout`,
     );
   }
   for (const path of [top, realpathSync(top)]) {
@@ -225,9 +225,10 @@ function createExclusive(path, text, beforeLink = () => {}) {
 
 // Takes the checkout's lock for `skill`. Never takes a live lock from another session. Inside this
 // session's own hold, a skill run by an outer skill (review inside yolo-review) leaves the hold to
-// it; any other hold this session left was a run that stopped, so it is replaced, and an outer
-// skill always replaces it. `afterRead` and `beforeLink` let tests run another session's steps
-// between reading the lock and creating the next one.
+// it; any other hold this session left was a run that stopped, so it is replaced (`replacedOwn`),
+// and an outer skill always replaces it. A PR lock (`pr` given) this session holds from another
+// checkout is refused like another session's. `afterRead` and `beforeLink` let tests run another
+// session's steps between reading the lock and creating the next one.
 function takeLock({
   dir,
   skill,
@@ -245,6 +246,7 @@ function takeLock({
     const { generation, lock: existing } = currentLock(dir);
     const live = existing && lockIsLive(existing, nowSeconds, isAlive);
     if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+    if (live && pr !== undefined && existing.checkout !== toplevel) return { ok: false, lock: existing };
     if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
     afterRead();
     const lock = { ...me, skill, outer, checkout: toplevel, ...(pr === undefined ? {} : { pr }), created: nowSeconds };
@@ -255,7 +257,7 @@ function takeLock({
       throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
     }
     removeLocks(dir, generation + 1);
-    return { ok: true, taken: true, lock };
+    return { ok: true, taken: true, lock, replacedOwn: sameHolder(existing, me) };
   }
   return { ok: false, lock: currentLock(dir).lock || {} };
 }

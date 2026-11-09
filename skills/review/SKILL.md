@@ -96,8 +96,10 @@ it, `cd` there first. If `agent-review run-dir` fails, stop and show its error: 
 `/tmp`. Stage 0A's first block also takes the checkout for this review (`--lock review`); when
 another live session's review already holds it, the block prints who holds it and stops, and you
 must stop too and show that message. The Gather PR Context block then takes the PR itself
-(`--lock-pr`): when another live session's run holds that PR, the block prints who holds it and
-stops. Show that message, run `agent-review run-dir --release review` to free this checkout, and stop.
+(`--lock-pr`): when another live session's run, or this session's run in another checkout, holds
+that PR, the block prints who holds it and stops. Show that message, run
+`agent-review run-dir --release review` to free this checkout, and stop. Initialize has already
+cleared this checkout's earlier local report and fix scripts by then. CI takes no PR lock.
 
 Subagents start in another shell, often outside the repository, and never see `$RUN_DIR`, and
 neither does a file you write with the Write tool. So in every prompt you hand a subagent, every
@@ -267,7 +269,7 @@ PR_NUMBER="${PR_NUMBER:-$(gh pr view --json number -q .number 2>/dev/null || tru
 [ -n "$PR_NUMBER" ] && echo "PR #$PR_NUMBER" || echo "No PR context: local review"
 
 # Take the PR too, so no other session reviews or addresses it from another checkout meanwhile.
-if [ -n "$PR_NUMBER" ]; then
+if [ -n "$PR_NUMBER" ] && [ -z "$CI_MODE" ]; then
   PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
   agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
 fi
@@ -1390,11 +1392,19 @@ set -euo pipefail
 # fix_*.sh are model-generated from PR content and UNTRUSTED — review each before applying.
 FIXES=$(cd "$(dirname "$0")" && pwd)
 SAFE_NAME='^fix_[0-9]+_[a-z0-9_-]+\.sh$'
+# The C locale keeps [a-z] to the 26 ASCII letters.
+safe_name() {
+  local LC_ALL=C
+  [[ "$1" =~ $SAFE_NAME ]]
+}
 if [ "${1:-}" != "--yes" ]; then
   echo "DRY RUN: review each fix, then re-run with --yes to apply. Nothing applied yet."
   for fix in "$FIXES"/fix_*.sh; do
+    if [ -L "$fix" ]; then
+      echo "skipped a fix script that is a symlink"; continue
+    fi
     [ -f "$fix" ] || continue
-    if ! [[ "$(basename "$fix")" =~ $SAFE_NAME ]]; then
+    if ! safe_name "$(basename "$fix")"; then
       echo "skipped a fix script whose name is not fix_<number>_<category>.sh"; continue
     fi
     echo ""; echo "===== $(basename "$fix") ====="; cat "$fix"
@@ -1404,8 +1414,11 @@ if [ "${1:-}" != "--yes" ]; then
 fi
 echo "Applying all automated fixes..."
 for fix in "$FIXES"/fix_*.sh; do
+  if [ -L "$fix" ]; then
+    echo "skipped a fix script that is a symlink"; continue
+  fi
   if [ -f "$fix" ]; then
-    if ! [[ "$(basename "$fix")" =~ $SAFE_NAME ]]; then
+    if ! safe_name "$(basename "$fix")"; then
       echo "skipped a fix script whose name is not fix_<number>_<category>.sh"; continue
     fi
     echo "Applying: $(basename "$fix")"

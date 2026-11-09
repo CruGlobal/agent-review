@@ -131,7 +131,10 @@ test('a flag beats AGENT_REVIEW_RUN_DIR, which beats CI, which beats the checkou
 
 test('outside a checkout, or with an unsafe path, there is no run folder', () => {
   withTemp('ar-rundir-plain-', (plain) => {
-    assert.throws(() => resolveRunDir({ root: plain, env: {} }), (e) => e instanceof RunDirError && /not inside a git checkout/.test(e.message));
+    assert.throws(
+      () => resolveRunDir({ root: plain, env: {} }),
+      (e) => e instanceof RunDirError && e.message === `${plain} is not inside a git checkout, so it has no run folder: run this from inside the checkout`,
+    );
   });
   for (const bad of ['relative/dir', '/tmp/has space', '/tmp/$HOME', '/tmp/quote"d', '']) {
     assert.throws(() => resolveRunDir({ root: '/', env: {}, flagDir: bad }), RunDirError, JSON.stringify(bad));
@@ -501,6 +504,62 @@ test('a PR lock whose holder died or is over 21600 seconds old is taken over', (
     assert.deepEqual([young.ok, young.lock.session_id], [false, 'session-two'], 'a lock exactly 21600 seconds old still holds');
     const old = takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW + 21601, isAlive: alive });
     assert.deepEqual([old.ok, old.lock.session_id], [true, 'session-one'], 'an older one is free');
+  });
+});
+
+test('this session holding a PR from one checkout is refused it from another, and takes it again from the same one', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const subagent = { CLAUDE_CODE_SESSION_ID: 'session-sub', CLAUDE_PID: '111', AGENT_REVIEW_CAPTURE_DIR: cap };
+    const runA = runFolder(cap, 'repo-a-0123456789ab');
+    const runB = runFolder(cap, 'repo-b-0123456789ab');
+    takeLock({ dir: runA, skill: 'review', toplevel: '/w/a', env: one, nowSeconds: NOW, isAlive: alive });
+    takeLock({ dir: runB, skill: 'address', toplevel: '/w/b', env: one, nowSeconds: NOW, isAlive: alive });
+    const take = (runDir, env) => takePrLock({ runDir, pr: PR, env, nowSeconds: NOW, isAlive: alive });
+    const prDir = prLockDir(one, PR);
+    assert.equal(take(runA, one).ok, true);
+    for (const env of [one, subagent]) {
+      const refused = take(runB, env);
+      assert.deepEqual([refused.ok, refused.lock.checkout, refused.lock.skill], [false, '/w/a', 'review']);
+    }
+    assert.deepEqual(lockGenerations(prDir), [1], 'the refused takes changed nothing');
+    const again = take(runA, one);
+    assert.deepEqual([again.ok, again.lock.checkout], [true, '/w/a'], 'the same checkout takes it again');
+    assert.deepEqual(lockGenerations(prDir), [2]);
+    const later = NOW + LOCK_MAX_AGE_SECONDS + 1;
+    takeLock({ dir: runB, skill: 'address', toplevel: '/w/b', env: one, nowSeconds: later, isAlive: alive });
+    const stale = takePrLock({ runDir: runB, pr: PR, env: one, nowSeconds: later, isAlive: alive });
+    assert.deepEqual([stale.ok, stale.lock.checkout], [true, '/w/b'], 'a stale PR lock from another checkout is taken over');
+  });
+});
+
+test('a PR taken by this session from another checkout between the read and the write refuses the take', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const prDir = join(cap, 'pr');
+    mkdirSync(prDir);
+    const take = (toplevel, afterRead) => takeLock({ dir: prDir, skill: 'review', toplevel, pr: PR, env: one, nowSeconds: NOW, isAlive: alive, afterRead });
+    let raced = false;
+    const r = take('/w/a', () => {
+      if (raced) return;
+      raced = true;
+      assert.equal(take('/w/b').ok, true);
+    });
+    assert.deepEqual([r.ok, r.lock.checkout], [false, '/w/b']);
+    assert.equal(currentLock(prDir).lock.checkout, '/w/b');
+  });
+});
+
+test('takeLock says when it replaced a hold this session left', () => {
+  withTemp('ar-rundir-lock-', (dir) => {
+    const lock = (skill, env, { outer = false, isAlive = alive } = {}) =>
+      takeLock({ dir, skill, toplevel: '/w/a', outer, env, nowSeconds: NOW, isAlive });
+    assert.equal(lock('review', S1).replacedOwn, false, 'nothing to replace');
+    assert.equal(lock('address', S1).replacedOwn, true, 'a stopped run of this session');
+    assert.equal(lock('yolo-review', S1, { outer: true }).replacedOwn, true, 'an outer skill replacing one');
+    const kept = lock('review', S1);
+    assert.deepEqual([kept.taken, kept.replacedOwn], [false, undefined], 'a run inside the outer hold replaces nothing');
+    assert.equal(lock('review', S2, { isAlive: dead }).replacedOwn, false, "another session's dead lock is not this session's");
   });
 });
 

@@ -2862,3 +2862,100 @@ test('run-dir refuses bad --lock-pr and --pr arguments', () => {
     t.cleanup();
   }
 });
+
+// Subagents run with their parent's CLAUDE_PID, and may share its session id too.
+test('run-dir --lock-pr refuses the same session the PR from a second worktree with exit 4, and lets it back in from the first', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const subagent = sessionEnv('session-sub', process.pid);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+
+    for (const env of [one, subagent]) {
+      assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], env).code, 0);
+      const refused = runDirIn(t.b, t.cap, ['--lock-pr', PR_48], env);
+      assert.deepEqual([refused.code, refused.stdout], [4, '']);
+      assert.ok(refused.stderr.startsWith(`error: another agent-review review run holds PR ${PR_48}: session session-one, checkout ${t.a}, started 0 minutes ago.`), refused.stderr);
+      assert.ok(refused.stderr.includes(`agent-review run-dir --release --force --pr ${PR_48}`), refused.stderr);
+      assert.equal(runDirIn(t.b, t.cap, ['--release', 'review'], env).code, 0);
+    }
+
+    const again = runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one);
+    assert.deepEqual([again.code, again.stderr], [0, ''], 'the same checkout takes it again');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --release --force --pr frees the PR from outside any checkout, and under CI or AGENT_REVIEW_RUN_DIR', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const prDir = join(t.cap, 'locks', 'cruglobal_agent-review_48');
+    const fromTmp = (env) => spawnCli(['run-dir', '--release', '--force', '--pr', PR_48], { dir: t.cap, cwd: os.tmpdir(), env });
+    for (const env of [{ AGENT_REVIEW_RUN_DIR: '', AGENT_REVIEW_CI: '' }, { AGENT_REVIEW_RUN_DIR: '', AGENT_REVIEW_CI: '1' }, { AGENT_REVIEW_RUN_DIR: join(t.cap, 'pinned'), AGENT_REVIEW_CI: '' }]) {
+      assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+      assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+      assert.notDeepEqual(readdirSync(prDir).filter((f) => f.startsWith('run.lock')), [], JSON.stringify(env));
+      assert.deepEqual(fromTmp({ ...two, ...env }), { code: 0, stdout: `released the lock on PR ${PR_48}\n`, stderr: '' }, JSON.stringify(env));
+      assert.deepEqual(readdirSync(prDir).filter((f) => f.startsWith('run.lock')), [], JSON.stringify(env));
+      assert.equal(runDirIn(t.a, t.cap, ['--release', 'review'], one).code, 0);
+    }
+    rmSync(t.cap, { recursive: true, force: true });
+    assert.deepEqual(fromTmp(two), { code: 0, stdout: `released the lock on PR ${PR_48}\n`, stderr: '' }, 'no capture root is nothing to free');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('a --lock that replaces a run this session stopped frees the PRs that run took from the checkout', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const PR_1 = 'o/r#1';
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_1], one).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], two).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_1], two).code, 4, 'the running review holds the PR');
+
+    const address = runDirIn(t.a, t.cap, ['--lock', 'address'], one);
+    assert.deepEqual([address.code, address.stderr], [0, ''], 'address replaces the review that stopped');
+    const taken = runDirIn(t.b, t.cap, ['--lock-pr', PR_1], two);
+    assert.deepEqual([taken.code, taken.stderr], [0, ''], "the stopped review's PR is free");
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_1], one).code, 4, 'and is now the other session\'s');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('yolo-review holds the PR from before its review through address, and frees it when it releases', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const prDir = join(t.cap, 'locks', 'cruglobal_agent-review_48');
+    const holder = () => JSON.parse(readFileSync(join(prDir, readdirSync(prDir).find((f) => /^run\.lock\.\d+$/.test(f))), 'utf8'));
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0, 'a review this session left behind');
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'yolo-review', '--outer'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0, 'yolo-review takes the PR before it pushes');
+    assert.equal(holder().skill, 'yolo-review');
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], two).code, 0);
+    for (const skill of ['review', 'address']) {
+      assert.equal(runDirIn(t.a, t.cap, ['--lock', skill], one).code, 0);
+      const retake = runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one);
+      assert.deepEqual([retake.code, retake.stderr], [0, ''], `${skill} takes the PR again inside yolo-review`);
+      assert.deepEqual([holder().skill, holder().checkout], ['yolo-review', t.a]);
+      assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 4, `no other checkout gets the PR during ${skill}`);
+      assert.match(runDirIn(t.a, t.cap, ['--release', skill], one).stdout, /^kept .*: this session's yolo-review run still holds it\n$/);
+      assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 4, `nor after ${skill} ends`);
+    }
+    assert.match(runDirIn(t.a, t.cap, ['--release', 'yolo-review'], one).stdout, /^released .* and cleaned /);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 0, 'yolo-review freed the PR');
+  } finally {
+    t.cleanup();
+  }
+});

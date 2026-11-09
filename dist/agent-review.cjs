@@ -20986,7 +20986,7 @@ var require_runDir = __commonJS({
       }
       if (!top) {
         throw new RunDirError(
-          `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`
+          `${root} is not inside a git checkout, so it has no run folder: run this from inside the checkout`
         );
       }
       for (const path of [top, realpathSync(top)]) {
@@ -21142,6 +21142,7 @@ var require_runDir = __commonJS({
         const { generation, lock: existing } = currentLock(dir);
         const live = existing && lockIsLive(existing, nowSeconds, isAlive);
         if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+        if (live && pr !== void 0 && existing.checkout !== toplevel) return { ok: false, lock: existing };
         if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
         afterRead();
         const lock = { ...me, skill, outer, checkout: toplevel, ...pr === void 0 ? {} : { pr }, created: nowSeconds };
@@ -21152,7 +21153,7 @@ var require_runDir = __commonJS({
           throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
         }
         removeLocks(dir, generation + 1);
-        return { ok: true, taken: true, lock };
+        return { ok: true, taken: true, lock, replacedOwn: sameHolder(existing, me) };
       }
       return { ok: false, lock: currentLock(dir).lock || {} };
     }
@@ -22032,7 +22033,7 @@ var require_cli = __commonJS({
   template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
-  run-dir [--lock <skill> [--outer] | --lock-pr <owner/repo#n> | --release <skill> | --release --force [--pr <owner/repo#n>]]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --lock-pr also takes that PR for the skill that holds this session's checkout, so a run in another checkout cannot take it too (exit 1 when this session does not hold the checkout, exit 4 when another live session's run holds the PR); --release ends <skill>'s hold, frees the PRs <skill> took, and deletes the run's files except agent_review_report.md and automated_fixes/ (a hold another skill of this session took is left to it, PRs included); --release --force deletes the lock whoever holds it, and with --pr deletes that PR's lock instead
+  run-dir [--lock <skill> [--outer] | --lock-pr <owner/repo#n> | --release <skill> | --release --force [--pr <owner/repo#n>]]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left and freeing the PRs this session took from this checkout, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --lock-pr also takes that PR for the skill that holds this session's checkout, so a run in another checkout cannot take it too, even one of this session (exit 1 when this session does not hold the checkout, exit 4 when another live session's run, or this session's run in another checkout, holds the PR); --release ends <skill>'s hold, then frees every PR this session took from this checkout and deletes the run's files except agent_review_report.md and automated_fixes/ (when another skill of this session holds the checkout, all of that is left to it); --release --force deletes the checkout's lock whoever holds it, and with --pr deletes only that PR's lock, from any folder
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run in its run folder: delete old capture files and write the arm file with this session's id (exit 1 when another live run of this session armed the same args)
   capture disarm                 turn off /code-review result capture for this run folder: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -22512,6 +22513,18 @@ var require_cli = __commonJS({
           }
           const lockSkill = locking ? skill : void 0;
           const releaseSkill = releasing ? skill : void 0;
+          if (force && prGiven) {
+            try {
+              forceReleasePr(process.env, pr);
+            } catch (e) {
+              if (!(e instanceof RunDirError)) throw e;
+              process.stderr.write(`error: ${e.message}
+`);
+              return 1;
+            }
+            out(`released the lock on PR ${pr}`);
+            return 0;
+          }
           let resolved;
           try {
             resolved = runDirFor(C, rawArgv, { create: true });
@@ -22532,18 +22545,6 @@ var require_cli = __commonJS({
 `);
             return 4;
           };
-          if (force && prGiven) {
-            try {
-              forceReleasePr(process.env, pr);
-            } catch (e) {
-              if (!(e instanceof RunDirError)) throw e;
-              process.stderr.write(`error: ${e.message}
-`);
-              return 1;
-            }
-            out(`released the lock on PR ${pr}`);
-            return 0;
-          }
           if (force) {
             forceRelease(dir);
             out(`released the lock on ${toplevel}`);
@@ -22583,6 +22584,7 @@ var require_cli = __commonJS({
             }
             const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
             if (!r.ok) return refuse(r.lock);
+            if (r.replacedOwn) releasePrLocks({ toplevel, nowSeconds: now });
             pruneRuns({ nowSeconds: now, keep: dir });
             out(dir);
             return 0;

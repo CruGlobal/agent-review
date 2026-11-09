@@ -21,9 +21,14 @@ re-reviews cheap.
 Each block keeps its files in this checkout's run folder (the path `agent-review run-dir`
 prints, and step 1 shows as `run folder:`), so run every block from the PR's checkout. Step 1
 takes the checkout for the whole yolo run (`--lock yolo-review --outer`); the review and address
-runs it starts work inside that hold and leave the folder to it. The hold covers the PR too: the review inside it takes the PR lock for yolo-review, and it stays held through address until the release. When this skill stops, after step 7 or earlier on any ❌, run
-`agent-review run-dir --release yolo-review`: it frees the checkout and deletes the run's working
-files. If step 1 prints that another session's run holds the checkout, stop and show that line.
+runs it starts work inside that hold and leave the folder to it. The hold covers the PR too:
+step 1 takes the PR lock for yolo-review before anything is pushed, and the review and address
+runs inside take it again for yolo-review, so it stays held until the release. If step 1 prints
+that another agent-review run holds the PR, show that message, run
+`agent-review run-dir --release yolo-review`, and stop. Whenever this skill stops, at step 7 or
+earlier for any reason, run `agent-review run-dir --release yolo-review`: it frees the checkout
+and the PR, and deletes the run's working files. If step 1 prints that another session's run
+holds the checkout, show that line and stop: this run took nothing, so there is nothing to release.
 
 1. **Preconditions** — run this block; stop on any ❌.
 
@@ -32,6 +37,8 @@ files. If step 1 prints that another session's run holds the checkout, stop and 
    echo "run folder: $RUN_DIR"
    PR_NUMBER=$(gh pr view --json number -q .number 2>/dev/null)
    [ -n "$PR_NUMBER" ] || { echo "❌ No PR for this branch. Open one first (gh pr create)."; exit 1; }
+   PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+   agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
    [ -z "$(git status --porcelain)" ] || { echo "❌ Working tree is dirty. Commit or stash first; yolo reviews and fixes committed code only."; exit 1; }
    HEAD_REF=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
    if [ "$(git rev-parse HEAD)" != "$HEAD_REF" ]; then

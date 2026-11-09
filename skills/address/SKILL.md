@@ -119,7 +119,8 @@ Every local block keeps its files in this checkout's run folder, the path Stage 
 you write yourself, such as the updated comment, go there by that literal path. Run every block from the PR's checkout. Stage 0's first block also takes the
 checkout (`--lock address`): if another session's review or address run holds it, the block
 prints who holds it and stops, and you stop too. The block then takes the PR itself
-(`--lock-pr`): when another live session's run holds that PR, it prints who holds it and stops.
+(`--lock-pr`): when another live session's run, or this session's run in another checkout, holds
+that PR, it prints who holds it and stops.
 Show that message, run `agent-review run-dir --release address` to free this checkout, and stop.
 Whenever this skill stops, at the end of Stage 5
 or earlier for any reason, run `agent-review run-dir --release address`. It frees the checkout and

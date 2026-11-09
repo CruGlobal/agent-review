@@ -5681,12 +5681,25 @@ test('posted text carries no em dash', () => {
   const EM = '—';
   const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
   assert.ok(!report.includes(EM), 'templates/report.md must carry no em dash');
-  // A trailing shell comment is not printed, so it is cut off before the check.
+  // A trailing shell comment is not printed, so it is cut off before the check. A " # " is outside
+  // quotes when each quote kind appears an even number of times before it.
+  const even = (text, quote) => (text.split(quote).length - 1) % 2 === 0;
+  const stripComment = (raw) => {
+    for (const m of raw.matchAll(/\s+#\s/g)) {
+      const before = raw.slice(0, m.index);
+      if (even(before, '"') && even(before, "'")) return before;
+    }
+    return raw;
+  };
   const postsText = (raw) => {
-    const line = raw.replace(/\s+#\s.*$/, '');
+    const line = stripComment(raw);
     return line.includes(EM) && (/^\s*(echo|printf)\b/.test(line) || /(&&|\|\||\{)\s*(echo|printf)\s+['"]/.test(line)
       || /^\s*[A-Z_]+=['"]/.test(line) || line.includes('BODY=') || line.includes('--body'));
   };
+  assert.equal(postsText(`echo "PR # 12 ${EM} x"`), true, 'a " # " inside double quotes is printed, not a comment');
+  assert.equal(postsText(`echo 'PR # 12 ${EM} x'`), true, 'nor inside single quotes');
+  assert.equal(postsText(`echo "PR # 12" # a ${EM} note`), false, 'a real trailing comment is cut off');
+  assert.equal(postsText(`echo "it's # 12 ${EM} x"`), true, 'a quote of the other kind inside a string does not end it');
   const files = [
     join(ROOT, '.github/workflows/review.yml'),
     join(ROOT, '.github/workflows/interact.yml'),
