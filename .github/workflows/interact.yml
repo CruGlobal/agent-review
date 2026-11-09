@@ -165,6 +165,7 @@ jobs:
         if: steps.prepare.outputs.has_fixes == 'true'
         uses: anthropics/claude-code-action@v1
         env:
+          AGENT_REVIEW_CI: '1'
           ADDRESS_REQUEST_FILE: ${{ runner.temp }}/address-request.json
           ADDRESS_REPORT_FILE: ${{ runner.temp }}/address-report.md
           # The sandbox (forced on by env scrubbing) only permits writes under
@@ -583,14 +584,14 @@ jobs:
                 printf '\n%s\n' "$WITHDRAW_WARNING"
               fi
             else
-              printf '%s\n\n' '⚠️ The agent-review address command did not complete — **nothing was changed**.'
+              printf '%s\n\n' '⚠️ The agent-review address command did not complete. **Nothing was changed**.'
               if [ -n "$REASON" ]; then
                 printf '%s\n\n' "$REASON"
                 printf '%s\n' 'Use `@claude fix 1, 3` or `@claude dismiss 2 [false-positive]: reason`, separating mixed clauses with `;`.'
               elif [ "$MODEL_RESULT" = 'failure' ]; then
                 printf '%s\n' 'The request could not be prepared or the produced patch failed validation.'
               else
-                printf '%s\n' 'The request was authorized but publishing was refused — the PR head, base, or the report itself moved while the command ran. Re-issue the command to retry against current state.'
+                printf '%s\n' 'The request was authorized but publishing was refused. The PR head, base, or the report itself moved while the command ran. Re-issue the command to retry against current state.'
               fi
             fi
             printf '\n%s\n' "[View the run log]($RUN_URL)"

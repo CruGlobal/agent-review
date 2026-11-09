@@ -19,6 +19,11 @@ const { captureDir, captureDirProblem, ARM_MAX_AGE_SECONDS, RUNS_DIR } = require
 
 const LOCK_FILE = 'run.lock';
 const LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
+const LOCKS_DIR = 'locks';
+const PRUNE_AGE_SECONDS = 604800;
+const NEW_LOCK_FOLDER_SECONDS = 60;
+const TEMP_LOCK_SECONDS = 60;
+const PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
 const CI_RUN_DIR = '/tmp';
 // Skills paste the run folder into prompts, JS strings and unquoted shell words.
 const SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
@@ -52,7 +57,7 @@ function gitToplevel(root) {
   }
   if (!top) {
     throw new RunDirError(
-      `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`,
+      `${root} is not inside a git checkout, so it has no run folder: run this from inside the checkout`,
     );
   }
   for (const path of [top, realpathSync(top)]) {
@@ -170,6 +175,7 @@ function lockIsLive(lock, nowSeconds, isAlive = pidAlive) {
 // Taking the checkout means creating the next one with O_EXCL, so of any sessions that read the
 // same lock, exactly one can take it.
 const LOCK_GENERATION = /^run\.lock\.([1-9][0-9]*)$/;
+const LOCK_TEMP = /^run\.lock\.[1-9][0-9]*\.tmp-[0-9a-f]{16}$/;
 
 function lockGenerations(dir) {
   let names = [];
@@ -221,36 +227,47 @@ function createExclusive(path, text, beforeLink = () => {}) {
 
 // Takes the checkout's lock for `skill`. Never takes a live lock from another session. Inside this
 // session's own hold, a skill run by an outer skill (review inside yolo-review) leaves the hold to
-// it; any other hold this session left was a run that stopped, so it is replaced, and an outer
-// skill always replaces it. `afterRead` and `beforeLink` let tests run another session's steps
-// between reading the lock and creating the next one.
+// it; any other hold this session left was a run that stopped, so it is replaced (`replacedOwn`),
+// and an outer skill always replaces it. A PR lock (`pr` given) this session holds from another
+// checkout is refused like another session's. Another session's prune can remove `dir` before the
+// lock is in place, so `remake` must make it again with the checks that first made it. `afterRead`
+// and `beforeLink` let tests run another session's steps between reading the lock and creating
+// the next one.
 function takeLock({
   dir,
   skill,
   toplevel,
   outer = false,
+  pr,
   env = process.env,
   nowSeconds,
   isAlive = pidAlive,
+  remake = () => makeDir(dir),
   afterRead = () => {},
   beforeLink = () => {},
 }) {
   const me = holderFrom(env);
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const attempts = 3;
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const { generation, lock: existing } = currentLock(dir);
     const live = existing && lockIsLive(existing, nowSeconds, isAlive);
     if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+    if (live && pr !== undefined && existing.checkout !== toplevel) return { ok: false, lock: existing };
     if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
     afterRead();
-    const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
+    const lock = { ...me, skill, outer, checkout: toplevel, ...(pr === undefined ? {} : { pr }), created: nowSeconds };
     try {
       createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + '\n', beforeLink);
     } catch (e) {
       if (e.code === 'EEXIST') continue;
+      if (e.code === 'ENOENT' && attempt < attempts - 1) {
+        remake();
+        continue;
+      }
       throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
     }
     removeLocks(dir, generation + 1);
-    return { ok: true, taken: true, lock };
+    return { ok: true, taken: true, lock, replacedOwn: sameHolder(existing, me) };
   }
   return { ok: false, lock: currentLock(dir).lock || {} };
 }
@@ -262,15 +279,170 @@ function foreignLock({ dir, env = process.env, nowSeconds, isAlive = pidAlive })
   return lock;
 }
 
-function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+function lockHolder(lock, nowSeconds) {
   const skill = SKILL_NAME.test(lock.skill || '') ? lock.skill : 'review';
   const session = typeof lock.session_id === 'string' && lock.session_id ? `session ${lock.session_id}` : 'an unknown session';
   const minutes = Number.isFinite(lock.created) ? Math.max(0, Math.round((nowSeconds - lock.created) / 60)) : null;
   const started = minutes === null ? '' : `, started ${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  return { skill, session, started };
+}
+
+function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+  const { skill, session, started } = lockHolder(lock, nowSeconds);
   return (
     `another agent-review ${skill} run holds this checkout${toplevel ? ` (${toplevel})` : ''}: ${session}${started}. ` +
     `Wait for it to finish, or run it from another checkout. If that run is gone, free the checkout with: ` +
     `agent-review run-dir --release --force (run folder ${dir})`
+  );
+}
+
+// GitHub owner and repo names ignore case, so every spelling of one PR names one lock folder.
+function prLockDir(env, pr) {
+  const m = typeof pr === 'string' ? PR_REF.exec(pr) : null;
+  if (!m) throw new RunDirError(`a PR must be named <owner>/<repo>#<number>: ${JSON.stringify(pr)}`);
+  return join(captureDir(env), LOCKS_DIR, `${m[1]}_${m[2]}_${m[3]}`.toLowerCase());
+}
+
+function ensurePrLockDir(env, pr) {
+  const dir = prLockDir(env, pr);
+  const root = captureDir(env);
+  for (const d of [root, join(root, LOCKS_DIR), dir]) makeDir(d);
+  return dir;
+}
+
+// A PR lock belongs to the skill holding this session's checkout lock on `runDir` when it is taken.
+function takePrLock({ runDir, pr, env = process.env, nowSeconds, isAlive = pidAlive }) {
+  const dir = prLockDir(env, pr);
+  const { lock: checkout } = currentLock(runDir);
+  if (!checkout || !lockIsLive(checkout, nowSeconds, isAlive) || !sameHolder(checkout, holderFrom(env))) {
+    return { ok: false, reason: 'not-held' };
+  }
+  const remake = () => ensurePrLockDir(env, pr);
+  remake();
+  const r = takeLock({ dir, skill: checkout.skill, toplevel: checkout.checkout, pr, env, nowSeconds, isAlive, remake });
+  return { ok: r.ok, lock: r.lock };
+}
+
+// Frees the PR locks taken from the checkout `toplevel` that `accept` takes, leaving any generation
+// another session created after the one read. Returns each freed folder and its PR (null when the
+// lock names none).
+function freePrLocks(env, toplevel, accept) {
+  const root = captureDir(env);
+  const locks = join(root, LOCKS_DIR);
+  if (dirProblem(root) || dirProblem(locks)) return [];
+  const freed = [];
+  for (const name of readdirSync(locks)) {
+    const dir = join(locks, name);
+    if (dirProblem(dir)) continue;
+    const { generation, lock } = currentLock(dir);
+    if (lock && lock.checkout === toplevel && accept(lock)) {
+      removeLocks(dir, generation + 1);
+      freed.push({ dir, pr: typeof lock.pr === 'string' && PR_REF.test(lock.pr) ? lock.pr : null });
+    }
+  }
+  return freed;
+}
+
+// Frees every PR lock this session took from the checkout `toplevel`.
+function releasePrLocks({ env = process.env, toplevel, nowSeconds, isAlive = pidAlive }) {
+  const me = holderFrom(env);
+  return freePrLocks(env, toplevel, (lock) => lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me));
+}
+
+// A missing folder on the way is nothing to free; any other problem with one is an error.
+function forceReleasePr(env, pr) {
+  const dir = prLockDir(env, pr);
+  const root = captureDir(env);
+  for (const d of [root, join(root, LOCKS_DIR), dir]) {
+    if (lstatOrNull(d) === null) return;
+    const problem = dirProblem(d);
+    if (problem) throw new RunDirError(problem);
+  }
+  removeLocks(dir);
+}
+
+function lstatOrNull(path) {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function realDirOwnedBy(path, uid) {
+  try {
+    const stat = lstatSync(path);
+    return stat.isDirectory() && stat.uid === uid ? stat : null;
+  } catch {
+    return null;
+  }
+}
+
+// A younger temp file may belong to a take that has not linked it into place yet.
+function removeOldTempLocks(dir, nowSeconds) {
+  for (const name of readdirSync(dir)) {
+    if (!LOCK_TEMP.test(name)) continue;
+    const stat = lstatSync(join(dir, name));
+    if (stat.isFile() && nowSeconds - stat.mtimeMs / 1000 > TEMP_LOCK_SECONDS) rmSync(join(dir, name), { force: true });
+  }
+}
+
+function newestMtimeSeconds(dir, stat) {
+  let newest = stat.mtimeMs / 1000;
+  for (const name of readdirSync(dir)) {
+    newest = Math.max(newest, lstatSync(join(dir, name)).mtimeMs / 1000);
+  }
+  return newest;
+}
+
+// Removes run folders untouched for PRUNE_AGE_SECONDS and PR lock folders, unless their lock is
+// live. Only real directories owned by `uid` are removed, and no symlink is followed.
+function pruneRuns({ env = process.env, nowSeconds, keep, isAlive = pidAlive, uid = process.getuid() }) {
+  const removed = [];
+  const root = captureDir(env);
+  const inside = (parent, old) => {
+    let names = [];
+    if (captureDirProblem(lstatOrNull(parent), uid)) return;
+    try {
+      names = readdirSync(parent);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const dir = join(parent, name);
+      if (dir === keep) continue;
+      try {
+        const stat = realDirOwnedBy(dir, uid);
+        if (!stat) continue;
+        const { generation, lock } = currentLock(dir);
+        if (lockIsLive(lock, nowSeconds, isAlive)) continue;
+        if (old) {
+          if (nowSeconds - newestMtimeSeconds(dir, stat) <= PRUNE_AGE_SECONDS) continue;
+          rmSync(dir, { recursive: true, force: true });
+        } else {
+          if (generation === 0 && nowSeconds - stat.mtimeMs / 1000 < NEW_LOCK_FOLDER_SECONDS) continue;
+          removeLocks(dir, generation + 1);
+          removeOldTempLocks(dir, nowSeconds);
+          rmdirSync(dir);
+        }
+        removed.push(dir);
+      } catch {
+        // This entry is skipped.
+      }
+    }
+  };
+  if (captureDirProblem(lstatOrNull(root), uid)) return { removed };
+  inside(join(root, RUNS_DIR), true);
+  inside(join(root, LOCKS_DIR), false);
+  return { removed };
+}
+
+function prHeldMessage(lock, { pr, nowSeconds }) {
+  const { skill, session, started } = lockHolder(lock, nowSeconds);
+  const checkout = typeof lock.checkout === 'string' && lock.checkout ? `, checkout ${lock.checkout}` : '';
+  return (
+    `another agent-review ${skill} run holds PR ${pr}: ${session}${checkout}${started}. Wait for it to finish. ` +
+    `If that run is gone, free the PR with: agent-review run-dir --release --force --pr ${pr}`
   );
 }
 
@@ -306,26 +478,37 @@ function cleanRunDir(dir) {
 }
 
 // Ends `skill`'s hold on the checkout. Only the skill that took the lock frees it and cleans the
-// folder, so a skill run by another (review inside yolo-review) leaves both to the outer one.
-function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidAlive }) {
+// folder, so a skill run by another (review inside yolo-review) leaves both to the outer one. The
+// PRs this session took from the checkout `toplevel` are freed while the checkout is still held,
+// so the session that takes it next never finds them held. `beforeClean` lets tests look between.
+function releaseLock({ dir, skill, toplevel, env = process.env, nowSeconds, isAlive = pidAlive, beforeClean = () => {} }) {
   const { lock } = currentLock(dir);
   const me = holderFrom(env);
   if (lock && lockIsLive(lock, nowSeconds, isAlive)) {
     if (!sameHolder(lock, me)) return { ok: false, lock };
     if (lock.skill !== skill) return { ok: true, cleaned: false, heldBy: lock.skill };
   }
+  if (toplevel !== undefined) releasePrLocks({ env, toplevel, nowSeconds, isAlive });
+  beforeClean();
   cleanRunDir(dir);
   return { ok: true, cleaned: true };
 }
 
-function forceRelease(dir) {
+// Deletes the checkout's lock and those of the PRs taken from it, whoever holds them. The PRs go
+// first, so a PR the next holder of the checkout takes is never among them.
+function forceRelease({ dir, toplevel, env = process.env }) {
+  const freed = freePrLocks(env, toplevel, () => true);
   removeLocks(dir);
+  return freed;
 }
 
 module.exports = {
   RUNS_DIR,
   LOCK_FILE,
   LOCK_MAX_AGE_SECONDS,
+  LOCKS_DIR,
+  PRUNE_AGE_SECONDS,
+  PR_REF,
   CI_RUN_DIR,
   KEPT_AFTER_RUN,
   SKILL_NAME,
@@ -347,4 +530,11 @@ module.exports = {
   cleanRunDir,
   releaseLock,
   forceRelease,
+  prLockDir,
+  ensurePrLockDir,
+  takePrLock,
+  releasePrLocks,
+  forceReleasePr,
+  pruneRuns,
+  prHeldMessage,
 };

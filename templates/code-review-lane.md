@@ -355,6 +355,8 @@ Each scored finding becomes one entry:
 - `recommendation`: what to change and why
 - `fix`: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
 
+Do not use em dashes in finding messages, summaries or headings that get posted.
+
 Each dropped finding becomes one entry: `{ raw, reason: "excluded", glob }` or
 `{ raw, reason: "disproved", proof }`.
 

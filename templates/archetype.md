@@ -112,6 +112,8 @@ Keep every finding tight — the file states it once, so write it once, well:
 - recommendation: ≤ 4 lines
 - fix: ≤ 2 lines of direction, or a unified diff ≤ 10 lines
 
+Do not use em dashes in finding messages, summaries or headings that get posted.
+
 Severity ≥ 7 is a BLOCKER (ledger checkbox, must be fixed or dismissed). Rate against the
 SEVERITY ANCHORS below — never against these section names.
 

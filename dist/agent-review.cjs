@@ -20172,7 +20172,7 @@ var require_addressState = __commonJS({
       }
       if (operations.length === 0) {
         throw new Error(
-          `no actionable findings \u2014 ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join("; ")}`
+          `no actionable findings: ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join("; ")}`
         );
       }
       return validateRequest({
@@ -20302,13 +20302,13 @@ var require_addressState = __commonJS({
       const prefix = entry.severity >= 7 ? "- [ ]" : "-";
       if (entry.status === "fixed") {
         const fixedPrefix = entry.severity >= 7 ? "- [x]" : "-";
-        return `${fixedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u2705 fixed in ${String(entry.sha).slice(0, 7)}`;
+        return `${fixedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \xB7 ~~${message}~~ \xB7 \u2705 fixed in ${String(entry.sha).slice(0, 7)}`;
       }
       if (entry.status === "dismissed") {
         const dismissedPrefix = entry.severity >= 7 ? "- [x]" : "-";
-        return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ~~${message}~~ \u2014 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
+        return `${dismissedPrefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \xB7 ~~${message}~~ \xB7 \u{1F6AB} dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
       }
-      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \u2014 ${message} _(${entry.agent})_${reopenedText(entry)}`;
+      return `${prefix} **\`#${entry.n}\`** \xB7 ${entry.severity}/10 \xB7 ${location} \xB7 ${message} _(${entry.agent})_${reopenedText(entry)}`;
     }
     function finalizeAddress({ request: requestInput, result, report, fixSha }) {
       const request = validateRequest(requestInput);
@@ -20371,11 +20371,11 @@ var require_addressState = __commonJS({
       const lines = [];
       if (appliedFixes.length) {
         lines.push(
-          `\u{1F50E} @${request.actor} \u2014 I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(", ")}. **Please review that commit before continuing** \u2014 these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
+          `\u{1F50E} @${request.actor}: I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(", ")}. **Please review that commit before continuing.** These are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
           ""
         );
       } else {
-        lines.push(`@${request.actor} \u2014 the agent-review address request completed.`, "");
+        lines.push(`@${request.actor}: the agent-review address request completed.`, "");
       }
       if (dismissed.length) lines.push(`Dismissed: ${dismissed.map((n) => `\`#${n}\``).join(", ")} using the maintainer-provided reasons.`);
       const notApplied = (result.fixes || []).filter((fix) => fix.status === "not-applied");
@@ -20794,7 +20794,7 @@ var require_package = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "agent-review",
-      version: "1.1.5",
+      version: "1.1.6",
       private: true,
       description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
       license: "MIT",
@@ -20956,6 +20956,11 @@ var require_runDir = __commonJS({
     var { captureDir, captureDirProblem, ARM_MAX_AGE_SECONDS, RUNS_DIR } = require_captureHook();
     var LOCK_FILE = "run.lock";
     var LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
+    var LOCKS_DIR = "locks";
+    var PRUNE_AGE_SECONDS = 604800;
+    var NEW_LOCK_FOLDER_SECONDS = 60;
+    var TEMP_LOCK_SECONDS = 60;
+    var PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
     var CI_RUN_DIR = "/tmp";
     var SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
     var SKILL_NAME = /^[a-z][a-z-]{0,31}$/;
@@ -20982,7 +20987,7 @@ var require_runDir = __commonJS({
       }
       if (!top) {
         throw new RunDirError(
-          `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`
+          `${root} is not inside a git checkout, so it has no run folder: run this from inside the checkout`
         );
       }
       for (const path of [top, realpathSync(top)]) {
@@ -21082,6 +21087,7 @@ var require_runDir = __commonJS({
       return true;
     }
     var LOCK_GENERATION = /^run\.lock\.([1-9][0-9]*)$/;
+    var LOCK_TEMP = /^run\.lock\.[1-9][0-9]*\.tmp-[0-9a-f]{16}$/;
     function lockGenerations(dir) {
       let names = [];
       try {
@@ -21124,30 +21130,38 @@ var require_runDir = __commonJS({
       skill,
       toplevel,
       outer = false,
+      pr,
       env = process.env,
       nowSeconds,
       isAlive = pidAlive,
+      remake = () => makeDir(dir),
       afterRead = () => {
       },
       beforeLink = () => {
       }
     }) {
       const me = holderFrom(env);
-      for (let attempt = 0; attempt < 3; attempt++) {
+      const attempts = 3;
+      for (let attempt = 0; attempt < attempts; attempt++) {
         const { generation, lock: existing } = currentLock(dir);
         const live = existing && lockIsLive(existing, nowSeconds, isAlive);
         if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+        if (live && pr !== void 0 && existing.checkout !== toplevel) return { ok: false, lock: existing };
         if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
         afterRead();
-        const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
+        const lock = { ...me, skill, outer, checkout: toplevel, ...pr === void 0 ? {} : { pr }, created: nowSeconds };
         try {
           createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + "\n", beforeLink);
         } catch (e) {
           if (e.code === "EEXIST") continue;
+          if (e.code === "ENOENT" && attempt < attempts - 1) {
+            remake();
+            continue;
+          }
           throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
         }
         removeLocks(dir, generation + 1);
-        return { ok: true, taken: true, lock };
+        return { ok: true, taken: true, lock, replacedOwn: sameHolder(existing, me) };
       }
       return { ok: false, lock: currentLock(dir).lock || {} };
     }
@@ -21156,12 +21170,140 @@ var require_runDir = __commonJS({
       if (!lock || !lockIsLive(lock, nowSeconds, isAlive) || sameHolder(lock, holderFrom(env))) return null;
       return lock;
     }
-    function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+    function lockHolder(lock, nowSeconds) {
       const skill = SKILL_NAME.test(lock.skill || "") ? lock.skill : "review";
       const session = typeof lock.session_id === "string" && lock.session_id ? `session ${lock.session_id}` : "an unknown session";
       const minutes = Number.isFinite(lock.created) ? Math.max(0, Math.round((nowSeconds - lock.created) / 60)) : null;
       const started = minutes === null ? "" : `, started ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+      return { skill, session, started };
+    }
+    function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+      const { skill, session, started } = lockHolder(lock, nowSeconds);
       return `another agent-review ${skill} run holds this checkout${toplevel ? ` (${toplevel})` : ""}: ${session}${started}. Wait for it to finish, or run it from another checkout. If that run is gone, free the checkout with: agent-review run-dir --release --force (run folder ${dir})`;
+    }
+    function prLockDir(env, pr) {
+      const m = typeof pr === "string" ? PR_REF.exec(pr) : null;
+      if (!m) throw new RunDirError(`a PR must be named <owner>/<repo>#<number>: ${JSON.stringify(pr)}`);
+      return join(captureDir(env), LOCKS_DIR, `${m[1]}_${m[2]}_${m[3]}`.toLowerCase());
+    }
+    function ensurePrLockDir(env, pr) {
+      const dir = prLockDir(env, pr);
+      const root = captureDir(env);
+      for (const d of [root, join(root, LOCKS_DIR), dir]) makeDir(d);
+      return dir;
+    }
+    function takePrLock({ runDir, pr, env = process.env, nowSeconds, isAlive = pidAlive }) {
+      const dir = prLockDir(env, pr);
+      const { lock: checkout } = currentLock(runDir);
+      if (!checkout || !lockIsLive(checkout, nowSeconds, isAlive) || !sameHolder(checkout, holderFrom(env))) {
+        return { ok: false, reason: "not-held" };
+      }
+      const remake = () => ensurePrLockDir(env, pr);
+      remake();
+      const r = takeLock({ dir, skill: checkout.skill, toplevel: checkout.checkout, pr, env, nowSeconds, isAlive, remake });
+      return { ok: r.ok, lock: r.lock };
+    }
+    function freePrLocks(env, toplevel, accept) {
+      const root = captureDir(env);
+      const locks = join(root, LOCKS_DIR);
+      if (dirProblem(root) || dirProblem(locks)) return [];
+      const freed = [];
+      for (const name of readdirSync(locks)) {
+        const dir = join(locks, name);
+        if (dirProblem(dir)) continue;
+        const { generation, lock } = currentLock(dir);
+        if (lock && lock.checkout === toplevel && accept(lock)) {
+          removeLocks(dir, generation + 1);
+          freed.push({ dir, pr: typeof lock.pr === "string" && PR_REF.test(lock.pr) ? lock.pr : null });
+        }
+      }
+      return freed;
+    }
+    function releasePrLocks({ env = process.env, toplevel, nowSeconds, isAlive = pidAlive }) {
+      const me = holderFrom(env);
+      return freePrLocks(env, toplevel, (lock) => lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me));
+    }
+    function forceReleasePr(env, pr) {
+      const dir = prLockDir(env, pr);
+      const root = captureDir(env);
+      for (const d of [root, join(root, LOCKS_DIR), dir]) {
+        if (lstatOrNull(d) === null) return;
+        const problem = dirProblem(d);
+        if (problem) throw new RunDirError(problem);
+      }
+      removeLocks(dir);
+    }
+    function lstatOrNull(path) {
+      try {
+        return lstatSync(path);
+      } catch {
+        return null;
+      }
+    }
+    function realDirOwnedBy(path, uid) {
+      try {
+        const stat = lstatSync(path);
+        return stat.isDirectory() && stat.uid === uid ? stat : null;
+      } catch {
+        return null;
+      }
+    }
+    function removeOldTempLocks(dir, nowSeconds) {
+      for (const name of readdirSync(dir)) {
+        if (!LOCK_TEMP.test(name)) continue;
+        const stat = lstatSync(join(dir, name));
+        if (stat.isFile() && nowSeconds - stat.mtimeMs / 1e3 > TEMP_LOCK_SECONDS) rmSync(join(dir, name), { force: true });
+      }
+    }
+    function newestMtimeSeconds(dir, stat) {
+      let newest = stat.mtimeMs / 1e3;
+      for (const name of readdirSync(dir)) {
+        newest = Math.max(newest, lstatSync(join(dir, name)).mtimeMs / 1e3);
+      }
+      return newest;
+    }
+    function pruneRuns({ env = process.env, nowSeconds, keep, isAlive = pidAlive, uid = process.getuid() }) {
+      const removed = [];
+      const root = captureDir(env);
+      const inside = (parent, old) => {
+        let names = [];
+        if (captureDirProblem(lstatOrNull(parent), uid)) return;
+        try {
+          names = readdirSync(parent);
+        } catch {
+          return;
+        }
+        for (const name of names) {
+          const dir = join(parent, name);
+          if (dir === keep) continue;
+          try {
+            const stat = realDirOwnedBy(dir, uid);
+            if (!stat) continue;
+            const { generation, lock } = currentLock(dir);
+            if (lockIsLive(lock, nowSeconds, isAlive)) continue;
+            if (old) {
+              if (nowSeconds - newestMtimeSeconds(dir, stat) <= PRUNE_AGE_SECONDS) continue;
+              rmSync(dir, { recursive: true, force: true });
+            } else {
+              if (generation === 0 && nowSeconds - stat.mtimeMs / 1e3 < NEW_LOCK_FOLDER_SECONDS) continue;
+              removeLocks(dir, generation + 1);
+              removeOldTempLocks(dir, nowSeconds);
+              rmdirSync(dir);
+            }
+            removed.push(dir);
+          } catch {
+          }
+        }
+      };
+      if (captureDirProblem(lstatOrNull(root), uid)) return { removed };
+      inside(join(root, RUNS_DIR), true);
+      inside(join(root, LOCKS_DIR), false);
+      return { removed };
+    }
+    function prHeldMessage(lock, { pr, nowSeconds }) {
+      const { skill, session, started } = lockHolder(lock, nowSeconds);
+      const checkout = typeof lock.checkout === "string" && lock.checkout ? `, checkout ${lock.checkout}` : "";
+      return `another agent-review ${skill} run holds PR ${pr}: ${session}${checkout}${started}. Wait for it to finish. If that run is gone, free the PR with: agent-review run-dir --release --force --pr ${pr}`;
     }
     function hasFixScripts(dir) {
       try {
@@ -21189,23 +21331,31 @@ var require_runDir = __commonJS({
       } catch {
       }
     }
-    function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidAlive }) {
+    function releaseLock({ dir, skill, toplevel, env = process.env, nowSeconds, isAlive = pidAlive, beforeClean = () => {
+    } }) {
       const { lock } = currentLock(dir);
       const me = holderFrom(env);
       if (lock && lockIsLive(lock, nowSeconds, isAlive)) {
         if (!sameHolder(lock, me)) return { ok: false, lock };
         if (lock.skill !== skill) return { ok: true, cleaned: false, heldBy: lock.skill };
       }
+      if (toplevel !== void 0) releasePrLocks({ env, toplevel, nowSeconds, isAlive });
+      beforeClean();
       cleanRunDir(dir);
       return { ok: true, cleaned: true };
     }
-    function forceRelease(dir) {
+    function forceRelease({ dir, toplevel, env = process.env }) {
+      const freed = freePrLocks(env, toplevel, () => true);
       removeLocks(dir);
+      return freed;
     }
     module2.exports = {
       RUNS_DIR,
       LOCK_FILE,
       LOCK_MAX_AGE_SECONDS,
+      LOCKS_DIR,
+      PRUNE_AGE_SECONDS,
+      PR_REF,
       CI_RUN_DIR,
       KEPT_AFTER_RUN,
       SKILL_NAME,
@@ -21226,7 +21376,14 @@ var require_runDir = __commonJS({
       heldMessage,
       cleanRunDir,
       releaseLock,
-      forceRelease
+      forceRelease,
+      prLockDir,
+      ensurePrLockDir,
+      takePrLock,
+      releasePrLocks,
+      forceReleasePr,
+      pruneRuns,
+      prHeldMessage
     };
   }
 });
@@ -21418,6 +21575,7 @@ var require_cli = __commonJS({
     } = require_captureHook();
     var {
       SKILL_NAME,
+      PR_REF,
       RunDirError,
       resolveRunDir,
       ensureRunDir,
@@ -21427,7 +21585,12 @@ var require_cli = __commonJS({
       foreignLock,
       heldMessage,
       releaseLock,
-      forceRelease
+      forceRelease,
+      takePrLock,
+      releasePrLocks,
+      forceReleasePr,
+      pruneRuns,
+      prHeldMessage
     } = require_runDir();
     var { TEMPLATE_NAMES, templateStatusReport } = require_templateStatus();
     var { repoRoot, reviewDir } = require_paths();
@@ -21838,7 +22001,7 @@ var require_cli = __commonJS({
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]";
     var REPORT_COMMENT_USAGE = "usage: agent-review report-comment --me <login> [--field body|id]";
-    var RUN_DIR_USAGE = "usage: agent-review run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]";
+    var RUN_DIR_USAGE = "usage: agent-review run-dir [--lock <skill> [--outer] | --lock-pr <owner/repo#n> | --release <skill> | --release --force [--pr <owner/repo#n>]]";
     var TEMPLATE_STATUS_USAGE = "usage: agent-review template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
     function diffFor(diffPath, rawPath, root, excludedPaths) {
@@ -21904,7 +22067,7 @@ var require_cli = __commonJS({
   template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
-  run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --release ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (a hold another skill of this session took is left to it); --release --force deletes the lock whoever holds it
+  run-dir [--lock <skill> [--outer] | --lock-pr <owner/repo#n> | --release <skill> | --release --force [--pr <owner/repo#n>]]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left and freeing the PRs this session took from this checkout, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --lock-pr also takes that PR for the skill that holds this session's checkout, so a run in another checkout cannot take it too, even one of this session (exit 1 when this session does not hold the checkout, exit 4 when another live session's run, or this session's run in another checkout, holds the PR); --release frees every PR this session took from this checkout, then ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (when another skill of this session holds the checkout, all of that is left to it); --release --force deletes the checkout's lock and the lock of every PR taken from this checkout, whoever holds them, and with --pr deletes only that PR's lock, from any folder
   capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run in its run folder: delete old capture files and write the arm file with this session's id (exit 1 when another live run of this session armed the same args)
   capture disarm                 turn off /code-review result capture for this run folder: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
@@ -22372,15 +22535,30 @@ var require_cli = __commonJS({
           const releasing = rest.includes("--release");
           const force = rest.includes("--force");
           const outer = rest.includes("--outer");
+          const lockingPr = rest.includes("--lock-pr");
+          const prGiven = rest.includes("--pr");
           const skill = flag(rest, locking ? "--lock" : "--release");
-          const tokens = [locking, releasing, skill !== void 0, force, outer].filter(Boolean).length;
+          const pr = flag(rest, lockingPr ? "--lock-pr" : "--pr");
+          const tokens = [locking, releasing, skill !== void 0, force, outer, lockingPr, prGiven, pr !== void 0].filter(Boolean).length;
           const named = SKILL_NAME.test(skill || "");
-          if (rest.length !== tokens || outer && !locking || locking && (releasing || force || !named) || releasing && (force ? skill !== void 0 : !named) || force && !releasing) {
+          if (rest.length !== tokens || outer && !locking || locking && (releasing || force || !named) || releasing && (force ? skill !== void 0 : !named) || force && !releasing || lockingPr && (locking || releasing || prGiven) || prGiven && !force || (lockingPr || prGiven) && !PR_REF.test(pr || "")) {
             out(RUN_DIR_USAGE);
             return 1;
           }
           const lockSkill = locking ? skill : void 0;
           const releaseSkill = releasing ? skill : void 0;
+          if (force && prGiven) {
+            try {
+              forceReleasePr(process.env, pr);
+            } catch (e) {
+              if (!(e instanceof RunDirError)) throw e;
+              process.stderr.write(`error: ${e.message}
+`);
+              return 1;
+            }
+            out(`released the lock on PR ${pr}`);
+            return 0;
+          }
           let resolved;
           try {
             resolved = runDirFor(C, rawArgv, { create: true });
@@ -22402,14 +22580,34 @@ var require_cli = __commonJS({
             return 4;
           };
           if (force) {
-            forceRelease(dir);
+            const freed = forceRelease({ dir, toplevel });
             out(`released the lock on ${toplevel}`);
+            for (const { dir: prDir, pr: pr2 } of freed) out(pr2 ? `released the lock on PR ${pr2}` : `released the PR lock in ${prDir}`);
             return 0;
           }
           if (releasing) {
-            const r = releaseLock({ dir, skill: releaseSkill, nowSeconds: now });
+            const r = releaseLock({ dir, skill: releaseSkill, toplevel, nowSeconds: now });
             if (!r.ok) return refuse(r.lock);
             out(r.cleaned ? `released ${toplevel} and cleaned ${dir}` : `kept ${dir}: this session's ${r.heldBy} run still holds it`);
+            return 0;
+          }
+          if (lockingPr) {
+            if (!identified(holderFrom())) {
+              process.stderr.write("warning: CLAUDE_CODE_SESSION_ID and CLAUDE_PID are not set, so this PR is not locked\n");
+              out(dir);
+              return 0;
+            }
+            const r = takePrLock({ runDir: dir, pr, nowSeconds: now });
+            if (r.reason === "not-held") {
+              process.stderr.write("error: this session does not hold the checkout: take it first with agent-review run-dir --lock <skill>\n");
+              return 1;
+            }
+            if (!r.ok) {
+              process.stderr.write(`error: ${prHeldMessage(r.lock, { pr, nowSeconds: now })}
+`);
+              return 4;
+            }
+            out(dir);
             return 0;
           }
           if (lockSkill) {
@@ -22418,8 +22616,10 @@ var require_cli = __commonJS({
               out(dir);
               return 0;
             }
-            const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
+            const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now, remake: () => ensureRunDir(resolved) });
             if (!r.ok) return refuse(r.lock);
+            if (r.replacedOwn) releasePrLocks({ toplevel, nowSeconds: now });
+            pruneRuns({ nowSeconds: now, keep: dir });
             out(dir);
             return 0;
           }

@@ -414,9 +414,11 @@ grows it from what you dismiss.
 in one session or several. Each review keeps its files in its own folder, so they never share a
 diff, ledger, report or `/code-review` result. A second review of the same checkout while the
 first is still running stops at once and says which session holds it. If that session is gone,
-free the checkout with `agent-review run-dir --release --force`. Two reviews in one session that
-both wait on `/code-review` for the same PR number at the same effort (one PR number in two repos)
-cannot be told apart, so the second one stops and asks you to run them one at a time.
+free the checkout with `agent-review run-dir --release --force`. The same PR from two checkouts
+stops the second run the same way, and its message gives the command that frees the PR. Two
+reviews in one session that both wait on `/code-review` for the same PR number at the same effort
+(one PR number in two repos) cannot be told apart, so the second one stops and asks you to run
+them one at a time.
 
 ---
 
@@ -664,7 +666,8 @@ double-quoted shell word cannot carry; spaces are fine.
 - **The lock.** `agent-review run-dir --lock <skill>` takes the checkout for that run. It holds
   while the Claude Code process that took it runs (`CLAUDE_PID`), for at most 6 hours. Within
   the same session, or the same process after `/clear` gave it a new session id, a new run
-  replaces any hold an earlier run left when it stopped, so a retry works. yolo-review takes the
+  replaces any hold an earlier run left when it stopped, and frees the PRs this session took from this checkout, so a
+  retry works. yolo-review takes the
   checkout with `--outer`: the review and address runs inside it keep its hold and leave the
   folder to it. If a review or address prints `kept` with no yolo-review running, an earlier
   yolo-review of that session stopped before its end; `--release yolo-review` frees it. Another
@@ -683,15 +686,39 @@ double-quoted shell word cannot carry; spaces are fine.
   empty or half written. Only the skill that took the
   lock cleans up, so a review inside yolo-review leaves the folder to yolo-review. Cleanup only
   ever touches a folder directly under `runs/`, and never another session's live run.
-  `--release --force` deletes the lock alone.
+  `--release --force` deletes the locks alone.
+- **One run per PR.** Two worktrees of one repo have two run folders, so the checkout lock alone
+  would let both review the same PR. `agent-review run-dir --lock-pr <owner/repo#n>` also takes
+  the PR, once review (after it knows the PR), address (Stage 0) or yolo-review (step 1, before
+  it pushes) holds the checkout. When another live session holds the PR, the command exits 4
+  with a message naming the PR, the holder's checkout, and the way out: `agent-review run-dir
+  --release --force --pr <owner/repo#n>`. A second worktree is refused the same way even within
+  one session. The refused skill frees its own checkout and stops. The PR belongs to the skill
+  that holds the checkout, so yolo-review keeps the PR through its review and address runs and
+  frees it when it releases. When `--release <skill>` ends the hold, it first frees every PR this
+  session took from this checkout. `--release --force` without `--pr` frees a checkout and every
+  PR taken from it, whoever holds them; with `--pr` it frees only that PR, from any folder. CI
+  and `AGENT_REVIEW_RUN_DIR` runs take no PR lock. A PR lock lives under
+  `/tmp/agent-review-<uid>/locks/` and follows the same live-process and 6-hour rules as the
+  checkout lock.
+- **Pruning.** `agent-review run-dir --lock` removes run folders untouched for 7 days with no
+  live lock, and PR lock folders whose lock is dead. It follows no symlink and touches only
+  folders this user owns.
 - **CI** sets `AGENT_REVIEW_CI`, and then `agent-review run-dir` prints `/tmp` itself and takes no
   lock, so the reusable workflows and their sandbox keep the same `/tmp` files as before.
   `AGENT_REVIEW_RUN_DIR` names a folder outright, for tests.
 - **Older versions.** 1.1.4 and earlier kept fixed `/tmp/review_*` and `/tmp/agent_review_*` files
   and one arm at `/tmp/agent-review-<uid>/agent_review_capture.json`. 1.1.5 never reads either,
   so a session still on 1.1.4 and one on 1.1.5 do not collide; two 1.1.4 sessions still can.
-- `/agent-review:init` still uses its own fixed `/tmp/agent_review_init*` files, so run one init
-  at a time.
+  1.1.5 takes no PR lock, so a 1.1.5 session can still review a PR that a 1.1.6 session holds
+  from another checkout.
+- **Posted text.** Text agent-review posts has no em dashes, and finding lines put ` · ` between
+  the location and the message. Reports posted by older versions still parse.
+- **Interact.** The reusable `.github/workflows/interact.yml`, which a repo's
+  `agent-review-interact.yml` calls, sets `AGENT_REVIEW_CI` on its model step, so it takes no
+  lock and uses the CI folder like the review workflow.
+- **Init.** `/agent-review:init` keeps its state in the run folder too (`--lock init`,
+  `--release init`), so two inits never collide.
 
 ## Testing CI changes locally
 

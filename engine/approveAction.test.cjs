@@ -300,7 +300,7 @@ const SCENARIOS = {
     { 'comments.json': '[]', config: PCI, 'reviews.json': REVIEWS },
     (o) => {
       notApproved(o);
-      assert.match(o.summary, /^No agent-review report found for PR #7 — not approving\.$/m);
+      assert.match(o.summary, /^No agent-review report found for PR #7: not approving\.$/m);
       assert.match(o.summary, /approve=false, label=add, dismiss bot approvals=all\. a person must approve: PCI path: app\/pci\/x\.rb/);
       assert.ok(o.writes.some((w) => w.startsWith('api ¦ -X ¦ POST ¦ repos/o/r/issues/7/labels ¦ ')));
       assert.deepEqual(o.dismissed, [11, 14, 16, 17]);

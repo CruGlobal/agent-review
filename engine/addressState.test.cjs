@@ -88,7 +88,7 @@ test('prepareAddressRequest skips unknown or resolved numbers and runs the rest'
   assert.deepEqual(value.skipped, [{ n: 1, reason: 'already fixed' }]);
 
   // Nothing left to act on is still a hard failure, with every number explained.
-  assert.throws(() => request('@claude fix 99'), /no actionable findings — `#99` is not in the findings ledger/);
+  assert.throws(() => request('@claude fix 99'), /no actionable findings: `#99` is not in the findings ledger/);
 });
 
 test('prepareAddressRequest reads the command from a comment carrying prose', () => {
@@ -477,7 +477,7 @@ test('an open entry a review reopened keeps its old dismissal on its report line
   assert.deepEqual(finalized.ledger[1].previousDismissal, previousDismissal, 'the ledger keeps it');
   assert.match(
     finalized.report,
-    /^- \[ \] \*\*`#2`\*\* · 9\/10 · `app\/model\.js:12` — authorization is missing _\(security\)_ · ↩️ reopened, dismissed before by @dev \[pre-existing\]: legacy importer$/m,
+    /^- \[ \] \*\*`#2`\*\* · 9\/10 · `app\/model\.js:12` · authorization is missing _\(security\)_ · ↩️ reopened, dismissed before by @dev \[pre-existing\]: legacy importer$/m,
   );
 });
 
@@ -492,4 +492,69 @@ test('an open entry with an empty previousDismissal renders no reopened text', (
     const finalized = finalizeAddress({ request: req, result: { version: 1, expectedHead: 'a'.repeat(40), fixes: [], tests: [] }, report: rep, fixSha: '' });
     assert.ok(!finalized.report.includes('reopened'), JSON.stringify(previousDismissal));
   }
+});
+
+const EM_DASH = '—';
+
+function runAddress(rep, command, fixes) {
+  const req = prepareAddressRequest({
+    command,
+    actor: 'dr-bizz', pr: 42, commentId: 100, reportCommentId: 200,
+    expectedHead: 'a'.repeat(40), report: rep,
+  });
+  return finalizeAddress({
+    request: req,
+    result: { version: 1, expectedHead: 'a'.repeat(40), fixes, tests: [] },
+    report: rep,
+    fixSha: 'c'.repeat(40),
+  });
+}
+
+test('finding lines put a middle dot between location and message', () => {
+  const ledger = [
+    finding(),
+    finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' }),
+    finding({ n: 3, id: 'f3', signature: 'sig-3', file: 'app/view.js', severity: 4 }),
+  ];
+  const old = [
+    '<!-- agent-review -->',
+    `<!-- agent-review-head: ${'a'.repeat(40)} -->`,
+    `<!-- agent-review-ledger: ${JSON.stringify(ledger)} -->`,
+    `<!-- agent-review-status: ${JSON.stringify({ v: 1, head: 'a'.repeat(40), risk: 'HIGH', openBlockers: 2, pass: false, irreversible: false, irreversibleReasons: [] })} -->`,
+    '',
+    '🤖 agent-review · ❌ 2 blockers open · risk HIGH',
+    '',
+    '- [ ] **`#1`** · 9/10 · `app/controller.js:12` · authorization is missing _(security)_',
+    '- [ ] **`#2`** · 9/10 · `app/model.js:12` · authorization is missing _(security)_',
+    '- **`#3`** · 4/10 · `app/view.js:12` · authorization is missing _(security)_',
+    '',
+  ].join('\n');
+  const done = runAddress(
+    old,
+    '@claude fix 1; dismiss 2 [false-positive]: guarded by the caller',
+    [{ n: 1, status: 'applied', summary: 'added the check', files: ['app/controller.js'] }],
+  );
+  assert.match(done.report, /`app\/controller\.js:12` · ~~authorization is missing~~ · ✅ fixed in ccccccc/);
+  assert.match(done.report, /`app\/model\.js:12` · ~~authorization is missing~~ · 🚫 dismissed by @dr-bizz \[false-positive\]: guarded by the caller/);
+  assert.match(done.report, /`app\/view\.js:12` · authorization is missing _\(security\)_/);
+  assert.ok(!done.report.includes(EM_DASH), 'rewritten report lines carry no em dash');
+  assert.ok(!done.summary.includes(EM_DASH), 'the comment text carries no em dash');
+});
+
+test('address still finds and rewrites a finding line posted with an em dash', () => {
+  const posted = report([
+    finding(),
+    finding({ n: 2, id: 'f2', signature: 'sig-2', file: 'app/model.js' }),
+    finding({ n: 3, id: 'f3', signature: 'sig-3', file: 'app/view.js' }),
+  ]) + `- [ ] **#3** · 9/10 · \`app/view.js:12\` ${EM_DASH} authorization is missing _(security)_\n`;
+  assert.ok(posted.includes(` ${EM_DASH} authorization is missing`), 'the fixture is a 1.1.5 line');
+  const done = runAddress(
+    posted,
+    '@claude fix 1; dismiss 2 [false-positive]: guarded by the caller',
+    [{ n: 1, status: 'applied', summary: 'added the check', files: ['app/controller.js'] }],
+  );
+  assert.match(done.report, /^- \[x\] \*\*`#1`\*\* · 9\/10 · `app\/controller\.js:12` · ~~authorization is missing~~ · ✅ fixed in ccccccc$/m);
+  assert.match(done.report, /^- \[x\] \*\*`#2`\*\* · 9\/10 · `app\/model\.js:12` · ~~authorization is missing~~ · 🚫 dismissed by @dr-bizz/m);
+  assert.match(done.report, /^- \[ \] \*\*`#3`\*\* · 9\/10 · `app\/view\.js:12` · authorization is missing _\(security\)_$/m);
+  assert.ok(!done.report.includes(EM_DASH), 'no old separator is left behind');
 });

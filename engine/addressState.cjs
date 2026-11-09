@@ -267,7 +267,7 @@ function prepareAddressRequest({
   }
   if (operations.length === 0) {
     throw new Error(
-      `no actionable findings — ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join('; ')}`,
+      `no actionable findings: ${skipped.map(({ n, reason }) => `\`#${n}\` is ${reason}`).join('; ')}`,
     );
   }
   return validateRequest({
@@ -407,13 +407,13 @@ function ledgerLine(entry) {
   const prefix = entry.severity >= 7 ? '- [ ]' : '-';
   if (entry.status === 'fixed') {
     const fixedPrefix = entry.severity >= 7 ? '- [x]' : '-';
-    return `${fixedPrefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} — ~~${message}~~ — ✅ fixed in ${String(entry.sha).slice(0, 7)}`;
+    return `${fixedPrefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} · ~~${message}~~ · ✅ fixed in ${String(entry.sha).slice(0, 7)}`;
   }
   if (entry.status === 'dismissed') {
     const dismissedPrefix = entry.severity >= 7 ? '- [x]' : '-';
-    return `${dismissedPrefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} — ~~${message}~~ — 🚫 dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
+    return `${dismissedPrefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} · ~~${message}~~ · 🚫 dismissed by @${entry.by} [${entry.reasonCode}]: ${entry.reason}`;
   }
-  return `${prefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} — ${message} _(${entry.agent})_${reopenedText(entry)}`;
+  return `${prefix} **\`#${entry.n}\`** · ${entry.severity}/10 · ${location} · ${message} _(${entry.agent})_${reopenedText(entry)}`;
 }
 
 function finalizeAddress({ request: requestInput, result, report, fixSha }) {
@@ -494,11 +494,11 @@ function finalizeAddress({ request: requestInput, result, report, fixSha }) {
   const lines = [];
   if (appliedFixes.length) {
     lines.push(
-      `🔎 @${request.actor} — I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(', ')}. **Please review that commit before continuing** — these are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
+      `🔎 @${request.actor}: I pushed commit \`${fixSha.slice(0, 7)}\` for findings ${appliedFixes.map((n) => `\`#${n}\``).join(', ')}. **Please review that commit before continuing.** These are unreviewed AI changes on your branch. Revert with \`git revert ${fixSha.slice(0, 7)}\` if anything looks wrong.`,
       '',
     );
   } else {
-    lines.push(`@${request.actor} — the agent-review address request completed.`, '');
+    lines.push(`@${request.actor}: the agent-review address request completed.`, '');
   }
   if (dismissed.length) lines.push(`Dismissed: ${dismissed.map((n) => `\`#${n}\``).join(', ')} using the maintainer-provided reasons.`);
   const notApplied = (result.fixes || []).filter((fix) => fix.status === 'not-applied');

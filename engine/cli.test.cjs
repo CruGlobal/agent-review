@@ -14,6 +14,7 @@ const {
   symlinkSync,
   lstatSync,
   realpathSync,
+  utimesSync,
 } = require('node:fs');
 const { join, relative, dirname } = require('node:path');
 const os = require('node:os');
@@ -27,6 +28,7 @@ const {
   captureWaitTimeout,
 } = require('./cli.cjs');
 const { buildPlan } = require('./plan.cjs');
+const { runDirName } = require('./runDir.cjs');
 const { looksFinished } = require('./codeReviewProof.cjs');
 const { EFFORTS } = require('./vocabulary.cjs');
 
@@ -1693,8 +1695,9 @@ test('ledger --match-suggestions-by-location skips reworded suggestions; without
 
 const CLI = join(__dirname, 'cli.cjs');
 
-function spawnCli(args, { dir, input = '', env = {} }) {
+function spawnCli(args, { dir, input = '', env = {}, cwd }) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
+    cwd,
     input,
     encoding: 'utf8',
     env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir, AGENT_REVIEW_RUN_DIR: dir, ...NO_SESSION, ...env },
@@ -2714,5 +2717,268 @@ test('ledger refuses --matches without --match-suggestions-by-location, and --ma
     assert.match(noFile.s, /^usage: agent-review ledger --findings <file>/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// A repo and a second worktree of it, with a private capture root, for run-dir from each checkout.
+function twoWorktrees() {
+  const a = realpathSync(tmpGitRepo());
+  const b = `${a}-wt`;
+  execFileSync('git', ['-C', a, 'worktree', 'add', '-q', '-b', 'other', b], { stdio: 'ignore' });
+  const cap = realpathSync(mkdtempSync(join(os.tmpdir(), 'ar-cap-')));
+  return { a, b, cap, cleanup: () => [b, a, cap].forEach((d) => rmSync(d, { recursive: true, force: true })) };
+}
+
+const sessionEnv = (id, pid) => ({ CLAUDE_CODE_SESSION_ID: id, CLAUDE_PID: String(pid) });
+const runDirIn = (cwd, cap, args, env = {}) =>
+  spawnCli(['run-dir', ...args], { dir: cap, cwd, env: { AGENT_REVIEW_RUN_DIR: '', AGENT_REVIEW_CI: '', ...env } });
+const PR_48 = 'CruGlobal/agent-review#48';
+
+// Two live sessions are two Claude Code processes: this test process and its parent.
+test('run-dir --lock-pr refuses a second checkout of the same PR with exit 4, and --release --force --pr frees it', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    const first = runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one);
+    assert.deepEqual([first.code, first.stdout, first.stderr], [0, runDirIn(t.a, t.cap, [], one).stdout, '']);
+
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], two).code, 0);
+    const refused = runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two);
+    assert.deepEqual([refused.code, refused.stdout], [4, '']);
+    assert.ok(
+      refused.stderr.startsWith(`error: another agent-review review run holds PR ${PR_48}: session session-one, checkout ${t.a}, started 0 minutes ago.`),
+      refused.stderr,
+    );
+    assert.ok(refused.stderr.includes(`agent-review run-dir --release --force --pr ${PR_48}`), refused.stderr);
+
+    const forced = runDirIn(t.b, t.cap, ['--release', '--force', '--pr', PR_48], two);
+    assert.deepEqual([forced.code, forced.stdout, forced.stderr], [0, `released the lock on PR ${PR_48}\n`, '']);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 0, 'the freed PR can be taken');
+    assert.equal(runDirIn(t.a, t.cap, [], two).code, 4, "--pr frees the PR alone, not the first checkout's lock");
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --lock-pr in CI mode prints /tmp and writes no lock', () => {
+  const t = twoWorktrees();
+  try {
+    const ci = { ...sessionEnv('session-one', process.pid), AGENT_REVIEW_CI: '1' };
+    assert.deepEqual(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], ci), { code: 0, stdout: '/tmp\n', stderr: '' });
+    assert.deepEqual(readdirSync(t.cap), [], 'no run folder and no PR lock');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --release cleans the PR lock the skill took', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'yolo-review', '--outer'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+    assert.match(runDirIn(t.a, t.cap, ['--release', 'review'], one).stdout, /^kept .*: this session's yolo-review run still holds it\n$/);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], two).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 4, 'the PR stays locked while yolo-review holds the checkout');
+
+    assert.match(runDirIn(t.a, t.cap, ['--release', 'yolo-review'], one).stdout, /^released .* and cleaned /);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 0, 'yolo-review freed the PR');
+    assert.equal(runDirIn(t.b, t.cap, ['--release', 'review'], two).code, 0);
+    const prDir = join(t.cap, 'locks', 'cruglobal_agent-review_48');
+    assert.deepEqual(readdirSync(prDir).filter((f) => f.startsWith('run.lock')), [], 'the review freed it in turn');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --lock prunes an old run folder of another checkout', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const runs = join(t.cap, 'runs');
+    const old = join(runs, 'gone-0123456789ab');
+    const fresh = join(runs, 'fresh-0123456789ab');
+    mkdirSync(runs, { recursive: true, mode: 0o700 });
+    for (const d of [old, fresh]) mkdirSync(d, { mode: 0o700 });
+    const eightDays = new Date(Date.now() - 8 * 86400 * 1000);
+    utimesSync(old, eightDays, eightDays);
+    const r = runDirIn(t.a, t.cap, ['--lock', 'review'], one);
+    assert.deepEqual([r.code, r.stderr], [0, '']);
+    const own = join(runs, runDirName(t.a));
+    assert.equal(r.stdout, `${own}\n`, 'it prints only the run folder');
+    assert.equal(existsSync(old), false);
+    assert.equal(existsSync(fresh), true);
+    assert.equal(existsSync(own), true, 'its own folder stays');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --lock-pr needs this session to hold the checkout, and with no session id it warns and locks nothing', () => {
+  const t = twoWorktrees();
+  try {
+    assert.deepEqual(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], sessionEnv('session-one', process.pid)), {
+      code: 1,
+      stdout: '',
+      stderr: 'error: this session does not hold the checkout: take it first with agent-review run-dir --lock <skill>\n',
+    });
+    const anonymous = runDirIn(t.a, t.cap, ['--lock-pr', PR_48]);
+    assert.deepEqual(
+      [anonymous.code, anonymous.stdout, anonymous.stderr],
+      [0, runDirIn(t.a, t.cap, []).stdout, 'warning: CLAUDE_CODE_SESSION_ID and CLAUDE_PID are not set, so this PR is not locked\n'],
+    );
+    assert.equal(existsSync(join(t.cap, 'locks')), false);
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir refuses bad --lock-pr and --pr arguments', () => {
+  const t = twoWorktrees();
+  try {
+    for (const bad of [
+      ['--lock-pr'],
+      ['--lock-pr', 'a/b'],
+      ['--lock-pr', 'a/b#1', 'extra'],
+      ['--lock-pr', 'a/b#1', '--outer'],
+      ['--lock-pr', 'a/b#1', '--lock', 'review'],
+      ['--lock-pr', 'a/b#1', '--release', 'review'],
+      ['--lock-pr', 'a/b#1', '--pr', 'a/b#1'],
+      ['--pr', 'a/b#1'],
+      ['--release', 'review', '--pr', 'a/b#1'],
+      ['--release', '--force', '--pr'],
+      ['--release', '--force', '--pr', 'a/b#0'],
+      ['--release', '--force', '--pr', 'a/b#1', '--pr', 'a/b#2'],
+    ]) {
+      const r = runDirIn(t.a, t.cap, bad, sessionEnv('s', process.pid));
+      assert.equal(r.code, 1, bad.join(' '));
+      assert.match(r.stdout, /^usage: agent-review run-dir .*--lock-pr <owner\/repo#n>/, bad.join(' '));
+    }
+  } finally {
+    t.cleanup();
+  }
+});
+
+// Subagents run with their parent's CLAUDE_PID, and may share its session id too.
+test('run-dir --lock-pr refuses the same session the PR from a second worktree with exit 4, and lets it back in from the first', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const subagent = sessionEnv('session-sub', process.pid);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+
+    for (const env of [one, subagent]) {
+      assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], env).code, 0);
+      const refused = runDirIn(t.b, t.cap, ['--lock-pr', PR_48], env);
+      assert.deepEqual([refused.code, refused.stdout], [4, '']);
+      assert.ok(refused.stderr.startsWith(`error: another agent-review review run holds PR ${PR_48}: session session-one, checkout ${t.a}, started 0 minutes ago.`), refused.stderr);
+      assert.ok(refused.stderr.includes(`agent-review run-dir --release --force --pr ${PR_48}`), refused.stderr);
+      assert.equal(runDirIn(t.b, t.cap, ['--release', 'review'], env).code, 0);
+    }
+
+    const again = runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one);
+    assert.deepEqual([again.code, again.stderr], [0, ''], 'the same checkout takes it again');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --release --force --pr frees the PR from outside any checkout, and under CI or AGENT_REVIEW_RUN_DIR', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const prDir = join(t.cap, 'locks', 'cruglobal_agent-review_48');
+    const fromTmp = (env) => spawnCli(['run-dir', '--release', '--force', '--pr', PR_48], { dir: t.cap, cwd: os.tmpdir(), env });
+    for (const env of [{ AGENT_REVIEW_RUN_DIR: '', AGENT_REVIEW_CI: '' }, { AGENT_REVIEW_RUN_DIR: '', AGENT_REVIEW_CI: '1' }, { AGENT_REVIEW_RUN_DIR: join(t.cap, 'pinned'), AGENT_REVIEW_CI: '' }]) {
+      assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+      assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+      assert.notDeepEqual(readdirSync(prDir).filter((f) => f.startsWith('run.lock')), [], JSON.stringify(env));
+      assert.deepEqual(fromTmp({ ...two, ...env }), { code: 0, stdout: `released the lock on PR ${PR_48}\n`, stderr: '' }, JSON.stringify(env));
+      assert.deepEqual(readdirSync(prDir).filter((f) => f.startsWith('run.lock')), [], JSON.stringify(env));
+      assert.equal(runDirIn(t.a, t.cap, ['--release', 'review'], one).code, 0);
+    }
+    rmSync(t.cap, { recursive: true, force: true });
+    assert.deepEqual(fromTmp(two), { code: 0, stdout: `released the lock on PR ${PR_48}\n`, stderr: '' }, 'no capture root is nothing to free');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('a --lock that replaces a run this session stopped frees the PRs that run took from the checkout', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const PR_1 = 'o/r#1';
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_1], one).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], two).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_1], two).code, 4, 'the running review holds the PR');
+
+    const address = runDirIn(t.a, t.cap, ['--lock', 'address'], one);
+    assert.deepEqual([address.code, address.stderr], [0, ''], 'address replaces the review that stopped');
+    const taken = runDirIn(t.b, t.cap, ['--lock-pr', PR_1], two);
+    assert.deepEqual([taken.code, taken.stderr], [0, ''], "the stopped review's PR is free");
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_1], one).code, 4, 'and is now the other session\'s');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('yolo-review holds the PR from before its review through address, and frees it when it releases', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const prDir = join(t.cap, 'locks', 'cruglobal_agent-review_48');
+    const holder = () => JSON.parse(readFileSync(join(prDir, readdirSync(prDir).find((f) => /^run\.lock\.\d+$/.test(f))), 'utf8'));
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0, 'a review this session left behind');
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'yolo-review', '--outer'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one).code, 0, 'yolo-review takes the PR before it pushes');
+    assert.equal(holder().skill, 'yolo-review');
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], two).code, 0);
+    for (const skill of ['review', 'address']) {
+      assert.equal(runDirIn(t.a, t.cap, ['--lock', skill], one).code, 0);
+      const retake = runDirIn(t.a, t.cap, ['--lock-pr', PR_48], one);
+      assert.deepEqual([retake.code, retake.stderr], [0, ''], `${skill} takes the PR again inside yolo-review`);
+      assert.deepEqual([holder().skill, holder().checkout], ['yolo-review', t.a]);
+      assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 4, `no other checkout gets the PR during ${skill}`);
+      assert.match(runDirIn(t.a, t.cap, ['--release', skill], one).stdout, /^kept .*: this session's yolo-review run still holds it\n$/);
+      assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 4, `nor after ${skill} ends`);
+    }
+    assert.match(runDirIn(t.a, t.cap, ['--release', 'yolo-review'], one).stdout, /^released .* and cleaned /);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', PR_48], two).code, 0, 'yolo-review freed the PR');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --release --force frees the checkout and every PR taken from it, whoever holds them', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const two = sessionEnv('session-two', process.ppid);
+    const PR_12 = 'o/r#12';
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock-pr', PR_12], one).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock', 'review'], one).code, 0);
+    assert.equal(runDirIn(t.b, t.cap, ['--lock-pr', 'o/r#13'], one).code, 0);
+
+    const forced = runDirIn(t.a, t.cap, ['--release', '--force'], two);
+    assert.deepEqual([forced.code, forced.stdout, forced.stderr], [0, `released the lock on ${t.a}\nreleased the lock on PR ${PR_12}\n`, '']);
+    assert.equal(runDirIn(t.a, t.cap, ['--lock', 'review'], two).code, 0);
+    const taken = runDirIn(t.a, t.cap, ['--lock-pr', PR_12], two);
+    assert.deepEqual([taken.code, taken.stderr], [0, ''], 'the forced run no longer holds its PR');
+    const other = join(t.cap, 'locks', 'o_r_13');
+    assert.equal(JSON.parse(readFileSync(join(other, readdirSync(other).find((f) => /^run\.lock\.\d+$/.test(f))), 'utf8')).checkout, t.b, 'a PR taken from another checkout stays');
+  } finally {
+    t.cleanup();
   }
 });

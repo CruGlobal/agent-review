@@ -257,7 +257,7 @@ test('review workflow reports back to the PR when the review job fails', () => {
   // on that path too, not claim "no report was posted" unconditionally.
   assert.ok(failure.includes('did not complete'));
   assert.ok(failure.includes('may be missing or partially posted'));
-  assert.ok(failure.includes('check for an agent-review comment'));
+  assert.ok(failure.includes('Check for an agent-review comment'));
   assert.ok(failure.includes('made no code changes'));
   assert.ok(failure.includes('agent-review'), 'must tell the maintainer which label to cycle');
   assert.ok(failure.includes('github.event.pull_request.number'));
@@ -407,7 +407,7 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
   // One verdict line up top, right after the hidden markers.
   assert.ok(report.includes('🤖 agent-review · [❌ [N] blockers open | ✅ no blockers] · risk [LEVEL]'));
   // Visible blocks: blockers with evidence + fix sub-lines, then one-liner findings.
-  assert.ok(report.includes('## BLOCKERS — fix or dismiss to pass'));
+  assert.ok(report.includes('## BLOCKERS: fix or dismiss to pass'));
   assert.ok(report.includes('↳ evidence:'));
   assert.ok(report.includes('↳ fix:'));
   assert.ok(report.includes('## OTHER FINDINGS'));
@@ -434,7 +434,7 @@ test('the report skeleton is the approved verdict+blockers caveman layout', () =
     assert.ok(!report.includes(heading), `legacy severity/debate section "${heading}" must not restate ledger findings`);
   }
   // Machine contracts survive byte-identical.
-  assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_'));
+  assert.ok(report.includes('- [ ] **`#[N]`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_'));
   // The skeleton may document the hidden markers in prose, but must never itself contain a
   // marker-shaped line — the CI posting step prepends the one real copy of each, and a
   // duplicate breaks addressState's "exactly one ledger/status marker" parsing.
@@ -461,12 +461,12 @@ test('the ledger-line rewrite regex only ever matches report.md\'s own ledger-fo
   const regex = new RegExp(LEDGER_LINE_REGEX.source, LEDGER_LINE_REGEX.flags);
   const matchedLines = [...realized.matchAll(regex)].map((match) => match[0].split('\n')[0]);
   assert.deepEqual(matchedLines, [
-    '- [ ] **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
-    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
-    '- [x] **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — ✅ fixed in [short sha]',
-    '- **`#7`** · [severity]/10 · `[file:line]` — ~~[one-line message]~~ — 🚫 dismissed by @[user] [[reason code]]: [reason]',
+    '- [ ] **`#7`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · ✅ fixed in [short sha]',
+    '- [x] **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · 🚫 dismissed by @[user] [[reason code]]: [reason]',
+    '- **`#7`** · [severity]/10 · `[file:line]` · [one-line message] _([agent])_[ · 🤔 needs-human-review][ · ↩️ reopened, dismissed before by @[previousDismissal.by] [[previousDismissal.reasonCode]]: [previousDismissal.reason]]',
+    '- **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · ✅ fixed in [short sha]',
+    '- **`#7`** · [severity]/10 · `[file:line]` · ~~[one-line message]~~ · 🚫 dismissed by @[user] [[reason code]]: [reason]',
   ], 'only the six open/fixed/dismissed ledger-format definition lines (BLOCKERS + OTHER FINDINGS) may match — any other match is a rewriter hazard');
 });
 
@@ -474,7 +474,7 @@ test('the review skill fills the caveman report and enforces the soft byte targe
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('soft target 25,000 bytes'), 'Stage 6 must state the new soft size target');
   assert.ok(skill.includes('state each finding exactly once'), 'fill rules must forbid restating findings across sections');
-  assert.ok(skill.includes('BLOCKERS — fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
+  assert.ok(skill.includes('BLOCKERS: fix or dismiss to pass'), 'fill rules must reference the skeleton sections by name');
   // Stale instructions from the pre-caveman layout must not survive: they contradict the
   // verdict+blockers skeleton and would mislead the model filling it.
   assert.ok(!skill.includes('AUTOMATED FIXES AVAILABLE'), 'the old AUTOMATED FIXES AVAILABLE section name must not survive');
@@ -1601,9 +1601,9 @@ test('the consolidated CI-path blocks keep every fail-closed exit message verbat
   for (const message of [
     '❌ No valid review config at ${AGENT_REVIEW_DIR:-.claude/review}/config.yml. Run /agent-review:init first.',
     "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml.",
-    '❌ No changed files in $RANGE — nothing to review. Check the base ref.',
-    '✅ Head $HEAD_REF already reviewed — nothing new since the last report. Exiting.',
-    '✅ No net changes since the last reviewed head — nothing to review. Exiting.',
+    '❌ No changed files in $RANGE. Nothing to review. Check the base ref.',
+    '✅ Head $HEAD_REF already reviewed. Nothing new since the last report. Exiting.',
+    '✅ No net changes since the last reviewed head. Nothing to review. Exiting.',
   ]) {
     assert.ok(skill.includes(message), `fail-closed message missing or altered: ${message}`);
   }
@@ -1616,7 +1616,7 @@ test('the review gates load the config without the code-review engine checks', (
     'engine=agent-review and CI must still run when the code-review engine settings are wrong; agent-review options reports them',
   );
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
-  assert.ok(yolo.includes('agent-review config show >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }'));
+  assert.ok(yolo.includes('agent-review config show >/dev/null || { echo "❌ No review config. Run /agent-review:init first."; exit 1; }'));
   for (const text of [review, yolo]) {
     assert.ok(!bashBlocks(text).includes('agent-review config validate'), 'config validate fails on code-review engine problems');
   }
@@ -2356,7 +2356,7 @@ test('interact\'s failure report says when a commit was already pushed, and "not
       return read(join(dir, 'body.md'), 'utf8');
     };
     const pushed = say({ PUSHED_SHA: 'abcdef1234567890abcdef1234567890abcdef12' });
-    assert.ok(!pushed.includes('nothing was changed'), pushed);
+    assert.ok(!/nothing was changed/i.test(pushed), pushed);
     assert.ok(pushed.includes('it already pushed commit `abcdef1`'), pushed);
     assert.ok(pushed.includes('`git revert abcdef1`'), pushed);
     assert.ok(pushed.includes('[View the run log](https://x/run)'), pushed);
@@ -2371,10 +2371,10 @@ test('interact\'s failure report says when a commit was already pushed, and "not
     assert.ok(posted.includes('The findings ledger and its summary comment were updated.'), posted);
     assert.ok(!posted.includes('was not posted') && !posted.includes(WARNING), 'a posted summary already carried the warning');
     const refused = say({});
-    assert.ok(refused.includes('**nothing was changed**'), refused);
+    assert.ok(refused.includes('**Nothing was changed**'), refused);
     assert.ok(refused.includes('publishing was refused'), refused);
     const unparsed = say({ REASON: 'Could not parse "fix one".', MODEL_RESULT: 'failure' });
-    assert.ok(unparsed.includes('**nothing was changed**') && unparsed.includes('Could not parse "fix one".'), unparsed);
+    assert.ok(unparsed.includes('**Nothing was changed**') && unparsed.includes('Could not parse "fix one".'), unparsed);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -2415,7 +2415,7 @@ test('the review skill runs the incremental path locally on the `incremental` ar
   assert.ok(!skill.includes('*" incremental "*)'), 'the skill must not re-parse incremental from the raw arguments');
   assert.ok(skill.includes('if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then'), 'the incremental gate must accept the local request');
   assert.ok(!skill.includes('# Incremental re-review (CI only)'), 'the CI-only comment is stale');
-  assert.ok(skill.includes('push first'), 'unpushed local commits must stop an incremental review');
+  assert.ok(skill.includes('Local HEAD is ahead of the PR head ($HEAD_REF). Push first, then re-run.'), 'unpushed local commits must stop an incremental review');
   assert.ok(skill.includes('only committed changes are reviewed'), 'a dirty tree must warn');
   assert.ok(skill.includes("bot's comment remains the CI ledger"), 'must explain the bot-canonical case');
   // A zero-risk local delta advances the head marker instead of stopping silently.
@@ -3085,8 +3085,8 @@ test('init writes engine and reviews_run only for a non-default answer', () => {
   assert.equal(guarded.length, 2, 'the 3C copy block and the 3E git add block');
   for (const block of guarded) {
     // The answer is saved in 3A, so the block sources it and never reads config back.
-    assert.ok(block.includes('. /tmp/agent_review_init.sh'), `the guard block sources the saved answer:\n${block}`);
-    assert.ok(block.indexOf('. /tmp/agent_review_init.sh') < block.indexOf('if [ "$REVIEWS_RUN"'), 'the source comes before the guard');
+    assert.ok(block.includes('. "$RUN_DIR"/init.sh'), `the guard block sources the saved answer:\n${block}`);
+    assert.ok(block.indexOf('. "$RUN_DIR"/init.sh') < block.indexOf('if [ "$REVIEWS_RUN"'), 'the source comes before the guard');
   }
   assert.ok(
     flat.includes('The copies run only when the `REVIEWS_RUN` answer saved in 3A is `local-and-ci`; anything else, including an empty value, copies nothing.'),
@@ -3104,9 +3104,9 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
   assert.ok(block, 'init has the .gitignore and .gitattributes block');
-  assert.ok(init.includes('rm -f /tmp/agent_review_init_baseline_head.txt /tmp/agent_review_init_baseline_status.txt /tmp/agent_review_init_stage.txt /tmp/agent_review_init_changed.txt'), 'Stage 0 clears both lists');
+  assert.ok(init.includes('rm -f "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_stage.txt "$RUN_DIR"/init_changed.txt'), 'Stage 0 clears both lists');
   const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
-  const staging = commit.slice(commit.indexOf('if [ -f /tmp/agent_review_init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
+  const staging = commit.slice(commit.indexOf('if [ -f "$RUN_DIR"/init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
   assert.ok(staging.includes('git add -- "$f"'), '3E stages from the list');
   assert.ok(!/\.(gitignore|gitattributes|dockerignore)/.test(commit.slice(0, commit.indexOf(staging)).split('\n').filter((l) => l.startsWith('git add')).join('\n')), '3E never adds those files by name');
   for (const shell of availableShells(t)) {
@@ -3116,7 +3116,7 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
       const repo = join(dir, 'repo');
       mkdirSync(tmp);
       mkdirSync(repo);
-      const at = (text) => text.replaceAll('/tmp/', `${tmp}/`);
+      const at = (text) => (/^RUN_DIR=/m.test(text) ? text.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${tmp}'; export RUN_DIR`) : `RUN_DIR='${tmp}'; export RUN_DIR\n${text}`);
       const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8' });
       git('init', '-q');
       writeFileSync(join(repo, '.gitignore'), 'node_modules/'); // no trailing newline
@@ -3228,7 +3228,7 @@ test('init never copies or stages the CI workflows outside a local-and-ci guard'
   for (const block of blocks) {
     assert.ok(!/^\s*REVIEWS_RUN=local-and-ci\b/m.test(block), 'REVIEWS_RUN must never be hardcoded to local-and-ci');
     if (block.includes(guard)) {
-      assert.ok(block.includes('. /tmp/agent_review_init.sh'), 'REVIEWS_RUN must come from the env file saved in 3A');
+      assert.ok(block.includes('. "$RUN_DIR"/init.sh'), 'REVIEWS_RUN must come from the env file saved in 3A');
       assert.ok(!block.includes('config get reviews_run'), 'REVIEWS_RUN must not be read back from a config that may not load yet');
     }
   }
@@ -4317,7 +4317,7 @@ const skillText = (name) => readFileSync(join(ROOT, `skills/${name}/SKILL.md`), 
 test('init 3C and 3E decide CI copying from the REVIEWS_RUN answer saved in 3A, not from config get', () => {
   const init = skillText('init');
   const threeA = stageSlice(init, '### 3A', '### 3B');
-  assert.ok(/export REVIEWS_RUN=/.test(threeA) && threeA.includes('>> /tmp/agent_review_init.sh'), '3A persists REVIEWS_RUN to the env file');
+  assert.ok(/export REVIEWS_RUN=/.test(threeA) && threeA.includes('>> "$RUN_DIR"/init.sh'), '3A persists REVIEWS_RUN to the env file');
   const rest = stageSlice(init, '### 3C', '### 3F');
   assert.ok(!rest.includes('config get reviews_run'), '3C-3E must not read reviews_run back from a config that may not load yet');
   assert.ok(rest.includes('if [ "$REVIEWS_RUN" = "local-and-ci" ]; then'), '3C and 3E gate on REVIEWS_RUN');
@@ -4330,7 +4330,7 @@ test('init keeps the approval answer in BOT_APPROVES and flips auto_approve with
   const threeC = stageSlice(init, '### 3C', '### 3D');
   const block = [...threeC.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]).find((b) => b.includes('auto_approve: false'));
   assert.ok(block, 'the approval-off block exists');
-  assert.ok(block.includes('. /tmp/agent_review_init.sh'), 'it sources the env file');
+  assert.ok(block.includes('. "$RUN_DIR"/init.sh'), 'it sources the env file');
   assert.ok(block.includes('if [ "$BOT_APPROVES" = "no" ]; then'), 'wrapped in the answer');
   assert.ok(/sed [^\n]*> "\$tmp"/.test(block) && block.includes('cat "$tmp" > "$w"'), 'sed to a temp file, then write back in place (keeps the mode)');
   assert.ok(!block.includes('-i.bak') && !block.includes('.bak'), 'no .bak files');
@@ -5666,4 +5666,68 @@ test('README lists the person-must-approve rule, drops irreversible from the sto
   }
   const own = r.slice(r.indexOf('## PCI and repos that always need a person'), r.indexOf('## Set up a repo (once)'));
   assert.ok(own.length > 0 && !own.includes('\u2014'), 'the human approval section uses no em dashes');
+});
+
+function walkMarkdown(dir) {
+  const { readdirSync, statSync } = require('node:fs');
+  return readdirSync(dir).flatMap((name) => {
+    const path = join(dir, name);
+    if (statSync(path).isDirectory()) return walkMarkdown(path);
+    return name.endsWith('.md') ? [path] : [];
+  });
+}
+
+test('posted text carries no em dash', () => {
+  const EM = '—';
+  const report = readFileSync(join(ROOT, 'templates/report.md'), 'utf8');
+  assert.ok(!report.includes(EM), 'templates/report.md must carry no em dash');
+  // A trailing shell comment is not printed, so it is cut off before the check. A " # " is outside
+  // quotes when each quote kind appears an even number of times before it.
+  const even = (text, quote) => (text.split(quote).length - 1) % 2 === 0;
+  const stripComment = (raw) => {
+    for (const m of raw.matchAll(/\s+#\s/g)) {
+      const before = raw.slice(0, m.index);
+      if (even(before, '"') && even(before, "'")) return before;
+    }
+    return raw;
+  };
+  const postsText = (raw) => {
+    const line = stripComment(raw);
+    return line.includes(EM) && (/^\s*(echo|printf)\b/.test(line) || /(&&|\|\||\{)\s*(echo|printf)\s+['"]/.test(line)
+      || /^\s*[A-Z_]+=['"]/.test(line) || line.includes('BODY=') || line.includes('--body'));
+  };
+  assert.equal(postsText(`echo "PR # 12 ${EM} x"`), true, 'a " # " inside double quotes is printed, not a comment');
+  assert.equal(postsText(`echo 'PR # 12 ${EM} x'`), true, 'nor inside single quotes');
+  assert.equal(postsText(`echo "PR # 12" # a ${EM} note`), false, 'a real trailing comment is cut off');
+  assert.equal(postsText(`echo "it's # 12 ${EM} x"`), true, 'a quote of the other kind inside a string does not end it');
+  const files = [
+    join(ROOT, '.github/workflows/review.yml'),
+    join(ROOT, '.github/workflows/interact.yml'),
+    join(ROOT, '.github/actions/approve/action.yml'),
+    join(ROOT, '.github/actions/withdraw/action.yml'),
+    join(ROOT, '.github/workflows/approve.yml'),
+    ...walkMarkdown(join(ROOT, 'skills')),
+  ];
+  for (const file of files) {
+    const bad = readFileSync(file, 'utf8').split('\n')
+      .map((line, i) => ({ line, at: i + 1 }))
+      .filter(({ line }) => postsText(line));
+    assert.deepEqual(bad, [], `${relative(ROOT, file)} posts or prints an em dash`);
+  }
+  const source = readFileSync(join(ROOT, 'engine/addressState.cjs'), 'utf8');
+  const literals = source.split('\n')
+    .filter((line) => line.includes(EM) && !/^\s*\/\//.test(line));
+  assert.deepEqual(literals, [], 'engine/addressState.cjs string literals must carry no em dash');
+});
+
+test('model prompts ask for no em dashes in posted text', () => {
+  const ask = 'Do not use em dashes';
+  const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage6 = stageSlice(skill, '## Stage 6 — Generate Review Report', '## Stage 7');
+  assert.ok(stage6.includes(ask), 'review Stage 6 must carry the ask');
+  for (const file of ['templates/archetype.md', 'templates/code-review-lane.md']) {
+    assert.ok(readFileSync(join(ROOT, file), 'utf8').includes(ask), `${file} must carry the ask`);
+  }
+  assert.ok(readFileSync(ARCHETYPE, 'utf8').includes(FINAL_LINE_CONTRACT), 'archetype keeps the final-line contract');
+  assert.ok(laneText().includes(FINAL_LINE_CONTRACT), 'lane template keeps the final-line contract');
 });

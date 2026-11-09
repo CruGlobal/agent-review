@@ -104,7 +104,7 @@ runs:
             > "$REPORT"
         fi
         if [ ! -s "$REPORT" ]; then
-          echo "No agent-review report found for PR #$PR — not approving." | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "No agent-review report found for PR #$PR: not approving." | tee -a "$GITHUB_STEP_SUMMARY"
         fi
         PR_JSON="$RUNNER_TEMP/agent-review-approve-pr.json"
         gh api "repos/$REPO/pulls/$PR" > "$PR_JSON"

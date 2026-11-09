@@ -21,9 +21,14 @@ re-reviews cheap.
 Each block keeps its files in this checkout's run folder (the path `agent-review run-dir`
 prints, and step 1 shows as `run folder:`), so run every block from the PR's checkout. Step 1
 takes the checkout for the whole yolo run (`--lock yolo-review --outer`); the review and address
-runs it starts work inside that hold and leave the folder to it. When this skill stops, after step 7 or earlier on any ❌, run
-`agent-review run-dir --release yolo-review`: it frees the checkout and deletes the run's working
-files. If step 1 prints that another session's run holds the checkout, stop and show that line.
+runs it starts work inside that hold and leave the folder to it. The hold covers the PR too:
+step 1 takes the PR lock for yolo-review before anything is pushed, and the review and address
+runs inside take it again for yolo-review, so it stays held until the release. If step 1 prints
+that another agent-review run holds the PR, show that message, run
+`agent-review run-dir --release yolo-review`, and stop. Whenever this skill stops, at step 7 or
+earlier for any reason, run `agent-review run-dir --release yolo-review`: it frees the checkout
+and the PR, and deletes the run's working files. If step 1 prints that another session's run
+holds the checkout, show that line and stop: this run took nothing, so there is nothing to release.
 
 1. **Preconditions** — run this block; stop on any ❌.
 
@@ -31,13 +36,16 @@ files. If step 1 prints that another session's run holds the checkout, stop and 
    RUN_DIR=$(agent-review run-dir --lock yolo-review --outer) || exit 1; export RUN_DIR
    echo "run folder: $RUN_DIR"
    PR_NUMBER=$(gh pr view --json number -q .number 2>/dev/null)
-   [ -n "$PR_NUMBER" ] || { echo "❌ No PR for this branch — open one first (gh pr create)."; exit 1; }
-   [ -z "$(git status --porcelain)" ] || { echo "❌ Working tree is dirty — commit or stash first; yolo reviews and fixes committed code only."; exit 1; }
+   [ -n "$PR_NUMBER" ] || { echo "❌ No PR for this branch. Open one first (gh pr create)."; exit 1; }
+   PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
+   [ -n "$PR_REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }
+   agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
+   [ -z "$(git status --porcelain)" ] || { echo "❌ Working tree is dirty. Commit or stash first; yolo reviews and fixes committed code only."; exit 1; }
    HEAD_REF=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
    if [ "$(git rev-parse HEAD)" != "$HEAD_REF" ]; then
-     git push || { echo "❌ Could not push local commits — the review must record the PR head."; exit 1; }
+     git push || { echo "❌ Could not push local commits: the review must record the PR head."; exit 1; }
    fi
-   agent-review config show >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }
+   agent-review config show >/dev/null || { echo "❌ No review config. Run /agent-review:init first."; exit 1; }
    START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
    echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > "$RUN_DIR"/yolo_env.sh
    ```
@@ -131,7 +139,7 @@ files. If step 1 prints that another session's run holds the checkout, stop and 
        [ "${APPROVED:-0}" -gt 0 ] && { echo "✅ Approved by the github-actions bot"; break; }
        [ "$i" -lt 9 ] && sleep 20
      done
-     [ "${APPROVED:-0}" -gt 0 ] || echo "⏳ Ledger passes but no bot approval arrived within 3 minutes — this repo may not run agent-review-approve.yml with auto_approve on, or the workflow is still queued. The PR is ready for a human."
+     [ "${APPROVED:-0}" -gt 0 ] || echo "⏳ Ledger passes but no bot approval arrived within 3 minutes. This repo may not run agent-review-approve.yml with auto_approve on, or the workflow is still queued. The PR is ready for a human."
    fi
    ```
 

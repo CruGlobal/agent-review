@@ -390,7 +390,7 @@ jobs:
           echo "Posting $COUNT inline anchor(s)."
           jq -c '.[]' /tmp/inline_validated.json | while read -r f; do
             N=$(printf '%s' "$f" | jq -r .n)
-            BODY=$(printf '%s' "$f" | jq -r '"<!-- agent-review-finding: \(.n) -->\n**agent-review #\(.n)** · \(.severity)/10 — \(.message)\n\n_Resolution is tracked in the findings ledger: `@claude fix \(.n)` or `@claude dismiss \(.n) [code]: reason`._"')
+            BODY=$(printf '%s' "$f" | jq -r '"<!-- agent-review-finding: \(.n) -->\n**agent-review #\(.n)** · \(.severity)/10 · \(.message)\n\n_Resolution is tracked in the findings ledger: `@claude fix \(.n)` or `@claude dismiss \(.n) [code]: reason`._"')
             gh api "repos/$REPO/pulls/$PR/comments" \
               -f commit_id="$HEAD_SHA" \
               -f path="$(printf '%s' "$f" | jq -r .file)" \
@@ -428,7 +428,7 @@ jobs:
           set -euo pipefail
           {
             printf '%s\n\n' '⚠️ The agent-review run did not complete.'
-            printf '%s\n\n' 'The review may be missing or partially posted — check for an agent-review comment below; the run made no code changes either way.'
+            printf '%s\n\n' 'The review may be missing or partially posted. Check for an agent-review comment below; the run made no code changes either way.'
             printf '%s\n' 'Re-trigger by cycling the `agent-review` label (remove it, then add it back).'
             printf '\n%s\n' "[View the run log]($RUN_URL)"
           } > "$RUNNER_TEMP/review-failure.md"
