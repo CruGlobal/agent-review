@@ -19187,6 +19187,7 @@ var require_captureHook = __commonJS({
       mismatch: "code_review_capture.mismatch.json"
     };
     var ARM_MAX_AGE_SECONDS = 21600;
+    var RUNS_DIR = "runs";
     var STOP_BUFFER_LINES = 50;
     var CAPTURE_SOURCE = "agent-review-capture-hook";
     var SKILL_HEADER = new RegExp(`^\\s*Skill "${CODE_REVIEW_SKILL}" completed`);
@@ -19216,6 +19217,44 @@ var require_captureHook = __commonJS({
       if (!nonEmpty(arm.run_id) || typeof arm.args !== "string") return null;
       if (!Number.isFinite(arm.created) || nowSeconds - arm.created > ARM_MAX_AGE_SECONDS) return null;
       return arm;
+    }
+    function argsTarget(args) {
+      const words = typeof args === "string" ? args.trim().split(/\s+/) : [];
+      return words.length > 1 ? words[1] : null;
+    }
+    function skillCall(payload) {
+      const input = isObject(payload.tool_input) ? payload.tool_input : {};
+      return {
+        skill: typeof input.skill === "string" ? input.skill.replace(/^\//, "") : "",
+        args: typeof input.args === "string" ? input.args : ""
+      };
+    }
+    function chooseArms({ arms, payload } = {}) {
+      const candidates = sessionArms({ arms, payload });
+      if (candidates.length === 0) return { kind: "none", entries: [] };
+      const { skill, args } = skillCall(payload);
+      const builtIn = skill === CODE_REVIEW_SKILL;
+      if (!builtIn && !skill.endsWith(`:${CODE_REVIEW_SKILL}`)) return { kind: "none", entries: [] };
+      if (builtIn) {
+        const exact = candidates.filter((e) => e.arm.args === args);
+        if (exact.length === 1) return { kind: "match", entries: exact };
+        if (exact.length > 1) return { kind: "ambiguous", entries: exact };
+      }
+      const target = argsTarget(args);
+      const same = target === null ? [] : candidates.filter((e) => argsTarget(e.arm.args) === target);
+      return same.length === 1 ? { kind: "mismatch", entries: same } : { kind: "none", entries: [] };
+    }
+    function sessionOf(v) {
+      return nonEmpty(v) ? v : null;
+    }
+    function sessionArms({ arms, payload } = {}) {
+      if (!Array.isArray(arms) || !isObject(payload) || !nonEmpty(payload.agent_id)) return [];
+      const session = sessionOf(payload.session_id);
+      return arms.filter((e) => isObject(e) && isObject(e.arm) && sessionOf(e.arm.session_id) === session);
+    }
+    function ambiguousMismatch({ arm, payload, now }) {
+      const { args } = skillCall(payload);
+      return { mismatch: { run_id: arm.run_id, expected: arm.args, got: args, reason: "ambiguous", ts: now } };
     }
     function stripSkillHeader(text) {
       const lines = text.split("\n");
@@ -19279,9 +19318,7 @@ var require_captureHook = __commonJS({
     function postSkillWrites({ payload, arm, stops, now, readTranscript } = {}) {
       const armed = armedState(arm, now);
       if (!armed || !isObject(payload) || !nonEmpty(payload.agent_id)) return {};
-      const input = isObject(payload.tool_input) ? payload.tool_input : {};
-      const skill = typeof input.skill === "string" ? input.skill.replace(/^\//, "") : "";
-      const args = typeof input.args === "string" ? input.args : "";
+      const { skill, args } = skillCall(payload);
       const mismatch = (got, reason) => ({
         mismatch: { run_id: armed.run_id, expected: armed.args, got, ...reason ? { reason } : {}, ts: now }
       });
@@ -19358,11 +19395,16 @@ var require_captureHook = __commonJS({
       CODE_REVIEW_SKILL,
       CAPTURE_FILES,
       ARM_MAX_AGE_SECONDS,
+      RUNS_DIR,
       STOP_BUFFER_LINES,
       CAPTURE_SOURCE,
       captureDir,
       captureDirProblem,
       armedState,
+      argsTarget,
+      chooseArms,
+      sessionArms,
+      ambiguousMismatch,
       stripSkillHeader,
       lastAssistantText,
       postSkillWrites,
@@ -20752,7 +20794,7 @@ var require_package = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "agent-review",
-      version: "1.1.4",
+      version: "1.1.5",
       private: true,
       description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
       license: "MIT",
@@ -20891,6 +20933,389 @@ var require_cliCommands = __commonJS({
   }
 });
 
+// engine/runDir.cjs
+var require_runDir = __commonJS({
+  "engine/runDir.cjs"(exports2, module2) {
+    "use strict";
+    var { execFileSync } = require("node:child_process");
+    var { createHash, randomBytes } = require("node:crypto");
+    var {
+      closeSync,
+      linkSync,
+      lstatSync,
+      mkdirSync,
+      openSync,
+      readFileSync,
+      readdirSync,
+      realpathSync,
+      rmSync,
+      rmdirSync,
+      writeFileSync
+    } = require("node:fs");
+    var { basename, dirname, isAbsolute, join } = require("node:path");
+    var { captureDir, captureDirProblem, ARM_MAX_AGE_SECONDS, RUNS_DIR } = require_captureHook();
+    var LOCK_FILE = "run.lock";
+    var LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
+    var CI_RUN_DIR = "/tmp";
+    var SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
+    var SKILL_NAME = /^[a-z][a-z-]{0,31}$/;
+    var KEPT_AFTER_RUN = Object.freeze(["agent_review_report.md", "automated_fixes"]);
+    var RunDirError = class extends Error {
+    };
+    function isObject(v) {
+      return v !== null && typeof v === "object" && !Array.isArray(v);
+    }
+    function runDirName(toplevel) {
+      const name = basename(toplevel).replace(/[^A-Za-z0-9._-]/g, "_") || "repo";
+      return `${name}-${createHash("sha256").update(toplevel).digest("hex").slice(0, 12)}`;
+    }
+    var QUOTE_BREAKER = /["$`\\\r\n]/;
+    function gitToplevel(root) {
+      let top;
+      try {
+        top = execFileSync("git", ["-C", root, "rev-parse", "--show-toplevel"], {
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"]
+        }).trim();
+      } catch {
+        top = "";
+      }
+      if (!top) {
+        throw new RunDirError(
+          `${root} is not inside a git checkout, so it has no run folder: run this from the checkout being reviewed`
+        );
+      }
+      for (const path of [top, realpathSync(top)]) {
+        if (QUOTE_BREAKER.test(path)) {
+          throw new RunDirError(
+            `the checkout path ${JSON.stringify(path)} holds a character a double-quoted shell word cannot carry (", $, \`, \\ or a line break), so review prompts could not name it safely: move or rename the checkout`
+          );
+        }
+      }
+      return realpathSync(top);
+    }
+    function safeDir(dir, from) {
+      if (typeof dir !== "string" || !isAbsolute(dir) || !SAFE_DIR.test(dir)) {
+        throw new RunDirError(
+          `${from} must be an absolute path made only of letters, digits, ".", "_", "-" and "/": ${JSON.stringify(dir)}`
+        );
+      }
+      return dir.length > 1 ? dir.replace(/\/+$/, "") : dir;
+    }
+    function resolveRunDir({ root, env = process.env, flagDir } = {}) {
+      if (flagDir !== void 0) return { dir: safeDir(flagDir, "--run-dir"), source: "flag", toplevel: null };
+      if (env.AGENT_REVIEW_RUN_DIR) {
+        return { dir: safeDir(env.AGENT_REVIEW_RUN_DIR, "AGENT_REVIEW_RUN_DIR"), source: "env", toplevel: null };
+      }
+      if (env.AGENT_REVIEW_CI) return { dir: CI_RUN_DIR, source: "ci", toplevel: null };
+      const toplevel = gitToplevel(root);
+      const dir = safeDir(join(captureDir(env), RUNS_DIR, runDirName(toplevel)), "the run folder");
+      return { dir, source: "checkout", toplevel };
+    }
+    function dirProblem(dir) {
+      let stat = null;
+      try {
+        stat = lstatSync(dir);
+      } catch (e) {
+        if (e.code !== "ENOENT") return `${dir} cannot be checked: ${e.message}`;
+      }
+      const problem = captureDirProblem(stat, process.getuid());
+      return problem ? `${dir} ${problem}` : null;
+    }
+    function makeDir(dir) {
+      try {
+        mkdirSync(dir, { mode: 448 });
+      } catch (e) {
+        if (e.code !== "EEXIST") throw new RunDirError(`could not create ${dir}: ${e.message}`);
+      }
+      const problem = dirProblem(dir);
+      if (problem) throw new RunDirError(problem);
+    }
+    function ensureRunDir(resolved, env = process.env) {
+      if (resolved.source === "checkout") {
+        const root = captureDir(env);
+        for (const dir of [root, join(root, RUNS_DIR), resolved.dir]) makeDir(dir);
+      } else if (resolved.source === "env") {
+        try {
+          mkdirSync(resolved.dir, { recursive: true, mode: 448 });
+        } catch (e) {
+          if (e.code !== "EEXIST") throw new RunDirError(`could not create ${resolved.dir}: ${e.message}`);
+        }
+      }
+      return resolved;
+    }
+    function readJsonOrNull(path) {
+      try {
+        return JSON.parse(readFileSync(path, "utf8"));
+      } catch {
+        return null;
+      }
+    }
+    function holderFrom(env = process.env) {
+      const session = typeof env.CLAUDE_CODE_SESSION_ID === "string" ? env.CLAUDE_CODE_SESSION_ID.trim() : "";
+      const pid = Number(env.CLAUDE_PID);
+      return {
+        session_id: session || null,
+        claude_pid: Number.isInteger(pid) && pid > 0 ? pid : null
+      };
+    }
+    function identified(me) {
+      return me.session_id !== null || me.claude_pid !== null;
+    }
+    function sameHolder(lock, me) {
+      if (!isObject(lock)) return false;
+      if (me.session_id && lock.session_id === me.session_id) return true;
+      return me.claude_pid !== null && lock.claude_pid === me.claude_pid;
+    }
+    function pidAlive(pid) {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch (e) {
+        return e.code === "EPERM";
+      }
+    }
+    function lockIsLive(lock, nowSeconds, isAlive = pidAlive) {
+      if (!isObject(lock) || !Number.isFinite(lock.created)) return false;
+      if (nowSeconds - lock.created > LOCK_MAX_AGE_SECONDS) return false;
+      if (Number.isInteger(lock.claude_pid) && lock.claude_pid > 0 && !isAlive(lock.claude_pid)) return false;
+      return true;
+    }
+    var LOCK_GENERATION = /^run\.lock\.([1-9][0-9]*)$/;
+    function lockGenerations(dir) {
+      let names = [];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return [];
+      }
+      return names.map((name) => LOCK_GENERATION.exec(name)).filter(Boolean).map((m) => Number(m[1])).sort((a, b) => a - b);
+    }
+    function lockPath(dir, generation) {
+      return join(dir, `${LOCK_FILE}.${generation}`);
+    }
+    function currentLock(dir) {
+      const generation = lockGenerations(dir).at(-1) ?? 0;
+      return { generation, lock: generation ? readJsonOrNull(lockPath(dir, generation)) : null };
+    }
+    function removeLocks(dir, below = Infinity) {
+      for (const generation of lockGenerations(dir)) {
+        if (generation < below) rmSync(lockPath(dir, generation), { force: true });
+      }
+    }
+    function createExclusive(path, text, beforeLink = () => {
+    }) {
+      const tmp = `${path}.tmp-${randomBytes(8).toString("hex")}`;
+      const fd = openSync(tmp, "wx", 384);
+      try {
+        try {
+          writeFileSync(fd, text);
+        } finally {
+          closeSync(fd);
+        }
+        beforeLink();
+        linkSync(tmp, path);
+      } finally {
+        rmSync(tmp, { force: true });
+      }
+    }
+    function takeLock({
+      dir,
+      skill,
+      toplevel,
+      outer = false,
+      env = process.env,
+      nowSeconds,
+      isAlive = pidAlive,
+      afterRead = () => {
+      },
+      beforeLink = () => {
+      }
+    }) {
+      const me = holderFrom(env);
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const { generation, lock: existing } = currentLock(dir);
+        const live = existing && lockIsLive(existing, nowSeconds, isAlive);
+        if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
+        if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
+        afterRead();
+        const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
+        try {
+          createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + "\n", beforeLink);
+        } catch (e) {
+          if (e.code === "EEXIST") continue;
+          throw new RunDirError(`could not write ${lockPath(dir, generation + 1)}: ${e.message}`);
+        }
+        removeLocks(dir, generation + 1);
+        return { ok: true, taken: true, lock };
+      }
+      return { ok: false, lock: currentLock(dir).lock || {} };
+    }
+    function foreignLock({ dir, env = process.env, nowSeconds, isAlive = pidAlive }) {
+      const { lock } = currentLock(dir);
+      if (!lock || !lockIsLive(lock, nowSeconds, isAlive) || sameHolder(lock, holderFrom(env))) return null;
+      return lock;
+    }
+    function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+      const skill = SKILL_NAME.test(lock.skill || "") ? lock.skill : "review";
+      const session = typeof lock.session_id === "string" && lock.session_id ? `session ${lock.session_id}` : "an unknown session";
+      const minutes = Number.isFinite(lock.created) ? Math.max(0, Math.round((nowSeconds - lock.created) / 60)) : null;
+      const started = minutes === null ? "" : `, started ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+      return `another agent-review ${skill} run holds this checkout${toplevel ? ` (${toplevel})` : ""}: ${session}${started}. Wait for it to finish, or run it from another checkout. If that run is gone, free the checkout with: agent-review run-dir --release --force (run folder ${dir})`;
+    }
+    function hasFixScripts(dir) {
+      try {
+        return readdirSync(dir).some((f) => /^fix_.*\.sh$/.test(f));
+      } catch {
+        return false;
+      }
+    }
+    function cleanRunDir(dir) {
+      if (basename(dirname(dir)) !== RUNS_DIR) throw new RunDirError(`refusing to clean ${dir}: it is not a run folder`);
+      let entries = [];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of entries) {
+        if (LOCK_GENERATION.test(name)) continue;
+        const kept = KEPT_AFTER_RUN.includes(name) && (name !== "automated_fixes" || hasFixScripts(join(dir, name)));
+        if (!kept) rmSync(join(dir, name), { recursive: true, force: true });
+      }
+      removeLocks(dir);
+      try {
+        rmdirSync(dir);
+      } catch {
+      }
+    }
+    function releaseLock({ dir, skill, env = process.env, nowSeconds, isAlive = pidAlive }) {
+      const { lock } = currentLock(dir);
+      const me = holderFrom(env);
+      if (lock && lockIsLive(lock, nowSeconds, isAlive)) {
+        if (!sameHolder(lock, me)) return { ok: false, lock };
+        if (lock.skill !== skill) return { ok: true, cleaned: false, heldBy: lock.skill };
+      }
+      cleanRunDir(dir);
+      return { ok: true, cleaned: true };
+    }
+    function forceRelease(dir) {
+      removeLocks(dir);
+    }
+    module2.exports = {
+      RUNS_DIR,
+      LOCK_FILE,
+      LOCK_MAX_AGE_SECONDS,
+      CI_RUN_DIR,
+      KEPT_AFTER_RUN,
+      SKILL_NAME,
+      RunDirError,
+      runDirName,
+      resolveRunDir,
+      ensureRunDir,
+      dirProblem,
+      holderFrom,
+      identified,
+      sameHolder,
+      currentLock,
+      lockGenerations,
+      pidAlive,
+      lockIsLive,
+      takeLock,
+      foreignLock,
+      heldMessage,
+      cleanRunDir,
+      releaseLock,
+      forceRelease
+    };
+  }
+});
+
+// engine/templateStatus.cjs
+var require_templateStatus = __commonJS({
+  "engine/templateStatus.cjs"(exports2, module2) {
+    "use strict";
+    var { createHash } = require("node:crypto");
+    var TEMPLATE_NAMES = Object.freeze([
+      "agent-review.yml",
+      "agent-review-interact.yml",
+      "agent-review-readiness.yml",
+      "agent-review-approve.yml"
+    ]);
+    var MARKER_LINE = /^# agent-review-template-version: (\d+\.\d+\.\d+)$/m;
+    var NO_MARKER = "pre-0.3.0";
+    function sha256(text) {
+      return createHash("sha256").update(text).digest("hex");
+    }
+    function readMarker(text) {
+      const m = typeof text === "string" ? text.match(MARKER_LINE) : null;
+      return m ? m[1] : null;
+    }
+    function compareVersions(a, b) {
+      const pa = a.split(".").map(Number);
+      const pb = b.split(".").map(Number);
+      for (let i = 0; i < 3; i++) {
+        if (pa[i] !== pb[i]) return pa[i] < pb[i] ? -1 : 1;
+      }
+      return 0;
+    }
+    function unchangedSince({ manifest, name, version, templateText }) {
+      const released = manifest?.[version]?.[name];
+      if (typeof released !== "string") return false;
+      const rebuilt = templateText.replace(MARKER_LINE, `# agent-review-template-version: ${version}`);
+      return sha256(rebuilt) === released;
+    }
+    function templateFileStatus({ name, fileText, pluginVersion, manifest, templates }) {
+      const marker = readMarker(fileText);
+      const result = (status, reason) => ({ template: TEMPLATE_NAMES.includes(name) ? name : null, marker, status, reason });
+      if (!marker) return result("stale", "no template marker");
+      if (compareVersions(marker, pluginVersion) >= 0) return result("current", `marker v${marker} is not older than v${pluginVersion}`);
+      if (!TEMPLATE_NAMES.includes(name)) {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and ${name} is not one of the template files`);
+      }
+      const templateText = templates?.[name];
+      if (typeof templateText !== "string") {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and the ${name} template could not be read`);
+      }
+      if (manifest?.[pluginVersion]?.[name] !== sha256(templateText)) {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and the manifest does not match the v${pluginVersion} template, so its history cannot be checked`);
+      }
+      if (unchangedSince({ manifest, name, version: marker, templateText })) {
+        return result("current", `the template is unchanged since v${marker} apart from its marker`);
+      }
+      if (!manifest?.[marker]?.[name]) {
+        return result("stale", `marker v${marker} is older than v${pluginVersion}, and the manifest has no v${marker} entry for ${name}`);
+      }
+      return result("stale", `the template changed after v${marker}`);
+    }
+    function templateStatusReport({ files, pluginVersion, manifest, templates }) {
+      const checked = files.map(({ file, name, text }) => ({
+        file,
+        ...templateFileStatus({ name, fileText: text, pluginVersion, manifest, templates })
+      }));
+      const stale = checked.filter((f) => f.status === "stale");
+      let oldest = null;
+      for (const f of stale) {
+        if (!f.marker) {
+          oldest = NO_MARKER;
+          break;
+        }
+        if (oldest === null || compareVersions(f.marker, oldest) < 0) oldest = f.marker;
+      }
+      return { version: pluginVersion, stale: stale.length > 0, oldest, files: checked };
+    }
+    module2.exports = {
+      TEMPLATE_NAMES,
+      NO_MARKER,
+      readMarker,
+      compareVersions,
+      unchangedSince,
+      templateFileStatus,
+      templateStatusReport
+    };
+  }
+});
+
 // engine/cli.cjs
 var require_cli = __commonJS({
   "engine/cli.cjs"(exports2, module2) {
@@ -20905,6 +21330,7 @@ var require_cli = __commonJS({
       rmSync,
       mkdirSync,
       statSync,
+      readdirSync,
       renameSync,
       lstatSync,
       openSync,
@@ -20982,10 +21408,28 @@ var require_cli = __commonJS({
       captureDir,
       captureDirProblem,
       armedState,
+      chooseArms,
+      sessionArms,
+      ambiguousMismatch,
+      RUNS_DIR,
       lastAssistantText,
       postSkillWrites,
       subagentStopWrites
     } = require_captureHook();
+    var {
+      SKILL_NAME,
+      RunDirError,
+      resolveRunDir,
+      ensureRunDir,
+      holderFrom,
+      identified,
+      takeLock,
+      foreignLock,
+      heldMessage,
+      releaseLock,
+      forceRelease
+    } = require_runDir();
+    var { TEMPLATE_NAMES, templateStatusReport } = require_templateStatus();
     var { repoRoot, reviewDir } = require_paths();
     function writeStdoutSync(text) {
       const buf = Buffer.from(text, "utf8");
@@ -21192,39 +21636,81 @@ var require_cli = __commonJS({
         writeFileAtomic(path, lines.slice(-STOP_BUFFER_LINES).join("\n") + "\n");
       }
     }
+    function hookRunDirs(env = process.env) {
+      if (env.AGENT_REVIEW_RUN_DIR) return [env.AGENT_REVIEW_RUN_DIR];
+      const root = captureDir(env);
+      const runs = join(root, RUNS_DIR);
+      if (captureDirError(root) || captureDirError(runs)) return [];
+      try {
+        return readdirSync(runs, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => join(runs, d.name));
+      } catch {
+        return [];
+      }
+    }
+    function liveRunArms(now, env = process.env) {
+      const arms = [];
+      for (const dir of hookRunDirs(env)) {
+        if (captureDirError(dir)) continue;
+        const arm = readJsonOrNull(join(dir, CAPTURE_FILES.arm));
+        if (armedState(arm, now)) arms.push({ dir, arm });
+      }
+      return arms;
+    }
     function runHook(name) {
       try {
-        const dir = captureDir();
-        if (captureDirError(dir)) return 0;
-        const file = (key) => join(dir, CAPTURE_FILES[key]);
-        const arm = readJsonOrNull(file("arm"));
         const now = nowSeconds();
-        if (!armedState(arm, now)) return 0;
-        const base = { payload: JSON.parse(readFileSync(0, "utf8")), arm, now, readTranscript };
+        const arms = liveRunArms(now);
+        if (arms.length === 0) return 0;
+        const payload = JSON.parse(readFileSync(0, "utf8"));
+        const base = { payload, now, readTranscript };
         if (name === "post-skill") {
-          const first = postSkillWrites({ ...base, stops: [] });
+          const choice = chooseArms({ arms, payload });
+          if (choice.kind === "ambiguous") {
+            for (const { dir: dir2, arm: arm2 } of choice.entries) {
+              const { mismatch } = ambiguousMismatch({ arm: arm2, payload, now });
+              writeFileAtomic(join(dir2, CAPTURE_FILES.mismatch), JSON.stringify(mismatch));
+            }
+            return 0;
+          }
+          if (choice.kind === "none") return 0;
+          const [{ dir, arm }] = choice.entries;
+          const file = (key) => join(dir, CAPTURE_FILES[key]);
+          const first = postSkillWrites({ ...base, arm, stops: [] });
           if (first.mismatch) writeFileAtomic(file("mismatch"), JSON.stringify(first.mismatch));
           if (first.pending) writeFileAtomic(file("pending"), JSON.stringify(first.pending));
           if (!first.pending && !first.capture) return 0;
-          const { capture } = postSkillWrites({ ...base, stops: readStops(file("stops")) });
+          const { capture } = postSkillWrites({ ...base, arm, stops: readStops(file("stops")) });
           if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
         } else if (name === "subagent-stop") {
-          const { stop } = subagentStopWrites({ ...base, pending: null, capture: null });
-          if (!stop) return 0;
-          appendStop(file("stops"), stop);
-          const pending = readJsonOrNull(file("pending"));
-          if (!pending) return 0;
-          const { capture } = subagentStopWrites({
-            ...base,
-            pending,
-            capture: readJsonOrNull(file("capture"))
-          });
-          if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
+          for (const { dir, arm } of sessionArms({ arms, payload })) {
+            const file = (key) => join(dir, CAPTURE_FILES[key]);
+            const { stop } = subagentStopWrites({ ...base, arm, pending: null, capture: null });
+            if (!stop) continue;
+            appendStop(file("stops"), stop);
+            const pending = readJsonOrNull(file("pending"));
+            if (!pending) continue;
+            const { capture } = subagentStopWrites({
+              ...base,
+              arm,
+              pending,
+              capture: readJsonOrNull(file("capture"))
+            });
+            if (capture) writeFileAtomic(file("capture"), JSON.stringify(capture));
+          }
         }
       } catch {
         return 0;
       }
       return 0;
+    }
+    function runDirFor(C, rawArgv, { create = false, env = process.env } = {}) {
+      const flagDir = flag(rawArgv, "--run-dir");
+      if (rawArgv.includes("--run-dir") && flagDir === void 0) throw new RunDirError("--run-dir needs a path");
+      const resolved = resolveRunDir({ root: C.ROOT, env, flagDir });
+      return create ? ensureRunDir(resolved, env) : resolved;
+    }
+    function hookReads(dir, env = process.env) {
+      return dir === env.AGENT_REVIEW_RUN_DIR || dirname(dir) === join(captureDir(env), RUNS_DIR);
     }
     var CAPTURE_WAIT_USAGE = `usage: agent-review capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]`;
     var CAPTURE_WAIT_EXIT = { finished: 0, waiting: 3, failed: 1 };
@@ -21242,11 +21728,14 @@ var require_cli = __commonJS({
       const ms = Number(env.AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS);
       return Number.isInteger(ms) && ms > 0 ? ms : 6e4;
     }
-    var HOOKS_DID_NOT_RUN = "the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed";
+    var HOOKS_DID_NOT_RUN = "the capture hooks saw no /code-review call for this run: restart Claude Code after installing or updating the plugin, check that plugin hooks are allowed, and check that /code-review was called from this session with the armed args";
     function mismatchReason(mismatch) {
       const rearm = "the run must be re-armed with capture arm before /code-review is called again";
       if (mismatch.reason === "no fork id") {
         return `/code-review ran in the background, but its Skill reply named no fork id, so its result cannot be captured; ${rearm}`;
+      }
+      if (mismatch.reason === "ambiguous") {
+        return `/code-review was called with args ${JSON.stringify(mismatch.got)}, which more than one review in this session armed, so its result cannot be told apart; run those reviews one at a time; ${rearm}`;
       }
       if (mismatch.reason === "wrong skill") {
         const builtIn = JSON.stringify(CODE_REVIEW_SKILL);
@@ -21254,8 +21743,7 @@ var require_cli = __commonJS({
       }
       return `/code-review was called with args ${JSON.stringify(mismatch.got)}, but capture was armed for ${JSON.stringify(mismatch.expected)}; ${rearm}`;
     }
-    function captureWait({ runId, effort, timeoutSeconds }) {
-      const dir = captureDir();
+    function captureWait({ runId, effort, timeoutSeconds, dir }) {
       const file = (key) => join(dir, CAPTURE_FILES[key]);
       const limitMinutes = CAPTURE_LIMIT_MINUTES[effort];
       const pollMs = capturePollMs();
@@ -21350,6 +21838,8 @@ var require_cli = __commonJS({
     }
     var CODE_REVIEW_PROOF_USAGE = "usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]";
     var REPORT_COMMENT_USAGE = "usage: agent-review report-comment --me <login> [--field body|id]";
+    var RUN_DIR_USAGE = "usage: agent-review run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]";
+    var TEMPLATE_STATUS_USAGE = "usage: agent-review template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]";
     var DIFF_FOR_USAGE = "usage: agent-review diff-for --diff <f> --raw <f>";
     function diffFor(diffPath, rawPath, root, excludedPaths) {
       let raw;
@@ -21411,13 +21901,16 @@ var require_cli = __commonJS({
   status --ledger <f> --plan <f> --safety <f> --human <f> --card-scan <f> [--head <sha>] [--evidence <f>]   compute approval status
   approval --report <f> --head <sha> [--rules <f> --labels <f> --label-owner bot|person|none]   decide whether a published report authorizes approving its PR
   report-comment --me <login> [--field body|id]   read every page of a PR's comments (gh api --paginate output) on stdin and print the body or id of the canonical report: the user's own marked comment, else github-actions[bot]'s (nothing when there is none; exit 1 on unreadable input)
+  template-status [--templates <dir>] [--manifest <f>] [--version <x.y.z>] [<workflow file>...]   judge whether a repo's copied agent-review workflow files are current (default: .github/workflows/agent-review*.yml under --root; templates, manifest, and version default to this plugin's): a copy is current when its template marker is not older than the version, or the template is unchanged apart from its marker since the copy's version, per the manifest; prints JSON {version, stale, oldest, files: [{file, template, marker, status, reason}]}
   human-check --config <file> --files <file> [--incomplete]   read a repo's human_approval rules (from the base config) against changed paths (JSON {required, reasons}; exit 1 on a bad config, or with --incomplete, which marks a partial file list, when the config sets any rule)
   code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> [--head <sha>] [--base <sha>] [--promote <f>]   prove the lane's raw findings match the captured /code-review result and that each is scored or dropped once (JSON; exit 1 if not); a disproof's file is read as committed at --head (default: HEAD in --root), never from the working tree; a location whose path has no "/" may name a file at --head or at --base; with --promote, copy the exact findings file it checked to <f> when ok, and remove <f> when not
-  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run: delete old capture files and write the arm file
-  capture disarm                 turn off /code-review result capture: delete the arm file and every capture file
+  run-dir [--lock <skill> [--outer] | --release <skill> | --release --force]   print this checkout's run folder, <capture dir>/runs/<checkout name>-<hash of its path>, creating it (or AGENT_REVIEW_RUN_DIR, or /tmp when AGENT_REVIEW_CI is set: those take no lock); exit 4 when another live session's run holds the checkout; --lock also takes the checkout for <skill>, replacing a hold this session left, but leaving an --outer hold of this session to its skill (--outer marks a skill that runs others inside its hold); --release ends <skill>'s hold and deletes the run's files except agent_review_report.md and automated_fixes/ (a hold another skill of this session took is left to it); --release --force deletes the lock whoever holds it
+  capture arm --run <id> --args "<args>"   turn on /code-review result capture for one review run in its run folder: delete old capture files and write the arm file with this session's id (exit 1 when another live run of this session armed the same args)
+  capture disarm                 turn off /code-review result capture for this run folder: delete the arm file and every capture file
   capture show --run <id>        print the captured /code-review result for that run exactly, with no added newline (exit 1 if there is none)
   capture-wait --run <id> --effort <${EFFORTS.join("|")}> [--timeout <seconds>]   wait up to --timeout (default 540, at most 590) for that run's capture to look finished; --effort must be the armed args' first word; print one JSON line {status, reason, stop_count, mode}; exit 0 finished, 3 not yet (run it again), 1 failed (args or skill mismatch, not armed, another effort, no hook file for the run within 60 seconds, or the effort's time limit passed)
-  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result while capture is armed (always exits 0, prints nothing)
+  hook post-skill|subagent-stop   plugin hook entry: read the hook payload on stdin and save /code-review's result into the run folder whose arm is from the same session with the same args (always exits 0, prints nothing)
+  global flags: --root <dir> (default: cwd), --review-dir <dir>, --run-dir <dir> (the run folder; default: this checkout's)
   evidence [--diff <f>] [--ast-grep <f>] [--ci <f>]   normalize deterministic review evidence
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
@@ -21435,7 +21928,7 @@ var require_cli = __commonJS({
       const out2 = [];
       for (let i = 0; i < argv.length; i++) {
         const tok = argv[i];
-        if (tok === "--root" || tok === "--review-dir") {
+        if (tok === "--root" || tok === "--review-dir" || tok === "--run-dir") {
           const v = argv[i + 1];
           if (v !== void 0 && !v.startsWith("--")) i++;
           continue;
@@ -21874,6 +22367,124 @@ var require_cli = __commonJS({
             return 1;
           }
         }
+        case "run-dir": {
+          const locking = rest.includes("--lock");
+          const releasing = rest.includes("--release");
+          const force = rest.includes("--force");
+          const outer = rest.includes("--outer");
+          const skill = flag(rest, locking ? "--lock" : "--release");
+          const tokens = [locking, releasing, skill !== void 0, force, outer].filter(Boolean).length;
+          const named = SKILL_NAME.test(skill || "");
+          if (rest.length !== tokens || outer && !locking || locking && (releasing || force || !named) || releasing && (force ? skill !== void 0 : !named) || force && !releasing) {
+            out(RUN_DIR_USAGE);
+            return 1;
+          }
+          const lockSkill = locking ? skill : void 0;
+          const releaseSkill = releasing ? skill : void 0;
+          let resolved;
+          try {
+            resolved = runDirFor(C, rawArgv, { create: true });
+          } catch (e) {
+            if (!(e instanceof RunDirError)) throw e;
+            process.stderr.write(`error: ${e.message}
+`);
+            return 1;
+          }
+          const { dir, toplevel } = resolved;
+          const now = nowSeconds();
+          if (resolved.source !== "checkout") {
+            if (!releasing) out(dir);
+            return 0;
+          }
+          const refuse = (lock) => {
+            process.stderr.write(`error: ${heldMessage(lock, { dir, toplevel, nowSeconds: now })}
+`);
+            return 4;
+          };
+          if (force) {
+            forceRelease(dir);
+            out(`released the lock on ${toplevel}`);
+            return 0;
+          }
+          if (releasing) {
+            const r = releaseLock({ dir, skill: releaseSkill, nowSeconds: now });
+            if (!r.ok) return refuse(r.lock);
+            out(r.cleaned ? `released ${toplevel} and cleaned ${dir}` : `kept ${dir}: this session's ${r.heldBy} run still holds it`);
+            return 0;
+          }
+          if (lockSkill) {
+            if (!identified(holderFrom())) {
+              process.stderr.write("warning: CLAUDE_CODE_SESSION_ID and CLAUDE_PID are not set, so this checkout is not locked\n");
+              out(dir);
+              return 0;
+            }
+            const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
+            if (!r.ok) return refuse(r.lock);
+            out(dir);
+            return 0;
+          }
+          const held = foreignLock({ dir, nowSeconds: now });
+          if (held) return refuse(held);
+          out(dir);
+          return 0;
+        }
+        case "template-status": {
+          const valueFlags = ["--templates", "--manifest", "--version"];
+          const given = rest;
+          const files = [];
+          for (let i = 0; i < given.length; i++) {
+            if (valueFlags.includes(given[i])) i++;
+            else files.push(given[i]);
+          }
+          const version = flag(rest, "--version");
+          if (files.some((f) => f.startsWith("--")) || valueFlags.some((name) => rest.includes(name) && flag(rest, name) === void 0) || version !== void 0 && !/^\d+\.\d+\.\d+$/.test(version)) {
+            out(TEMPLATE_STATUS_USAGE);
+            return 1;
+          }
+          const templatesDir = resolve(flag(rest, "--templates") || join(__dirname, "../templates/workflows"));
+          const manifestPath = resolve(flag(rest, "--manifest") || join(templatesDir, "template-manifest.json"));
+          let pluginVersion = version;
+          let manifest;
+          try {
+            pluginVersion ??= JSON.parse(readFileSync(join(__dirname, "../.claude-plugin/plugin.json"), "utf8")).version;
+            manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+          } catch (e) {
+            process.stderr.write(`template-status: ${e.message}
+`);
+            return 1;
+          }
+          const templates = {};
+          for (const name of TEMPLATE_NAMES) {
+            try {
+              templates[name] = readFileSync(join(templatesDir, name), "utf8");
+            } catch {
+            }
+          }
+          let paths = files.map((f) => resolve(C.ROOT, f));
+          if (paths.length === 0) {
+            const workflows = join(C.ROOT, ".github/workflows");
+            try {
+              paths = readdirSync(workflows).filter((f) => /^agent-review.*\.ya?ml$/.test(f)).sort().map((f) => join(workflows, f));
+            } catch {
+              paths = [];
+            }
+          }
+          const report = templateStatusReport({
+            files: paths.map((p) => {
+              let text = null;
+              try {
+                text = readFileSync(p, "utf8");
+              } catch {
+              }
+              return { file: relative(C.ROOT, p) || p, name: p.split("/").pop(), text };
+            }),
+            pluginVersion,
+            manifest,
+            templates
+          });
+          out(JSON.stringify(report));
+          return 0;
+        }
         case "report-comment": {
           const me = flag(rest, "--me");
           const field = flag(rest, "--field") || "body";
@@ -21949,7 +22560,13 @@ var require_cli = __commonJS({
             base = commitIn(C.ROOT, baseArg);
             if (!base) return refuse("config", `--base ${JSON.stringify(baseArg)} is not a commit in ${C.ROOT}`);
           }
-          const dir = captureDir();
+          let dir;
+          try {
+            dir = runDirFor(C, rawArgv).dir;
+          } catch (e) {
+            if (e instanceof RunDirError) return refuse("config", e.message);
+            throw e;
+          }
           const dirError = captureDirError(dir);
           if (dirError) return refuse("capture", dirError);
           const capturePath = join(dir, CAPTURE_FILES.capture);
@@ -22016,24 +22633,42 @@ var require_cli = __commonJS({
 `);
             return 1;
           };
-          const dir = captureDir();
+          let resolved;
+          try {
+            resolved = runDirFor(C, rawArgv, { create: sub === "arm" });
+          } catch (e) {
+            if (e instanceof RunDirError) return fail(e.message);
+            throw e;
+          }
+          const { dir } = resolved;
           const file = (key) => join(dir, CAPTURE_FILES[key]);
-          if (sub === "arm") {
-            try {
-              mkdirSync(dir, { mode: 448 });
-            } catch (e) {
-              if (e.code !== "EEXIST") return fail(`could not create capture dir ${dir}: ${e.message}`);
-            }
+          if (sub === "arm" && !hookReads(dir)) {
+            return fail(`the capture hooks never read ${dir}, so capture cannot be armed there; arm it from the checkout being reviewed`);
           }
           const dirError = captureDirError(dir);
           if (dirError) return fail(dirError);
           if (sub === "arm") {
+            const now = nowSeconds();
+            const session = holderFrom().session_id;
+            if (!session && resolved.source === "checkout") {
+              return fail(
+                "CLAUDE_CODE_SESSION_ID is not set, so the capture hooks could not tell this review's /code-review call from another session's; update Claude Code, or run the review with engine=agent-review"
+              );
+            }
+            const clash = liveRunArms(now).find(
+              (e) => e.dir !== dir && e.arm.args === args && (e.arm.session_id || null) === session
+            );
+            if (clash) {
+              return fail(
+                `another review in this session armed /code-review with the same args ${JSON.stringify(args)} (run folder ${clash.dir}). Their results cannot be told apart, so run those reviews one at a time, or disarm the other with: agent-review capture disarm --run-dir ${clash.dir}`
+              );
+            }
             for (const key of ["capture", "pending", "stops", "mismatch"]) {
               rmSync(file(key), { force: true });
             }
             writeFileAtomic(
               file("arm"),
-              JSON.stringify({ armed: true, run_id: runId, args, created: nowSeconds() })
+              JSON.stringify({ armed: true, run_id: runId, args, session_id: session, created: now })
             );
             out(`armed ${runId}: ${args}`);
             return 0;
@@ -22061,7 +22696,17 @@ var require_cli = __commonJS({
             out(CAPTURE_WAIT_USAGE);
             return 1;
           }
-          return captureWait({ runId, effort, timeoutSeconds });
+          let dir;
+          try {
+            dir = runDirFor(C, rawArgv).dir;
+          } catch (e) {
+            if (e instanceof RunDirError) {
+              out(JSON.stringify({ status: "failed", reason: e.message, stop_count: null, mode: null }));
+              return CAPTURE_WAIT_EXIT.failed;
+            }
+            throw e;
+          }
+          return captureWait({ runId, effort, timeoutSeconds, dir });
         }
         case "hook":
           return runHook(rest[0]);
@@ -22341,7 +22986,8 @@ ${USAGE}`);
       resolveMinSupport,
       planTmpPath,
       readTranscript,
-      captureWaitTimeout
+      captureWaitTimeout,
+      hookRunDirs
     };
   }
 });

@@ -1066,6 +1066,8 @@ test('startup notes leftover CI files when any of the three CI workflows remains
   }
 });
 
+// Tests may run inside a Claude Code session; its ids must not reach the CLI under test.
+const NO_SESSION = { CLAUDE_CODE_SESSION_ID: '', CLAUDE_PID: '' };
 const PROOF_USAGE = /^usage: agent-review code-review-proof --raw <f> --findings <f> --dropped <f> --run <id> \[--head <sha>\] \[--base <sha>\] \[--promote <f>\]\n$/;
 
 // Writes the lane files into dir and the capture into a private dir under it, which the
@@ -1088,14 +1090,18 @@ function proofFiles(dir, { raw, scored, dropped, result }) {
   return files;
 }
 
+// The capture dir doubles as the run folder, so the files sit where the 1.1.4 layout put them.
 function withCaptureDir(capDir, fn) {
-  const saved = process.env.AGENT_REVIEW_CAPTURE_DIR;
-  process.env.AGENT_REVIEW_CAPTURE_DIR = capDir;
+  const vars = { AGENT_REVIEW_CAPTURE_DIR: capDir, AGENT_REVIEW_RUN_DIR: capDir, ...NO_SESSION };
+  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
+  Object.assign(process.env, vars);
   try {
     return fn();
   } finally {
-    if (saved === undefined) delete process.env.AGENT_REVIEW_CAPTURE_DIR;
-    else process.env.AGENT_REVIEW_CAPTURE_DIR = saved;
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
   }
 }
 
@@ -1691,7 +1697,7 @@ function spawnCli(args, { dir, input = '', env = {} }) {
   const r = spawnSync(process.execPath, [CLI, ...args], {
     input,
     encoding: 'utf8',
-    env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir, ...env },
+    env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir, AGENT_REVIEW_RUN_DIR: dir, ...NO_SESSION, ...env },
   });
   return { code: r.status, stdout: r.stdout, stderr: r.stderr };
 }
@@ -1700,10 +1706,10 @@ function readCaptureJson(dir, name) {
   return JSON.parse(readFileSync(join(dir, name), 'utf8'));
 }
 
-function armCapture(dir, args = 'xhigh 12') {
+function armCapture(dir, args = 'xhigh 12', session = undefined) {
   writeFileSync(
     join(dir, 'agent_review_capture.json'),
-    JSON.stringify({ armed: true, run_id: 'r1', args, created: Math.floor(Date.now() / 1000) }),
+    JSON.stringify({ armed: true, run_id: 'r1', args, ...(session ? { session_id: session } : {}), created: Math.floor(Date.now() / 1000) }),
   );
 }
 
@@ -1756,7 +1762,8 @@ test('capture arm clears old capture files and writes the arm file', () => {
     assert.equal(armed.stdout, 'armed r1: xhigh  12 --max-findings all\n');
     assert.deepEqual(readdirSync(dir).sort(), ['agent_review_capture.json', 'unrelated.json']);
     const arm = readCaptureJson(dir, 'agent_review_capture.json');
-    assert.deepEqual(Object.keys(arm), ['armed', 'run_id', 'args', 'created']);
+    assert.deepEqual(Object.keys(arm), ['armed', 'run_id', 'args', 'session_id', 'created']);
+    assert.equal(arm.session_id, null, 'no session id outside Claude Code');
     assert.equal(arm.armed, true);
     assert.equal(arm.run_id, 'r1');
     assert.equal(arm.args, 'xhigh  12 --max-findings all', 'args are stored exactly');
@@ -1791,7 +1798,7 @@ test('capture arm clears old capture files and writes the arm file', () => {
 test('post-skill then subagent-stop write a capture end to end', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'ar-capture-'));
   try {
-    armCapture(dir);
+    armCapture(dir, 'xhigh 12', 's1');
     const quiet = { code: 0, stdout: '', stderr: '' };
     const skill = {
       hook_event_name: 'PostToolUse',
@@ -1806,7 +1813,7 @@ test('post-skill then subagent-stop write a capture end to end', () => {
     assert.equal(readCaptureJson(dir, 'code_review_capture.pending.json').fork_id, 'f1');
     assert.equal(existsSync(join(dir, 'code_review_capture.json')), false);
 
-    const helper = { hook_event_name: 'SubagentStop', agent_id: 'helper9', agent_type: '', last_assistant_message: 'helper', agent_transcript_path: '/t/h.jsonl' };
+    const helper = { hook_event_name: 'SubagentStop', session_id: 's1', agent_id: 'helper9', agent_type: '', last_assistant_message: 'helper', agent_transcript_path: '/t/h.jsonl' };
     assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(helper) }), quiet);
     assert.equal(existsSync(join(dir, 'code_review_capture.json')), false, 'a non-matching stop only buffers');
 
@@ -1815,7 +1822,7 @@ test('post-skill then subagent-stop write a capture end to end', () => {
       JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '- lib/cart.rb:50: wrong discount' }] } }),
       JSON.stringify({ type: 'attachment' }),
     ].join('\n') + '\n');
-    const forkStop = { hook_event_name: 'SubagentStop', agent_id: 'f1', agent_type: 'general-purpose', last_assistant_message: '', agent_transcript_path: transcript };
+    const forkStop = { hook_event_name: 'SubagentStop', session_id: 's1', agent_id: 'f1', agent_type: 'general-purpose', last_assistant_message: '', agent_transcript_path: transcript };
     assert.deepEqual(spawnCli(['hook', 'subagent-stop'], { dir, input: JSON.stringify(forkStop) }), quiet);
     const capture = readCaptureJson(dir, 'code_review_capture.json');
     assert.deepEqual(
@@ -1895,6 +1902,7 @@ test('the light hook entry and captureDir agree on the capture dir, the arm file
   assert.equal(hookCaptureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }), captureDir({ AGENT_REVIEW_CAPTURE_DIR: '' }));
   assert.equal(ARM_FILE, CAPTURE_FILES.arm);
   assert.equal(hookEntry.ARM_MAX_AGE_SECONDS, ARM_MAX_AGE_SECONDS, 'the light entry keeps its own copy of the arm age limit');
+  assert.equal(hookEntry.RUNS_DIR, require('./captureHook.cjs').RUNS_DIR, 'the light entry looks in the same runs folder');
 });
 
 // Runs the light entry with a preload that records every module loaded, to see whether the bundle was.
@@ -1907,7 +1915,7 @@ function spawnHookEntry(name, { dir, input }) {
     const r = spawnSync(process.execPath, ['--require', preload, HOOK_ENTRY, name], {
       input,
       encoding: 'utf8',
-      env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir },
+      env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: dir, AGENT_REVIEW_RUN_DIR: dir, ...NO_SESSION },
     });
     return { code: r.status, stdout: r.stdout, stderr: r.stderr, bundleLoaded: JSON.parse(readFileSync(loaded, 'utf8')).includes(BUNDLE) };
   } finally {
@@ -1973,7 +1981,7 @@ test('the hooks.json commands write a capture end to end through the light entry
     const r = spawnSync('/bin/sh', ['-c', command.command], {
       input: JSON.stringify(payload),
       encoding: 'utf8',
-      env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, AGENT_REVIEW_CAPTURE_DIR: dir },
+      env: { ...process.env, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT, AGENT_REVIEW_CAPTURE_DIR: dir, AGENT_REVIEW_RUN_DIR: dir, ...NO_SESSION },
     });
     return { code: r.status, stdout: r.stdout, stderr: r.stderr };
   };
@@ -2187,7 +2195,7 @@ test('hooks exit 0 silently when the session cwd was removed', () => {
       const r = spawnSync(
         'sh',
         ['-c', 'mkdir "$1" && cd "$1" && rmdir "$1" && shift && exec "$@"', 'sh', gone, process.execPath, CLI, ...args],
-        { input, encoding: 'utf8', env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: captureDirPath } },
+        { input, encoding: 'utf8', env: { ...process.env, AGENT_REVIEW_CAPTURE_DIR: captureDirPath, AGENT_REVIEW_RUN_DIR: captureDirPath, ...NO_SESSION } },
       );
       return { code: r.status, stdout: r.stdout, stderr: r.stderr };
     };
@@ -2479,7 +2487,7 @@ test('capture-wait fails with no arm for the run or a refused dir, and checks it
 });
 
 const HOOKS_DID_NOT_RUN =
-  'the capture hooks did not run: restart Claude Code after installing or updating the plugin, and check that plugin hooks are allowed';
+  'the capture hooks saw no /code-review call for this run: restart Claude Code after installing or updating the plugin, check that plugin hooks are allowed, and check that /code-review was called from this session with the armed args';
 const SHORT_HOOK_GRACE = { AGENT_REVIEW_CAPTURE_HOOK_GRACE_MS: '150' };
 
 test('capture-wait fails fast when no hook wrote anything for the run', () => {

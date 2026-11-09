@@ -18,9 +18,18 @@ re-reviews cheap.
 
 ## Steps
 
+Each block keeps its files in this checkout's run folder (the path `agent-review run-dir`
+prints, and step 1 shows as `run folder:`), so run every block from the PR's checkout. Step 1
+takes the checkout for the whole yolo run (`--lock yolo-review --outer`); the review and address
+runs it starts work inside that hold and leave the folder to it. When this skill stops, after step 7 or earlier on any ❌, run
+`agent-review run-dir --release yolo-review`: it frees the checkout and deletes the run's working
+files. If step 1 prints that another session's run holds the checkout, stop and show that line.
+
 1. **Preconditions** — run this block; stop on any ❌.
 
    ```bash
+   RUN_DIR=$(agent-review run-dir --lock yolo-review --outer) || exit 1; export RUN_DIR
+   echo "run folder: $RUN_DIR"
    PR_NUMBER=$(gh pr view --json number -q .number 2>/dev/null)
    [ -n "$PR_NUMBER" ] || { echo "❌ No PR for this branch — open one first (gh pr create)."; exit 1; }
    [ -z "$(git status --porcelain)" ] || { echo "❌ Working tree is dirty — commit or stash first; yolo reviews and fixes committed code only."; exit 1; }
@@ -30,7 +39,7 @@ re-reviews cheap.
    fi
    agent-review config show >/dev/null || { echo "❌ No review config — run /agent-review:init first."; exit 1; }
    START_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-   echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > /tmp/yolo_env.sh
+   echo "export PR_NUMBER=\"$PR_NUMBER\" START_TS=\"$START_TS\"" > "$RUN_DIR"/yolo_env.sh
    ```
 
 2. **Review**. Invoke `agent-review:review` with the argument `auto` (or the user's
@@ -41,21 +50,22 @@ re-reviews cheap.
 3. **Fix blockers** — read the posted ledger:
 
    ```bash
-   . /tmp/yolo_env.sh
+   RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+   . "$RUN_DIR/yolo_env.sh"
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
    # Local canonical comment: this user's own marked comment when one exists, else the bot's.
    # Anyone else's could be a forged report.
    ME=$(gh api user --jq .login 2>/dev/null || echo "")
    gh api "repos/$REPO/issues/$PR_NUMBER/comments?per_page=100" --paginate \
-     | agent-review report-comment --me "$ME" | tr -d '\r' > /tmp/yolo_report.md
-   sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' /tmp/yolo_report.md | head -1 > /tmp/yolo_ledger.json
-   REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' /tmp/yolo_report.md | head -1)
+     | agent-review report-comment --me "$ME" | tr -d '\r' > "$RUN_DIR"/yolo_report.md
+   sed -n 's/^<!-- agent-review-ledger: \(.*\) -->$/\1/p' "$RUN_DIR"/yolo_report.md | head -1 > "$RUN_DIR"/yolo_ledger.json
+   REPORTED_HEAD=$(sed -n 's/^<!-- agent-review-head: \([0-9a-f]\{7,40\}\) -->$/\1/p' "$RUN_DIR"/yolo_report.md | head -1)
    if [ -z "$REPORTED_HEAD" ] || [ "$REPORTED_HEAD" != "$(git rev-parse HEAD)" ]; then
      echo "❌ No report for the current head: the latest review or re-review failed before posting. Show its error and stop."; exit 1
    fi
-   OPEN=$(node -e 'const l=require("/tmp/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
+   OPEN=$(node -e 'const l=require(process.env.RUN_DIR + "/yolo_ledger.json"); console.log(l.filter(e=>e.status==="open"&&e.severity>=7).length)' 2>/dev/null || echo 0)
    echo "open blockers: $OPEN"
-   echo "export FIX_FROM=\"$(git rev-parse HEAD)\"" >> /tmp/yolo_env.sh
+   echo "export FIX_FROM=\"$(git rev-parse HEAD)\"" >> "$RUN_DIR"/yolo_env.sh
    ```
 
    The guard in that block uses the report only if its `<!-- agent-review-head: <sha> -->` marker
@@ -72,7 +82,8 @@ re-reviews cheap.
 4. **Re-review**. First check that address committed something:
 
    ```bash
-   . /tmp/yolo_env.sh
+   RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+   . "$RUN_DIR/yolo_env.sh"
    if [ "$(git rev-parse HEAD)" = "$FIX_FROM" ]; then
      echo "no new commit: address changed nothing, so there is nothing to re-review"
    fi
@@ -94,7 +105,8 @@ re-reviews cheap.
    `agent-review-approve.yml` (0.7.0+). Read the posted status:
 
    ```bash
-   . /tmp/yolo_env.sh
+   RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
+   . "$RUN_DIR/yolo_env.sh"
    REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
    # Local canonical comment: this user's own marked comment when one exists, else the bot's.
    # Anyone else's could be a forged report.
@@ -123,10 +135,11 @@ re-reviews cheap.
    fi
    ```
 
-7. **Report** — one of: approved by the bot; ledger passes, no approval (say which of the two
-   causes above applies if you can tell from `gh run list --workflow "agent-review approve"`);
+7. **Report** — first run `agent-review run-dir --release yolo-review`. Then report one of:
+   approved by the bot; ledger passes, no approval (say which of the two causes above applies
+   if you can tell from `gh run list --workflow "agent-review approve"`);
    `N` blockers remain that could not be fixed (list each with its number, file:line, and the
    reason the fix was not applied); or a person must approve (`humanRequired` is true; give the reasons).
    If the change is irreversible, add the caution: a revert will not undo it, so check backups and the deploy plan before merging.
    End with the open suggestions (severity < 7) as a plain list. Do not run anything under
-   `/tmp/automated_fixes`.
+   `$RUN_DIR/automated_fixes`.
