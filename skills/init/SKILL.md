@@ -326,8 +326,9 @@ that gate review (`.claude/review/config.yml`, `.claude/review/learnings/learnin
 `.claude/settings.json`) are worth `2`-`3` points, because weakening them weakens every future
 review. A `.claude/review/**` glob is fine too, but only because the skeleton's `excluded_paths`
 keep out the bookkeeping files: `learnings/feedback.jsonl`, which `/agent-review:address` commits
-to PRs, and the `metrics/` and `index/` files reviews write. Keep those exclusions; without them a
-small fix scores as critical.
+to PRs, the `metrics/` and `index/` files reviews write, and the learning loop's local scratch
+(`learnings/pending/` and `learnings/findings.json`). Keep those exclusions; without them a small
+fix scores as critical.
 
 **Docker images.** If a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`) and
 `.dockerignore` does not already leave them out, propose adding `/.claude`, `**/CLAUDE.md`, and

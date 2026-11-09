@@ -3299,9 +3299,9 @@ test('the dashboard calls its score mean finding severity, averages the last 10 
   }
 });
 
-test("yolo-review's clean-tree check and the review's dirty warning skip only the review's own files, under bash and zsh", (t) => {
-  const { writeFileSync } = require('node:fs');
-  const filter = `grep -vE '${REVIEW_SCRATCH.replace('^', '^.. ')}'`;
+test("yolo-review's clean-tree check and the review's dirty warning skip only the review's own unstaged files, under bash and zsh", (t) => {
+  const { writeFileSync, rmSync: rm } = require('node:fs');
+  const filter = `grep -vE '${REVIEW_SCRATCH.replace('^', '^(\\?\\?| [A-Z]) ')}'`;
   const check = `[ -z "$(git status --porcelain --untracked-files=all | ${filter})" ]`;
   const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
@@ -3314,22 +3314,37 @@ test("yolo-review's clean-tree check and the review's dirty warning skip only th
       const clean = () => execFileSync(shell, ['-c', `${check} && echo clean || echo dirty`], { cwd: dir, encoding: 'utf8' }).trim();
       git('init', '-q');
       mkdirSync(join(dir, '.claude/review/learnings/pending'), { recursive: true });
+      mkdirSync(join(dir, '.claude/review/metrics/history'), { recursive: true });
       writeFileSync(join(dir, '.claude/review/config.yml'), 'version: 1\n');
       writeFileSync(join(dir, '.claude/review/learnings/feedback.jsonl'), '');
+      writeFileSync(join(dir, '.claude/review/metrics/severity_history.txt'), '1 2.0 d\n'); // committed by an older review
       git('add', '.');
       git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
-      mkdirSync(join(dir, '.claude/review/metrics/history'), { recursive: true });
       mkdirSync(join(dir, '.claude/review/index'), { recursive: true });
       writeFileSync(join(dir, '.claude/review/metrics/history/2026-11-09_1.json'), '{}\n');
       writeFileSync(join(dir, '.claude/review/index/graph.json'), '{}\n');
       writeFileSync(join(dir, '.claude/review/learnings/pending/1-1.yml'), 'findings: []\n');
       writeFileSync(join(dir, '.claude/review/learnings/findings.json'), '{}\n');
-      assert.equal(clean(), 'clean', `${shell}: the review's own files are not changes`);
+      writeFileSync(join(dir, '.claude/review/metrics/severity_history.txt'), '1 2.0 d\n2 3.0 d\n');
+      assert.equal(clean(), 'clean', `${shell}: the review's own untracked and unstaged output is not a change`);
       writeFileSync(join(dir, '.claude/review/learnings/feedback.jsonl'), '{}\n');
       assert.equal(clean(), 'dirty', `${shell}: an uncommitted feedback.jsonl is a change`);
       git('checkout', '--', '.claude/review/learnings/feedback.jsonl');
       writeFileSync(join(dir, '.claude/review/learnings/findings.json.bak'), '{}\n');
       assert.equal(clean(), 'dirty', `${shell}: a lookalike name is a change`);
+      rm(join(dir, '.claude/review/learnings/findings.json.bak'));
+      assert.equal(clean(), 'clean', shell);
+      git('rm', '--cached', '--quiet', '--', '.claude/review/metrics/severity_history.txt');
+      assert.equal(clean(), 'dirty', `${shell}: a staged deletion, as update-files' untrack step leaves, is a change`);
+      git('reset', '-q');
+      assert.equal(clean(), 'clean', shell);
+      mkdirSync(join(dir, 'src'));
+      git('mv', '.claude/review/metrics/severity_history.txt', 'src/history.txt');
+      assert.ok(git('status', '--porcelain').includes('.claude/review/metrics/severity_history.txt -> src/history.txt'), `${shell}: git shows the rename`);
+      assert.equal(clean(), 'dirty', `${shell}: a staged rename out of a bookkeeping path is a change`);
+      git('reset', '-q', '--hard');
+      git('add', '--', '.claude/review/learnings/findings.json');
+      assert.equal(clean(), 'dirty', `${shell}: a staged bookkeeping file is a change`);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -3348,10 +3363,15 @@ test('update-files adds the same bookkeeping lines as init, once each, and recor
   const block = bashBlockList(stage1B)[0];
   assert.ok(block.startsWith('UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1\n'));
   const flat = update.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('if the repo has a root `Dockerfile`, read `.dockerignore`'), 'the .dockerignore lines are proposed only with a root Dockerfile');
+  assert.ok(flat.includes('as init does, check whether a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`). If one does, read `.dockerignore`.'), 'the .dockerignore lines are proposed on the same condition as init');
+  assert.ok(readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8').replace(/\s+/g, ' ').includes('If a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`)'), 'which is init\'s condition');
   assert.ok(flat.includes('Ask before you run the block below.'));
   assert.ok(flat.includes('On a yes, run `git rm -r --cached --quiet -- <each tracked path>`. Never drop `--cached`.'));
-  assert.ok(flat.includes('If every file is current and Stage 1B changed nothing, say so, run the **Clean up** block'));
+  assert.ok(flat.includes('If every file is current and Stage 1B added no line and untracked nothing, say so, run the **Clean up** block'));
+  assert.ok(flat.includes('If every file is current but Stage 1B added a line or untracked a file, skip Stage 3 and go to Stage 4.'), 'Stage 3 is skipped only when every workflow file is current');
+  assert.ok(!flat.includes('If Stage 1B changed something, skip Stage 3'), 'never on Stage 1B alone');
+  assert.ok(flat.includes('Stage by name: the workflow files this skill wrote, `.claude/review/config.yml` when the user accepted the `rollout.mode` change, and each file in `bookkeeping_changed.txt`'), 'the accepted config change goes in the same commit');
+  assert.ok(flat.includes("once the PR merges, each teammate's next pull deletes their copies"), 'the untrack offer says what it does to teammates');
   assert.ok(flat.includes('commit with `chore: keep agent-review bookkeeping out of git`'));
   assert.ok(flat.includes('Never `git add -A` or `git add .`.'));
   const diff = bashBlockList(update.slice(update.indexOf('### Diff and PR'))).find((b) => b.includes('git diff HEAD -- .github/workflows/'));

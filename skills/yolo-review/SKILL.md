@@ -40,7 +40,7 @@ holds the checkout, show that line and stop: this run took nothing, so there is 
    PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}"
    [ -n "$PR_REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }
    agent-review run-dir --lock-pr "$PR_REPO#$PR_NUMBER" >/dev/null || exit 1
-   [ -z "$(git status --porcelain --untracked-files=all | grep -vE '^.. \.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\.json$)')" ] \
+   [ -z "$(git status --porcelain --untracked-files=all | grep -vE '^(\?\?| [A-Z]) \.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\.json$)')" ] \
      || { echo "❌ Working tree is dirty. Commit or stash first; yolo reviews and fixes committed code only."; exit 1; }
    HEAD_REF=$(gh pr view "$PR_NUMBER" --json headRefOid -q .headRefOid)
    if [ "$(git rev-parse HEAD)" != "$HEAD_REF" ]; then

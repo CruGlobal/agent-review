@@ -314,7 +314,7 @@ if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
     echo "❌ Local HEAD is ahead of the PR head ($HEAD_REF). Push first, then re-run. The review records the PR head and the approval workflow compares against it."
     exit 1
   fi
-  [ -z "$(git status --porcelain --untracked-files=all | grep -vE '^.. \.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\.json$)')" ] \
+  [ -z "$(git status --porcelain --untracked-files=all | grep -vE '^(\?\?| [A-Z]) \.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\.json$)')" ] \
     || echo "⚠️  Working tree is dirty: only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
 fi
 PREV_COMMENT=""

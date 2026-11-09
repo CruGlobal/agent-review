@@ -73,9 +73,11 @@ test("the config template keeps agent-review's bookkeeping out of the risk score
       '.claude/review/metrics/severity_history.txt',
       '.claude/review/metrics/history/2026-11-03_12.json',
       '.claude/review/index/graph.json',
+      '.claude/review/learnings/pending/12-1700000000.yml',
+      '.claude/review/learnings/findings.json',
     ]),
     0,
-    'feedback.jsonl, metrics and the index cache are excluded',
+    "feedback.jsonl, metrics, the index cache and the learning loop's scratch are excluded",
   );
   assert.equal(score(['.claude/review/config.yml']), 3, 'the config still scores');
   assert.equal(score(['.claude/review/learnings/learnings.yml']), 3, 'ratified learnings still score');

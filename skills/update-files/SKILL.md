@@ -49,10 +49,11 @@ grep -h '^# agent-review-template-version:' "$UPDATE_DIR"/*.yml | sort -u
 up by an older init can lack some of them, and then every review leaves untracked files behind.
 Add the missing ones here. This runs in every repo, local-only included, whatever Stage 2 finds.
 
-First, if the repo has a root `Dockerfile`, read `.dockerignore`. If it lacks any of `/.claude`,
-`**/CLAUDE.md`, or `**/AGENTS.md` as a whole line, propose adding the missing ones, so the rule
-docs, the seeded-bug eval patches, and the agent guides stay out of the image. Ask before you run
-the block below. With no root `Dockerfile`, skip the question.
+First, as init does, check whether a `Dockerfile` copies the whole tree (`COPY . .` or
+`ADD . .`). If one does, read `.dockerignore`. If it lacks any of `/.claude`, `**/CLAUDE.md`, or
+`**/AGENTS.md` as a whole line, propose adding the missing ones, so the rule docs, the seeded-bug
+eval patches, and the agent guides stay out of the image. Ask before you run the block below.
+When no `Dockerfile` copies the whole tree, skip the question.
 
 Each line is added once, on its own line, and only when no line in the file matches it exactly.
 The block records each file it changes, and which of those already had uncommitted changes, for
@@ -83,8 +84,11 @@ If the user said yes to the `.dockerignore` lines, also run `add_line .dockerign
 `add_line .dockerignore '**/CLAUDE.md'`, and `add_line .dockerignore '**/AGENTS.md'` in that block.
 
 An ignore line does not untrack a file git already tracks, so each `tracked:` path is a committed
-file that reviews keep changing. List them and offer to untrack them. The local copies stay.
-On a yes, run `git rm -r --cached --quiet -- <each tracked path>`. Never drop `--cached`.
+file that reviews keep changing. List them and offer to untrack them. Say in the offer that
+`--cached` keeps only this checkout's copies: once the PR merges, each teammate's next pull deletes
+their copies, review history in `severity_history.txt` included, and the pull stops if they have
+local changes to one of those files. On a yes, run
+`git rm -r --cached --quiet -- <each tracked path>`. Never drop `--cached`.
 
 Report the lines added, by file, and any files untracked. If `bookkeeping_dirty.txt` lists a file,
 say that it had other uncommitted changes before this stage.
@@ -139,10 +143,10 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   user also wants locally posted reports to approve: that trusts a writer's posted report, a
   stronger grant than the CI path.
 
-If every file is current and Stage 1B changed nothing, say so, run the **Clean up** block at the
-end of this skill, and stop here. If Stage 1B changed something, skip Stage 3 and go to Stage 4.
-In a local-only repo, do not stop before the removal check in Stage 4 if any CI file is still
-installed.
+If every file is current and Stage 1B added no line and untracked nothing, say so, run the
+**Clean up** block at the end of this skill, and stop here. If every file is current but Stage 1B
+added a line or untracked a file, skip Stage 3 and go to Stage 4. In a local-only repo, do not stop
+before the removal check in Stage 4 if any CI file is still installed.
 
 ## Stage 3 — Carry over the repo's own settings
 
@@ -218,7 +222,7 @@ leave them and say they will keep running CI reviews on labeled PRs.
 
 ```bash
 UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1
-git diff HEAD -- .github/workflows/
+git diff HEAD -- .github/workflows/ .claude/review/config.yml
 touch "$UPDATE_DIR"/bookkeeping_changed.txt
 while IFS= read -r f; do
   if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then git diff HEAD -- "$f"; else echo "new file $f:"; cat -- "$f"; fi
@@ -228,20 +232,20 @@ git diff --cached --name-status --diff-filter=D -- .claude/review/
 
 Walk the user through what changed and why (new inputs, permissions, version marker), and name
 any removed CI files, the bookkeeping lines Stage 1B added, and any files it untracked. An
-approve file updated from before 1.1.2 gains a `pull_request_target` trigger and a `withdraw` job: on new commits, a reopen, or a base change, the bot takes back its
-approval of an older commit unless the push only merged in the default branch. Say so, and that
-the job never checks out or runs
-the PR's code. It runs from the default branch, so it starts working once the update PR merges.
-Then ask
-before touching git history: offer to create a branch, commit with
+approve file updated from before 1.1.2 gains a `pull_request_target` trigger and a `withdraw`
+job: on new commits, a reopen, or a base change, the bot takes back its approval of an older
+commit unless the push only merged in the default branch. Say so, and that the job never checks
+out or runs the PR's code. It runs from the default branch, so it starts working once the update
+PR merges. Then ask before touching git history: offer to create a branch, commit with
 `chore: update agent-review workflows to v<LATEST>`, push, and open a PR. If the PR only removes
 CI files from a local-only repo, with no template updates, commit with
 `chore: remove agent-review CI workflows from a local-only repo` instead. If it does both, keep
 the update message and mention the removal in the PR body. If the PR only adds bookkeeping lines
 or untracks bookkeeping files, commit with `chore: keep agent-review bookkeeping out of git`;
 when it also updates or removes workflows, keep that message and mention the bookkeeping changes
-in the PR body. Stage by name: the workflow files this skill wrote and each file in
-`bookkeeping_changed.txt` (the `git rm` removals are already staged). Never `git add -A` or
+in the PR body. Stage by name: the workflow files this skill wrote, `.claude/review/config.yml`
+when the user accepted the `rollout.mode` change, and each file in `bookkeeping_changed.txt` (the
+`git rm` removals are already staged). Never `git add -A` or
 `git add .`. Stage a file that `bookkeeping_dirty.txt` lists only on the user's yes, since its
 other changes would go into the commit too. Never commit to the
 default branch directly, and never push without the user's go-ahead.

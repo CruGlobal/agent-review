@@ -751,7 +751,7 @@ pinned refs), shows the diff, and offers a PR. If the fresh caller says `advisor
 the same PR, because the reusable workflow refuses a caller whose mode disagrees with config.
 It also adds any `.gitignore` and `.gitattributes` lines `/agent-review:init` writes that the repo
 lacks, offers to untrack review files a repo committed before it ignored them, and offers the
-`.dockerignore` lines when the repo has a root `Dockerfile`.
+`.dockerignore` lines when a `Dockerfile` copies the whole tree.
 Reviews flag both kinds of staleness automatically: the report gains a footer when a repo's
 workflow files are behind the templates, and local runs note when the installed plugin is behind
 the latest version. `agent-review template-status` makes the workflow-file call. A copy is stale
