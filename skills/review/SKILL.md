@@ -1353,6 +1353,7 @@ echo "🔧 Extracting automated fixes from agent reports..."
 node -e '
 const fs = require("fs");
 const dir = process.env.RUN_DIR + "/automated_fixes";
+const FIX_NAME = /^fix_[0-9]+_[a-z0-9_-]+\.sh$/;
 let names = [];
 try { names = fs.readdirSync(dir); } catch {}
 for (const name of names) {
@@ -1362,10 +1363,10 @@ for (const name of names) {
     console.log("⚠️  removed a fix script that is a symlink: " + JSON.stringify(name));
     continue;
   }
-  if (/^fix_[0-9]+_[a-z0-9_-]+\.sh$/.test(name)) continue;
+  if (FIX_NAME.test(name)) continue;
   fs.rmSync(dir + "/" + name, { recursive: true, force: true });
   const lower = name.toLowerCase();
-  const fix = /^fix_[0-9]+_[a-z0-9_-]+\.sh$/.test(lower) ? "; rename it to " + JSON.stringify(lower) : "";
+  const fix = FIX_NAME.test(lower) ? "; rename it to " + JSON.stringify(lower) : "";
   console.log("⚠️  removed a fix script named " + JSON.stringify(name) + ": a name must be fix_<number>_<category>.sh, with the category only lowercase letters, digits, _ or -" + fix);
 }
 '
