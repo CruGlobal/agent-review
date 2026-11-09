@@ -20957,6 +20957,7 @@ var require_runDir = __commonJS({
     var LOCK_FILE = "run.lock";
     var LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
     var LOCKS_DIR = "locks";
+    var PRUNE_AGE_SECONDS = 604800;
     var PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
     var CI_RUN_DIR = "/tmp";
     var SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
@@ -21186,7 +21187,7 @@ var require_runDir = __commonJS({
       const r = takeLock({ dir, skill: checkout.skill, toplevel: checkout.checkout, pr, env, nowSeconds, isAlive });
       return { ok: r.ok, lock: r.lock };
     }
-    function releasePrLocks({ env = process.env, skill, nowSeconds, isAlive = pidAlive }) {
+    function releasePrLocks({ env = process.env, toplevel, nowSeconds, isAlive = pidAlive }) {
       const root = captureDir(env);
       const locks = join(root, LOCKS_DIR);
       if (dirProblem(root) || dirProblem(locks)) return;
@@ -21195,13 +21196,71 @@ var require_runDir = __commonJS({
         const dir = join(locks, name);
         if (dirProblem(dir)) continue;
         const { generation, lock } = currentLock(dir);
-        if (lock && lock.skill === skill && lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me)) {
+        if (lock && lock.checkout === toplevel && lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me)) {
           removeLocks(dir, generation + 1);
         }
       }
     }
     function forceReleasePr(env, pr) {
-      removeLocks(prLockDir(env, pr));
+      const dir = prLockDir(env, pr);
+      const root = captureDir(env);
+      for (const d of [root, join(root, LOCKS_DIR), dir]) {
+        const problem = dirProblem(d);
+        if (problem === `${d} does not exist`) return;
+        if (problem) throw new RunDirError(problem);
+      }
+      removeLocks(dir);
+    }
+    function lstatOrNull(path) {
+      try {
+        return lstatSync(path);
+      } catch {
+        return null;
+      }
+    }
+    function realDirOwnedBy(path, uid) {
+      try {
+        const stat = lstatSync(path);
+        return stat.isDirectory() && stat.uid === uid ? stat : null;
+      } catch {
+        return null;
+      }
+    }
+    function newestMtimeSeconds(dir, stat) {
+      let newest = stat.mtimeMs / 1e3;
+      for (const name of readdirSync(dir)) {
+        newest = Math.max(newest, lstatSync(join(dir, name)).mtimeMs / 1e3);
+      }
+      return newest;
+    }
+    function pruneRuns({ env = process.env, nowSeconds, keep, isAlive = pidAlive, uid = process.getuid() }) {
+      const removed = [];
+      const root = captureDir(env);
+      const inside = (parent, old) => {
+        let names = [];
+        if (captureDirProblem(lstatOrNull(parent), uid)) return;
+        try {
+          names = readdirSync(parent);
+        } catch {
+          return;
+        }
+        for (const name of names) {
+          const dir = join(parent, name);
+          if (dir === keep) continue;
+          try {
+            const stat = realDirOwnedBy(dir, uid);
+            if (!stat || lockIsLive(currentLock(dir).lock, nowSeconds, isAlive)) continue;
+            if (old && nowSeconds - newestMtimeSeconds(dir, stat) <= PRUNE_AGE_SECONDS) continue;
+            rmSync(dir, { recursive: true, force: true });
+            removed.push(dir);
+          } catch {
+          }
+        }
+      };
+      if (captureDirProblem(lstatOrNull(root), uid)) return { removed };
+      inside(join(root, RUNS_DIR), true);
+      inside(join(root, LOCKS_DIR), false);
+      return { removed };
     }
     function prHeldMessage(lock, { pr, nowSeconds }) {
       const { skill, session, started } = lockHolder(lock, nowSeconds);
@@ -21252,6 +21311,7 @@ var require_runDir = __commonJS({
       LOCK_FILE,
       LOCK_MAX_AGE_SECONDS,
       LOCKS_DIR,
+      PRUNE_AGE_SECONDS,
       PR_REF,
       CI_RUN_DIR,
       KEPT_AFTER_RUN,
@@ -21278,6 +21338,7 @@ var require_runDir = __commonJS({
       takePrLock,
       releasePrLocks,
       forceReleasePr,
+      pruneRuns,
       prHeldMessage
     };
   }
@@ -21484,6 +21545,7 @@ var require_cli = __commonJS({
       takePrLock,
       releasePrLocks,
       forceReleasePr,
+      pruneRuns,
       prHeldMessage
     } = require_runDir();
     var { TEMPLATE_NAMES, templateStatusReport } = require_templateStatus();
@@ -22462,7 +22524,14 @@ var require_cli = __commonJS({
             return 4;
           };
           if (force && prGiven) {
-            forceReleasePr(process.env, pr);
+            try {
+              forceReleasePr(process.env, pr);
+            } catch (e) {
+              if (!(e instanceof RunDirError)) throw e;
+              process.stderr.write(`error: ${e.message}
+`);
+              return 1;
+            }
             out(`released the lock on PR ${pr}`);
             return 0;
           }
@@ -22474,7 +22543,7 @@ var require_cli = __commonJS({
           if (releasing) {
             const r = releaseLock({ dir, skill: releaseSkill, nowSeconds: now });
             if (!r.ok) return refuse(r.lock);
-            if (r.cleaned) releasePrLocks({ skill: releaseSkill, nowSeconds: now });
+            if (r.cleaned) releasePrLocks({ toplevel, nowSeconds: now });
             out(r.cleaned ? `released ${toplevel} and cleaned ${dir}` : `kept ${dir}: this session's ${r.heldBy} run still holds it`);
             return 0;
           }
@@ -22505,6 +22574,7 @@ var require_cli = __commonJS({
             }
             const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
             if (!r.ok) return refuse(r.lock);
+            pruneRuns({ nowSeconds: now, keep: dir });
             out(dir);
             return 0;
           }

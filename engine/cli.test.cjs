@@ -14,6 +14,7 @@ const {
   symlinkSync,
   lstatSync,
   realpathSync,
+  utimesSync,
 } = require('node:fs');
 const { join, relative, dirname } = require('node:path');
 const os = require('node:os');
@@ -27,6 +28,7 @@ const {
   captureWaitTimeout,
 } = require('./cli.cjs');
 const { buildPlan } = require('./plan.cjs');
+const { runDirName } = require('./runDir.cjs');
 const { looksFinished } = require('./codeReviewProof.cjs');
 const { EFFORTS } = require('./vocabulary.cjs');
 
@@ -2788,6 +2790,29 @@ test('run-dir --release cleans the PR lock the skill took', () => {
     assert.equal(runDirIn(t.b, t.cap, ['--release', 'review'], two).code, 0);
     const prDir = join(t.cap, 'locks', 'cruglobal_agent-review_48');
     assert.deepEqual(readdirSync(prDir).filter((f) => f.startsWith('run.lock')), [], 'the review freed it in turn');
+  } finally {
+    t.cleanup();
+  }
+});
+
+test('run-dir --lock prunes an old run folder of another checkout', () => {
+  const t = twoWorktrees();
+  try {
+    const one = sessionEnv('session-one', process.pid);
+    const runs = join(t.cap, 'runs');
+    const old = join(runs, 'gone-0123456789ab');
+    const fresh = join(runs, 'fresh-0123456789ab');
+    mkdirSync(runs, { recursive: true, mode: 0o700 });
+    for (const d of [old, fresh]) mkdirSync(d, { mode: 0o700 });
+    const eightDays = new Date(Date.now() - 8 * 86400 * 1000);
+    utimesSync(old, eightDays, eightDays);
+    const r = runDirIn(t.a, t.cap, ['--lock', 'review'], one);
+    assert.deepEqual([r.code, r.stderr], [0, '']);
+    const own = join(runs, runDirName(t.a));
+    assert.equal(r.stdout, `${own}\n`, 'it prints only the run folder');
+    assert.equal(existsSync(old), false);
+    assert.equal(existsSync(fresh), true);
+    assert.equal(existsSync(own), true, 'its own folder stays');
   } finally {
     t.cleanup();
   }

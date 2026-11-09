@@ -15,6 +15,7 @@ const {
   existsSync,
   realpathSync,
   chmodSync,
+  utimesSync,
 } = require('node:fs');
 const { join, basename } = require('node:path');
 const os = require('node:os');
@@ -39,6 +40,8 @@ const {
   takePrLock,
   releasePrLocks,
   forceReleasePr,
+  pruneRuns,
+  PRUNE_AGE_SECONDS,
   prHeldMessage,
 } = require('./runDir.cjs');
 
@@ -465,23 +468,22 @@ test('the PR lock belongs to the skill that holds the checkout', () => {
     const { one, two, runA, runB, prDir } = twoHeldCheckouts(cap);
     const lock = (skill, outer = false) => takeLock({ dir: runA, skill, toplevel: '/w/a', outer, env: one, nowSeconds: NOW, isAlive: alive });
     const takePr = (runDir, env) => takePrLock({ runDir, pr: PR, env, nowSeconds: NOW, isAlive: alive });
-    const releasePrs = (env, skill) => releasePrLocks({ env, skill, nowSeconds: NOW, isAlive: alive });
+    const releasePrs = (env, toplevel) => releasePrLocks({ env, toplevel, nowSeconds: NOW, isAlive: alive });
     assert.equal(lock('yolo-review', true).taken, true);
     for (const skill of ['review', 'address']) {
       assert.equal(lock(skill).taken, false, `${skill} runs inside yolo-review's hold`);
       const taken = takePr(runA, one);
       assert.deepEqual([taken.ok, taken.lock.skill], [true, 'yolo-review'], `${skill} takes the PR for yolo-review`);
       assert.deepEqual(releaseLock({ dir: runA, skill, env: one, nowSeconds: NOW, isAlive: alive }), { ok: true, cleaned: false, heldBy: 'yolo-review' });
-      releasePrs(one, skill);
       assert.equal(currentLock(prDir).lock.skill, 'yolo-review', `${skill} leaves the PR to yolo-review`);
       assert.equal(takePr(runB, two).ok, false, 'no other checkout gets the PR in between');
     }
     assert.equal(releaseLock({ dir: runA, skill: 'yolo-review', env: one, nowSeconds: NOW, isAlive: alive }).cleaned, true);
-    releasePrs(one, 'yolo-review');
+    releasePrs(one, '/w/a');
     assert.deepEqual(lockGenerations(prDir), []);
 
     assert.equal(takePr(runB, two).ok, true);
-    releasePrs(one, 'review');
+    releasePrs(one, '/w/a');
     assert.equal(currentLock(prDir).lock.session_id, 'session-two', "another session's PR lock is never freed");
   });
 });
@@ -540,5 +542,241 @@ test('a symlinked or group-writable locks folder is refused', () => {
     symlinkSync(elsewhere, prLockDir(one, PR));
     assert.throws(take, (e) => e instanceof RunDirError && /cruglobal_agent-review_48 is a symlink/.test(e.message));
     assert.deepEqual(readdirSync(elsewhere), [], 'nor through a linked PR folder');
+  });
+});
+
+test('a release frees the PR locks taken from that checkout, even those a stopped run left', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, runA, prDir } = twoHeldCheckouts(cap);
+    const pr2 = prLockDir(one, 'CruGlobal/agent-review#49');
+    const releasePrs = (toplevel) => releasePrLocks({ env: one, toplevel, nowSeconds: NOW, isAlive: alive });
+    assert.equal(takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    takeLock({ dir: runA, skill: 'address', toplevel: '/w/a', env: one, nowSeconds: NOW, isAlive: alive });
+    assert.equal(takePrLock({ runDir: runA, pr: 'CruGlobal/agent-review#49', env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    assert.deepEqual([currentLock(prDir).lock.skill, currentLock(pr2).lock.skill], ['review', 'address']);
+
+    releasePrs('/w/other');
+    assert.deepEqual([lockGenerations(prDir), lockGenerations(pr2)], [[1], [1]], 'another checkout frees nothing');
+    releasePrs('/w/a');
+    assert.deepEqual([lockGenerations(prDir), lockGenerations(pr2)], [[], []], "the stopped review's PR goes with address's");
+  });
+});
+
+test("a release in one checkout leaves this session's PR lock taken from another checkout", () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const runA = runFolder(cap, 'repo-a-0123456789ab');
+    const runB = runFolder(cap, 'repo-b-0123456789ab');
+    const hold = (dir, toplevel) => takeLock({ dir, skill: 'review', toplevel, env: one, nowSeconds: NOW, isAlive: alive });
+    hold(runA, '/w/a');
+    hold(runB, '/w/b');
+    const prB = 'CruGlobal/agent-review#50';
+    assert.equal(takePrLock({ runDir: runB, pr: prB, env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    releasePrLocks({ env: one, toplevel: '/w/a', nowSeconds: NOW, isAlive: alive });
+    assert.deepEqual(lockGenerations(prLockDir(one, prB)), [1]);
+    releasePrLocks({ env: one, toplevel: '/w/b', nowSeconds: NOW, isAlive: alive });
+    assert.deepEqual(lockGenerations(prLockDir(one, prB)), []);
+  });
+});
+
+test('releasePrLocks skips a symlinked entry under locks and keeps a newer generation', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, runA, prDir } = twoHeldCheckouts(cap);
+    assert.equal(takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    const elsewhere = join(cap, 'elsewhere');
+    mkdirSync(elsewhere, { mode: 0o700 });
+    const mine = { ...one, CLAUDE_PID: '111' };
+    writeFileSync(join(elsewhere, `${LOCK_FILE}.1`), JSON.stringify({ ...holderFrom(mine), skill: 'review', checkout: '/w/a', created: NOW }));
+    symlinkSync(elsewhere, join(cap, 'locks', 'linked'));
+    let raced = false;
+    releasePrLocks({
+      env: one,
+      toplevel: '/w/a',
+      nowSeconds: NOW,
+      isAlive: () => {
+        if (!raced) {
+          raced = true;
+          writeFileSync(join(prDir, `${LOCK_FILE}.2`), JSON.stringify({ session_id: 'session-two', claude_pid: 222, skill: 'review', checkout: '/w/b', created: NOW }));
+        }
+        return true;
+      },
+    });
+    assert.deepEqual(readdirSync(elsewhere), [`${LOCK_FILE}.1`], 'nothing is removed through the link');
+    assert.deepEqual(lockGenerations(prDir), [2], "the newer generation is another session's and survives");
+  });
+});
+
+test('forceReleasePr follows no symlink, ignores a missing folder, and refuses a bad one', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    assert.doesNotThrow(() => forceReleasePr(one, PR), 'no capture folder at all');
+    mkdirSync(cap, { recursive: true, mode: 0o700 });
+    mkdirSync(join(cap, 'locks'), { mode: 0o700 });
+    assert.doesNotThrow(() => forceReleasePr(one, PR), 'no PR folder');
+
+    const elsewhere = join(cap, 'elsewhere');
+    mkdirSync(elsewhere, { mode: 0o700 });
+    writeFileSync(join(elsewhere, `${LOCK_FILE}.1`), '{}');
+    symlinkSync(elsewhere, prLockDir(one, PR));
+    assert.throws(() => forceReleasePr(one, PR), (e) => e instanceof RunDirError && /is a symlink/.test(e.message));
+    rmSync(prLockDir(one, PR));
+    rmSync(join(cap, 'locks'), { recursive: true });
+    symlinkSync(elsewhere, join(cap, 'locks'));
+    assert.throws(() => forceReleasePr(one, PR), (e) => e instanceof RunDirError && /locks is a symlink/.test(e.message));
+    assert.deepEqual(readdirSync(elsewhere), [`${LOCK_FILE}.1`], 'nothing is removed through a link');
+  });
+});
+
+const DAY = 86400;
+const age = (path, seconds) => utimesSync(path, NOW - seconds, NOW - seconds);
+
+// A capture root with `runs/` and `locks/`; folders are aged past the prune age unless noted.
+function pruneRoot(cap) {
+  for (const d of [cap, join(cap, 'runs'), join(cap, 'locks')]) mkdirSync(d, { recursive: true, mode: 0o700 });
+  return { env: { AGENT_REVIEW_CAPTURE_DIR: cap }, runs: join(cap, 'runs'), locks: join(cap, 'locks') };
+}
+
+function oldRun(runs, name, { files = ['pr_diff.txt'], seconds = PRUNE_AGE_SECONDS + DAY } = {}) {
+  const dir = join(runs, name);
+  mkdirSync(dir, { mode: 0o700 });
+  for (const f of files) {
+    writeFileSync(join(dir, f), 'x');
+    age(join(dir, f), seconds);
+  }
+  age(dir, seconds);
+  return dir;
+}
+
+const prune = (env, extra = {}) => pruneRuns({ env, nowSeconds: NOW, isAlive: alive, ...extra });
+
+test('prune removes a run folder untouched for 7 days with no live lock', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs } = pruneRoot(cap);
+    assert.equal(PRUNE_AGE_SECONDS, 604800);
+    const old = oldRun(runs, 'old-0123456789ab');
+    const justUnder = oldRun(runs, 'recent-0123456789ab', { seconds: PRUNE_AGE_SECONDS - 60 });
+    assert.deepEqual(prune(env).removed, [old]);
+    assert.equal(existsSync(old), false);
+    assert.equal(existsSync(justUnder), true);
+  });
+});
+
+test('prune keeps an old run folder that holds a recent file', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs } = pruneRoot(cap);
+    const dir = oldRun(runs, 'old-0123456789ab', { files: ['a.txt', 'b.txt'] });
+    age(join(dir, 'b.txt'), DAY);
+    age(dir, PRUNE_AGE_SECONDS + DAY);
+    assert.deepEqual(prune(env).removed, []);
+    assert.equal(existsSync(dir), true);
+  });
+});
+
+test('prune keeps an old run folder with a live lock, and removes one whose lock is dead or stale', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs } = pruneRoot(cap);
+    const live = oldRun(runs, 'live-0123456789ab');
+    const dead = oldRun(runs, 'dead-0123456789ab');
+    const stale = oldRun(runs, 'stale-0123456789ab');
+    const lock = (dir, holder, created) => {
+      const file = join(dir, `${LOCK_FILE}.1`);
+      writeFileSync(file, JSON.stringify({ ...holderFrom(holder), skill: 'review', checkout: '/w/a', created }));
+      age(file, PRUNE_AGE_SECONDS + DAY);
+      age(dir, PRUNE_AGE_SECONDS + DAY);
+    };
+    lock(live, S1, NOW - 60);
+    lock(dead, S2, NOW - 60);
+    lock(stale, S1, NOW - LOCK_MAX_AGE_SECONDS - 1);
+    const { removed } = prune(env, { isAlive: (pid) => pid !== 222 });
+    assert.deepEqual(removed.sort(), [dead, stale].sort());
+    assert.equal(existsSync(live), true);
+  });
+});
+
+test('prune keeps the caller\'s own run folder', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs } = pruneRoot(cap);
+    const mine = oldRun(runs, 'mine-0123456789ab');
+    const other = oldRun(runs, 'other-0123456789ab');
+    assert.deepEqual(prune(env, { keep: mine }).removed, [other]);
+    assert.equal(existsSync(mine), true);
+  });
+});
+
+test('prune follows no symlink under runs/ or locks/', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs, locks } = pruneRoot(cap);
+    const target = join(cap, 'target');
+    mkdirSync(target, { mode: 0o700 });
+    writeFileSync(join(target, 'keep.txt'), 'x');
+    writeFileSync(join(target, `${LOCK_FILE}.1`), '{}');
+    age(join(target, 'keep.txt'), PRUNE_AGE_SECONDS + DAY);
+    age(target, PRUNE_AGE_SECONDS + DAY);
+    symlinkSync(target, join(runs, 'linked-0123456789ab'));
+    symlinkSync(target, join(locks, 'linked'));
+    const real = oldRun(runs, 'old-0123456789ab');
+    assert.deepEqual(prune(env).removed, [real]);
+    assert.deepEqual(readdirSync(target).sort(), ['keep.txt', `${LOCK_FILE}.1`]);
+  });
+});
+
+test('prune does not follow a symlinked runs or locks folder', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs, locks } = pruneRoot(cap);
+    const target = join(cap, 'target');
+    mkdirSync(join(target, 'old-0123456789ab'), { recursive: true, mode: 0o700 });
+    age(join(target, 'old-0123456789ab'), PRUNE_AGE_SECONDS + DAY);
+    rmSync(runs, { recursive: true });
+    rmSync(locks, { recursive: true });
+    symlinkSync(target, runs);
+    symlinkSync(target, locks);
+    assert.deepEqual(prune(env).removed, []);
+    assert.deepEqual(readdirSync(target), ['old-0123456789ab']);
+  });
+});
+
+test('prune skips a plain file under runs/ and locks/', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs, locks } = pruneRoot(cap);
+    for (const file of [join(runs, 'note.txt'), join(locks, 'note.txt')]) {
+      writeFileSync(file, 'x');
+      age(file, PRUNE_AGE_SECONDS + DAY);
+    }
+    assert.deepEqual(prune(env).removed, []);
+    assert.equal(existsSync(join(runs, 'note.txt')) && existsSync(join(locks, 'note.txt')), true);
+  });
+});
+
+test('prune skips a folder owned by another uid', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, runs, locks } = pruneRoot(cap);
+    const run = oldRun(runs, 'old-0123456789ab');
+    const pr = join(locks, 'a_b_1');
+    mkdirSync(pr, { mode: 0o700 });
+    const other = process.getuid() + 1;
+    assert.deepEqual(prune(env, { uid: other }).removed, []);
+    assert.equal(existsSync(run) && existsSync(pr), true);
+  });
+});
+
+test('prune removes a PR lock folder whose lock is stale, dead or unreadable, and keeps a live one', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, locks } = pruneRoot(cap);
+    const make = (name, text) => {
+      const dir = join(locks, name);
+      mkdirSync(dir, { mode: 0o700 });
+      if (text !== null) writeFileSync(join(dir, `${LOCK_FILE}.1`), text);
+      return dir;
+    };
+    const lock = (holder, created) => JSON.stringify({ ...holderFrom(holder), skill: 'review', checkout: '/w/a', pr: 'a/b#1', created });
+    const live = make('a_b_1', lock(S1, NOW - 60));
+    const dead = make('a_b_2', lock(S2, NOW - 60));
+    const stale = make('a_b_3', lock(S1, NOW - LOCK_MAX_AGE_SECONDS - 1));
+    const corrupt = make('a_b_4', '{not json');
+    const empty = make('a_b_5', null);
+    const { removed } = prune(env, { isAlive: (pid) => pid !== 222 });
+    assert.deepEqual(removed.sort(), [dead, stale, corrupt, empty].sort());
+    assert.deepEqual(readdirSync(locks), ['a_b_1']);
+    assert.equal(existsSync(live), true);
   });
 });

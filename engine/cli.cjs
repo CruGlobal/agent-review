@@ -111,6 +111,7 @@ const {
   takePrLock,
   releasePrLocks,
   forceReleasePr,
+  pruneRuns,
   prHeldMessage,
 } = require('./runDir.cjs');
 
@@ -1207,7 +1208,13 @@ function main(rawArgv) {
         return 4;
       };
       if (force && prGiven) {
-        forceReleasePr(process.env, pr);
+        try {
+          forceReleasePr(process.env, pr);
+        } catch (e) {
+          if (!(e instanceof RunDirError)) throw e;
+          process.stderr.write(`error: ${e.message}\n`);
+          return 1;
+        }
         out(`released the lock on PR ${pr}`);
         return 0;
       }
@@ -1219,7 +1226,7 @@ function main(rawArgv) {
       if (releasing) {
         const r = releaseLock({ dir, skill: releaseSkill, nowSeconds: now });
         if (!r.ok) return refuse(r.lock);
-        if (r.cleaned) releasePrLocks({ skill: releaseSkill, nowSeconds: now });
+        if (r.cleaned) releasePrLocks({ toplevel, nowSeconds: now });
         out(r.cleaned ? `released ${toplevel} and cleaned ${dir}` : `kept ${dir}: this session's ${r.heldBy} run still holds it`);
         return 0;
       }
@@ -1249,6 +1256,7 @@ function main(rawArgv) {
         }
         const r = takeLock({ dir, skill: lockSkill, toplevel, outer, nowSeconds: now });
         if (!r.ok) return refuse(r.lock);
+        pruneRuns({ nowSeconds: now, keep: dir });
         out(dir);
         return 0;
       }

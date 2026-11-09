@@ -20,6 +20,7 @@ const { captureDir, captureDirProblem, ARM_MAX_AGE_SECONDS, RUNS_DIR } = require
 const LOCK_FILE = 'run.lock';
 const LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
 const LOCKS_DIR = 'locks';
+const PRUNE_AGE_SECONDS = 604800;
 const PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
 const CI_RUN_DIR = '/tmp';
 // Skills paste the run folder into prompts, JS strings and unquoted shell words.
@@ -302,9 +303,9 @@ function takePrLock({ runDir, pr, env = process.env, nowSeconds, isAlive = pidAl
   return { ok: r.ok, lock: r.lock };
 }
 
-// Frees every PR lock this session holds for `skill`, leaving any generation another session
-// created after the one read.
-function releasePrLocks({ env = process.env, skill, nowSeconds, isAlive = pidAlive }) {
+// Frees every PR lock this session took from the checkout `toplevel`, leaving any generation
+// another session created after the one read.
+function releasePrLocks({ env = process.env, toplevel, nowSeconds, isAlive = pidAlive }) {
   const root = captureDir(env);
   const locks = join(root, LOCKS_DIR);
   if (dirProblem(root) || dirProblem(locks)) return;
@@ -313,14 +314,80 @@ function releasePrLocks({ env = process.env, skill, nowSeconds, isAlive = pidAli
     const dir = join(locks, name);
     if (dirProblem(dir)) continue;
     const { generation, lock } = currentLock(dir);
-    if (lock && lock.skill === skill && lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me)) {
+    if (lock && lock.checkout === toplevel && lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me)) {
       removeLocks(dir, generation + 1);
     }
   }
 }
 
+// A missing folder on the way is nothing to free; any other problem with one is an error.
 function forceReleasePr(env, pr) {
-  removeLocks(prLockDir(env, pr));
+  const dir = prLockDir(env, pr);
+  const root = captureDir(env);
+  for (const d of [root, join(root, LOCKS_DIR), dir]) {
+    const problem = dirProblem(d);
+    if (problem === `${d} does not exist`) return;
+    if (problem) throw new RunDirError(problem);
+  }
+  removeLocks(dir);
+}
+
+function lstatOrNull(path) {
+  try {
+    return lstatSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function realDirOwnedBy(path, uid) {
+  try {
+    const stat = lstatSync(path);
+    return stat.isDirectory() && stat.uid === uid ? stat : null;
+  } catch {
+    return null;
+  }
+}
+
+function newestMtimeSeconds(dir, stat) {
+  let newest = stat.mtimeMs / 1000;
+  for (const name of readdirSync(dir)) {
+    newest = Math.max(newest, lstatSync(join(dir, name)).mtimeMs / 1000);
+  }
+  return newest;
+}
+
+// Removes run folders untouched for PRUNE_AGE_SECONDS and PR lock folders, unless their lock is
+// live. Only real directories owned by `uid` are removed, and no symlink is followed.
+function pruneRuns({ env = process.env, nowSeconds, keep, isAlive = pidAlive, uid = process.getuid() }) {
+  const removed = [];
+  const root = captureDir(env);
+  const inside = (parent, old) => {
+    let names = [];
+    if (captureDirProblem(lstatOrNull(parent), uid)) return;
+    try {
+      names = readdirSync(parent);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const dir = join(parent, name);
+      if (dir === keep) continue;
+      try {
+        const stat = realDirOwnedBy(dir, uid);
+        if (!stat || lockIsLive(currentLock(dir).lock, nowSeconds, isAlive)) continue;
+        if (old && nowSeconds - newestMtimeSeconds(dir, stat) <= PRUNE_AGE_SECONDS) continue;
+        rmSync(dir, { recursive: true, force: true });
+        removed.push(dir);
+      } catch {
+        // This entry is skipped.
+      }
+    }
+  };
+  if (captureDirProblem(lstatOrNull(root), uid)) return { removed };
+  inside(join(root, RUNS_DIR), true);
+  inside(join(root, LOCKS_DIR), false);
+  return { removed };
 }
 
 function prHeldMessage(lock, { pr, nowSeconds }) {
@@ -385,6 +452,7 @@ module.exports = {
   LOCK_FILE,
   LOCK_MAX_AGE_SECONDS,
   LOCKS_DIR,
+  PRUNE_AGE_SECONDS,
   PR_REF,
   CI_RUN_DIR,
   KEPT_AFTER_RUN,
@@ -411,5 +479,6 @@ module.exports = {
   takePrLock,
   releasePrLocks,
   forceReleasePr,
+  pruneRuns,
   prHeldMessage,
 };
