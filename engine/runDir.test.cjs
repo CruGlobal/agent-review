@@ -14,6 +14,7 @@ const {
   statSync,
   existsSync,
   realpathSync,
+  chmodSync,
 } = require('node:fs');
 const { join, basename } = require('node:path');
 const os = require('node:os');
@@ -34,6 +35,11 @@ const {
   heldMessage,
   cleanRunDir,
   releaseLock,
+  prLockDir,
+  takePrLock,
+  releasePrLocks,
+  forceReleasePr,
+  prHeldMessage,
 } = require('./runDir.cjs');
 
 const NOW = 1_800_000_000;
@@ -400,5 +406,139 @@ test('a leftover temp lock file is never read as a lock, and cleanup removes it'
     assert.equal(releaseLock({ dir, skill: 'review', env: S1, nowSeconds: NOW, isAlive: alive }).cleaned, true);
     assert.deepEqual(readdirSync(dir).sort(), ['agent_review_report.md', 'automated_fixes'].filter((f) => existsSync(join(dir, f))));
     assert.ok(!readdirSync(dir).some((f) => f.startsWith(LOCK_FILE)), 'no lock or temp lock file survives cleanup');
+  });
+});
+
+const PR = 'CruGlobal/agent-review#48';
+
+// Two checkouts of one repo under one capture root; the first is held by session one, the second by session two.
+function twoHeldCheckouts(cap, { skillB = 'review' } = {}) {
+  const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+  const two = { ...S2, AGENT_REVIEW_CAPTURE_DIR: cap };
+  const runA = runFolder(cap, 'repo-a-0123456789ab');
+  const runB = runFolder(cap, 'repo-b-0123456789ab');
+  takeLock({ dir: runA, skill: 'review', toplevel: '/w/a', env: one, nowSeconds: NOW, isAlive: alive });
+  takeLock({ dir: runB, skill: skillB, toplevel: '/w/b', env: two, nowSeconds: NOW, isAlive: alive });
+  return { one, two, runA, runB, prDir: prLockDir(one, PR) };
+}
+
+test('prLockDir names owner_repo_n in lower case and rejects anything else', () => {
+  const env = { AGENT_REVIEW_CAPTURE_DIR: '/tmp/cap' };
+  assert.equal(prLockDir(env, PR), '/tmp/cap/locks/cruglobal_agent-review_48');
+  assert.equal(prLockDir(env, 'cruglobal/AGENT-REVIEW#48'), prLockDir(env, PR), 'every spelling of a PR is one lock');
+  for (const bad of ['a/b', 'a/b#0', 'a b/c#1', '../x#1', 'a/b#1 ', 'a_b/c#1', 'a/b/c#1']) {
+    assert.throws(() => prLockDir(env, bad), RunDirError, JSON.stringify(bad));
+  }
+});
+
+test("a session holding the checkout takes the PR, and another session's live PR lock refuses with its holder", () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, two, runA, runB, prDir } = twoHeldCheckouts(cap, { skillB: 'address' });
+    const first = takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive });
+    assert.equal(first.ok, true);
+    const { session_id, skill, checkout, pr } = currentLock(prDir).lock;
+    assert.deepEqual({ session_id, skill, checkout, pr }, { session_id: 'session-one', skill: 'review', checkout: '/w/a', pr: PR });
+    for (const dir of [join(cap, 'locks'), prDir]) assert.equal(statSync(dir).mode & 0o777, 0o700, dir);
+
+    const second = takePrLock({ runDir: runB, pr: 'cruglobal/agent-review#48', env: two, nowSeconds: NOW + 125, isAlive: alive });
+    assert.equal(second.ok, false);
+    assert.equal(second.lock.session_id, 'session-one');
+    assert.equal(
+      prHeldMessage(second.lock, { pr: PR, nowSeconds: NOW + 125 }),
+      'another agent-review review run holds PR CruGlobal/agent-review#48: session session-one, checkout /w/a, started 2 minutes ago. ' +
+        'Wait for it to finish. If that run is gone, free the PR with: agent-review run-dir --release --force --pr CruGlobal/agent-review#48',
+    );
+    assert.deepEqual(lockGenerations(prDir), [1], 'the refused session changed nothing');
+
+    assert.equal(takePrLock({ runDir: runB, pr: 'CruGlobal/agent-review#49', env: two, nowSeconds: NOW, isAlive: alive }).ok, true, 'another PR is free');
+    assert.equal(takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW + 5, isAlive: alive }).ok, true, 'the holding session gets back in');
+
+    forceReleasePr(two, PR);
+    assert.deepEqual(lockGenerations(prDir), []);
+    const taken = takePrLock({ runDir: runB, pr: PR, env: two, nowSeconds: NOW + 130, isAlive: alive });
+    assert.deepEqual([taken.ok, taken.lock.skill, taken.lock.checkout], [true, 'address', '/w/b']);
+  });
+});
+
+test('the PR lock belongs to the skill that holds the checkout', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, two, runA, runB, prDir } = twoHeldCheckouts(cap);
+    const lock = (skill, outer = false) => takeLock({ dir: runA, skill, toplevel: '/w/a', outer, env: one, nowSeconds: NOW, isAlive: alive });
+    const takePr = (runDir, env) => takePrLock({ runDir, pr: PR, env, nowSeconds: NOW, isAlive: alive });
+    const releasePrs = (env, skill) => releasePrLocks({ env, skill, nowSeconds: NOW, isAlive: alive });
+    assert.equal(lock('yolo-review', true).taken, true);
+    for (const skill of ['review', 'address']) {
+      assert.equal(lock(skill).taken, false, `${skill} runs inside yolo-review's hold`);
+      const taken = takePr(runA, one);
+      assert.deepEqual([taken.ok, taken.lock.skill], [true, 'yolo-review'], `${skill} takes the PR for yolo-review`);
+      assert.deepEqual(releaseLock({ dir: runA, skill, env: one, nowSeconds: NOW, isAlive: alive }), { ok: true, cleaned: false, heldBy: 'yolo-review' });
+      releasePrs(one, skill);
+      assert.equal(currentLock(prDir).lock.skill, 'yolo-review', `${skill} leaves the PR to yolo-review`);
+      assert.equal(takePr(runB, two).ok, false, 'no other checkout gets the PR in between');
+    }
+    assert.equal(releaseLock({ dir: runA, skill: 'yolo-review', env: one, nowSeconds: NOW, isAlive: alive }).cleaned, true);
+    releasePrs(one, 'yolo-review');
+    assert.deepEqual(lockGenerations(prDir), []);
+
+    assert.equal(takePr(runB, two).ok, true);
+    releasePrs(one, 'review');
+    assert.equal(currentLock(prDir).lock.session_id, 'session-two', "another session's PR lock is never freed");
+  });
+});
+
+test('a PR lock whose holder died or is over 21600 seconds old is taken over', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const { one, two, runA, runB } = twoHeldCheckouts(cap);
+    assert.equal(LOCK_MAX_AGE_SECONDS, 21600);
+    assert.equal(takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive }).ok, true);
+    const died = takePrLock({ runDir: runB, pr: PR, env: two, nowSeconds: NOW, isAlive: (pid) => pid !== 111 });
+    assert.deepEqual([died.ok, died.lock.session_id], [true, 'session-two'], 'its holder died');
+
+    takeLock({ dir: runA, skill: 'review', toplevel: '/w/a', env: one, nowSeconds: NOW + 21600, isAlive: alive });
+    const young = takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW + 21600, isAlive: alive });
+    assert.deepEqual([young.ok, young.lock.session_id], [false, 'session-two'], 'a lock exactly 21600 seconds old still holds');
+    const old = takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW + 21601, isAlive: alive });
+    assert.deepEqual([old.ok, old.lock.session_id], [true, 'session-one'], 'an older one is free');
+  });
+});
+
+test('takePrLock without holding the checkout returns not-held and writes nothing', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const two = { ...S2, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const runA = runFolder(cap, 'repo-a-0123456789ab');
+    const take = (env, now = NOW, isAlive = alive) => takePrLock({ runDir: runA, pr: PR, env, nowSeconds: now, isAlive });
+    assert.deepEqual(take(one), { ok: false, reason: 'not-held' }, 'nobody holds the checkout');
+    takeLock({ dir: runA, skill: 'review', toplevel: '/w/a', env: two, nowSeconds: NOW, isAlive: alive });
+    assert.deepEqual(take(one), { ok: false, reason: 'not-held' }, 'another session holds it');
+    assert.deepEqual(take(two, NOW + LOCK_MAX_AGE_SECONDS + 1), { ok: false, reason: 'not-held' }, 'its own hold went stale');
+    assert.deepEqual(take(two, NOW, dead), { ok: false, reason: 'not-held' }, 'its own hold is from a process that is gone');
+    assert.equal(existsSync(join(cap, 'locks')), false);
+  });
+});
+
+test('a symlinked or group-writable locks folder is refused', () => {
+  withTemp('ar-rundir-pr-', (cap) => {
+    const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
+    const runA = runFolder(cap, 'repo-a-0123456789ab');
+    takeLock({ dir: runA, skill: 'review', toplevel: '/w/a', env: one, nowSeconds: NOW, isAlive: alive });
+    const take = () => takePrLock({ runDir: runA, pr: PR, env: one, nowSeconds: NOW, isAlive: alive });
+    const locks = join(cap, 'locks');
+    const elsewhere = join(cap, 'elsewhere');
+    mkdirSync(elsewhere, { mode: 0o700 });
+
+    symlinkSync(elsewhere, locks);
+    assert.throws(take, (e) => e instanceof RunDirError && /locks is a symlink/.test(e.message));
+    assert.deepEqual(readdirSync(elsewhere), [], 'nothing is written through the link');
+
+    rmSync(locks);
+    mkdirSync(locks, { mode: 0o700 });
+    chmodSync(locks, 0o770);
+    assert.throws(take, (e) => e instanceof RunDirError && /group or other permission bits/.test(e.message));
+
+    chmodSync(locks, 0o700);
+    symlinkSync(elsewhere, prLockDir(one, PR));
+    assert.throws(take, (e) => e instanceof RunDirError && /cruglobal_agent-review_48 is a symlink/.test(e.message));
+    assert.deepEqual(readdirSync(elsewhere), [], 'nor through a linked PR folder');
   });
 });

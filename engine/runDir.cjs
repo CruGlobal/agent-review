@@ -19,6 +19,8 @@ const { captureDir, captureDirProblem, ARM_MAX_AGE_SECONDS, RUNS_DIR } = require
 
 const LOCK_FILE = 'run.lock';
 const LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
+const LOCKS_DIR = 'locks';
+const PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
 const CI_RUN_DIR = '/tmp';
 // Skills paste the run folder into prompts, JS strings and unquoted shell words.
 const SAFE_DIR = /^\/[A-Za-z0-9._/-]+$/;
@@ -229,6 +231,7 @@ function takeLock({
   skill,
   toplevel,
   outer = false,
+  pr,
   env = process.env,
   nowSeconds,
   isAlive = pidAlive,
@@ -242,7 +245,7 @@ function takeLock({
     if (live && !sameHolder(existing, me)) return { ok: false, lock: existing };
     if (live && !outer && existing.outer === true) return { ok: true, taken: false, lock: existing };
     afterRead();
-    const lock = { ...me, skill, outer, checkout: toplevel, created: nowSeconds };
+    const lock = { ...me, skill, outer, checkout: toplevel, ...(pr === undefined ? {} : { pr }), created: nowSeconds };
     try {
       createExclusive(lockPath(dir, generation + 1), JSON.stringify(lock) + '\n', beforeLink);
     } catch (e) {
@@ -262,15 +265,70 @@ function foreignLock({ dir, env = process.env, nowSeconds, isAlive = pidAlive })
   return lock;
 }
 
-function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+function lockHolder(lock, nowSeconds) {
   const skill = SKILL_NAME.test(lock.skill || '') ? lock.skill : 'review';
   const session = typeof lock.session_id === 'string' && lock.session_id ? `session ${lock.session_id}` : 'an unknown session';
   const minutes = Number.isFinite(lock.created) ? Math.max(0, Math.round((nowSeconds - lock.created) / 60)) : null;
   const started = minutes === null ? '' : `, started ${minutes} minute${minutes === 1 ? '' : 's'} ago`;
+  return { skill, session, started };
+}
+
+function heldMessage(lock, { dir, toplevel, nowSeconds }) {
+  const { skill, session, started } = lockHolder(lock, nowSeconds);
   return (
     `another agent-review ${skill} run holds this checkout${toplevel ? ` (${toplevel})` : ''}: ${session}${started}. ` +
     `Wait for it to finish, or run it from another checkout. If that run is gone, free the checkout with: ` +
     `agent-review run-dir --release --force (run folder ${dir})`
+  );
+}
+
+// GitHub owner and repo names ignore case, so every spelling of one PR names one lock folder.
+function prLockDir(env, pr) {
+  const m = typeof pr === 'string' ? PR_REF.exec(pr) : null;
+  if (!m) throw new RunDirError(`a PR must be named <owner>/<repo>#<number>: ${JSON.stringify(pr)}`);
+  return join(captureDir(env), LOCKS_DIR, `${m[1]}_${m[2]}_${m[3]}`.toLowerCase());
+}
+
+// A PR lock belongs to the skill holding this session's checkout lock on `runDir` when it is taken.
+function takePrLock({ runDir, pr, env = process.env, nowSeconds, isAlive = pidAlive }) {
+  const dir = prLockDir(env, pr);
+  const { lock: checkout } = currentLock(runDir);
+  if (!checkout || !lockIsLive(checkout, nowSeconds, isAlive) || !sameHolder(checkout, holderFrom(env))) {
+    return { ok: false, reason: 'not-held' };
+  }
+  const root = captureDir(env);
+  for (const d of [root, join(root, LOCKS_DIR), dir]) makeDir(d);
+  const r = takeLock({ dir, skill: checkout.skill, toplevel: checkout.checkout, pr, env, nowSeconds, isAlive });
+  return { ok: r.ok, lock: r.lock };
+}
+
+// Frees every PR lock this session holds for `skill`, leaving any generation another session
+// created after the one read.
+function releasePrLocks({ env = process.env, skill, nowSeconds, isAlive = pidAlive }) {
+  const root = captureDir(env);
+  const locks = join(root, LOCKS_DIR);
+  if (dirProblem(root) || dirProblem(locks)) return;
+  const me = holderFrom(env);
+  for (const name of readdirSync(locks)) {
+    const dir = join(locks, name);
+    if (dirProblem(dir)) continue;
+    const { generation, lock } = currentLock(dir);
+    if (lock && lock.skill === skill && lockIsLive(lock, nowSeconds, isAlive) && sameHolder(lock, me)) {
+      removeLocks(dir, generation + 1);
+    }
+  }
+}
+
+function forceReleasePr(env, pr) {
+  removeLocks(prLockDir(env, pr));
+}
+
+function prHeldMessage(lock, { pr, nowSeconds }) {
+  const { skill, session, started } = lockHolder(lock, nowSeconds);
+  const checkout = typeof lock.checkout === 'string' && lock.checkout ? `, checkout ${lock.checkout}` : '';
+  return (
+    `another agent-review ${skill} run holds PR ${pr}: ${session}${checkout}${started}. Wait for it to finish. ` +
+    `If that run is gone, free the PR with: agent-review run-dir --release --force --pr ${pr}`
   );
 }
 
@@ -326,6 +384,8 @@ module.exports = {
   RUNS_DIR,
   LOCK_FILE,
   LOCK_MAX_AGE_SECONDS,
+  LOCKS_DIR,
+  PR_REF,
   CI_RUN_DIR,
   KEPT_AFTER_RUN,
   SKILL_NAME,
@@ -347,4 +407,9 @@ module.exports = {
   cleanRunDir,
   releaseLock,
   forceRelease,
+  prLockDir,
+  takePrLock,
+  releasePrLocks,
+  forceReleasePr,
+  prHeldMessage,
 };
