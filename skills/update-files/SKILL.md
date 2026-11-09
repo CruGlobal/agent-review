@@ -1,6 +1,6 @@
 ---
 name: update-files
-description: Refresh this repo's copied agent-review workflow files to the latest templates, preserving the repo's own settings
+description: Refresh this repo's copied agent-review workflow files to the latest templates, preserving the repo's own settings, and add any missing bookkeeping ignore lines
 ---
 
 # Update agent-review workflow files
@@ -9,7 +9,9 @@ Consumer repos carry copies of the `templates/workflows/` files (`agent-review.y
 `agent-review-interact.yml`, `agent-review-readiness.yml`, `agent-review-approve.yml`). Those copies go
 stale when the
 templates change upstream. This skill replaces them with the latest templates while carrying
-over the repo's own choices, shows the diff, and offers to open a PR.
+over the repo's own choices, shows the diff, and offers to open a PR. It also adds the
+`.gitignore` and `.gitattributes` lines that `/agent-review:init` writes, when the repo lacks
+them (Stage 1B).
 
 Run it inside the consumer repo (e.g. `mpdx_api`), never inside agent-review itself or a fork of
 it. Refuse and stop if either check trips: any `git remote -v` entry points at an
@@ -40,6 +42,52 @@ echo "Latest agent-review version: $LATEST"
 echo "$LATEST" > "$UPDATE_DIR/LATEST"
 grep -h '^# agent-review-template-version:' "$UPDATE_DIR"/*.yml | sort -u
 ```
+
+## Stage 1B: Bookkeeping lines
+
+`/agent-review:init` writes a few lines that keep the review's local files out of git. A repo set
+up by an older init can lack some of them, and then every review leaves untracked files behind.
+Add the missing ones here. This runs in every repo, local-only included, whatever Stage 2 finds.
+
+First, if the repo has a root `Dockerfile`, read `.dockerignore`. If it lacks any of `/.claude`,
+`**/CLAUDE.md`, or `**/AGENTS.md` as a whole line, propose adding the missing ones, so the rule
+docs, the seeded-bug eval patches, and the agent guides stay out of the image. Ask before you run
+the block below. With no root `Dockerfile`, skip the question.
+
+Each line is added once, on its own line, and only when no line in the file matches it exactly.
+The block records each file it changes, and which of those already had uncommitted changes, for
+Stage 4:
+
+```bash
+UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1
+add_line() {
+  [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
+  if ! grep -qxF -- "$1" "$UPDATE_DIR"/bookkeeping_changed.txt 2>/dev/null; then
+    [ -z "$(git status --porcelain -- "$1")" ] || printf '%s\n' "$1" >> "$UPDATE_DIR"/bookkeeping_dirty.txt
+    printf '%s\n' "$1" >> "$UPDATE_DIR"/bookkeeping_changed.txt
+  fi
+  [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
+  printf '%s\n' "$2" >> "$1"
+  echo "added to $1: $2"
+}
+add_line .gitignore '/.claude/review/metrics/'
+add_line .gitignore '/.claude/review/index/'
+add_line .gitignore '/.claude/review/learnings/pending/'
+add_line .gitignore '/.claude/review/learnings/findings.json'
+add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
+git ls-files -- .claude/review/metrics .claude/review/index .claude/review/learnings/pending \
+  .claude/review/learnings/findings.json | sed 's/^/tracked: /'
+```
+
+If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'`,
+`add_line .dockerignore '**/CLAUDE.md'`, and `add_line .dockerignore '**/AGENTS.md'` in that block.
+
+An ignore line does not untrack a file git already tracks, so each `tracked:` path is a committed
+file that reviews keep changing. List them and offer to untrack them. The local copies stay.
+On a yes, run `git rm -r --cached --quiet -- <each tracked path>`. Never drop `--cached`.
+
+Report the lines added, by file, and any files untracked. If `bookkeeping_dirty.txt` lists a file,
+say that it had other uncommitted changes before this stage.
 
 ## Stage 2 — Compare against the repo's copies
 
@@ -91,9 +139,10 @@ For each fetched template, look for the matching file in `.github/workflows/`:
   user also wants locally posted reports to approve: that trusts a writer's posted report, a
   stronger grant than the CI path.
 
-If every file is current, say so, run the **Clean up** block at the end of this skill, and stop
-here. In a local-only repo, do not stop before the removal check in Stage 4 if any CI file is
-still installed.
+If every file is current and Stage 1B changed nothing, say so, run the **Clean up** block at the
+end of this skill, and stop here. If Stage 1B changed something, skip Stage 3 and go to Stage 4.
+In a local-only repo, do not stop before the removal check in Stage 4 if any CI file is still
+installed.
 
 ## Stage 3 — Carry over the repo's own settings
 
@@ -168,12 +217,18 @@ leave them and say they will keep running CI reviews on labeled PRs.
 ### Diff and PR
 
 ```bash
+UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1
 git diff HEAD -- .github/workflows/
+touch "$UPDATE_DIR"/bookkeeping_changed.txt
+while IFS= read -r f; do
+  if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then git diff HEAD -- "$f"; else echo "new file $f:"; cat -- "$f"; fi
+done < "$UPDATE_DIR"/bookkeeping_changed.txt
+git diff --cached --name-status --diff-filter=D -- .claude/review/
 ```
 
 Walk the user through what changed and why (new inputs, permissions, version marker), and name
-any removed CI files. An approve file updated from before 1.1.2 gains a `pull_request_target`
-trigger and a `withdraw` job: on new commits, a reopen, or a base change, the bot takes back its
+any removed CI files, the bookkeeping lines Stage 1B added, and any files it untracked. An
+approve file updated from before 1.1.2 gains a `pull_request_target` trigger and a `withdraw` job: on new commits, a reopen, or a base change, the bot takes back its
 approval of an older commit unless the push only merged in the default branch. Say so, and that
 the job never checks out or runs
 the PR's code. It runs from the default branch, so it starts working once the update PR merges.
@@ -182,7 +237,13 @@ before touching git history: offer to create a branch, commit with
 `chore: update agent-review workflows to v<LATEST>`, push, and open a PR. If the PR only removes
 CI files from a local-only repo, with no template updates, commit with
 `chore: remove agent-review CI workflows from a local-only repo` instead. If it does both, keep
-the update message and mention the removal in the PR body. Never commit to the
+the update message and mention the removal in the PR body. If the PR only adds bookkeeping lines
+or untracks bookkeeping files, commit with `chore: keep agent-review bookkeeping out of git`;
+when it also updates or removes workflows, keep that message and mention the bookkeeping changes
+in the PR body. Stage by name: the workflow files this skill wrote and each file in
+`bookkeeping_changed.txt` (the `git rm` removals are already staged). Never `git add -A` or
+`git add .`. Stage a file that `bookkeeping_dirty.txt` lists only on the user's yes, since its
+other changes would go into the commit too. Never commit to the
 default branch directly, and never push without the user's go-ahead.
 
 If nothing changed after the merge, leave the working tree clean and say the repo was already

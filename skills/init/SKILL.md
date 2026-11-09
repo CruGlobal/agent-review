@@ -330,9 +330,9 @@ to PRs, and the `metrics/` and `index/` files reviews write. Keep those exclusio
 small fix scores as critical.
 
 **Docker images.** If a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`) and
-`.dockerignore` does not already leave them out, propose adding `/.claude` and `CLAUDE.md` to
-`.dockerignore`, so the rule docs and the seeded-bug eval patches do not ship in the image. Write
-them only on a yes at the 3B gate.
+`.dockerignore` does not already leave them out, propose adding `/.claude`, `**/CLAUDE.md`, and
+`**/AGENTS.md` to `.dockerignore`, so the rule docs, the seeded-bug eval patches, and the agent
+guides at any depth do not ship in the image. Write them only on a yes at the 3B gate.
 
 **`manifests` / `lockfiles`** — the detected pair(s). Keep them accurate: they drive the
 `new_dependency`, `critical_pkg_update`, and `lockfile_only_change` detections.
@@ -773,7 +773,8 @@ Present the complete proposal:
 8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
 9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`,
-   the `.gitignore` lines for `.claude/review/metrics/` and `.claude/review/index/`, and the
+   the `.gitignore` lines for `.claude/review/metrics/`, `.claude/review/index/`,
+   `.claude/review/learnings/pending/`, and `.claude/review/learnings/findings.json`, the
    `.gitattributes` line that merges `feedback.jsonl` with `merge=union`, and the `.dockerignore`
    lines when the repo builds an image from the whole tree.
 
@@ -810,7 +811,11 @@ printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
 ```
 
 Keep the review's bookkeeping out of git. Reviews write `.claude/review/metrics/` and the
-`.claude/review/index/` cache on every run, so both are ignored. `feedback.jsonl` is committed and
+`.claude/review/index/` cache on every run, so both are ignored. With learning on, each review's
+`agent-review emit` also writes `learnings/findings.json`, which the same run reads back, and a
+`learnings/pending/<reviewId>.yml` outcomes file, which `/agent-review:learn` reads locally and
+ingests into `feedback.jsonl`. Both are local scratch, so both are ignored. `feedback.jsonl` and
+`learnings.yml` are the learning files git keeps. `feedback.jsonl` is committed and
 only ever appended to, so `merge=union` keeps both sides' lines when a branch merges the base
 branch locally. GitHub's web merge and "Update branch" ignore `.gitattributes`, so a conflict there
 is still fixed by merging locally. Each line is added once, on its own line. A file is listed for
@@ -830,11 +835,13 @@ add_line() {
 }
 add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
+add_line .gitignore '/.claude/review/learnings/pending/'
+add_line .gitignore '/.claude/review/learnings/findings.json'
 add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
 ```
 
-If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'` and
-`add_line .dockerignore 'CLAUDE.md'` in that block.
+If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'`,
+`add_line .dockerignore '**/CLAUDE.md'`, and `add_line .dockerignore '**/AGENTS.md'` in that block.
 
 Then the CI workflows. The copies run only when the `REVIEWS_RUN` answer saved in 3A is
 `local-and-ci`; anything else, including an empty value, copies nothing. Do not read it back

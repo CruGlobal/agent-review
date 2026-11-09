@@ -335,7 +335,7 @@ test('apply_all.sh skips a fix script whose name is not fix_<number>_<category>.
 test('update-files removes its fetched templates on every way it stops, the every-file-current one included', () => {
   const skill = read('skills/update-files/SKILL.md');
   const flat = skill.replace(/\s+/g, ' ');
-  assert.ok(flat.includes('If every file is current, say so, run the **Clean up** block at the end of this skill, and stop here.'));
+  assert.ok(flat.includes('If every file is current and Stage 1B changed nothing, say so, run the **Clean up** block at the end of this skill, and stop here.'));
   const cleanup = skill.slice(skill.indexOf('## Clean up'));
   assert.ok(cleanup.replace(/\s+/g, ' ').includes('Whenever this skill stops after Stage 1, for any reason'));
   assert.deepStrictEqual(bashBlocks(cleanup), ['UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"']);

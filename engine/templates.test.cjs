@@ -21,6 +21,14 @@ const SKILLS = ['review', 'init', 'learn', 'address'].map((name) => ({
   path: join(ROOT, `skills/${name}/SKILL.md`),
 }));
 const ALL_SKILLS = [...SKILLS, { name: 'update-files', path: join(ROOT, 'skills/update-files/SKILL.md') }];
+// What init and update-files git-ignore, and what address and yolo-review treat as the review's own files.
+const BOOKKEEPING_IGNORES = [
+  '/.claude/review/metrics/',
+  '/.claude/review/index/',
+  '/.claude/review/learnings/pending/',
+  '/.claude/review/learnings/findings.json',
+];
+const REVIEW_SCRATCH = '^\\.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\\.json$)';
 
 const PLACEHOLDERS = [
   'TITLE',
@@ -3126,13 +3134,13 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
       // Someone's uncommitted edit that already has init's line, so init leaves the file alone.
       writeFileSync(join(repo, '.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n');
       writeFileSync(join(repo, '.dockerignore'), 'tmp/\n'); // untracked, and not init's
-      const script = at(`${block}\nadd_line .dockerignore '/.claude'\nadd_line .dockerignore 'CLAUDE.md'`);
+      const script = at(`${block}\nadd_line .dockerignore '/.claude'\nadd_line .dockerignore '**/CLAUDE.md'\nadd_line .dockerignore '**/AGENTS.md'`);
       execFileSync(shell, ['-c', script], { cwd: repo });
       execFileSync(shell, ['-c', script], { cwd: repo });
       const read = (f) => readFileSync(join(repo, f), 'utf8');
-      assert.equal(read('.gitignore'), 'node_modules/\n/.claude/review/metrics/\n/.claude/review/index/\n', `${shell}: added once, on its own line`);
+      assert.equal(read('.gitignore'), `node_modules/\n${BOOKKEEPING_IGNORES.join('\n')}\n`, `${shell}: added once, on its own line`);
       assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n.claude/review/learnings/feedback.jsonl merge=union\n', `${shell}: unchanged`);
-      assert.equal(read('.dockerignore'), 'tmp/\n/.claude\nCLAUDE.md\n', shell);
+      assert.equal(read('.dockerignore'), 'tmp/\n/.claude\n**/CLAUDE.md\n**/AGENTS.md\n', `${shell}: the globs are written as typed`);
       const out = execFileSync(shell, ['-c', at(staging)], { cwd: repo, encoding: 'utf8' });
       assert.equal(git('diff', '--cached', '--name-only'), '.gitignore\n', `${shell}: only the file whose one change is init's lines is staged`);
       assert.ok(!out.includes('.gitattributes'), `${shell}: no warning for a file init did not change`);
@@ -3158,8 +3166,9 @@ test('init explains whole-token triggers with examples the engine matches, and s
     assert.ok(flat.includes(`\`${trigger}\``) && flat.includes(`\`${text}\``), `init names ${trigger} and ${text}`);
     assert.equal(contentMatches(`+ x = ${text}\n`, trigger), want, `${trigger} on ${text}`);
   }
-  assert.ok(flat.includes('propose adding `/.claude` and `CLAUDE.md` to `.dockerignore`'));
-  assert.ok(flat.includes("also run `add_line .dockerignore '/.claude'` and `add_line .dockerignore 'CLAUDE.md'`"));
+  assert.ok(flat.includes('propose adding `/.claude`, `**/CLAUDE.md`, and `**/AGENTS.md` to `.dockerignore`'));
+  assert.ok(flat.includes("also run `add_line .dockerignore '/.claude'`, `add_line .dockerignore '**/CLAUDE.md'`, and `add_line .dockerignore '**/AGENTS.md'` in that block"));
+  assert.ok(!/add_line \.dockerignore 'CLAUDE\.md'/.test(flat), 'no root-only CLAUDE.md line');
 });
 
 test("address stages only the files its fixes changed, never the review's bookkeeping", () => {
@@ -3171,7 +3180,7 @@ test("address stages only the files its fixes changed, never the review's bookke
   const at = (s) => commit.indexOf(s);
   assert.ok(at('git status --porcelain --untracked-files=all') >= 0, 'new files a fix created are listed one by one');
   assert.ok(at('git add -- <each file you changed or created for these fixes>') > at('git status --porcelain'), 'then the fix commit names its files');
-  assert.ok(at("grep -E '^\\.claude/review/(metrics|index)/'") > at('git add --'), 'a staged review file stops the commit');
+  assert.ok(at(`grep -E '${REVIEW_SCRATCH}'`) > at('git add --'), 'a staged review file stops the commit');
   assert.ok(at('git diff --cached --name-only\ngit commit') > 0, 'and what is staged is shown before committing');
   assert.ok(at('if git diff --cached --quiet; then') > at('git add --'), 'nothing staged stops it');
   assert.ok(commit.includes('git commit -m "fix: address agent-review findings ${FIXED_NUMBERS}" || exit 1'), 'a failed commit stops it');
@@ -3198,16 +3207,193 @@ test("address's staged-file guard stops on review files and lets a new spec thro
       execFileSync(shell, ['-c', guard], { cwd: dir });
       git('add', '--', '.claude/review/metrics/PR_1_metrics.md');
       assert.throws(() => execFileSync(shell, ['-c', guard], { cwd: dir, stdio: 'pipe' }), `${shell}: a staged metrics file stops it`);
+      for (const scratch of ['.claude/review/learnings/pending/local-1.yml', '.claude/review/learnings/findings.json']) {
+        git('reset', '-q');
+        git('add', '--', 'spec/new_spec.rb');
+        mkdirSync(join(dir, '.claude/review/learnings/pending'), { recursive: true });
+        writeFileSync(join(dir, scratch), '{}\n');
+        git('add', '--', scratch);
+        assert.throws(() => execFileSync(shell, ['-c', guard], { cwd: dir, stdio: 'pipe' }), `${shell}: a staged ${scratch} stops it`);
+      }
+      git('reset', '-q');
+      writeFileSync(join(dir, '.claude/review/learnings/feedback.jsonl'), '{}\n');
+      git('add', '--', '.claude/review/learnings/feedback.jsonl');
+      execFileSync(shell, ['-c', guard], { cwd: dir });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
 });
 
-test('a review never commits a git-ignored metrics dashboard', () => {
+test('a review never commits or pushes, and Stage 7 prints where the local dashboard is, under bash and zsh', (t) => {
+  const { writeFileSync } = require('node:fs');
   const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
-  const block = bashBlockList(review).find((b) => b.includes('Committing quality metrics dashboard'));
-  assert.ok(block.indexOf('git check-ignore -q') < block.indexOf('git add'), 'the ignore check comes before any git add');
+  const engine = readFileSync(join(ROOT, 'skills/review/code-review-engine.md'), 'utf8');
+  for (const [name, text] of [['review', review], ['code-review-engine', engine]]) {
+    assert.ok(!/^\s*git (add|commit|push)\b/m.test(text), `${name}: no review step stages, commits or pushes`);
+    assert.ok(!text.includes('chore(review): add code review metrics'), `${name}: no metrics commit message is left`);
+  }
+  const flat = review.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('The review never commits or pushes, in any mode.'));
+  assert.ok(flat.includes('| Stage 7 (post and print) | **Skipped entirely**: the posting step below replaces it |'));
+  assert.ok(!flat.includes('Stage 7 (metrics commit)'));
+  assert.ok(review.includes('📊 $REVIEW_DIR/metrics/PR_[N]_metrics.md (local only, never committed; skipped in CI mode)'));
+
+  const post = bashBlockList(review).find((b) => b.includes('marker self-check OK') && b.includes('agent_review_post_result.txt'));
+  const print = post.slice(post.indexOf('DASHBOARD='));
+  assert.ok(print.startsWith('DASHBOARD="$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md"'), 'the print closes the Post and print block');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-dash-'));
+    try {
+      const run = () => execFileSync(shell, ['-c', print], { cwd: dir, encoding: 'utf8', env: { ...process.env, REVIEW_DIR: '.claude/review', PR_NUM: '12' } });
+      execFileSync('git', ['-C', dir, 'init', '-q']);
+      assert.equal(run(), '', `${shell}: no dashboard, no line`);
+      mkdirSync(join(dir, '.claude/review/metrics'), { recursive: true });
+      writeFileSync(join(dir, '.claude/review/metrics/PR_12_metrics.md'), 'x\n');
+      assert.equal(run(), '📊 Metrics dashboard (local only, not git-ignored here, so run /agent-review:update-files): .claude/review/metrics/PR_12_metrics.md\n', shell);
+      writeFileSync(join(dir, '.gitignore'), '/.claude/review/metrics/\n');
+      assert.equal(run(), '📊 Metrics dashboard (local only): .claude/review/metrics/PR_12_metrics.md\n', shell);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('the dashboard calls its score mean finding severity, averages the last 10 reviews, and says when there are none, under bash and zsh', (t) => {
+  const { writeFileSync } = require('node:fs');
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const stage5B = review.slice(review.indexOf('## Stage 5B — Historical Metrics Dashboard'), review.indexOf('## Stage 6 — Generate Review Report'));
+  for (const gone of ['Quality Score', 'Repo Average', 'N/A']) assert.ok(!stage5B.includes(gone), `Stage 5B no longer says ${gone}`);
+  const block = bashBlockList(stage5B).find((b) => b.includes('cat > "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"'));
+  assert.ok(block, 'Stage 5B writes the dashboard');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-severity-'));
+    try {
+      const runDir = join(dir, 'run');
+      const reviewDir = join(dir, 'review');
+      mkdirSync(runDir);
+      mkdirSync(join(reviewDir, 'metrics'), { recursive: true });
+      const history = join(reviewDir, 'metrics/severity_history.txt');
+      const dashboard = () => {
+        writeFileSync(join(runDir, 'review_env.sh'), `export REVIEW_DIR='${reviewDir}' AGENT_MODE=standard FIX_COUNT=0 PR_NUMBER=12\n`);
+        execFileSync(shell, ['-c', block.replace(/^RUN_DIR=.*$/m, `RUN_DIR='${runDir}'; export RUN_DIR`)], {
+          cwd: dir,
+          env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
+        });
+        return readFileSync(join(reviewDir, 'metrics/PR_12_metrics.md'), 'utf8');
+      };
+      let out = dashboard();
+      assert.ok(out.includes('- **Mean finding severity**: [X.X]/10'), `${shell}: the current score is named for what it is`);
+      assert.ok(out.includes('Lower is better.'), `${shell}: and says which way is good`);
+      assert.ok(out.includes('- **Mean finding severity, last 10 reviews**: no earlier reviews\n'), `${shell}: no history`);
+      assert.ok(out.includes('Mean finding severity of the last 10 reviews:\nno earlier reviews\n'), shell);
+      assert.ok(!out.includes('N/A'), shell);
+      writeFileSync(history, '');
+      assert.ok(dashboard().includes('last 10 reviews**: no earlier reviews\n'), `${shell}: an empty history is no history`);
+      writeFileSync(history, ['1 9.0 d', '2 9.0 d', ...Array.from({ length: 10 }, (_, i) => `${i + 3} 2.0 d`)].join('\n') + '\n');
+      out = dashboard();
+      assert.ok(out.includes('- **Mean finding severity, last 10 reviews**: 2.0/10\n'), `${shell}: only the last 10 count:\n${out}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("yolo-review's clean-tree check and the review's dirty warning skip only the review's own files, under bash and zsh", (t) => {
+  const { writeFileSync } = require('node:fs');
+  const filter = `grep -vE '${REVIEW_SCRATCH.replace('^', '^.. ')}'`;
+  const check = `[ -z "$(git status --porcelain --untracked-files=all | ${filter})" ]`;
+  const review = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
+  const yolo = readFileSync(join(ROOT, 'skills/yolo-review/SKILL.md'), 'utf8');
+  assert.ok(review.includes(`${check} \\\n    || echo "⚠️  Working tree is dirty`), 'the review warns past its own files');
+  assert.ok(yolo.includes(`${check} \\\n     || { echo "❌ Working tree is dirty`), 'yolo-review stops past its own files');
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-clean-'));
+    try {
+      const git = (...a) => execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+      const clean = () => execFileSync(shell, ['-c', `${check} && echo clean || echo dirty`], { cwd: dir, encoding: 'utf8' }).trim();
+      git('init', '-q');
+      mkdirSync(join(dir, '.claude/review/learnings/pending'), { recursive: true });
+      writeFileSync(join(dir, '.claude/review/config.yml'), 'version: 1\n');
+      writeFileSync(join(dir, '.claude/review/learnings/feedback.jsonl'), '');
+      git('add', '.');
+      git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
+      mkdirSync(join(dir, '.claude/review/metrics/history'), { recursive: true });
+      mkdirSync(join(dir, '.claude/review/index'), { recursive: true });
+      writeFileSync(join(dir, '.claude/review/metrics/history/2026-11-09_1.json'), '{}\n');
+      writeFileSync(join(dir, '.claude/review/index/graph.json'), '{}\n');
+      writeFileSync(join(dir, '.claude/review/learnings/pending/1-1.yml'), 'findings: []\n');
+      writeFileSync(join(dir, '.claude/review/learnings/findings.json'), '{}\n');
+      assert.equal(clean(), 'clean', `${shell}: the review's own files are not changes`);
+      writeFileSync(join(dir, '.claude/review/learnings/feedback.jsonl'), '{}\n');
+      assert.equal(clean(), 'dirty', `${shell}: an uncommitted feedback.jsonl is a change`);
+      git('checkout', '--', '.claude/review/learnings/feedback.jsonl');
+      writeFileSync(join(dir, '.claude/review/learnings/findings.json.bak'), '{}\n');
+      assert.equal(clean(), 'dirty', `${shell}: a lookalike name is a change`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('update-files adds the same bookkeeping lines as init, once each, and records what it changed, under bash and zsh', (t) => {
+  const { writeFileSync, existsSync } = require('node:fs');
+  const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
+  const update = readFileSync(join(ROOT, 'skills/update-files/SKILL.md'), 'utf8');
+  const lines = (text) => [...text.matchAll(/add_line (\.[a-z]+) '([^']+)'/g)].map((m) => `${m[1]} ${m[2]}`).sort();
+  assert.deepEqual(lines(update), lines(init), 'update-files adds exactly the lines init adds');
+  assert.deepEqual(lines(init).filter((l) => l.startsWith('.gitignore ')).map((l) => l.slice('.gitignore '.length)), [...BOOKKEEPING_IGNORES].sort());
+  const stage1B = update.slice(update.indexOf('## Stage 1B: Bookkeeping lines'), update.indexOf('## Stage 2'));
+  assert.ok(update.indexOf('## Stage 1B: Bookkeeping lines') > update.indexOf('## Stage 1 '), 'Stage 1B follows the fetch');
+  const block = bashBlockList(stage1B)[0];
+  assert.ok(block.startsWith('UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1\n'));
+  const flat = update.replace(/\s+/g, ' ');
+  assert.ok(flat.includes('if the repo has a root `Dockerfile`, read `.dockerignore`'), 'the .dockerignore lines are proposed only with a root Dockerfile');
+  assert.ok(flat.includes('Ask before you run the block below.'));
+  assert.ok(flat.includes('On a yes, run `git rm -r --cached --quiet -- <each tracked path>`. Never drop `--cached`.'));
+  assert.ok(flat.includes('If every file is current and Stage 1B changed nothing, say so, run the **Clean up** block'));
+  assert.ok(flat.includes('commit with `chore: keep agent-review bookkeeping out of git`'));
+  assert.ok(flat.includes('Never `git add -A` or `git add .`.'));
+  const diff = bashBlockList(update.slice(update.indexOf('### Diff and PR'))).find((b) => b.includes('git diff HEAD -- .github/workflows/'));
+  for (const shell of availableShells(t)) {
+    const dir = mkdtempSync(join(os.tmpdir(), 'ar-update-'));
+    try {
+      const updateDir = join(dir, 'update');
+      const repo = join(dir, 'repo');
+      mkdirSync(updateDir);
+      mkdirSync(join(repo, '.claude/review/metrics'), { recursive: true });
+      mkdirSync(join(repo, 'docs'));
+      const at = (text) => text.replace(/^UPDATE_DIR=.*$/m, `UPDATE_DIR='${updateDir}'`);
+      const git = (...a) => execFileSync('git', ['-C', repo, ...a], { encoding: 'utf8', env: { ...process.env, GIT_PAGER: 'cat' } });
+      git('init', '-q');
+      writeFileSync(join(repo, '.gitignore'), 'node_modules/'); // no trailing newline
+      writeFileSync(join(repo, '.claude/review/metrics/severity_history.txt'), '1 2.0 d\n');
+      writeFileSync(join(repo, 'docs/CLAUDE.md'), '# guide\n'); // what an unquoted **/CLAUDE.md would expand to
+      git('add', '.');
+      git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
+      writeFileSync(join(repo, '.dockerignore'), 'tmp/\n'); // untracked, and not the skill's
+      const script = at(`${block}\nadd_line .dockerignore '/.claude'\nadd_line .dockerignore '**/CLAUDE.md'\nadd_line .dockerignore '**/AGENTS.md'`);
+      const first = execFileSync(shell, ['-c', script], { cwd: repo, encoding: 'utf8' });
+      const second = execFileSync(shell, ['-c', script], { cwd: repo, encoding: 'utf8' });
+      const read = (f) => readFileSync(join(repo, f), 'utf8');
+      assert.equal(read('.gitignore'), `node_modules/\n${BOOKKEEPING_IGNORES.join('\n')}\n`, `${shell}: added once, on its own line`);
+      assert.equal(read('.gitattributes'), '.claude/review/learnings/feedback.jsonl merge=union\n', shell);
+      assert.equal(read('.dockerignore'), 'tmp/\n/.claude\n**/CLAUDE.md\n**/AGENTS.md\n', `${shell}: the globs are written as typed`);
+      assert.ok(first.includes('added to .gitignore: /.claude/review/learnings/pending/'), `${shell}: ${first}`);
+      assert.ok(first.includes('tracked: .claude/review/metrics/severity_history.txt'), `${shell}: a committed metrics file is listed`);
+      assert.ok(!second.includes('added to'), `${shell}: a second run adds nothing: ${second}`);
+      assert.equal(readFileSync(join(updateDir, 'bookkeeping_changed.txt'), 'utf8'), '.gitignore\n.gitattributes\n.dockerignore\n', shell);
+      assert.equal(readFileSync(join(updateDir, 'bookkeeping_dirty.txt'), 'utf8'), '.dockerignore\n', `${shell}: only the file with other changes`);
+      git('rm', '-r', '--cached', '--quiet', '--', '.claude/review/metrics/severity_history.txt');
+      const shown = execFileSync(shell, ['-c', at(diff)], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_PAGER: 'cat' } });
+      assert.ok(shown.includes('+/.claude/review/learnings/findings.json'), `${shell}: the .gitignore diff shows: ${shown}`);
+      assert.ok(shown.includes('new file .gitattributes:\n.claude/review/learnings/feedback.jsonl merge=union'), `${shell}: a new file is shown whole`);
+      assert.ok(shown.includes('D\t.claude/review/metrics/severity_history.txt'), `${shell}: the untracked file is named`);
+      assert.ok(existsSync(join(repo, '.claude/review/metrics/severity_history.txt')), `${shell}: and its local copy stays`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test('init never copies or stages the CI workflows outside a local-and-ci guard', () => {

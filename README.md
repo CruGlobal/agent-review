@@ -33,7 +33,7 @@ Three more you will use less often:
 | Command | Type it when | What it does |
 | --- | --- | --- |
 | `/agent-review:init` | Once, in a repo that has never had agent-review | Reads the repo and its PR history, proposes the config, rule docs, and workflow files. Writes nothing until you say yes. |
-| `/agent-review:update-files` | The review tells you your workflow files are old | Refreshes the copied `.github/workflows/agent-review*.yml` files, keeping your settings. |
+| `/agent-review:update-files` | The review tells you your workflow files are old | Refreshes the copied `.github/workflows/agent-review*.yml` files, keeping your settings. Adds any ignore lines your repo is missing for the review's local files. |
 | `/agent-review:learn` | Every few weeks | Turns the findings you keep dismissing into rules so they stop coming up. |
 
 **Words to know.** A **blocker** is a finding with severity 7 or higher. The robot will not
@@ -740,7 +740,7 @@ Two things can go stale in a consumer repo, and each has its own update path:
 
 ```
 /plugin marketplace update cruglobal      # the plugin itself (local Claude Code sessions)
-/agent-review:update-files                # the copied .github/workflows/agent-review*.yml files
+/agent-review:update-files                # the copied .github/workflows/agent-review*.yml files, and the ignore lines
 ```
 
 CI never needs the first — the workflows pull the plugin fresh from this repo on every run. The
@@ -749,6 +749,9 @@ repo's own settings (`auto_approve` on each caller, `rollout_mode`, secret names
 pinned refs), shows the diff, and offers a PR. If the fresh caller says `advisory` but the repo's
 `.claude/review/config.yml` still says `rollout.mode: shadow`, it offers to change the config in
 the same PR, because the reusable workflow refuses a caller whose mode disagrees with config.
+It also adds any `.gitignore` and `.gitattributes` lines `/agent-review:init` writes that the repo
+lacks, offers to untrack review files a repo committed before it ignored them, and offers the
+`.dockerignore` lines when the repo has a root `Dockerfile`.
 Reviews flag both kinds of staleness automatically: the report gains a footer when a repo's
 workflow files are behind the templates, and local runs note when the installed plugin is behind
 the latest version. `agent-review template-status` makes the workflow-file call. A copy is stale
