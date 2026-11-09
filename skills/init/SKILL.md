@@ -63,7 +63,8 @@ path in it: the path Stage 0's first block prints as `run folder: <path>`.
 
 ⚠️ **STOPPING EARLY**: whenever init stops before it finishes, for any reason (a refusal to
 continue, a `--migrate` run, a "no" at the 3B gate, a failed check), run the **Finish the run**
-block before you stop. It is the last block of this skill. It frees the checkout and deletes this
+block before you stop. The one exception is a read-only guard drift, which pauses init until the
+revert is done (see [the read-only guard](#the-read-only-guard)). It is the last block of this skill. It frees the checkout and deletes this
 run's working files.
 
 ---
@@ -133,7 +134,6 @@ If the user explicitly confirms the larger run, recompute `BATCHES` **without** 
 fans out. Without that recompute the confirmation is a no-op and mining still stops at 100 PRs.
 
 ```bash
-git rev-parse --show-toplevel || { echo "❌ Not a git repository — run init from the repo root."; exit 1; }
 ls -A .claude/review/config.yml 2>/dev/null && echo "⚠️  This repo already has .claude/review/config.yml"
 ```
 
@@ -244,9 +244,12 @@ diff "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_now_head.txt \
 
 Both diffs silent → continue. Any output → **drift**. Then:
 
-1. **Stop.** Dispatch nothing further.
-2. **Show the human the delta** — the `diff` output above plus
-   `git log <baselineHEAD>..HEAD --oneline` if HEAD moved.
+1. **Pause.** Dispatch nothing further. This pause is not a stop of the run: do not run **Finish the
+   run** until the revert below is done and init either resumes or ends, because that block deletes
+   the baseline files the revert and the re-run need.
+2. **Show the human the delta**, the `diff` output above plus
+   `git log <baselineHEAD>..HEAD --oneline` if HEAD moved, with the baseline SHA (the contents of
+   `"$RUN_DIR"/init_baseline_head.txt`) written out in the message.
 3. **Discard the offending subagent's returned content as contaminated.** A subagent that ignored
    the read-only constraint may have ignored other parts of its brief too; detecting the write
    without discarding the output still poisons the mined result. Either re-run that subagent

@@ -159,6 +159,12 @@ test('init takes the checkout first and frees it at the end or on any early stop
   assert.deepStrictEqual(bashBlocks(skill.slice(skill.indexOf('### Finish the run'))), ['agent-review run-dir --release init'], 'the last block releases the checkout');
   assert.ok(skill.indexOf('### Finish the run') > report, 'the release comes after the report');
   const flat = skill.replace(/\s+/g, ' ');
+  const drift = flat.slice(flat.indexOf('Any output → **drift**'), flat.indexOf('**What this check cannot see**'));
+  assert.ok(drift.includes('This pause is not a stop of the run: do not run **Finish the run** until the revert below is done'), 'a drift pause keeps the baseline files');
+  assert.ok(drift.includes('the baseline SHA (the contents of `"$RUN_DIR"/init_baseline_head.txt`) written out in the message'), 'the human is shown the baseline SHA');
+  assert.ok(flat.includes('The one exception is a read-only guard drift, which pauses init until the revert is done'), 'the early-stop rule names the drift exception');
+  const prose = skill.replace(/^( *)```[\s\S]*?^\1```$/gm, '');
+  assert.deepStrictEqual(prose.match(/(?<!"\$RUN_DIR"\/)\binit(\.sh|_[a-z_]+\.(txt|json))\b/g), null, 'prose names an init state file only behind the run folder');
   for (const needle of [
     'whenever init stops before it finishes, for any reason (a refusal to continue, a `--migrate` run, a "no" at the 3B gate, a failed check), run the **Finish the run** block before you stop',
     'If `agent-review run-dir` fails, stop and show its error: never fall back to `/tmp`.',
