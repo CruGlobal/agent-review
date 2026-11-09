@@ -609,8 +609,8 @@ test('releasePrLocks skips a symlinked entry under locks and keeps a newer gener
 test('forceReleasePr follows no symlink, ignores a missing folder, and refuses a bad one', () => {
   withTemp('ar-rundir-pr-', (cap) => {
     const one = { ...S1, AGENT_REVIEW_CAPTURE_DIR: cap };
-    assert.doesNotThrow(() => forceReleasePr(one, PR), 'no capture folder at all');
-    mkdirSync(cap, { recursive: true, mode: 0o700 });
+    assert.doesNotThrow(() => forceReleasePr({ ...one, AGENT_REVIEW_CAPTURE_DIR: join(cap, 'missing') }, PR), 'no capture folder at all');
+    assert.doesNotThrow(() => forceReleasePr(one, PR), 'no locks folder');
     mkdirSync(join(cap, 'locks'), { mode: 0o700 });
     assert.doesNotThrow(() => forceReleasePr(one, PR), 'no PR folder');
 
@@ -623,6 +623,13 @@ test('forceReleasePr follows no symlink, ignores a missing folder, and refuses a
     rmSync(join(cap, 'locks'), { recursive: true });
     symlinkSync(elsewhere, join(cap, 'locks'));
     assert.throws(() => forceReleasePr(one, PR), (e) => e instanceof RunDirError && /locks is a symlink/.test(e.message));
+    const linkedRoot = join(os.tmpdir(), `ar-linked-root-${process.pid}`);
+    symlinkSync(cap, linkedRoot);
+    try {
+      assert.throws(() => forceReleasePr({ ...one, AGENT_REVIEW_CAPTURE_DIR: linkedRoot }, PR), (e) => e instanceof RunDirError && /is a symlink/.test(e.message));
+    } finally {
+      rmSync(linkedRoot);
+    }
     assert.deepEqual(readdirSync(elsewhere), [`${LOCK_FILE}.1`], 'nothing is removed through a link');
   });
 });
@@ -630,7 +637,7 @@ test('forceReleasePr follows no symlink, ignores a missing folder, and refuses a
 const DAY = 86400;
 const age = (path, seconds) => utimesSync(path, NOW - seconds, NOW - seconds);
 
-// A capture root with `runs/` and `locks/`; folders are aged past the prune age unless noted.
+// A capture root with `runs/` and `locks/`.
 function pruneRoot(cap) {
   for (const d of [cap, join(cap, 'runs'), join(cap, 'locks')]) mkdirSync(d, { recursive: true, mode: 0o700 });
   return { env: { AGENT_REVIEW_CAPTURE_DIR: cap }, runs: join(cap, 'runs'), locks: join(cap, 'locks') };
@@ -747,7 +754,7 @@ test('prune skips a plain file under runs/ and locks/', () => {
   });
 });
 
-test('prune skips a folder owned by another uid', () => {
+test('prune touches nothing when the capture root belongs to another uid', () => {
   withTemp('ar-prune-', (cap) => {
     const { env, runs, locks } = pruneRoot(cap);
     const run = oldRun(runs, 'old-0123456789ab');
@@ -778,5 +785,40 @@ test('prune removes a PR lock folder whose lock is stale, dead or unreadable, an
     assert.deepEqual(removed.sort(), [dead, stale, corrupt, empty].sort());
     assert.deepEqual(readdirSync(locks), ['a_b_1']);
     assert.equal(existsSync(live), true);
+  });
+});
+
+test('prune keeps a PR lock another session writes while it runs', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, locks } = pruneRoot(cap);
+    const dir = join(locks, 'a_b_1');
+    mkdirSync(dir, { mode: 0o700 });
+    const lock = (holder) => JSON.stringify({ ...holderFrom(holder), skill: 'review', checkout: '/w/b', pr: 'a/b#1', created: NOW });
+    writeFileSync(join(dir, `${LOCK_FILE}.1`), lock(S2));
+    let raced = false;
+    const { removed } = prune(env, {
+      isAlive: (pid) => {
+        if (!raced) {
+          raced = true;
+          writeFileSync(join(dir, `${LOCK_FILE}.2`), lock(S1));
+        }
+        return pid !== 222;
+      },
+    });
+    assert.deepEqual(removed, []);
+    assert.deepEqual(lockGenerations(dir), [2], 'the live generation survives with its folder');
+  });
+});
+
+test('prune keeps a PR lock folder made under a minute ago that holds no lock yet', () => {
+  withTemp('ar-prune-', (cap) => {
+    const { env, locks } = pruneRoot(cap);
+    const fresh = join(locks, 'a_b_1');
+    const older = join(locks, 'a_b_2');
+    for (const d of [fresh, older]) mkdirSync(d, { mode: 0o700 });
+    age(fresh, 10);
+    age(older, 61);
+    assert.deepEqual(prune(env).removed, [older]);
+    assert.equal(existsSync(fresh), true);
   });
 });

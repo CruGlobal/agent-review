@@ -21,6 +21,7 @@ const LOCK_FILE = 'run.lock';
 const LOCK_MAX_AGE_SECONDS = ARM_MAX_AGE_SECONDS;
 const LOCKS_DIR = 'locks';
 const PRUNE_AGE_SECONDS = 604800;
+const NEW_LOCK_FOLDER_SECONDS = 60;
 const PR_REF = /^([A-Za-z0-9-]+)\/([A-Za-z0-9._-]+)#([1-9][0-9]*)$/;
 const CI_RUN_DIR = '/tmp';
 // Skills paste the run folder into prompts, JS strings and unquoted shell words.
@@ -325,8 +326,8 @@ function forceReleasePr(env, pr) {
   const dir = prLockDir(env, pr);
   const root = captureDir(env);
   for (const d of [root, join(root, LOCKS_DIR), dir]) {
+    if (lstatOrNull(d) === null) return;
     const problem = dirProblem(d);
-    if (problem === `${d} does not exist`) return;
     if (problem) throw new RunDirError(problem);
   }
   removeLocks(dir);
@@ -375,9 +376,17 @@ function pruneRuns({ env = process.env, nowSeconds, keep, isAlive = pidAlive, ui
       if (dir === keep) continue;
       try {
         const stat = realDirOwnedBy(dir, uid);
-        if (!stat || lockIsLive(currentLock(dir).lock, nowSeconds, isAlive)) continue;
-        if (old && nowSeconds - newestMtimeSeconds(dir, stat) <= PRUNE_AGE_SECONDS) continue;
-        rmSync(dir, { recursive: true, force: true });
+        if (!stat) continue;
+        const { generation, lock } = currentLock(dir);
+        if (lockIsLive(lock, nowSeconds, isAlive)) continue;
+        if (old) {
+          if (nowSeconds - newestMtimeSeconds(dir, stat) <= PRUNE_AGE_SECONDS) continue;
+          rmSync(dir, { recursive: true, force: true });
+        } else {
+          if (generation === 0 && nowSeconds - stat.mtimeMs / 1000 < NEW_LOCK_FOLDER_SECONDS) continue;
+          removeLocks(dir, generation + 1);
+          rmdirSync(dir);
+        }
         removed.push(dir);
       } catch {
         // This entry is skipped.
