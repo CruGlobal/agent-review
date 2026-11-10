@@ -467,7 +467,7 @@ else
   # Fallback: merge-base against the repo's configured base branch.
   # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
   # (base_branch is optional), so guard on BOTH empty and "undefined" — otherwise RANGE would
-  # degrade to "..HEAD" and the whole review would silently run on an empty diff.
+  # degrade to "..<head>" and the whole review would silently run on an empty diff.
   BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null || true)
   if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
     BASE_BRANCH=main
@@ -480,7 +480,9 @@ else
       echo "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml."
       exit 1
     }
-  RANGE="$MERGE_BASE..HEAD"
+  # A SHA, not HEAD: /code-review resolves HEAD in the session's start folder, which may be another checkout.
+  HEAD_SHA=$(git rev-parse HEAD)
+  RANGE="$MERGE_BASE..$HEAD_SHA"
 fi
 
 # Review effort may be incremental, but approval metadata must always describe
@@ -489,7 +491,7 @@ fi
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   FULL_RANGE="$PR_BASE..$HEAD_REF"
 else
-  FULL_RANGE="$MERGE_BASE..HEAD"
+  FULL_RANGE="$MERGE_BASE..$HEAD_SHA"
 fi
 
 echo "Diff range: $RANGE"

@@ -308,7 +308,7 @@ armed: the hook's `session_id` is the main session's id even for a
 subagent's Skill call, and it equals `CLAUDE_CODE_SESSION_ID` in that session's shells. So a
 `/code-review` in another session never touches your review. Within one session, the args tell
 runs apart: a call with a run's exact args is that run's, and a wrong `/code-review` call (another
-effort, or the `code-review:code-review` plugin command) whose target, the PR number or range, is
+effort, or the `code-review:code-review` plugin command) whose target, the PR URL or range, is
 one run's writes a mismatch record and fails that run's wait. A `/code-review` you run yourself in
 the main conversation is never captured. While a run is armed, the hooks also keep the final
 message of each subagent that stops in its session (the newest 50) in its folder until it
@@ -417,7 +417,7 @@ first is still running stops at once and says which session holds it. If that se
 free the checkout with `agent-review run-dir --release --force`. The same PR from two checkouts
 stops the second run the same way, and its message gives the command that frees the PR. Two
 reviews in one session that both wait on `/code-review` with the same args (two local reviews
-with no PR that start from the same commit, at the same effort) cannot be told apart, so the
+with no PR of the same base and head commits, at the same effort) cannot be told apart, so the
 second one stops and asks you to run them one at a time.
 
 ---
@@ -820,10 +820,15 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   of a dismissed one from the same reviewer in the same file, so this mostly applies across PRs.
 - **Two reviews in one session cannot both wait on the same `/code-review` args.** The hooks tell
   sessions apart by `session_id`, but inside one session only the args separate runs, so a second
-  arm with the same args (two reviews with no PR from the same base commit, at the same effort) is
-  refused. A PR review's args name the PR's URL, so the same PR number in two repos never clashes.
-  Two helpers of one session reviewing the same checkout would also share its run folder; give
-  each review its own checkout.
+  arm with the same args (two reviews with no PR of the same base and head commits, at the same
+  effort) is refused. A PR review's args name the PR's URL and a range names its commits by SHA,
+  so the same PR number in two repos never clashes. Two helpers of one session reviewing the same
+  checkout would also share its run folder; give each review its own checkout.
+- **`/code-review` still reads from the session's start folder.** The lane names a PR by its URL
+  and a range by commit SHAs, so the change it asks `/code-review` for is this checkout's. But
+  `/code-review` reads CLAUDE.md, and any file it opens, from the folder the session started in,
+  and it finds a range's commits only when that folder is a checkout of the same repo. Start the
+  session in the checkout under review, so `/code-review` sees that repo's guides and code.
 - **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
   lane, and the check reads that file. But a lane runs as the same user, so it could replace the
   file. The check cannot rule that out.

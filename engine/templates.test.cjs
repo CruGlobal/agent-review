@@ -3649,7 +3649,7 @@ test('README states how the capture, the wait, and the proof behave, and what th
     'The hooks act only while a review has armed capture, and an arm expires after 6 hours.',
     'a hook only ever writes into a run its own session armed: the hook\'s `session_id` is the main session\'s id even for a subagent\'s Skill call, and it equals `CLAUDE_CODE_SESSION_ID` in that session\'s shells.',
     'So a `/code-review` in another session never touches your review.',
-    "a wrong `/code-review` call (another effort, or the `code-review:code-review` plugin command) whose target, the PR number or range, is one run's writes a mismatch record and fails that run's wait.",
+    "a wrong `/code-review` call (another effort, or the `code-review:code-review` plugin command) whose target, the PR URL or range, is one run's writes a mismatch record and fails that run's wait.",
     'A `/code-review` you run yourself in the main conversation is never captured.',
     'While a run is armed, the hooks also keep the final message of each subagent that stops in its session (the newest 50) in its folder until it disarms.',
     'If the hooks never run, for example because Claude Code was not restarted after the plugin was installed, the wait fails within a minute and gives the reason, and the lane\'s reply, which the review prints when it fails, carries it as `/code-review did not finish: <reason>`.',
@@ -4194,9 +4194,9 @@ test('code-review-engine.md arms capture with the composed args and fills SKILL_
       'high ccc333..bbb222 --max-findings 5',
     ],
     [
-      { ...FULL_PR_ENV, EFFORT: 'low', PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { ...FULL_PR_ENV, EFFORT: 'low', PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..localhead1234', CODE_REVIEW_TARGET: 'ddd444..localhead1234' },
       { engine: { maxFindings: 'all' } },
-      'low ddd444..HEAD --max-findings all',
+      'low ddd444..localhead1234 --max-findings all',
     ],
   ];
   for (const shell of availableShells(t)) {
@@ -4239,7 +4239,7 @@ test('full PR reviews give the lane a merge-base diff', (t) => {
 
     const noPr = runArmBlock(
       shell,
-      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..localhead1234', CODE_REVIEW_TARGET: 'ddd444..localhead1234' },
       { engine: {} },
     );
     assert.strictEqual(noPr.git, 'rev-parse HEAD\n', `${shell}: a range review keeps the reviewed range and reads only the local HEAD`);
@@ -4257,10 +4257,10 @@ test('Stage 1 saves the reviewed head and base that the lane and Stage 2 both ch
       'bbb222',
       'ccc333',
     ],
-    ['a PR with no head or base ref', { ...FULL_PR_ENV, BASE_REF: '', HEAD_REF: '', RANGE: 'eee555..HEAD' }, 'localhead1234', 'eee555'],
+    ['a PR with no head or base ref', { ...FULL_PR_ENV, BASE_REF: '', HEAD_REF: '', RANGE: 'eee555..localhead1234' }, 'localhead1234', 'eee555'],
     [
       'a local range review',
-      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..HEAD', CODE_REVIEW_TARGET: 'ddd444..HEAD' },
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..localhead1234', CODE_REVIEW_TARGET: 'ddd444..localhead1234' },
       'localhead1234',
       'ddd444',
     ],
@@ -5246,6 +5246,11 @@ test("PR diffs start at the merge base, not the base branch's tip, under bash an
       const noForkPoint = run('no merge base', { BASE_REF: lonely, HEAD_REF: head });
       assert.ok(noForkPoint.output.includes(`Full PR range: ${lonely}..${head}\n`), `${shell}: ${noForkPoint.output}`);
       assert.strictEqual(noForkPoint.wanted['full_changed_files.txt'], names(lonely), `${shell}: no merge base diffs from the base commit`);
+
+      execFileSync('git', ['-C', repo, 'branch', '-f', 'main', fork]);
+      const noPr = run('a local review with no PR', {});
+      assert.ok(noPr.output.includes(`Diff range: ${fork}..${head}\nFull PR range: ${fork}..${head}\n`), `${shell}: the range names the head by its SHA, never HEAD: ${noPr.output}`);
+      ownChanges(noPr, 'a local review with no PR', DIFFS);
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });
