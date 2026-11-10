@@ -551,6 +551,7 @@ test('lastAssistantText returns the last assistant text block in a transcript', 
 test('argsTarget is the second word of the /code-review args', () => {
   assert.equal(argsTarget('xhigh 12 --max-findings default'), '12');
   assert.equal(argsTarget('  high   abc123..def456  '), 'abc123..def456');
+  assert.equal(argsTarget('xhigh https://github.com/acme/widgets/pull/12 --max-findings default'), 'https://github.com/acme/widgets/pull/12');
   assert.equal(argsTarget('low'), null);
   assert.equal(argsTarget(undefined), null);
 });

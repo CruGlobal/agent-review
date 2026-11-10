@@ -62,14 +62,14 @@ Stage 4:
 ```bash
 UPDATE_DIR=$(agent-review run-dir)/update-files || exit 1
 add_line() {
-  [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
-  if ! grep -qxF -- "$1" "$UPDATE_DIR"/bookkeeping_changed.txt 2>/dev/null; then
-    [ -z "$(git status --porcelain -- "$1")" ] || printf '%s\n' "$1" >> "$UPDATE_DIR"/bookkeeping_dirty.txt
-    printf '%s\n' "$1" >> "$UPDATE_DIR"/bookkeeping_changed.txt
+  [ -f "${1}" ] && grep -qxF -- "${2}" "${1}" && return 0
+  if ! grep -qxF -- "${1}" "$UPDATE_DIR"/bookkeeping_changed.txt 2>/dev/null; then
+    [ -z "$(git status --porcelain -- "${1}")" ] || printf '%s\n' "${1}" >> "$UPDATE_DIR"/bookkeeping_dirty.txt
+    printf '%s\n' "${1}" >> "$UPDATE_DIR"/bookkeeping_changed.txt
   fi
-  [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
-  printf '%s\n' "$2" >> "$1"
-  echo "added to $1: $2"
+  [ -s "${1}" ] && [ -n "$(tail -c1 "${1}")" ] && printf '\n' >> "${1}"
+  printf '%s\n' "${2}" >> "${1}"
+  echo "added to ${1}: ${2}"
 }
 add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'

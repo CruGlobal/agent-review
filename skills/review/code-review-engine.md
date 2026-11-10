@@ -51,15 +51,16 @@ fi
 MAX_FINDINGS=$(node -e 'const e = require(process.env.RUN_DIR + "/review_plan.json").engine || {}; console.log(e.maxFindings == null ? "" : String(e.maxFindings))')
 MAX_FINDINGS_FLAG=" --max-findings ${MAX_FINDINGS:-default}"
 CODE_REVIEW_ARGS="$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"
-REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"
 if [ -z "$INCREMENTAL" ] && [ -n "$PR_NUMBER" ] && [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   # The merge base, or the base branch's tip when there is none, as RANGE in SKILL.md.
   REVIEWED_BASE=$(git merge-base "$BASE_REF" "$HEAD_REF" 2>/dev/null) || REVIEWED_BASE="$BASE_REF"
+  REVIEWED_HEAD="$HEAD_REF"
   git diff "$REVIEWED_BASE" "$HEAD_REF" > "$RUN_DIR"/code_review_diff.txt
   CODE_REVIEW_DIFF="$RUN_DIR"/code_review_diff.txt
 else
   CODE_REVIEW_DIFF="$RUN_DIR"/pr_diff.txt
   REVIEWED_BASE="${RANGE%%..*}"
+  REVIEWED_HEAD="${RANGE#*..}"
 fi
 if [ -z "$REVIEWED_HEAD" ] || [ -z "$REVIEWED_BASE" ]; then
   echo "❌ Could not work out the reviewed head and base commits."
@@ -106,7 +107,7 @@ this file) and fill its sixteen placeholders:
 | `{{LEARNINGS}}`           | Entries from `$RUN_DIR/review_rules.json` whose `agent` is in `plan.engine.replaces` or is `code-review`, rendered like the archetype's `{{LEARNINGS}}`. Empty string when there are none.              |
 | `{{IMPACT}}`              | The block the `architecture` lane would have received (see **`{{IMPACT}}` content** in `SKILL.md`'s Stage 1), under the same conditions. Empty string when impact was not computed or `blastRadius` is 0.        |
 | `{{EXCLUDED_PATHS}}`      | The globs `agent-review config get excluded_paths` prints (a JSON array), one per line. `none` when the list is empty.                                                                          |
-| `{{REVIEWED_HEAD}}`       | `$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR. Stage 2's proof reads the same saved value. |
+| `{{REVIEWED_HEAD}}`       | `$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: the commit the lane's diff ends at. That is `HEAD_REF`, the PR head, for a full PR review, and the end of `RANGE` otherwise (the local `HEAD` commit Stage 0 resolved when there is no PR). Stage 2's proof reads the same saved value. |
 | `{{REVIEWED_BASE}}`       | `$REVIEWED_BASE`, the value the block above prints as `code-review base:`: the commit the lane's diff starts from. That is the merge base of `BASE_REF` and `HEAD_REF` for a full PR review, and the start of `RANGE` otherwise (`LAST_REVIEWED` for an incremental review). Stage 2's proof reads the same saved value. |
 
 Launch the lane with the Task tool, in the same message as every other launch:

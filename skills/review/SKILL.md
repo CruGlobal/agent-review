@@ -24,9 +24,9 @@ prose rule docs.
                                   # (local only; engine=agent-review picks the specialist lanes)
 ```
 
-**Rough cost** (varies with diff size): quick ~$0.50 · standard ~$2-4 · deep varies with
-escalating-lane count.
-`auto` costs whatever tier it resolves to — and $0 when it skips a no-risk diff.
+**Rough cost** (varies with diff size): quick about 50 cents · standard 2 to 4 dollars · deep
+varies with escalating-lane count.
+`auto` costs whatever tier it resolves to, and nothing when it skips a no-risk diff.
 
 **Incremental re-reviews**: the posted report records the reviewed head SHA. In CI, a later run
 on the same PR diffs only the commits since that SHA. Locally, pass `incremental` (any position)
@@ -378,7 +378,7 @@ process.exit((evidence.staticFindings || []).every((finding) => listed.has(findi
       -e "s/^<!-- agent-review-rollout: [a-z]* -->$/<!-- agent-review-rollout: ${AGENT_REVIEW_ROLLOUT_MODE:-advisory} -->/" \
       -e "/^<!-- agent-review-status:/ s/\"head\":\"[0-9a-f]\{7,40\}\"/\"head\":\"$HEAD_REF\"/" \
       "$PREV_COMMENT" > "$AGENT_REVIEW_COMMENT_OUT" || true
-    echo "$1"
+    echo "${1}"
     return 0
   fi
   rm -f "$RUN_DIR"/agent_review_ledger.json "$RUN_DIR"/agent_review_status.json "$RUN_DIR"/agent_review_report.md
@@ -467,7 +467,7 @@ else
   # Fallback: merge-base against the repo's configured base branch.
   # `config get` exits 0 and prints the literal string "undefined" for a key the config omits
   # (base_branch is optional), so guard on BOTH empty and "undefined" — otherwise RANGE would
-  # degrade to "..HEAD" and the whole review would silently run on an empty diff.
+  # degrade to "..<head>" and the whole review would silently run on an empty diff.
   BASE_BRANCH=$(agent-review config get base_branch 2>/dev/null || true)
   if [ -z "$BASE_BRANCH" ] || [ "$BASE_BRANCH" = "undefined" ] || [ "$BASE_BRANCH" = "null" ]; then
     BASE_BRANCH=main
@@ -480,7 +480,9 @@ else
       echo "❌ Could not resolve a diff base (tried 'origin/$BASE_BRANCH' and '$BASE_BRANCH'). Set base_branch in config.yml."
       exit 1
     }
-  RANGE="$MERGE_BASE..HEAD"
+  # A SHA, not HEAD: /code-review resolves HEAD in the session's start folder, which may be another checkout.
+  HEAD_SHA=$(git rev-parse HEAD)
+  RANGE="$MERGE_BASE..$HEAD_SHA"
 fi
 
 # Review effort may be incremental, but approval metadata must always describe
@@ -489,7 +491,8 @@ fi
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   FULL_RANGE="$PR_BASE..$HEAD_REF"
 else
-  FULL_RANGE="$MERGE_BASE..HEAD"
+  [ -n "${MERGE_BASE:-}" ] || { echo "❌ No base commit for the full PR range: gh gave no base ref. Check that gh pr view works, then re-run."; exit 1; }
+  FULL_RANGE="$MERGE_BASE..$HEAD_SHA"
 fi
 
 echo "Diff range: $RANGE"
@@ -784,12 +787,12 @@ HEAD_ARGS=()
 if [ -n "${HEAD_REF:-}" ]; then HEAD_ARGS=(--head "$HEAD_REF"); fi
 if [ "$MODE" = "auto" ]; then
   # The skip report keeps the options notes (such as the CI engine override) and the Notes bullets
-  # the previous report for this PR carried; $1 is that previous comment, when there is one.
+  # the previous report for this PR carried; ${1} is that previous comment, when there is one.
   skip_notes() {
     { node -e 'for (const n of require(process.env.RUN_DIR + "/review_options.json").notes || []) console.log("- " + n)' 2>/dev/null
-      [ -s "${1:-}" ] && tr -d '\r' < "$1" | sed -n '/^\*\*Notes\*\*:/,/^$/{/^- /p;}'
+      [ -s "${1:-}" ] && tr -d '\r' < "${1}" | sed -n '/^\*\*Notes\*\*:/,/^$/{/^- /p;}'
       true
-    } | awk '!seen[$0]++' | { read -r first && { echo ""; echo "**Notes**:"; echo "$first"; cat; }; true; }
+    } | awk '!seen[$(0)]++' | { read -r first && { echo ""; echo "**Notes**:"; echo "$first"; cat; }; true; }
   }
   LEVEL=$(node -e 'const p = require(process.env.RUN_DIR + "/review_plan.json"); console.log(p.risk.level)' 2>/dev/null)
   RESOLVED=$(node -e 'const p = require(process.env.RUN_DIR + "/review_plan.json"); console.log(p.mode.resolved)' 2>/dev/null)
@@ -1044,8 +1047,8 @@ The launch table (Stage 1) selects a subagent type per agent's tier (`agent-revi
 / `-sonnet` / `-haiku`). Confirm those plugin subagent types actually resolve in this environment
 before committing every later launch to them — a stale or partially-installed plugin might not
 expose them yet. Run this only once a review is actually about to launch agents (the resolved
-mode reached this point instead of exiting at a Stage 0 skip) — that keeps a score-0 auto skip at
-$0. Launch this probe as one Task, not one per tier:
+mode reached this point instead of exiting at a Stage 0 skip) — that keeps a score-0 auto skip
+free. Launch this probe as one Task, not one per tier:
 
 - **description**: `"routing smoke test"`
 - **subagent_type**: `"agent-review:reviewer-haiku"`
@@ -1102,7 +1105,10 @@ if [ "${ENGINE:-}" = "code-review" ]; then
   if [ -n "$INCREMENTAL" ]; then
     CODE_REVIEW_TARGET="$LAST_REVIEWED..$HEAD_REF"
   elif [ -n "$PR_NUMBER" ]; then
-    CODE_REVIEW_TARGET="$PR_NUMBER"
+    # /code-review runs its commands from the session's start folder, which may be another repo.
+    PR_REPO="${GITHUB_REPOSITORY:-$(gh repo view --json nameWithOwner -q .nameWithOwner)}" || PR_REPO=""
+    [ -n "$PR_REPO" ] || { echo "❌ could not tell which repository this PR is in (gh repo view failed)"; exit 1; }
+    CODE_REVIEW_TARGET="https://github.com/$PR_REPO/pull/$PR_NUMBER"
   else
     CODE_REVIEW_TARGET="$RANGE"
   fi
@@ -1401,12 +1407,12 @@ if [ "$FIX_COUNT" -gt 0 ]; then
 #!/bin/bash
 set -euo pipefail
 # fix_*.sh are model-generated from PR content and UNTRUSTED — review each before applying.
-FIXES=$(cd "$(dirname "$0")" && pwd)
+FIXES=$(cd "$(dirname "${0}")" && pwd)
 SAFE_NAME='^fix_[0-9]+_[a-z0-9_-]+\.sh$'
 # The C locale keeps [a-z] to the 26 ASCII letters.
 safe_name() {
   local LC_ALL=C
-  [[ "$1" =~ $SAFE_NAME ]]
+  [[ "${1}" =~ $SAFE_NAME ]]
 }
 if [ "${1:-}" != "--yes" ]; then
   echo "DRY RUN: review each fix, then re-run with --yes to apply. Nothing applied yet."
@@ -1718,8 +1724,8 @@ EOF
 AVG_SEVERITY="" LAST_10=""
 if [ -s "$REVIEW_DIR/metrics/severity_history.txt" ]; then
   AVG_SEVERITY=$(tail -10 "$REVIEW_DIR/metrics/severity_history.txt" \
-    | awk '{sum+=$2; count++} END {if (count) printf "%.1f/10", sum/count}')
-  LAST_10=$(tail -10 "$REVIEW_DIR/metrics/severity_history.txt" | awk '{print $2}')
+    | awk '{sum+=$(2); count++} END {if (count) printf "%.1f/10", sum/count}')
+  LAST_10=$(tail -10 "$REVIEW_DIR/metrics/severity_history.txt" | awk '{print $(2)}')
 fi
 [ -n "$AVG_SEVERITY" ] || AVG_SEVERITY="no earlier reviews"
 [ -n "$LAST_10" ] || LAST_10="no earlier reviews"

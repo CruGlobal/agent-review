@@ -308,7 +308,7 @@ armed: the hook's `session_id` is the main session's id even for a
 subagent's Skill call, and it equals `CLAUDE_CODE_SESSION_ID` in that session's shells. So a
 `/code-review` in another session never touches your review. Within one session, the args tell
 runs apart: a call with a run's exact args is that run's, and a wrong `/code-review` call (another
-effort, or the `code-review:code-review` plugin command) whose target, the PR number or range, is
+effort, or the `code-review:code-review` plugin command) whose target, the PR URL or range, is
 one run's writes a mismatch record and fails that run's wait. A `/code-review` you run yourself in
 the main conversation is never captured. While a run is armed, the hooks also keep the final
 message of each subagent that stops in its session (the newest 50) in its folder until it
@@ -411,14 +411,16 @@ a deep one more. `re-review` only looks at new commits, so it is usually the che
 grows it from what you dismiss.
 
 **Can I run two reviews at once?** Yes, from different checkouts (a worktree per PR works well),
-in one session or several. Each review keeps its files in its own folder, so they never share a
-diff, ledger, report or `/code-review` result. A second review of the same checkout while the
-first is still running stops at once and says which session holds it. If that session is gone,
-free the checkout with `agent-review run-dir --release --force`. The same PR from two checkouts
-stops the second run the same way, and its message gives the command that frees the PR. Two
-reviews in one session that both wait on `/code-review` for the same PR number at the same effort
-(one PR number in two repos) cannot be told apart, so the second one stops and asks you to run
-them one at a time.
+in one session or several. Under the `code-review` engine, `/code-review` reads CLAUDE.md and
+other files from the checkout the session started in, so one session over several worktrees
+gives it the start checkout's files (see Known limitations). Each review keeps its files in its
+own folder, so they never share a diff, ledger, report or `/code-review` result. A second review
+of the same checkout while the first is still running stops at once and says which session holds
+it. If that session is gone, free the checkout with `agent-review run-dir --release --force`. The
+same PR from two checkouts stops the second run the same way, and its message gives the command
+that frees the PR. Two reviews in one session that both wait on `/code-review` with the same args
+(two local reviews with no PR of the same base and head commits, at the same effort) cannot be
+told apart, so the second one stops and asks you to run them one at a time.
 
 ---
 
@@ -820,9 +822,18 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   of a dismissed one from the same reviewer in the same file, so this mostly applies across PRs.
 - **Two reviews in one session cannot both wait on the same `/code-review` args.** The hooks tell
   sessions apart by `session_id`, but inside one session only the args separate runs, so a second
-  arm with the same args (the same PR number at the same effort, in two repos) is refused. Two
-  helpers of one session reviewing the same checkout would also share its run folder; give each
-  review its own checkout.
+  arm with the same args (two reviews with no PR of the same base and head commits, at the same
+  effort) is refused. A PR review's args name the PR's URL and a range names its commits by SHA,
+  so the same PR number in two repos never clashes. Two helpers of one session reviewing the same
+  checkout would also share its run folder; give each review its own checkout.
+- **`/code-review` still reads from the session's start folder.** The lane names a PR by its URL
+  and a range by commit SHAs, so the change it asks `/code-review` for is this checkout's. But
+  `/code-review` reads CLAUDE.md, and any file it opens, from the folder the session started in,
+  and it finds a range's commits only when that folder is a checkout that has those commits. A
+  worktree shares its repo's commits; a separate clone lacks unpushed ones. With one session over
+  several worktrees, `/code-review` reads those files from the start checkout's branch, not the
+  reviewed one. For it to see the reviewed branch's guides and code, start a session in that
+  checkout.
 - **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
   lane, and the check reads that file. But a lane runs as the same user, so it could replace the
   file. The check cannot rule that out.
