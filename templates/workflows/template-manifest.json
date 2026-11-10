@@ -88,5 +88,11 @@
     "agent-review-interact.yml": "2f84f44fdbb4aafaf4361ca3fe94d2e57d2617c07ae4d27e72c99a93f3b3dc4d",
     "agent-review-readiness.yml": "601e0d0f807202d2e14604d9c5023c1d4ca71f6d8513c8b2a06b859224b21704",
     "agent-review-approve.yml": "3dde06915e19c97df6073649c50b2d264119125a462d6e713cdddbd75dd2a203"
+  },
+  "1.1.8": {
+    "agent-review.yml": "468fe9736eda3a2eddd8e8d2775b8aea125c6dc011232ed1365a57884909a551",
+    "agent-review-interact.yml": "abcab9879f944607aa523801654e32ce2491f1ed47fe98f7518178c58062cc48",
+    "agent-review-readiness.yml": "c22abcaacde761a1dd1fbdcb9cc5f6f9e6f6c115756dbd5e559edb1fa26e8408",
+    "agent-review-approve.yml": "4845494c93b56388928b55cd019c1408c37e946c094436e9590438dd86f56745"
   }
 }

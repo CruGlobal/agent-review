@@ -416,9 +416,9 @@ diff, ledger, report or `/code-review` result. A second review of the same check
 first is still running stops at once and says which session holds it. If that session is gone,
 free the checkout with `agent-review run-dir --release --force`. The same PR from two checkouts
 stops the second run the same way, and its message gives the command that frees the PR. Two
-reviews in one session that both wait on `/code-review` for the same PR number at the same effort
-(one PR number in two repos) cannot be told apart, so the second one stops and asks you to run
-them one at a time.
+reviews in one session that both wait on `/code-review` with the same args (two local reviews
+with no PR that start from the same commit, at the same effort) cannot be told apart, so the
+second one stops and asks you to run them one at a time.
 
 ---
 
@@ -820,9 +820,10 @@ Current, deliberate boundaries — worth knowing before you rely on any of them.
   of a dismissed one from the same reviewer in the same file, so this mostly applies across PRs.
 - **Two reviews in one session cannot both wait on the same `/code-review` args.** The hooks tell
   sessions apart by `session_id`, but inside one session only the args separate runs, so a second
-  arm with the same args (the same PR number at the same effort, in two repos) is refused. Two
-  helpers of one session reviewing the same checkout would also share its run folder; give each
-  review its own checkout.
+  arm with the same args (two reviews with no PR from the same base commit, at the same effort) is
+  refused. A PR review's args name the PR's URL, so the same PR number in two repos never clashes.
+  Two helpers of one session reviewing the same checkout would also share its run folder; give
+  each review its own checkout.
 - **A lane could still overwrite the capture file on purpose.** A hook writes the capture, not the
   lane, and the check reads that file. But a lane runs as the same user, so it could replace the
   file. The check cannot rule that out.

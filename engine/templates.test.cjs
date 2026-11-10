@@ -70,6 +70,30 @@ test('skills reference the CLI, never legacy engine paths', () => {
   }
 });
 
+test('no SKILL.md holds $ before a digit or $ARGUMENTS, which Claude Code replaces with the skill arguments', () => {
+  const { readdirSync } = require('node:fs');
+  const skillFiles = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? skillFiles(join(dir, e.name)) : e.name === 'SKILL.md' ? [join(dir, e.name)] : [],
+    );
+  const files = skillFiles(join(ROOT, 'skills'));
+  assert.ok(files.length >= 7, `found only ${files.length} SKILL.md files`);
+  const hits = [];
+  for (const path of files) {
+    readFileSync(path, 'utf8').split('\n').forEach((line, i) => {
+      if (/\$(?:\d|ARGUMENTS)/.test(line)) hits.push(`${relative(ROOT, path)}:${i + 1}: ${line.trim()}`);
+    });
+  }
+  assert.deepStrictEqual(
+    hits,
+    [],
+    'When Claude Code loads a SKILL.md it replaces $0, $1, ... with the skill arguments and $ARGUMENTS with all of them, ' +
+      'inside code blocks and quotes too, and it drops the backslash from \\$1. ' +
+      'Write shell parameters as ${1}, awk fields as $(1), and prices without a $ before a digit:\n' +
+      hits.join('\n'),
+  );
+});
+
 // Lines of every ```bash fenced block in the skill.
 function bashBlocks(text) {
   const out = [];
@@ -704,7 +728,7 @@ test('with no PR, /code-review gets the same range the lanes review', () => {
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   const bash = bashBlocks(skill);
   assert.ok(
-    bash.includes('  elif [ -n "$PR_NUMBER" ]; then\n    CODE_REVIEW_TARGET="$PR_NUMBER"\n  else\n    CODE_REVIEW_TARGET="$RANGE"\n  fi'),
+    bash.includes('    CODE_REVIEW_TARGET="https://github.com/$PR_REPO/pull/$PR_NUMBER"\n  else\n    CODE_REVIEW_TARGET="$RANGE"\n  fi'),
     'the no-PR target is $RANGE',
   );
   assert.ok(!bash.includes('git branch --show-current'), 'a branch name lets /code-review pick its own base');
@@ -712,6 +736,62 @@ test('with no PR, /code-review gets the same range the lanes review', () => {
   assert.ok(row, 'the skill documents {{SKILL_ARGS}}');
   assert.ok(row.includes('`"$EFFORT $CODE_REVIEW_TARGET$MAX_FINDINGS_FLAG"`'), row);
   assert.ok(!row.includes('branch name'), row);
+});
+
+// Runs the review's /code-review target section, from its `if` line to its `fi`, in a folder that
+// is not a checkout, with a stub gh that prints $GH_REPO_OUT (or fails when it is empty).
+function runTargetSection(shell, env) {
+  const { writeFileSync, existsSync } = require('node:fs');
+  const { spawnSync } = require('node:child_process');
+  const lines = bashBlocks(readFileSync(REVIEW_SKILL, 'utf8')).split('\n');
+  const from = lines.indexOf('if [ "${ENGINE:-}" = "code-review" ]; then');
+  assert.ok(from >= 0, 'the review has a /code-review target section');
+  const section = lines.slice(from, lines.indexOf('fi', from) + 1).join('\n');
+  const dir = mkdtempSync(join(os.tmpdir(), 'ar-target-'));
+  try {
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\necho "gh $*" >> "${dir}/gh.log"\n[ -n "$GH_REPO_OUT" ] || exit 1\necho "$GH_REPO_OUT"\n`, { mode: 0o755 });
+    const base = { ...process.env };
+    delete base.GITHUB_REPOSITORY;
+    const r = spawnSync(shell, ['-c', `set -e\nexport RUN_DIR='${dir}'\n${section}\necho reached`], {
+      cwd: dir,
+      encoding: 'utf8',
+      env: { ...base, PATH: `${bin}:${process.env.PATH}`, ENGINE: 'code-review', INCREMENTAL: '', LAST_REVIEWED: '', HEAD_REF: 'bbb222', RANGE: 'aaa111..bbb222', ...env },
+    });
+    const read = (name) => (existsSync(join(dir, name)) ? readFileSync(join(dir, name), 'utf8') : '');
+    return { code: r.status, stdout: r.stdout, gh: read('gh.log'), env: read('review_env.sh') };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('a PR review hands /code-review the PR URL, so the session start folder never picks the repo', (t) => {
+  const url = 'https://github.com/acme/widgets/pull/33';
+  for (const shell of availableShells(t)) {
+    for (const [label, env, gh] of [
+      ['GITHUB_REPOSITORY', { PR_NUMBER: '33', GITHUB_REPOSITORY: 'acme/widgets' }, ''],
+      ['gh repo view', { PR_NUMBER: '33', GH_REPO_OUT: 'acme/widgets' }, 'gh repo view --json nameWithOwner -q .nameWithOwner\n'],
+    ]) {
+      const run = runTargetSection(shell, env);
+      assert.strictEqual(run.code, 0, `${shell}, ${label}: ${run.stdout}`);
+      assert.ok(run.stdout.includes(`code-review target: ${url}\nreached\n`), `${shell}, ${label}: ${run.stdout}`);
+      assert.strictEqual(run.env, `export CODE_REVIEW_TARGET="${url}"\n`, `${shell}, ${label}`);
+      assert.strictEqual(run.gh, gh, `${shell}, ${label}`);
+    }
+    const noRepo = runTargetSection(shell, { PR_NUMBER: '33' });
+    assert.strictEqual(noRepo.code, 1, `${shell}: ${noRepo.stdout}`);
+    assert.ok(noRepo.stdout.includes('❌ could not tell which repository this PR is in (gh repo view failed)'), `${shell}: ${noRepo.stdout}`);
+    assert.strictEqual(noRepo.env, '', `${shell}: no target is saved without a repo`);
+    for (const [label, env, target] of [
+      ['incremental', { PR_NUMBER: '33', INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333' }, 'ccc333..bbb222'],
+      ['no PR', { PR_NUMBER: '' }, 'aaa111..bbb222'],
+    ]) {
+      const run = runTargetSection(shell, env);
+      assert.strictEqual(run.env, `export CODE_REVIEW_TARGET="${target}"\n`, `${shell}, ${label}: ${run.stdout}`);
+      assert.strictEqual(run.gh, '', `${shell}, ${label}: a range target needs no repo`);
+    }
+  }
 });
 
 test('the lane always passes --max-findings, so a remembered /code-review limit never caps it', () => {
@@ -4079,7 +4159,7 @@ const FULL_PR_ENV = {
   BASE_REF: 'aaa111',
   HEAD_REF: 'bbb222',
   RANGE: 'aaa111..bbb222',
-  CODE_REVIEW_TARGET: '33',
+  CODE_REVIEW_TARGET: 'https://github.com/acme/widgets/pull/33',
 };
 
 test('code-review-engine.md arms capture with the composed args and fills SKILL_ARGS from it', (t) => {
@@ -4107,7 +4187,7 @@ test('code-review-engine.md arms capture with the composed args and fills SKILL_
   assert.ok(row.includes('Copy them exactly from the `armed <id>: <args>` line the block prints.'), row);
 
   const cases = [
-    [FULL_PR_ENV, { engine: { maxFindings: null } }, 'xhigh 33 --max-findings default'],
+    [FULL_PR_ENV, { engine: { maxFindings: null } }, 'xhigh https://github.com/acme/widgets/pull/33 --max-findings default'],
     [
       { ...FULL_PR_ENV, EFFORT: 'high', INCREMENTAL: 'true', LAST_REVIEWED: 'ccc333', CODE_REVIEW_TARGET: 'ccc333..bbb222' },
       { engine: { maxFindings: 5 } },

@@ -490,3 +490,4 @@ else stands.
   final mode and a skip, notes the `--max-findings` reset whenever `max_findings` is not set, and
   notes any leftover CI workflow.
 - On 2026-10-23, a hook now captures `/code-review`'s result and the proof checks the lane against that capture, so the lane no longer saves `/tmp/code_review_raw.txt` itself. See `docs/specs/2026-10-23-code-review-capture-design.md`.
+- On 2026-11-10 (1.1.8), a full PR review's target is the PR's URL, `https://github.com/<owner>/<repo>/pull/<n>`, in place of the PR number in section 5's step 1. `/code-review` runs its own commands from the session's start folder, so from a folder outside the checkout a bare number reviewed the PR with that number in another repository. Incremental and local range targets are unchanged.

@@ -52,7 +52,7 @@ function armedState(arm, nowSeconds) {
   return arm;
 }
 
-// /code-review's args are "<effort> <target> ...": the target is the PR number or commit range.
+// /code-review's args are "<effort> <target> ...": the target is the PR URL or a commit range.
 function argsTarget(args) {
   const words = typeof args === 'string' ? args.trim().split(/\s+/) : [];
   return words.length > 1 ? words[1] : null;

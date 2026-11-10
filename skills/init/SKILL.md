@@ -76,7 +76,7 @@ RUN_DIR=$(agent-review run-dir --lock init) || exit 1; export RUN_DIR
 echo "run folder: $RUN_DIR"
 PRS=50; MIGRATE=""; SKIP_HISTORY=""
 while [ $# -gt 0 ]; do
-  case "$1" in
+  case "${1}" in
     --prs) PRS="${2:-50}"; shift 2 ;;
     --prs=*) PRS="${1#*=}"; shift ;;
     --migrate) MIGRATE="true"; shift ;;
@@ -115,7 +115,7 @@ elif [ -n "$SKIP_HISTORY" ]; then
   echo "• Phase 2 PR-history mining: SKIPPED (--skip-history)"
 else
   echo "• Phase 2 PR-history mining: up to $PRS merged PRs across $BATCHES parallel subagents"
-  echo "  Rough cost: ~\$0.30-0.60 per 10-PR batch (larger diffs cost more)"
+  echo "  Rough cost: 30 to 60 cents per 10-PR batch (larger diffs cost more)"
   printf '  Estimated total: ~$%s.%02d-%s.%02d\n' \
     $((BATCHES * 30 / 100)) $((BATCHES * 30 % 100)) \
     $((BATCHES * 60 / 100)) $((BATCHES * 60 % 100))
@@ -826,13 +826,13 @@ someone's unrelated edits:
 ```bash
 RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 add_line() {
-  [ -f "$1" ] && grep -qxF -- "$2" "$1" && return 0
-  if [ -z "$(git status --porcelain -- "$1")" ] && ! grep -qxF -- "$1" "$RUN_DIR"/init_stage.txt 2>/dev/null; then
-    printf '%s\n' "$1" >> "$RUN_DIR"/init_stage.txt
+  [ -f "${1}" ] && grep -qxF -- "${2}" "${1}" && return 0
+  if [ -z "$(git status --porcelain -- "${1}")" ] && ! grep -qxF -- "${1}" "$RUN_DIR"/init_stage.txt 2>/dev/null; then
+    printf '%s\n' "${1}" >> "$RUN_DIR"/init_stage.txt
   fi
-  [ -s "$1" ] && [ -n "$(tail -c1 "$1")" ] && printf '\n' >> "$1"
-  printf '%s\n' "$2" >> "$1"
-  grep -qxF -- "$1" "$RUN_DIR"/init_changed.txt 2>/dev/null || printf '%s\n' "$1" >> "$RUN_DIR"/init_changed.txt
+  [ -s "${1}" ] && [ -n "$(tail -c1 "${1}")" ] && printf '\n' >> "${1}"
+  printf '%s\n' "${2}" >> "${1}"
+  grep -qxF -- "${1}" "$RUN_DIR"/init_changed.txt 2>/dev/null || printf '%s\n' "${1}" >> "$RUN_DIR"/init_changed.txt
 }
 add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
