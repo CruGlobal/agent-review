@@ -246,8 +246,9 @@ Then commit and push once for the batch:
 
 Stage the files you changed or created for these fixes, by name. The block lists the tree first:
 a file a fix created, such as a new spec, shows as `??` and must be staged too. Leave out
-everything that is not part of the fixes: the review's own files (`.claude/review/metrics/`,
-`.claude/review/index/`) and any other change you did not make for these findings. Never
+everything that is not part of the fixes: the review's own local files (`.claude/review/metrics/`,
+`.claude/review/index/`, `.claude/review/learnings/pending/`, `.claude/review/learnings/findings.json`)
+and any other change you did not make for these findings. Never
 `git add -A` or `git add .`: they take all of that, which inflates the next review's risk score.
 The block stops if a review file is staged; unstage anything else that is not yours with
 `git restore --staged <file>`.
@@ -257,7 +258,7 @@ RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 . "$RUN_DIR/address_env.sh"
 git status --porcelain --untracked-files=all
 git add -- <each file you changed or created for these fixes>
-if git diff --cached --name-only | grep -E '^\.claude/review/(metrics|index)/'; then
+if git diff --cached --name-only | grep -E '^\.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\.json$)'; then
   echo "❌ Review files are staged. Unstage them with git restore --staged, then commit."
   exit 1
 fi

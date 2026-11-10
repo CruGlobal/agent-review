@@ -314,7 +314,8 @@ if [ -n "$INCREMENTAL_REQUESTED" ] && [ -z "$CI_MODE" ]; then
     echo "❌ Local HEAD is ahead of the PR head ($HEAD_REF). Push first, then re-run. The review records the PR head and the approval workflow compares against it."
     exit 1
   fi
-  [ -z "$(git status --porcelain)" ] || echo "⚠️  Working tree is dirty: only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
+  [ -z "$(git status --porcelain --untracked-files=all | grep -vE '^(\?\?| [A-Z]) \.claude/review/(metrics/|index/|learnings/pending/|learnings/findings\.json$)')" ] \
+    || echo "⚠️  Working tree is dirty: only committed changes are reviewed; commit (or run /agent-review:address) first if that matters."
 fi
 PREV_COMMENT=""
 if { [ -n "$CI_MODE" ] || [ -n "$INCREMENTAL_REQUESTED" ]; } && [ -n "$PR_NUMBER" ] && [ -n "$HEAD_REF" ]; then
@@ -656,7 +657,7 @@ Active when the invocation includes the `ci` argument or `$AGENT_REVIEW_CI` is s
 | Stage 3/4 (debate/rebuttal)  | **Skipped** unless `$AGENT_REVIEW_DEBATE` is exactly `true`           |
 | Stage 5B (metrics dashboard) | **Skipped entirely** — nothing written under `.claude/review/metrics/` |
 | Stage 6 (report)             | Runs; fixes are described but presented as suggestions only           |
-| Stage 7 (metrics commit)     | **Skipped entirely** — no commits, no pushes, no interactive menu     |
+| Stage 7 (post and print)     | **Skipped entirely**: the posting step below replaces it              |
 | Fix scripts                  | **Never written or executed in CI.** Suggestions appear only as ≤10-line diffs in the report's 🔧 Fix suggestions section |
 | Ending                       | Post the report to the PR (below) instead of the interactive menu      |
 
@@ -1706,22 +1707,22 @@ PR_NUM="${PR_NUMBER:-$(gh pr view ${PR_NUMBER:+"$PR_NUMBER"} --json number -q .n
 CURRENT_DATE=$(date +%Y-%m-%d)
 AUTHOR=$(git config user.name || echo "Developer")
 
-# Average consensus severity for this review — derive the mean `severity` across
-# $RUN_DIR/consensus_findings.json's entries and substitute the real number.
+# Mean finding severity for this review, where lower is better: derive the mean `severity` across
+# $RUN_DIR/consensus_findings.json's entries (0 when there are none) and substitute the real number.
 CURRENT_SEVERITY="[X.X]"
 
 cat >> "$RUN_DIR"/review_env.sh <<EOF
 export PR_NUM="$PR_NUM" CURRENT_DATE="$CURRENT_DATE" CURRENT_SEVERITY="$CURRENT_SEVERITY"
 EOF
 
-if [ -f "$REVIEW_DIR/metrics/severity_history.txt" ]; then
-  AVG_SEVERITY=$(awk '{sum+=$2; count++} END {printf "%.1f", sum/count}' \
-    "$REVIEW_DIR/metrics/severity_history.txt" 2>/dev/null || echo "N/A")
+AVG_SEVERITY="" LAST_10=""
+if [ -s "$REVIEW_DIR/metrics/severity_history.txt" ]; then
+  AVG_SEVERITY=$(tail -10 "$REVIEW_DIR/metrics/severity_history.txt" \
+    | awk '{sum+=$2; count++} END {if (count) printf "%.1f/10", sum/count}')
   LAST_10=$(tail -10 "$REVIEW_DIR/metrics/severity_history.txt" | awk '{print $2}')
-else
-  AVG_SEVERITY="N/A"
-  LAST_10=""
 fi
+[ -n "$AVG_SEVERITY" ] || AVG_SEVERITY="no earlier reviews"
+[ -n "$LAST_10" ] || LAST_10="no earlier reviews"
 
 cat > "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" << EOF
 # 📊 Code Quality Metrics Dashboard
@@ -1733,19 +1734,21 @@ cat > "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" << EOF
 
 ---
 
-## 📈 Quality Trend
+## 📈 Finding Severity Trend
+
+Mean finding severity runs 0-10. Lower is better.
 
 ### Current Review
-- **Quality Score**: ${CURRENT_SEVERITY}/10
+- **Mean finding severity**: ${CURRENT_SEVERITY}/10
 - **Risk Level**: [from Stage 0]
 - **Findings**: [N] blockers, [N] important, [N] suggestions
 
 ### Historical Comparison
-- **Repo Average**: ${AVG_SEVERITY}/10 (last 10 reviews)
-- **Trend**: [↗️ Improving / → Stable / ↘️ Declining]
+- **Mean finding severity, last 10 reviews**: ${AVG_SEVERITY}
+- **Trend**: [↘️ Improving (lower than that mean) / → Stable / ↗️ Worse (higher than that mean), or no earlier reviews]
 
 \`\`\`
-Last 10 reviews:
+Mean finding severity of the last 10 reviews:
 ${LAST_10}
 \`\`\`
 
@@ -2225,38 +2228,11 @@ installed.
 
 ## Stage 7 — Post, Print & Metrics
 
-**SKIP THIS ENTIRE STAGE IN CI MODE** — no commits, no pushes, no interactive menu. In CI, go
-straight to the [CI Mode](#ci-mode) posting step, then Stage 8.
+**SKIP THIS ENTIRE STAGE IN CI MODE.** In CI, go straight to the [CI Mode](#ci-mode) posting
+step, then Stage 8.
 
-### Commit Metrics Dashboard
-
-```bash
-RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
-. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # PR_NUM, CURRENT_DATE, CURRENT_SEVERITY, AGENT_MODE, FIX_COUNT
-if [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ] && git check-ignore -q "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md"; then
-  echo "📊 Metrics dashboard: $REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md (git-ignored here, so not committed)"
-elif [ -f "$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md" ]; then
-  echo "📊 Committing quality metrics dashboard..."
-  git add "$REVIEW_DIR/metrics/PR_${PR_NUM}_metrics.md" \
-          "$REVIEW_DIR/metrics/severity_history.txt" \
-          "$REVIEW_DIR/metrics/history/${CURRENT_DATE}_${PR_NUM}.json"
-
-  git commit -m "chore(review): add code review metrics
-
-Quality Score: ${CURRENT_SEVERITY}/10
-Mode: ${AGENT_MODE}
-Fixes suggested: ${FIX_COUNT}
-
-Generated by agent-review" || echo "Nothing to commit"
-
-  git push || echo "Failed to push, push manually later"
-else
-  echo "⚠️  No metrics dashboard to commit"
-fi
-```
-
-Only commit metrics when the user asked for a committed dashboard — if the working tree has
-unrelated staged changes, report the dashboard path and skip the commit instead.
+The review never commits or pushes, in any mode. The Stage 5B dashboard stays a local file: a
+commit would move the PR head, and the approve workflow would take back the bot's approval.
 
 ### Post and print
 
@@ -2264,7 +2240,7 @@ No menu. When a PR resolves, post the report now; either way print what a reader
 
 ```bash
 RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
-. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT
+. "$RUN_DIR/review_env.sh" 2>/dev/null || true   # PR_NUMBER, HEAD_REF, FIX_COUNT, PR_NUM, REVIEW_DIR
 : > "$RUN_DIR"/agent_review_post_result.txt
 if [ -z "${PR_NUMBER:-}" ]; then
   echo "💾 Saved locally, no PR: report at $RUN_DIR/agent_review_report.md" | tee "$RUN_DIR"/agent_review_post_result.txt
@@ -2335,6 +2311,13 @@ fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 awk '/^<details>/{exit} {print}' "$RUN_DIR"/agent_review_report.md
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+DASHBOARD="$REVIEW_DIR/metrics/PR_${PR_NUM:-}_metrics.md"
+if [ -f "$DASHBOARD" ] && git check-ignore -q "$DASHBOARD"; then
+  echo "📊 Metrics dashboard (local only): $DASHBOARD"
+elif [ -f "$DASHBOARD" ]; then
+  echo "📊 Metrics dashboard (local only, not git-ignored here, so run /agent-review:update-files): $DASHBOARD"
+fi
 ```
 
 The metrics dashboard (`$REVIEW_DIR/metrics/PR_<n>_metrics.md`) and the fix dry-run
@@ -2383,7 +2366,7 @@ carrying `needsHumanReview: true`, not a debate-specific count)
 **Artifacts**:
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📄 $RUN_DIR/agent_review_report.md
-📊 .claude/review/metrics/ (skipped in CI mode)
+📊 $REVIEW_DIR/metrics/PR_[N]_metrics.md (local only, never committed; skipped in CI mode)
 💬 [contents of $RUN_DIR/agent_review_post_result.txt]
 
 **Next Steps**:

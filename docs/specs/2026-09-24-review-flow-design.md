@@ -64,6 +64,9 @@ Stage 7's interactive menu is replaced.
   `bash /tmp/automated_fixes/apply_all.sh`) instead of a blocking prompt. Fix scripts are still
   never executed by the skill.
 - **Metrics commit.** Unchanged: written locally, committed only when asked.
+  **Amendment, 2026-11-09 (1.1.7).** Removed. The review never commits or pushes metrics. A
+  metrics commit moved the PR head, so the withdraw job took back the bot's approval. The
+  dashboard stays local; init and update-files git-ignore it.
 
 ### 2. Review skill: local `incremental` mode
 

@@ -20794,7 +20794,7 @@ var require_package = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "agent-review",
-      version: "1.1.6",
+      version: "1.1.7",
       private: true,
       description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
       license: "MIT",
