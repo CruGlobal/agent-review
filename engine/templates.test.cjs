@@ -606,7 +606,7 @@ const ENV_PREAMBLE = `${RUN_DIR_LINE}\n${SOURCE_ENV}`;
 // Runs a skill block with its run folder at `dir`, the way agent-review run-dir would give it.
 const atRunDir = (script, dir) =>
   `export RUN_DIR='${dir}'\n${script.replace(/^\s*RUN_DIR=\$\(agent-review run-dir[^)]*\) \|\| exit 1; export RUN_DIR$/gm, '')}`;
-const REVIEWED_HEAD_LINE = 'REVIEWED_HEAD="${HEAD_REF:-$(git rev-parse HEAD)}"';
+const REVIEWED_HEAD_LINES = ['  REVIEWED_HEAD="$HEAD_REF"', '  REVIEWED_HEAD="${RANGE#*..}"'];
 const QUIET_DISARM = 'agent-review capture disarm >/dev/null 2>&1 || true';
 
 function laneText() {
@@ -4242,13 +4242,13 @@ test('full PR reviews give the lane a merge-base diff', (t) => {
       { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..localhead1234', CODE_REVIEW_TARGET: 'ddd444..localhead1234' },
       { engine: {} },
     );
-    assert.strictEqual(noPr.git, 'rev-parse HEAD\n', `${shell}: a range review keeps the reviewed range and reads only the local HEAD`);
+    assert.strictEqual(noPr.git, null, `${shell}: a range review keeps the reviewed range and reads its head from it, so it runs no git`);
     assert.ok(noPr.stdout.includes(`code-review diff: ${noPr.dir}/pr_diff.txt\n`), `${shell}: ${noPr.stdout}`);
   }
 });
 
 test('Stage 1 saves the reviewed head and base that the lane and Stage 2 both check', (t) => {
-  assert.ok(armBlock().split('\n').includes(REVIEWED_HEAD_LINE), 'the head is HEAD_REF, or the local HEAD when there is no PR head');
+  for (const line of REVIEWED_HEAD_LINES) assert.ok(armBlock().split('\n').includes(line), `the head is HEAD_REF for a full PR review, else the end of RANGE: ${line}`);
   const cases = [
     ['a full PR review', FULL_PR_ENV, 'bbb222', 'mergebase90'],
     [
@@ -4257,11 +4257,11 @@ test('Stage 1 saves the reviewed head and base that the lane and Stage 2 both ch
       'bbb222',
       'ccc333',
     ],
-    ['a PR with no head or base ref', { ...FULL_PR_ENV, BASE_REF: '', HEAD_REF: '', RANGE: 'eee555..localhead1234' }, 'localhead1234', 'eee555'],
+    ['a PR with no head or base ref', { ...FULL_PR_ENV, BASE_REF: '', HEAD_REF: '', RANGE: 'eee555..fff666' }, 'fff666', 'eee555'],
     [
       'a local range review',
-      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..localhead1234', CODE_REVIEW_TARGET: 'ddd444..localhead1234' },
-      'localhead1234',
+      { ...FULL_PR_ENV, PR_NUMBER: '', BASE_REF: '', HEAD_REF: '', RANGE: 'ddd444..fff666', CODE_REVIEW_TARGET: 'ddd444..fff666' },
+      'fff666',
       'ddd444',
     ],
   ];
@@ -4280,7 +4280,7 @@ test('Stage 1 saves the reviewed head and base that the lane and Stage 2 both ch
   const { rows } = lanePlaceholderRows();
   assert.strictEqual(
     rows.get('REVIEWED_HEAD'),
-    "`$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: `HEAD_REF`, the PR head, or the local `HEAD` when there is no PR. Stage 2's proof reads the same saved value.",
+    "`$REVIEWED_HEAD`, the value the block above prints as `code-review head:`: the commit the lane's diff ends at. That is `HEAD_REF`, the PR head, for a full PR review, and the end of `RANGE` otherwise (the local `HEAD` commit Stage 0 resolved when there is no PR). Stage 2's proof reads the same saved value.",
   );
   assert.strictEqual(
     rows.get('REVIEWED_BASE'),
@@ -5251,6 +5251,15 @@ test("PR diffs start at the merge base, not the base branch's tip, under bash an
       const noPr = run('a local review with no PR', {});
       assert.ok(noPr.output.includes(`Diff range: ${fork}..${head}\nFull PR range: ${fork}..${head}\n`), `${shell}: the range names the head by its SHA, never HEAD: ${noPr.output}`);
       ownChanges(noPr, 'a local review with no PR', DIFFS);
+
+      const noBase = runRulesBlock(shell, script, {
+        repo,
+        env: { BASE_REF: '', HEAD_REF: head, CI_MODE: '1', PR_NUMBER: '7', AGENT_REVIEW_PREVIOUS_COMMENT: '/tmp/previous_comment.md' },
+        files: { 'previous_comment.md': `<!-- agent-review-head: ${mid} -->\n` },
+      });
+      assert.strictEqual(noBase.status, 1, `${shell}: an incremental review with no base ref stops: ${noBase.output}`);
+      assert.ok(noBase.output.includes('❌ No base commit for the full PR range: gh gave no base ref.'), `${shell}: ${noBase.output}`);
+      assert.ok(!noBase.output.includes('outside repository'), `${shell}: git never sees an empty range: ${noBase.output}`);
     }
   } finally {
     rmSync(repo, { recursive: true, force: true });

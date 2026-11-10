@@ -491,6 +491,7 @@ fi
 if [ -n "$BASE_REF" ] && [ -n "$HEAD_REF" ]; then
   FULL_RANGE="$PR_BASE..$HEAD_REF"
 else
+  [ -n "${MERGE_BASE:-}" ] || { echo "❌ No base commit for the full PR range: gh gave no base ref. Check that gh pr view works, then re-run."; exit 1; }
   FULL_RANGE="$MERGE_BASE..$HEAD_SHA"
 fi
 
