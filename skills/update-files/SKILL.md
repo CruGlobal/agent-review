@@ -10,8 +10,8 @@ Consumer repos carry copies of the `templates/workflows/` files (`agent-review.y
 stale when the
 templates change upstream. This skill replaces them with the latest templates while carrying
 over the repo's own choices, shows the diff, and offers to open a PR. It also adds the
-`.gitignore` and `.gitattributes` lines that `/agent-review:init` writes, when the repo lacks
-them (Stage 1B).
+`.gitignore` lines that `/agent-review:init` writes, when the repo lacks them, and moves the repo
+to the one-file-per-write feedback folder (Stage 1B).
 
 Run it inside the consumer repo (e.g. `mpdx_api`), never inside agent-review itself or a fork of
 it. Refuse and stop if either check trips: any `git remote -v` entry points at an
@@ -75,13 +75,43 @@ add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
 add_line .gitignore '/.claude/review/learnings/pending/'
 add_line .gitignore '/.claude/review/learnings/findings.json'
-add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
+# Feedback now goes to a new file per write in learnings/feedback/, so the old
+# merge=union line for the single feedback.jsonl has nothing left to do.
+drop_line() {
+  [ -f "${1}" ] && grep -qxF -- "${2}" "${1}" || return 0
+  if ! grep -qxF -- "${1}" "$UPDATE_DIR"/bookkeeping_changed.txt 2>/dev/null; then
+    [ -z "$(git status --porcelain -- "${1}")" ] || printf '%s\n' "${1}" >> "$UPDATE_DIR"/bookkeeping_dirty.txt
+    printf '%s\n' "${1}" >> "$UPDATE_DIR"/bookkeeping_changed.txt
+  fi
+  { grep -vxF -- "${2}" "${1}" || true; } > "$UPDATE_DIR"/drop_line.tmp
+  cat "$UPDATE_DIR"/drop_line.tmp > "${1}"
+  echo "removed from ${1}: ${2}"
+}
+drop_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
+FEEDBACK_DIR=.claude/review/learnings/feedback
+if [ -d .claude/review/learnings ] && [ -z "$(ls -A "$FEEDBACK_DIR" 2>/dev/null)" ]; then
+  mkdir -p "$FEEDBACK_DIR" && : > "$FEEDBACK_DIR/.gitkeep"
+  printf '%s\n' "$FEEDBACK_DIR/.gitkeep" >> "$UPDATE_DIR"/bookkeeping_changed.txt
+  echo "added $FEEDBACK_DIR/.gitkeep"
+fi
 git ls-files -- .claude/review/metrics .claude/review/index .claude/review/learnings/pending \
   .claude/review/learnings/findings.json | sed 's/^/tracked: /'
 ```
 
 If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'`,
 `add_line .dockerignore '**/CLAUDE.md'`, and `add_line .dockerignore '**/AGENTS.md'` in that block.
+
+When `drop_line` removed the `merge=union` line and a comment line right above it only explained
+that line (for example "agent-review appends a line per fixed or dismissed finding"), remove that
+comment too. Leave the old `feedback.jsonl` file itself where it is: readers still read it along
+with the folder.
+
+Then read `excluded_paths` in `.claude/review/config.yml`. If no entry covers
+`.claude/review/learnings/feedback/**` (that glob, or a wider one such as `.claude/review/**`),
+say so and offer to add `- '.claude/review/learnings/feedback/**'` in the same PR, right after the
+`feedback.jsonl` entry when there is one. Without it, every address run's new feedback file is
+reviewed, and in a repo that scores `.claude/review/**` it raises the next review's risk. On a yes,
+add the line with the Edit tool and count it as a line Stage 1B added.
 
 An ignore line does not untrack a file git already tracks, so each `tracked:` path is a committed
 file that reviews keep changing. List them and offer to untrack them. Say in the offer that
@@ -244,8 +274,8 @@ the update message and mention the removal in the PR body. If the PR only adds b
 or untracks bookkeeping files, commit with `chore: keep agent-review bookkeeping out of git`;
 when it also updates or removes workflows, keep that message and mention the bookkeeping changes
 in the PR body. Stage by name: the workflow files this skill wrote, `.claude/review/config.yml`
-when the user accepted the `rollout.mode` change, and each file in `bookkeeping_changed.txt` (the
-`git rm` removals are already staged). Never `git add -A` or
+when the user accepted the `rollout.mode` change or the feedback folder exclusion, and each file
+in `bookkeeping_changed.txt` (the `git rm` removals are already staged). Never `git add -A` or
 `git add .`. Stage a file that `bookkeeping_dirty.txt` lists only on the user's yes, since its
 other changes would go into the commit too. Never commit to the
 default branch directly, and never push without the user's go-ahead.

@@ -9,8 +9,9 @@ on:
         type: string
         default: .claude/review/evals/results
       feedback:
+        description: The learnings folder (reads its feedback.jsonl and feedback/*.jsonl) or one feedback file
         type: string
-        default: .claude/review/learnings/feedback.jsonl
+        default: .claude/review/learnings
 
 jobs:
   readiness:

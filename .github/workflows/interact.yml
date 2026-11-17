@@ -398,6 +398,7 @@ jobs:
           EXPECTED_HEAD: ${{ needs.model.outputs.expected_head }}
           BASE_SHA: ${{ needs.model.outputs.base_sha }}
           HEAD_REF: ${{ needs.model.outputs.head_ref }}
+          PR_NUMBER: ${{ inputs.pr_number }}
           RUNTIME_DIR: ${{ runner.temp }}/agent-review-runtime
           HANDOFF_DIR: ${{ runner.temp }}/address-handoff
           RESULT_FILE: ${{ runner.temp }}/address-result-validated.json
@@ -422,16 +423,38 @@ jobs:
             [ "$CONFIGURED" = "undefined" ] || LEARNING_DIR="$CONFIGURED"
           fi
           export LEARNING_DIR
+          # One new file per run, so two PRs that record outcomes never edit the same
+          # file. The PR branch controls this tree, so the folder must stay inside the
+          # repo and out of .git, with no symlink on the way, and the file must be new.
           FEEDBACK_FILE=$(node -e '
+            const fs = require("node:fs");
             const path = require("node:path");
             const root = path.resolve(process.env.GITHUB_WORKSPACE);
             const value = process.env.LEARNING_DIR;
-            const target = value ? path.resolve(root, value, "feedback.jsonl") : "";
+            const dir = value ? path.resolve(root, value, "feedback") : "";
             const gitDir = path.join(root, ".git");
-            if (!value || value.includes("\\") || !target.startsWith(root + path.sep) ||
-                target === gitDir || target.startsWith(gitDir + path.sep)) {
+            if (!value || value.includes("\\") || !dir.startsWith(root + path.sep) ||
+                dir === gitDir || dir.startsWith(gitDir + path.sep)) {
               throw new Error("trusted learning.path must remain inside the repository");
             }
+            let at = root;
+            for (const part of path.relative(root, dir).split(path.sep)) {
+              at = path.join(at, part);
+              let stat;
+              try { stat = fs.lstatSync(at); } catch { break; }
+              if (stat.isSymbolicLink() || !stat.isDirectory()) {
+                throw new Error("the learning folder must be a plain folder inside the repository");
+              }
+            }
+            const { PR_NUMBER, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT } = process.env;
+            if (![PR_NUMBER, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT].every((n) => /^[0-9]+$/.test(n || ""))) {
+              throw new Error("the PR number, run id and run attempt must be numbers");
+            }
+            const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/[.][0-9]+Z$/, "Z");
+            const target = path.join(dir, `address-${PR_NUMBER}-${stamp}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.jsonl`);
+            let taken = true;
+            try { fs.lstatSync(target); } catch { taken = false; }
+            if (taken) throw new Error("the feedback file for this run already exists");
             process.stdout.write(path.relative(root, target));
           ')
           node "$RUNTIME_DIR/dist/agent-review.cjs" address feedback \
@@ -439,8 +462,7 @@ jobs:
             > "$RUNNER_TEMP/address-feedback.jsonl"
           if [ -s "$RUNNER_TEMP/address-feedback.jsonl" ]; then
             mkdir -p "$(dirname "$FEEDBACK_FILE")"
-            touch "$FEEDBACK_FILE"
-            cat "$RUNNER_TEMP/address-feedback.jsonl" >> "$FEEDBACK_FILE"
+            cat "$RUNNER_TEMP/address-feedback.jsonl" > "$FEEDBACK_FILE"
           fi
           git add -- .
           # Advisory only: the patch is already validated, so a stray trailing

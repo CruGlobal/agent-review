@@ -34,7 +34,9 @@ Once a pending file has outcomes marked, ingest it:
 agent-review feedback .claude/review/learnings/pending/<reviewId>.yml
 ```
 
-Repeat for every pending file with marked outcomes.
+Repeat for every pending file with marked outcomes. Each run writes a new file in
+`.claude/review/learnings/feedback/` (never an edit to an existing one, so two branches never
+conflict over it); commit the new files with the learnings they produce.
 
 ## Step 3 — Mine proposals
 

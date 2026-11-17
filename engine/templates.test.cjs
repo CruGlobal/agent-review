@@ -2405,6 +2405,60 @@ test('interact takes back the bot\'s approval right after it pushes, since that 
   assert.equal(job.outputs.summary_posted, '${{ steps.finalize.outputs.summary_posted }}');
 });
 
+test('interact writes each run\'s outcomes to a new file in learnings/feedback/, and only inside the repo', (t) => {
+  const { parse } = require('yaml');
+  const { writeFileSync, symlinkSync } = require('node:fs');
+  const { spawnSync } = require('node:child_process');
+  const step = parse(readFileSync(INTERACT_WORKFLOW, 'utf8')).jobs.publish.steps.find((s) => s.id === 'push');
+  assert.equal(step.env.PR_NUMBER, '${{ inputs.pr_number }}', 'the PR number reaches the script through env');
+  assert.ok(step.run.includes('cat "$RUNNER_TEMP/address-feedback.jsonl" > "$FEEDBACK_FILE"'), 'a new file, written with >');
+  assert.ok(!/>>\s*"\$FEEDBACK_FILE"/.test(step.run), 'never appended to');
+  assert.ok(!step.run.includes('"feedback.jsonl"'), 'the old shared file is never written');
+  assert.ok(step.run.indexOf('FEEDBACK_FILE=$(node -e') < step.run.indexOf('address feedback'), 'the path is checked before anything is written');
+  const script = step.run.match(/FEEDBACK_FILE=\$\(node -e '\n([\s\S]*?)\n\s*'\)\n/)[1];
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-feedback-path-'));
+  const outside = mkdtempSync(join(os.tmpdir(), 'ar-feedback-outside-'));
+  const check = (learningDir, env = {}) => spawnSync(process.execPath, ['-e', script], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, GITHUB_WORKSPACE: root, LEARNING_DIR: learningDir,
+      PR_NUMBER: '12', GITHUB_RUN_ID: '9876543210', GITHUB_RUN_ATTEMPT: '2', ...env },
+  });
+  try {
+    mkdirSync(join(root, '.git'));
+    const ok = check('.claude/review/learnings');
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /^\.claude\/review\/learnings\/feedback\/address-12-\d{8}T\d{6}Z-9876543210-2\.jsonl$/);
+    for (const bad of ['', '..', '../x', outside, '.git', '.git/hooks', 'a\\b']) {
+      const r = check(bad);
+      assert.notEqual(r.status, 0, `learning.path ${JSON.stringify(bad)} is refused`);
+      assert.match(r.stderr, /trusted learning.path must remain inside the repository/);
+    }
+    for (const env of [{ PR_NUMBER: '12; rm' }, { PR_NUMBER: '' }, { GITHUB_RUN_ID: 'x' }, { GITHUB_RUN_ATTEMPT: '../1' }]) {
+      const r = check('.claude/review/learnings', env);
+      assert.notEqual(r.status, 0, `${JSON.stringify(env)} is refused`);
+      assert.match(r.stderr, /must be numbers/);
+    }
+    if (process.platform === 'win32') return t.skip('symlinks need admin rights on Windows');
+    // The PR branch controls the tree: a symlinked folder must not lead outside it or into .git.
+    mkdirSync(join(root, 'linked'));
+    symlinkSync(outside, join(root, 'linked', 'learnings'));
+    symlinkSync(join(root, '.git'), join(root, 'gitlink'));
+    for (const bad of ['linked/learnings', 'gitlink']) {
+      const r = check(bad);
+      assert.notEqual(r.status, 0, `${bad} is refused`);
+      assert.match(r.stderr, /must be a plain folder inside the repository/);
+    }
+    mkdirSync(join(root, 'plain'));
+    symlinkSync(outside, join(root, 'plain', 'feedback'));
+    assert.match(check('plain').stderr, /must be a plain folder/, 'nor may the feedback folder itself be a link');
+    writeFileSync(join(root, 'file'), '');
+    assert.match(check('file').stderr, /must be a plain folder/, 'a file in the way is refused');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test('interact\'s failure report says when a commit was already pushed, and "nothing was changed" only when not', (t) => {
   const { parse } = require('yaml');
   const { mkdtempSync, writeFileSync, readFileSync: read } = require('node:fs');
@@ -3267,6 +3321,18 @@ test("address stages only the files its fixes changed, never the review's bookke
   assert.ok(commit.includes('git push || exit 1\nFIX_SHA='), 'a failed push stops it before FIX_SHA is saved');
 });
 
+test('address commits only the new feedback file its run wrote, and no skill writes the old feedback.jsonl', () => {
+  const address = readFileSync(ADDRESS_SKILL, 'utf8');
+  const block = bashBlockList(address).find((b) => b.includes('agent-review feedback'));
+  assert.ok(block.includes('FEEDBACK_FILE=$(agent-review feedback "$RUN_DIR"/address_pending.yml --print-path) || exit 1'), 'the engine says which file it wrote');
+  assert.ok(block.includes('[ -z "$FEEDBACK_FILE" ] || { git add -- "$FEEDBACK_FILE" && git commit'), 'only that file is staged, and only when there is one');
+  for (const { name, path } of ALL_SKILLS) {
+    for (const b of bashBlockList(readFileSync(path, 'utf8'))) {
+      assert.ok(!/learnings\/feedback\.jsonl/.test(b.replace(/^drop_line .*$/m, '')), `${name} never writes or stages feedback.jsonl:\n${b}`);
+    }
+  }
+});
+
 test("address's staged-file guard stops on review files and lets a new spec through, under bash and zsh", (t) => {
   const { writeFileSync } = require('node:fs');
   const commit = bashBlockList(readFileSync(ADDRESS_SKILL, 'utf8')).find((b) => b.includes('git commit -m "fix: address agent-review findings'));
@@ -3450,7 +3516,9 @@ test('update-files adds the same bookkeeping lines as init, once each, and recor
   assert.ok(flat.includes('If every file is current and Stage 1B added no line and untracked nothing, say so, run the **Clean up** block'));
   assert.ok(flat.includes('If every file is current but Stage 1B added a line or untracked a file, skip Stage 3 and go to Stage 4.'), 'Stage 3 is skipped only when every workflow file is current');
   assert.ok(!flat.includes('If Stage 1B changed something, skip Stage 3'), 'never on Stage 1B alone');
-  assert.ok(flat.includes('Stage by name: the workflow files this skill wrote, `.claude/review/config.yml` when the user accepted the `rollout.mode` change, and each file in `bookkeeping_changed.txt`'), 'the accepted config change goes in the same commit');
+  assert.ok(flat.includes('Stage by name: the workflow files this skill wrote, `.claude/review/config.yml` when the user accepted the `rollout.mode` change or the feedback folder exclusion, and each file in `bookkeeping_changed.txt`'), 'the accepted config change goes in the same commit');
+  assert.ok(flat.includes("offer to add `- '.claude/review/learnings/feedback/**'` in the same PR"), 'a config without the feedback folder exclusion gets the offer');
+  assert.ok(!/add_line \.gitattributes/.test(update + init), 'neither skill adds the merge=union line any more');
   assert.ok(flat.includes("once the PR merges, each teammate's next pull deletes their copies"), 'the untrack offer says what it does to teammates');
   assert.ok(flat.includes('commit with `chore: keep agent-review bookkeeping out of git`'));
   assert.ok(flat.includes('Never `git add -A` or `git add .`.'));
@@ -3469,6 +3537,11 @@ test('update-files adds the same bookkeeping lines as init, once each, and recor
       writeFileSync(join(repo, '.gitignore'), 'node_modules/'); // no trailing newline
       writeFileSync(join(repo, '.claude/review/metrics/severity_history.txt'), '1 2.0 d\n');
       writeFileSync(join(repo, 'docs/CLAUDE.md'), '# guide\n'); // what an unquoted **/CLAUDE.md would expand to
+      // A repo set up before 1.1.10: one feedback.jsonl, merged with merge=union.
+      const union = '.claude/review/learnings/feedback.jsonl merge=union';
+      mkdirSync(join(repo, '.claude/review/learnings'));
+      writeFileSync(join(repo, '.claude/review/learnings/feedback.jsonl'), '{}\n');
+      writeFileSync(join(repo, '.gitattributes'), `*.png binary\n${union}\n*.jpg binary`); // no trailing newline
       git('add', '.');
       git('-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'commit.gpgsign=false', 'commit', '-q', '--no-verify', '-m', 'base');
       writeFileSync(join(repo, '.dockerignore'), 'tmp/\n'); // untracked, and not the skill's
@@ -3477,17 +3550,22 @@ test('update-files adds the same bookkeeping lines as init, once each, and recor
       const second = execFileSync(shell, ['-c', script], { cwd: repo, encoding: 'utf8' });
       const read = (f) => readFileSync(join(repo, f), 'utf8');
       assert.equal(read('.gitignore'), `node_modules/\n${BOOKKEEPING_IGNORES.join('\n')}\n`, `${shell}: added once, on its own line`);
-      assert.equal(read('.gitattributes'), '.claude/review/learnings/feedback.jsonl merge=union\n', shell);
+      assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n', `${shell}: only the merge=union line goes`);
+      assert.equal(read('.claude/review/learnings/feedback/.gitkeep'), '', `${shell}: the feedback folder is kept in git`);
+      assert.equal(read('.claude/review/learnings/feedback.jsonl'), '{}\n', `${shell}: the old file stays`);
       assert.equal(read('.dockerignore'), 'tmp/\n/.claude\n**/CLAUDE.md\n**/AGENTS.md\n', `${shell}: the globs are written as typed`);
+      assert.ok(first.includes(`removed from .gitattributes: ${union}`), `${shell}: ${first}`);
+      assert.ok(first.includes('added .claude/review/learnings/feedback/.gitkeep'), `${shell}: ${first}`);
       assert.ok(first.includes('added to .gitignore: /.claude/review/learnings/pending/'), `${shell}: ${first}`);
       assert.ok(first.includes('tracked: .claude/review/metrics/severity_history.txt'), `${shell}: a committed metrics file is listed`);
-      assert.ok(!second.includes('added to'), `${shell}: a second run adds nothing: ${second}`);
-      assert.equal(readFileSync(join(updateDir, 'bookkeeping_changed.txt'), 'utf8'), '.gitignore\n.gitattributes\n.dockerignore\n', shell);
+      assert.ok(!/added|removed/.test(second), `${shell}: a second run changes nothing: ${second}`);
+      assert.equal(readFileSync(join(updateDir, 'bookkeeping_changed.txt'), 'utf8'), '.gitignore\n.gitattributes\n.claude/review/learnings/feedback/.gitkeep\n.dockerignore\n', shell);
       assert.equal(readFileSync(join(updateDir, 'bookkeeping_dirty.txt'), 'utf8'), '.dockerignore\n', `${shell}: only the file with other changes`);
       git('rm', '-r', '--cached', '--quiet', '--', '.claude/review/metrics/severity_history.txt');
       const shown = execFileSync(shell, ['-c', at(diff)], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_PAGER: 'cat' } });
       assert.ok(shown.includes('+/.claude/review/learnings/findings.json'), `${shell}: the .gitignore diff shows: ${shown}`);
-      assert.ok(shown.includes('new file .gitattributes:\n.claude/review/learnings/feedback.jsonl merge=union'), `${shell}: a new file is shown whole`);
+      assert.ok(shown.includes(`-${union}\n`), `${shell}: the dropped line shows: ${shown}`);
+      assert.ok(shown.includes('new file .claude/review/learnings/feedback/.gitkeep:'), `${shell}: a new file is named`);
       assert.ok(shown.includes('D\t.claude/review/metrics/severity_history.txt'), `${shell}: the untracked file is named`);
       assert.ok(existsSync(join(repo, '.claude/review/metrics/severity_history.txt')), `${shell}: and its local copy stays`);
     } finally {

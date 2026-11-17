@@ -4,8 +4,9 @@ const {
   writeFileSync,
   existsSync,
   mkdirSync,
-  appendFileSync,
+  readdirSync,
 } = require('node:fs');
+const { randomBytes } = require('node:crypto');
 const { join, dirname } = require('node:path');
 const YAML = require('yaml');
 const { signature } = require('./findingSignature.cjs');
@@ -108,22 +109,54 @@ function saveLearnings(path, obj) {
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, YAML.stringify(obj));
 }
-function loadFeedback(path) {
-  if (!existsSync(path)) return [];
+// Feedback lives in <learnings>/feedback/, one JSONL file per write, so two PRs
+// that both record outcomes add two different files and never conflict. The
+// old single feedback.jsonl is still read if a repo has one; nothing moves.
+function feedbackDir(base) {
+  return join(base, 'feedback');
+}
+// The old file first, then the folder's files in name order. A name starts
+// with its reviewId and then the UTC time, so one review's writes stay in order.
+function feedbackFiles(base) {
+  const files = [];
+  const legacy = join(base, 'feedback.jsonl');
+  if (existsSync(legacy)) files.push(legacy);
+  const dir = feedbackDir(base);
+  if (existsSync(dir)) {
+    for (const name of readdirSync(dir).sort()) {
+      if (name.endsWith('.jsonl')) files.push(join(dir, name));
+    }
+  }
+  return files;
+}
+function loadFeedback(base) {
   const out = [];
-  for (const line of readFileSync(path, 'utf8').split('\n')) {
-    if (!line.trim()) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {
-      /* skip malformed line */
+  for (const file of feedbackFiles(base)) {
+    for (const line of readFileSync(file, 'utf8').split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        out.push(JSON.parse(line));
+      } catch {
+        /* skip malformed line */
+      }
     }
   }
   return out;
 }
-function appendFeedback(path, entries) {
-  mkdirSync(dirname(path), { recursive: true });
-  for (const e of entries) appendFileSync(path, JSON.stringify(e) + '\n');
+// 20261117T190312Z
+function utcStamp(date = new Date()) {
+  return date.toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+}
+// Writes entries to a new file in the feedback folder and returns its path, or
+// null when there is nothing to write. 'wx' never reuses an existing file.
+function writeFeedbackBatch(base, reviewId, entries) {
+  if (!entries.length) return null;
+  const id = String(reviewId || '').replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+/, '').slice(0, 80) || 'feedback';
+  const dir = feedbackDir(base);
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, `${id}-${utcStamp()}-${randomBytes(3).toString('hex')}.jsonl`);
+  writeFileSync(path, entries.map((e) => JSON.stringify(e) + '\n').join(''), { flag: 'wx' });
+  return path;
 }
 
 module.exports = {
@@ -132,8 +165,10 @@ module.exports = {
   loadApproved,
   loadLearnings,
   saveLearnings,
+  feedbackDir,
+  feedbackFiles,
   loadFeedback,
-  appendFeedback,
+  writeFeedbackBatch,
   emitFindings,
 };
 
@@ -144,7 +179,6 @@ if (require.main === module) {
   const base =
     a['learning-dir'] ||
     join(reviewDir({ root: a.root, reviewDir: a['review-dir'] }), 'learnings');
-  const feedbackPath = join(base, 'feedback.jsonl');
   const learningsPath = join(base, 'learnings.yml');
   const findingsPath = join(base, 'findings.json');
 
@@ -160,12 +194,12 @@ if (require.main === module) {
     const entries = parsePending(readFileSync(pendingFile, 'utf8')).map(
       (e) => ({ ts: new Date().toISOString(), ...e }),
     );
-    appendFeedback(feedbackPath, entries);
+    writeFeedbackBatch(base, entries.length && entries[0].reviewId, entries);
     process.stdout.write(`Ingested ${entries.length} outcomes\n`);
   } else if (a.mine) {
     const minSupport =
       typeof a['min-support'] === 'string' ? Number(a['min-support']) : 3;
-    const proposals = mineLearnings(loadFeedback(feedbackPath), { minSupport });
+    const proposals = mineLearnings(loadFeedback(base), { minSupport });
     const merged = mergeProposals(loadLearnings(learningsPath), proposals);
     saveLearnings(learningsPath, merged);
     process.stdout.write(

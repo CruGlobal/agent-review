@@ -1,9 +1,13 @@
 'use strict';
 
-const { readFileSync } = require('node:fs');
+const { readFileSync, statSync } = require('node:fs');
 const { DISMISSAL_REASONS } = require('./evalSuite.cjs');
+const { feedbackFiles } = require('./learningsStore.cjs');
 
+// path is one file, or the learnings folder: its old feedback.jsonl (if any)
+// plus every file in its feedback/ folder.
 function readTelemetry(path) {
+  if (statSync(path).isDirectory()) return feedbackFiles(path).flatMap((file) => readTelemetry(file));
   const text = readFileSync(path, 'utf8').trim();
   if (!text) return [];
   if (/\.json$/i.test(path)) {

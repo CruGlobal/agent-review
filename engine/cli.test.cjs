@@ -2982,3 +2982,43 @@ test('run-dir --release --force frees the checkout and every PR taken from it, w
     t.cleanup();
   }
 });
+
+test('feedback writes a new file per run, --print-path prints only its path, and learn reads old and new', () => {
+  const root = optionsRoot();
+  const at = ['--root', root, '--review-dir', 'rd'];
+  const base = join(root, 'rd', 'learnings');
+  try {
+    const pending = join(root, 'pending.yml');
+    writeFileSync(pending, [
+      'reviewId: address-7',
+      'findings:',
+      '  - { id: f1, signature: s1, agent: ux, category: style, severity: 3, file: src/a.ts, message: m, outcome: dismissed, dismissal_reason: intentional }',
+      '',
+    ].join('\n'));
+    const first = run(['feedback', pending, ...at]);
+    assert.equal(first.code, 0, first.s);
+    assert.equal(first.s, 'Ingested 1 outcomes\n');
+    const second = run(['feedback', pending, '--print-path', ...at]);
+    assert.equal(second.code, 0, second.s);
+    const written = second.s.trim();
+    assert.equal(second.s, `${written}\n`, 'one line, the path');
+    assert.equal(dirname(written), join(base, 'feedback'));
+    assert.match(written, /address-7-\d{8}T\d{6}Z-[0-9a-f]{6}\.jsonl$/);
+    assert.equal(readdirSync(join(base, 'feedback')).length, 2, 'two runs, two files');
+    assert.equal(existsSync(join(base, 'feedback.jsonl')), false, 'the old file is never written');
+    writeFileSync(join(root, 'empty.yml'), 'reviewId: address-7\nfindings: []\n');
+    const empty = run(['feedback', join(root, 'empty.yml'), '--print-path', ...at]);
+    assert.deepEqual([empty.code, empty.s], [0, ''], 'nothing to record prints nothing and writes nothing');
+    assert.equal(readdirSync(join(base, 'feedback')).length, 2);
+    // One more dismissal in the old file reaches the support count of 3 only if learn reads both places.
+    writeFileSync(join(base, 'feedback.jsonl'), readFileSync(written, 'utf8').replace('address-7', 'address-6'));
+    const learn = run(['learn', '--min-support', '3', ...at]);
+    assert.equal(learn.code, 0, learn.s);
+    assert.match(learn.s, /^Mined 1 proposals/);
+    const telemetry = run(['telemetry', '--in', base]);
+    assert.equal(telemetry.code, 0, telemetry.s);
+    assert.equal(JSON.parse(telemetry.s).totals.dispositioned, 2, 'address-7 twice counts once, plus address-6');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

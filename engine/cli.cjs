@@ -31,7 +31,7 @@ const { queryImpact } = require('./queryImpact.cjs');
 const { mineLearnings } = require('./mineLearnings.cjs');
 const {
   parsePending,
-  appendFeedback,
+  writeFeedbackBatch,
   loadFeedback,
   loadLearnings,
   saveLearnings,
@@ -186,7 +186,7 @@ const CI_REVIEW_WORKFLOWS = ['agent-review.yml', 'agent-review-interact.yml', 'a
 function learningPaths(cfg, C) {
   const lp = (cfg.learning && cfg.learning.path) || null;
   const base = lp ? (require('node:path').isAbsolute(lp) ? lp : join(C.ROOT, lp)) : join(C.RD, 'learnings');
-  return { FEEDBACK: join(base, 'feedback.jsonl'), LEARNINGS: join(base, 'learnings.yml') };
+  return { BASE: base, LEARNINGS: join(base, 'learnings.yml') };
 }
 
 function validRef(ref) {
@@ -684,10 +684,10 @@ const USAGE = `usage: agent-review <command>
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
   eval prepare --suite <f> --case <id> --repo <d> --out <d>   create a seeded disposable worktree
-  telemetry --in <feedback.jsonl>   summarize review dispositions and dismissal reasons
+  telemetry --in <learnings dir | file>   summarize review dispositions and dismissal reasons (a folder reads its feedback.jsonl and feedback/*.jsonl)
   rollout --eval <summary.json> --telemetry <summary.json>   check every-PR readiness gates
   rules                          list rules synthesized from approved learnings
-  feedback <pendingFile>         ingest marked outcomes
+  feedback <pendingFile> [--print-path]   ingest marked outcomes into a new file in learnings/feedback/ (--print-path prints only that file's path, or nothing)
   learn [--min-support N]        mine feedback into proposed learnings
   learnings [--status S]         list learnings
   approve <id> | reject <id>     set a learning's status
@@ -900,8 +900,7 @@ function main(rawArgv) {
     }
     case 'emit': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      const { FEEDBACK } = learningPaths(cfg, C);
-      const base = dirname(FEEDBACK);
+      const { BASE: base } = learningPaths(cfg, C);
       const reviewId = flag(rest, '--review') || 'review';
       const raw = JSON.parse(readFileSync(flag(rest, '--in'), 'utf8'));
       const findings = emitFindings({ dir: base, reviewId, rawFindings: raw });
@@ -910,8 +909,7 @@ function main(rawArgv) {
     }
     case 'filter': {
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
-      const base = dirname(FEEDBACK);
+      const { BASE: base, LEARNINGS } = learningPaths(cfg, C);
       const inPath = flag(rest, '--in') || join(base, 'findings.json');
       const raw = JSON.parse(readFileSync(inPath, 'utf8'));
       out(
@@ -1669,7 +1667,7 @@ function main(rawArgv) {
     case 'telemetry': {
       const path = flag(rest, '--in');
       if (!path) {
-        out('usage: agent-review telemetry --in <feedback.jsonl>');
+        out('usage: agent-review telemetry --in <learnings dir | feedback file>');
         return 1;
       }
       out(JSON.stringify(summarizeTelemetry(readTelemetry(path)), null, 2));
@@ -1704,18 +1702,23 @@ function main(rawArgv) {
       return 0;
     }
     case 'feedback': {
-      if (!rest[0]) {
-        out('usage: agent-review feedback <pendingFile>');
+      const pendingFile = rest.find((a) => a !== '--print-path');
+      if (!pendingFile) {
+        out('usage: agent-review feedback <pendingFile> [--print-path]');
         return 1;
       }
       const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      const { FEEDBACK } = learningPaths(cfg, C);
-      const entries = parsePending(readFileSync(rest[0], 'utf8')).map((e) => ({
+      const { BASE } = learningPaths(cfg, C);
+      const entries = parsePending(readFileSync(pendingFile, 'utf8')).map((e) => ({
         ts: new Date().toISOString(),
         ...e,
       }));
-      appendFeedback(FEEDBACK, entries);
-      out(`Ingested ${entries.length} outcomes`);
+      const written = writeFeedbackBatch(BASE, entries.length && entries[0].reviewId, entries);
+      if (rest.includes('--print-path')) {
+        if (written) out(written);
+      } else {
+        out(`Ingested ${entries.length} outcomes`);
+      }
       return 0;
     }
     case 'learn': {
@@ -1726,8 +1729,8 @@ function main(rawArgv) {
         return 1;
       }
       const { minSupport } = resolved;
-      const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
-      const proposals = mineLearnings(loadFeedback(FEEDBACK), { minSupport });
+      const { BASE, LEARNINGS } = learningPaths(cfg, C);
+      const proposals = mineLearnings(loadFeedback(BASE), { minSupport });
       const merged = mergeProposals(loadLearnings(LEARNINGS), proposals);
       saveLearnings(LEARNINGS, merged);
       out(
