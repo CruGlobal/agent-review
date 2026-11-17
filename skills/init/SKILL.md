@@ -99,7 +99,7 @@ BATCHES=$(( (PRS + 9) / 10 ))
 : > "$RUN_DIR"/init.sh
 # Clear any read-only-guard baseline left by a previous run — the guard's `[ -f ] ||` capture
 # would otherwise reuse a stale snapshot for this run's drift checks.
-rm -f "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_stage.txt "$RUN_DIR"/init_changed.txt
+rm -f "${RUN_DIR:?}"/init_baseline_head.txt "${RUN_DIR:?}"/init_baseline_status.txt "${RUN_DIR:?}"/init_stage.txt "${RUN_DIR:?}"/init_changed.txt
 cat >> "$RUN_DIR"/init.sh <<EOF
 export PRS="$PRS" MIGRATE="$MIGRATE" SKIP_HISTORY="$SKIP_HISTORY"
 export BATCHES="$BATCHES" OVER_CAP="$OVER_CAP"
@@ -875,7 +875,7 @@ if [ "$BOT_APPROVES" = "no" ]; then
     [ -f "$w" ] || continue
     tmp=$(mktemp) || continue
     sed 's/auto_approve: true/auto_approve: false/' "$w" > "$tmp" && cat "$tmp" > "$w"
-    rm -f "$tmp"
+    rm -f "${tmp:?}"
   done
 fi
 ```
