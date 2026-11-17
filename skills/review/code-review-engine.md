@@ -193,7 +193,7 @@ new attempt id and removes any findings file attempt 1's proof saved:
 ```bash
 RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 . "$RUN_DIR/review_env.sh" 2>/dev/null || true
-rm -f "$RUN_DIR"/agent_findings/code-review.json
+rm -f "${RUN_DIR:?}"/agent_findings/code-review.json
 echo "export CODE_REVIEW_ATTEMPT=\"$REVIEW_ID-2\"" >> "$RUN_DIR"/review_env.sh
 echo "code-review attempt: $REVIEW_ID-2"
 ```

@@ -199,12 +199,12 @@ test('with the shipped manifest, a copy of every template stamped with the previ
   }
 });
 
-test('with the shipped manifest, a copy of every template stamped 1.1.8 is current after the marker-only bump to 1.1.10', () => {
+test('with the shipped manifest, a copy of every template stamped 1.1.9 is current after the marker-only bump to 1.1.10', () => {
   const copies = {};
   for (const name of TEMPLATE_NAMES) {
     copies[name] = readFileSync(join(ROOT, 'templates/workflows', name), 'utf8').replace(
       /^# agent-review-template-version: .*$/m,
-      '# agent-review-template-version: 1.1.8',
+      '# agent-review-template-version: 1.1.9',
     );
   }
   const root = cliRepo(copies);

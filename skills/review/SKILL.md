@@ -147,7 +147,7 @@ agent-review config show >/dev/null || {
 # --- Resolve mode, engine, and effort (argument, then config, then default) ---
 agent-review options --args-file "$RUN_DIR"/review_args.txt ${CI_MODE:+--ci} > "$RUN_DIR"/review_options.json || {
   cat "$RUN_DIR"/review_options.json
-  rm -f "$RUN_DIR"/review_options.json
+  rm -f "${RUN_DIR:?}"/review_options.json
   exit 1
 }
 OPTION_VARS=$(node -e '
@@ -203,18 +203,18 @@ echo ""
 # unknown-index error against this run's smaller candidates array), and a stale per-lane
 # findings file can coincidentally pass Stage 2's N cross-check even though no agent wrote it
 # this run.
-rm -f "$RUN_DIR"/consensus_decisions.json "$RUN_DIR"/consensus_raw.json "$RUN_DIR"/consensus_findings.json
-rm -f "$RUN_DIR"/agent_findings/*.json 2>/dev/null || true
-rm -f "$RUN_DIR"/agent_review_card_scan.json "$RUN_DIR"/agent_review_human_rules.json
+rm -f "${RUN_DIR:?}"/consensus_decisions.json "${RUN_DIR:?}"/consensus_raw.json "${RUN_DIR:?}"/consensus_findings.json
+rm -f "${RUN_DIR:?}"/agent_findings/*.json 2>/dev/null || true
+rm -f "${RUN_DIR:?}"/agent_review_card_scan.json "${RUN_DIR:?}"/agent_review_human_rules.json
 # The report, its markers' files, and the posted comment are this run's alone.
-rm -f "$RUN_DIR"/agent_review_report.md "$RUN_DIR"/agent_review_ledger.json "$RUN_DIR"/agent_review_status.json
-rm -f "$RUN_DIR"/agent_review_inline.json "$RUN_DIR"/agent_review_safety.json "$RUN_DIR"/agent_review_comment.md
+rm -f "${RUN_DIR:?}"/agent_review_report.md "${RUN_DIR:?}"/agent_review_ledger.json "${RUN_DIR:?}"/agent_review_status.json
+rm -f "${RUN_DIR:?}"/agent_review_inline.json "${RUN_DIR:?}"/agent_review_safety.json "${RUN_DIR:?}"/agent_review_comment.md
 # No earlier run's /code-review files or armed capture may carry into this run. Under zsh a glob
 # with no match fails its whole command and prints an error, so each glob gets its own quiet line.
-{ rm -f "$RUN_DIR"/code_review_raw.*.json; } 2>/dev/null || true
-{ rm -f "$RUN_DIR"/code_review_findings.*.json; } 2>/dev/null || true
-{ rm -f "$RUN_DIR"/code_review_dropped.*.json; } 2>/dev/null || true
-rm -f "$RUN_DIR"/code_review_proof.json "$RUN_DIR"/code_review_diff.txt
+{ rm -f "${RUN_DIR:?}"/code_review_raw.*.json; } 2>/dev/null || true
+{ rm -f "${RUN_DIR:?}"/code_review_findings.*.json; } 2>/dev/null || true
+{ rm -f "${RUN_DIR:?}"/code_review_dropped.*.json; } 2>/dev/null || true
+rm -f "${RUN_DIR:?}"/code_review_proof.json "${RUN_DIR:?}"/code_review_diff.txt
 # disarm exits 1 when the capture dir does not exist yet, the normal state on a fresh machine.
 if [ "$ENGINE" = "code-review" ]; then
   agent-review capture disarm >/dev/null 2>&1 || true
@@ -222,8 +222,8 @@ fi
 # A stale per-agent slice or launched-lane plan from a prior review would otherwise let this
 # run's Stage 1 launch a lane against last run's diff, or let consensus silently accept a
 # launched-subset plan this run never wrote.
-rm -f "$RUN_DIR"/slice_manifest.json "$RUN_DIR"/review_plan_launched.json "$RUN_DIR"/launched_lanes.json "$RUN_DIR"/skipped_lanes.txt
-rm -rf "$RUN_DIR"/agent_slices 2>/dev/null || true
+rm -f "${RUN_DIR:?}"/slice_manifest.json "${RUN_DIR:?}"/review_plan_launched.json "${RUN_DIR:?}"/launched_lanes.json "${RUN_DIR:?}"/skipped_lanes.txt
+rm -rf "${RUN_DIR:?}"/agent_slices 2>/dev/null || true
 REVIEW_DIR="${AGENT_REVIEW_DIR:-.claude/review}"
 cat >> "$RUN_DIR"/review_env.sh <<EOF
 export MODE="$MODE" AGENT_MODE="$AGENT_MODE" REVIEW_DIR="$REVIEW_DIR"
@@ -239,7 +239,7 @@ echo "export INCREMENTAL_REQUESTED=\"$INCREMENTAL_REQUESTED\"" >> "$RUN_DIR"/rev
 
 # --- Initialize Directories ---
 # An earlier run's fix scripts would otherwise be offered, and applied by apply_all.sh, with this run's.
-rm -rf "$RUN_DIR"/automated_fixes
+rm -rf "${RUN_DIR:?}"/automated_fixes
 mkdir -p "$RUN_DIR"/automated_fixes
 # On a cold runner this dir does not exist yet — without it every lane's findings-file write
 # throws ENOENT, the unchanged-prompt retry reproduces the same error, and the review posts
@@ -381,7 +381,7 @@ process.exit((evidence.staticFindings || []).every((finding) => listed.has(findi
     echo "${1}"
     return 0
   fi
-  rm -f "$RUN_DIR"/agent_review_ledger.json "$RUN_DIR"/agent_review_status.json "$RUN_DIR"/agent_review_report.md
+  rm -f "${RUN_DIR:?}"/agent_review_ledger.json "${RUN_DIR:?}"/agent_review_status.json "${RUN_DIR:?}"/agent_review_report.md
   node -e '
 const { readFileSync, writeFileSync } = require("fs");
 const [file, head] = process.argv.slice(1);
@@ -434,7 +434,7 @@ if [ -n "$INCREMENTAL" ]; then
        && REPO_OBJECTS=$(git rev-parse --path-format=absolute --git-path objects); then
       KEPT_TREE=$(GIT_OBJECT_DIRECTORY="$MERGE_OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$REPO_OBJECTS" \
         git merge-tree --write-tree "$LAST_REVIEWED" "$PR_BASE" 2>/dev/null) || KEPT_TREE=""
-      rm -rf "$MERGE_OBJECTS"
+      rm -rf "${MERGE_OBJECTS:?}"
     fi
     NOTE="✅ No net changes since the last reviewed head except a merge of the base branch, so the last review still holds. Exiting."
   fi
@@ -1885,7 +1885,7 @@ fi
 LEDGER_BY_LOCATION=""
 [ "$ENGINE" = "code-review" ] && LEDGER_BY_LOCATION=1
 # While matcher pairs exist, no ledger may exist: the next step builds it from the matcher's answers.
-rm -f "$RUN_DIR"/ledger_candidates.json "$RUN_DIR"/ledger_matches.json "$RUN_DIR"/agent_review_ledger.json
+rm -f "${RUN_DIR:?}"/ledger_candidates.json "${RUN_DIR:?}"/ledger_matches.json "${RUN_DIR:?}"/agent_review_ledger.json
 LEDGER_PAIRS=0
 if [ -n "$LEDGER_BY_LOCATION" ]; then
   if agent-review ledger-candidates --findings "$RUN_DIR"/review_filtered.json \
