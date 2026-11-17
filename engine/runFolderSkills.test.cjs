@@ -149,7 +149,7 @@ test('the review takes the checkout first and frees it at the end or on any earl
   assert.ok(first.startsWith('RUN_DIR=$(agent-review run-dir --lock review) || exit 1; export RUN_DIR\n'));
   assert.ok(first.includes('\necho "run folder: $RUN_DIR"\necho "checkout: $(git rev-parse --show-toplevel)"\n'), 'the model learns the literal paths for prompts and its own writes');
   for (const f of ['agent_review_report.md', 'agent_review_ledger.json', 'agent_review_status.json', 'agent_review_inline.json', 'agent_review_safety.json', 'agent_review_comment.md']) {
-    assert.match(first, new RegExp(`^rm -f [^\\n]*"\\$RUN_DIR"/${f.replace('.', '\\.')}`, 'm'), `Initialize clears an earlier ${f}`);
+    assert.match(first, new RegExp(`^rm -f [^\\n]*"\\$\\{RUN_DIR:\\?\\}"/${f.replace('.', '\\.')}`, 'm'), `Initialize clears an earlier ${f}`);
   }
   const stage8 = skill.slice(skill.indexOf('## Stage 8'), skill.indexOf('## Notes'));
   assert.deepStrictEqual(bashBlocks(stage8), ['agent-review run-dir --release review'], 'Stage 8 ends by releasing the checkout');
@@ -286,7 +286,7 @@ test('apply_all.sh finds the fix scripts beside itself, from any folder', (t) =>
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
-  assert.ok(skill.includes('rm -rf "$RUN_DIR"/automated_fixes\nmkdir -p "$RUN_DIR"/automated_fixes'), 'each run starts with no earlier fix scripts');
+  assert.ok(skill.includes('rm -rf "${RUN_DIR:?}"/automated_fixes\nmkdir -p "$RUN_DIR"/automated_fixes'), 'each run starts with no earlier fix scripts');
 });
 
 test('Stage 2B counts only fix scripts directly in automated_fixes', () => {
@@ -338,7 +338,7 @@ test('update-files removes its fetched templates on every way it stops, the ever
   assert.ok(flat.includes('If every file is current and Stage 1B added no line and untracked nothing, say so, run the **Clean up** block at the end of this skill, and stop here.'));
   const cleanup = skill.slice(skill.indexOf('## Clean up'));
   assert.ok(cleanup.replace(/\s+/g, ' ').includes('Whenever this skill stops after Stage 1, for any reason'));
-  assert.deepStrictEqual(bashBlocks(cleanup), ['UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"']);
+  assert.deepStrictEqual(bashBlocks(cleanup), ['UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "${UPDATE_DIR:?}"']);
   assert.ok(skill.indexOf('## Clean up') > skill.indexOf('### Diff and PR'), 'the cleanup is the last step');
 });
 

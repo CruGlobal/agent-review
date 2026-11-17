@@ -29,7 +29,7 @@ may itself be the stale thing. `gh` auth is already required by the rest of the 
 set -e
 RUN_DIR=$(agent-review run-dir)
 UPDATE_DIR="$RUN_DIR/update-files"
-rm -rf "$UPDATE_DIR" && mkdir -p "$UPDATE_DIR"
+rm -rf "${UPDATE_DIR:?}" && mkdir -p "${UPDATE_DIR:?}"
 for f in agent-review.yml agent-review-interact.yml agent-review-readiness.yml agent-review-approve.yml; do
   gh api "repos/CruGlobal/agent-review/contents/templates/workflows/$f" --jq .content \
     | base64 -d > "$UPDATE_DIR/$f"
@@ -259,5 +259,5 @@ Whenever this skill stops after Stage 1, for any reason (every file current, not
 PR handed over, or an error), remove the fetched templates:
 
 ```bash
-UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "$UPDATE_DIR"
+UPDATE_DIR=$(agent-review run-dir)/update-files && rm -rf "${UPDATE_DIR:?}"
 ```

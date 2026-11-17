@@ -94,6 +94,32 @@ test('no SKILL.md holds $ before a digit or $ARGUMENTS, which Claude Code replac
   );
 });
 
+test('every rm in a skill guards its variable path with ${VAR:?}, so Claude Code runs it without a prompt', () => {
+  const { readdirSync } = require('node:fs');
+  const mdFiles = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? mdFiles(join(dir, e.name)) : e.name.endsWith('.md') ? [join(dir, e.name)] : [],
+    );
+  const files = mdFiles(join(ROOT, 'skills'));
+  const hits = [];
+  let guarded = 0;
+  for (const path of files) {
+    readFileSync(path, 'utf8').split('\n').forEach((line, i) => {
+      if (!/(?:^|[\s{;&|])rm -r?f /.test(line)) return;
+      if (/\$(?:[A-Za-z_]|\{[A-Za-z_]\w*\})/.test(line)) hits.push(`${relative(ROOT, path)}:${i + 1}: ${line.trim()}`);
+      else if (/\$\{[A-Za-z_]\w*:\?\}/.test(line)) guarded++;
+    });
+  }
+  assert.ok(guarded >= 20, `found only ${guarded} guarded rm lines`);
+  assert.deepStrictEqual(
+    hits,
+    [],
+    'Claude Code asks before it runs rm on a path it cannot prove is set, which stops every local review. ' +
+      'Write the path as "${RUN_DIR:?}"/file so an empty variable fails instead of deleting from /:\n' +
+      hits.join('\n'),
+  );
+});
+
 // Lines of every ```bash fenced block in the skill.
 function bashBlocks(text) {
   const out = [];
@@ -1245,7 +1271,7 @@ test('the review skill slices per agent and skips empty lanes', () => {
   assert.ok(skill.includes('agent-review slice --plan'));
   assert.ok(skill.includes('"$RUN_DIR"/agent_slices'));
   assert.ok(skill.includes('mode is "empty"'), 'empty-slice lanes must be skipped, not launched');
-  assert.ok(skill.includes('mkdir -p "$RUN_DIR"/agent_slices') && skill.includes('rm -rf "$RUN_DIR"/agent_slices'), 'slice dir needs fresh-state handling in Initialize');
+  assert.ok(skill.includes('mkdir -p "$RUN_DIR"/agent_slices') && skill.includes('rm -rf "${RUN_DIR:?}"/agent_slices'), 'slice dir needs fresh-state handling in Initialize');
 });
 
 // --- Final review fix wave (I1, I2, I3, I5) ---
@@ -1274,7 +1300,7 @@ test('skipped-lane notes are plumbed through a file from Stage 1 to Stage 6', ()
   const skill = readFileSync(join(ROOT, 'skills/review/SKILL.md'), 'utf8');
   assert.ok(skill.includes('$RUN_DIR/skipped_lanes.txt'), 'a skipped-lanes file must exist');
   assert.ok(
-    /rm -f[^\n]*"\$RUN_DIR"\/skipped_lanes\.txt/.test(skill),
+    /rm -f[^\n]*"\$\{RUN_DIR:\?\}"\/skipped_lanes\.txt/.test(skill),
     'fresh-state cleanup must remove skipped_lanes.txt like the other per-run slice state',
   );
   const stage1 = stageSlice(skill, '## Stage 1 — Launch Specialized Review Agents', '## Stage 1B');
@@ -3192,7 +3218,7 @@ test("init adds its ignore and attributes lines once each, and stages a file onl
   const init = readFileSync(join(ROOT, 'skills/init/SKILL.md'), 'utf8');
   const block = bashBlockList(init).find((b) => b.includes('add_line .gitignore'));
   assert.ok(block, 'init has the .gitignore and .gitattributes block');
-  assert.ok(init.includes('rm -f "$RUN_DIR"/init_baseline_head.txt "$RUN_DIR"/init_baseline_status.txt "$RUN_DIR"/init_stage.txt "$RUN_DIR"/init_changed.txt'), 'Stage 0 clears both lists');
+  assert.ok(init.includes('rm -f "${RUN_DIR:?}"/init_baseline_head.txt "${RUN_DIR:?}"/init_baseline_status.txt "${RUN_DIR:?}"/init_stage.txt "${RUN_DIR:?}"/init_changed.txt'), 'Stage 0 clears both lists');
   const commit = bashBlockList(init).find((b) => b.includes('git commit -m "chore: bootstrap agent-review"'));
   const staging = commit.slice(commit.indexOf('if [ -f "$RUN_DIR"/init_stage.txt ]'), commit.indexOf('if [ "$REVIEWS_RUN"'));
   assert.ok(staging.includes('git add -- "$f"'), '3E stages from the list');
@@ -4386,7 +4412,7 @@ test('Stage 2 relaunches with the existing capture on stage lane, and re-arms on
 const RELAUNCH_ATTEMPT_BLOCK = [
   RUN_DIR_LINE,
   SOURCE_ENV,
-  `rm -f ${PROMOTED_FINDINGS}`,
+  'rm -f "${RUN_DIR:?}"/agent_findings/code-review.json',
   'echo "export CODE_REVIEW_ATTEMPT=\\"$REVIEW_ID-2\\"" >> "$RUN_DIR"/review_env.sh',
   'echo "code-review attempt: $REVIEW_ID-2"',
 ].join('\n');
@@ -4527,10 +4553,10 @@ test('Stage 0 no longer mentions code_review_raw.txt', (t) => {
   assert.ok(!skill.includes('code_review_raw.txt') && !engineDoc().includes('code_review_raw.txt'));
   const bash = bashBlocks(init);
   const removals = [
-    '{ rm -f "$RUN_DIR"/code_review_raw.*.json; } 2>/dev/null || true',
-    '{ rm -f "$RUN_DIR"/code_review_findings.*.json; } 2>/dev/null || true',
-    '{ rm -f "$RUN_DIR"/code_review_dropped.*.json; } 2>/dev/null || true',
-    'rm -f "$RUN_DIR"/code_review_proof.json "$RUN_DIR"/code_review_diff.txt',
+    '{ rm -f "${RUN_DIR:?}"/code_review_raw.*.json; } 2>/dev/null || true',
+    '{ rm -f "${RUN_DIR:?}"/code_review_findings.*.json; } 2>/dev/null || true',
+    '{ rm -f "${RUN_DIR:?}"/code_review_dropped.*.json; } 2>/dev/null || true',
+    'rm -f "${RUN_DIR:?}"/code_review_proof.json "${RUN_DIR:?}"/code_review_diff.txt',
   ];
   for (const line of removals) assert.ok(bash.split('\n').includes(line), `Initialize runs: ${line}`);
   assert.ok(
@@ -4673,7 +4699,7 @@ test('init saves shadow as no and validates its answers, update-files guards Sta
   const threeA = stageSlice(init, '### 3A', '### 3B');
   assert.ok(threeA.includes('case "$REVIEWS_RUN" in local|local-and-ci)') && threeA.includes('case "$BOT_APPROVES" in yes|no)'), '3A validates both values');
   const threeC = stageSlice(init, '### 3C', '### 3D');
-  assert.ok(threeC.includes('cat "$tmp" > "$w"') && threeC.includes('rm -f "$tmp"') && !threeC.includes('mv "$tmp"'), 'keeps file mode, removes temp');
+  assert.ok(threeC.includes('cat "$tmp" > "$w"') && threeC.includes('rm -f "${tmp:?}"') && !threeC.includes('mv "$tmp"'), 'keeps file mode, removes temp');
   const upd = skillText('update-files');
   const s4 = stageSlice(upd, '## Stage 4', '### Diff and PR').replace(/\s+/g, ' ');
   assert.ok(s4.includes('Never offer the removal below while the approve workflow is missing') && s4.includes('it is staged and removal is fine'), 'Stage 4 carries the guard');
@@ -5060,7 +5086,7 @@ test('the status step judges card data on the full PR diff, with the spec lists 
 
   const init = bashBlocks(stageSlice(skill, '### Initialize', '### Gather PR Context & Diff Manifest'));
   assert.ok(
-    init.split('\n').includes('rm -f "$RUN_DIR"/agent_review_card_scan.json "$RUN_DIR"/agent_review_human_rules.json'),
+    init.split('\n').includes('rm -f "${RUN_DIR:?}"/agent_review_card_scan.json "${RUN_DIR:?}"/agent_review_human_rules.json'),
     'no earlier run can stand in for this run\'s card scan or rules check',
   );
 });
@@ -5640,7 +5666,7 @@ test('Stage 6 computes ledger candidates under the code-review engine and builds
   assert.deepStrictEqual(callsOf(block, 'agent-review ledger-candidates'), [
     'if agent-review ledger-candidates --findings "$RUN_DIR"/review_filtered.json --previous "$RUN_DIR"/previous_agent_review_ledger.json > "$RUN_DIR"/ledger_candidates.json; then',
   ]);
-  const clear = block.indexOf('rm -f "$RUN_DIR"/ledger_candidates.json "$RUN_DIR"/ledger_matches.json "$RUN_DIR"/agent_review_ledger.json');
+  const clear = block.indexOf('rm -f "${RUN_DIR:?}"/ledger_candidates.json "${RUN_DIR:?}"/ledger_matches.json "${RUN_DIR:?}"/agent_review_ledger.json');
   assert.ok(clear !== -1 && clear < block.indexOf('agent-review ledger-candidates'), 'stale candidates, answers, and ledger go first');
   assert.ok(block.includes('if [ -n "$LEDGER_BY_LOCATION" ]; then'), 'candidates are computed only under the code-review engine');
   assert.ok(block.includes('echo "export LEDGER_PAIRS=\\"$LEDGER_PAIRS\\"" >> "$RUN_DIR"/review_env.sh'), 'the pair count reaches the next block');
