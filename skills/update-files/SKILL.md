@@ -75,19 +75,6 @@ add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
 add_line .gitignore '/.claude/review/learnings/pending/'
 add_line .gitignore '/.claude/review/learnings/findings.json'
-# Feedback now goes to a new file per write in learnings/feedback/, so the old
-# merge=union line for the single feedback.jsonl has nothing left to do.
-drop_line() {
-  [ -f "${1}" ] && grep -qxF -- "${2}" "${1}" || return 0
-  if ! grep -qxF -- "${1}" "$UPDATE_DIR"/bookkeeping_changed.txt 2>/dev/null; then
-    [ -z "$(git status --porcelain -- "${1}")" ] || printf '%s\n' "${1}" >> "$UPDATE_DIR"/bookkeeping_dirty.txt
-    printf '%s\n' "${1}" >> "$UPDATE_DIR"/bookkeeping_changed.txt
-  fi
-  { grep -vxF -- "${2}" "${1}" || true; } > "$UPDATE_DIR"/drop_line.tmp
-  cat "$UPDATE_DIR"/drop_line.tmp > "${1}"
-  echo "removed from ${1}: ${2}"
-}
-drop_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
 FEEDBACK_DIR=.claude/review/learnings/feedback
 if [ -d .claude/review/learnings ] && [ -z "$(ls -A "$FEEDBACK_DIR" 2>/dev/null)" ]; then
   mkdir -p "$FEEDBACK_DIR" && : > "$FEEDBACK_DIR/.gitkeep"
@@ -101,17 +88,16 @@ git ls-files -- .claude/review/metrics .claude/review/index .claude/review/learn
 If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'`,
 `add_line .dockerignore '**/CLAUDE.md'`, and `add_line .dockerignore '**/AGENTS.md'` in that block.
 
-When `drop_line` removed the `merge=union` line and a comment line right above it only explained
-that line (for example "agent-review appends a line per fixed or dismissed finding"), remove that
-comment too. Leave the old `feedback.jsonl` file itself where it is: readers still read it along
-with the folder.
+Leave the old `feedback.jsonl` file where it is: readers still read it along with the folder.
+Leave a `feedback.jsonl merge=union` line in `.gitattributes` too. Teammates on an older plugin
+still append to that file until they update, and the line keeps their local merges clean.
 
-Then read `excluded_paths` in `.claude/review/config.yml`. If no entry covers
-`.claude/review/learnings/feedback/**` (that glob, or a wider one such as `.claude/review/**`),
-say so and offer to add `- '.claude/review/learnings/feedback/**'` in the same PR, right after the
-`feedback.jsonl` entry when there is one. Without it, every address run's new feedback file is
-reviewed, and in a repo that scores `.claude/review/**` it raises the next review's risk. On a yes,
-add the line with the Edit tool and count it as a line Stage 1B added.
+Then read `excluded_paths` in `.claude/review/config.yml`. The engine always skips the feedback
+files, whatever this list says, so this step is optional and only keeps the config in step with the
+template. If no entry covers `.claude/review/learnings/feedback/**` (that glob, or a wider one such
+as `.claude/review/**`), offer to add `- '.claude/review/learnings/feedback/**'` in the same PR,
+right after the `feedback.jsonl` entry when there is one, and say that nothing breaks without it.
+On a yes, add the line with the Edit tool and count it as a line Stage 1B added.
 
 An ignore line does not untrack a file git already tracks, so each `tracked:` path is a committed
 file that reviews keep changing. List them and offer to untrack them. Say in the offer that

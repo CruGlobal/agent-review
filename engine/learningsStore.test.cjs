@@ -123,3 +123,24 @@ test('loadFeedback reads the old feedback.jsonl, then the folder files in name o
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('loadFeedback sorts entries by ts across the old file and the folder, oldest first', () => {
+  const { loadFeedback } = require('./learningsStore.cjs');
+  const { mineLearnings } = require('./mineLearnings.cjs');
+  const { writeFileSync, mkdirSync, rmSync } = require('node:fs');
+  const base = mkdtempSync(join(tmpdir(), 'fb-ts-'));
+  try {
+    const line = (o) => JSON.stringify(o) + '\n';
+    const e = (ts, message) => ({ ts, signature: 's1', agent: 'a', category: 'c', file: 'src/x.js', outcome: 'dismissed', message });
+    writeFileSync(join(base, 'feedback.jsonl'), line(e('2026-11-18T00:00:00.000Z', 'newest')));
+    mkdirSync(join(base, 'feedback'));
+    writeFileSync(join(base, 'feedback', 'r1-20261117T000000Z-aaaaaa.jsonl'),
+      line(e('2026-11-17T00:00:00.000Z', 'middle')) + line({ n: 'no ts' }));
+    writeFileSync(join(base, 'feedback', 'r0-20261116T000000Z-bbbbbb.jsonl'), line(e('2026-11-16T00:00:00.000Z', 'oldest')));
+    const entries = loadFeedback(base);
+    assert.deepEqual(entries.map((x) => x.message || x.n), ['no ts', 'oldest', 'middle', 'newest']);
+    assert.equal(mineLearnings(entries)[0].example, 'oldest', 'the sample is the oldest entry again');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});

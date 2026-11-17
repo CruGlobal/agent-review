@@ -18255,6 +18255,13 @@ var require_learningsStore = __commonJS({
       }
       return files;
     }
+    function feedbackGlobs(relBase) {
+      return [`${relBase}/feedback.jsonl`, `${relBase}/feedback/**`];
+    }
+    function byTs(entries) {
+      const ts = (e) => e && typeof e.ts === "string" ? e.ts : "";
+      return [...entries].sort((a, b) => ts(a) < ts(b) ? -1 : ts(a) > ts(b) ? 1 : 0);
+    }
     function loadFeedback(base) {
       const out = [];
       for (const file of feedbackFiles(base)) {
@@ -18266,7 +18273,7 @@ var require_learningsStore = __commonJS({
           }
         }
       }
-      return out;
+      return byTs(out);
     }
     function utcStamp(date = /* @__PURE__ */ new Date()) {
       return date.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
@@ -18288,6 +18295,8 @@ var require_learningsStore = __commonJS({
       saveLearnings,
       feedbackDir,
       feedbackFiles,
+      feedbackGlobs,
+      byTs,
       loadFeedback,
       writeFeedbackBatch,
       emitFindings
@@ -20716,7 +20725,7 @@ var require_telemetry = __commonJS({
     "use strict";
     var { readFileSync, statSync } = require("node:fs");
     var { DISMISSAL_REASONS } = require_evalSuite();
-    var { feedbackFiles } = require_learningsStore();
+    var { feedbackFiles, byTs } = require_learningsStore();
     function readTelemetry(path) {
       if (statSync(path).isDirectory()) return feedbackFiles(path).flatMap((file) => readTelemetry(file));
       const text = readFileSync(path, "utf8").trim();
@@ -20729,7 +20738,7 @@ var require_telemetry = __commonJS({
         try {
           return JSON.parse(line);
         } catch (e) {
-          throw new Error(`invalid telemetry JSONL line ${i + 1}: ${e.message}`);
+          throw new Error(`invalid telemetry JSONL line ${i + 1} in ${path}: ${e.message}`);
         }
       });
     }
@@ -20739,7 +20748,7 @@ var require_telemetry = __commonJS({
     function summarizeTelemetry(entries) {
       const deduped = [];
       const positions = /* @__PURE__ */ new Map();
-      for (const entry of entries) {
+      for (const entry of byTs(entries)) {
         const identity = entry.reviewId && (entry.signature || entry.id) ? `${entry.reviewId}:${entry.signature || entry.id}` : null;
         if (identity && positions.has(identity)) deduped[positions.get(identity)] = entry;
         else {
@@ -21538,6 +21547,7 @@ var require_cli = __commonJS({
     var {
       parsePending,
       writeFeedbackBatch,
+      feedbackGlobs,
       loadFeedback,
       loadLearnings,
       saveLearnings,
@@ -21678,6 +21688,14 @@ var require_cli = __commonJS({
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
       return { BASE: base, LEARNINGS: join(base, "learnings.yml") };
     }
+    function loadCfg(C) {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const rel = relative(C.ROOT, learningPaths(cfg, C).BASE).split("\\").join("/");
+      if (!rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) return cfg;
+      const listed = cfg.excluded_paths || [];
+      const missing = feedbackGlobs(rel).filter((g) => !listed.includes(g));
+      return missing.length ? { ...cfg, excluded_paths: [...listed, ...missing] } : cfg;
+    }
     function validRef(ref) {
       return /^[A-Za-z0-9._/~^-]+$/.test(ref) && !ref.startsWith("-");
     }
@@ -21740,7 +21758,7 @@ var require_cli = __commonJS({
       return { aliases: ix.aliases, exts: ix.extensions, roots: ix.roots };
     }
     function loadIndex(C, cfg, { force } = {}) {
-      const c = cfg || loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const c = cfg || loadCfg(C);
       const indexPath = c.index && c.index.path ? join(C.ROOT, c.index.path) : C.INDEX;
       if (force) {
         const gf = join(indexPath, "graph.json");
@@ -22069,7 +22087,7 @@ var require_cli = __commonJS({
     }
     function excludedPathsOrNone(C) {
       try {
-        return existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+        return existsSync(C.CONFIG) ? loadCfg(C).excluded_paths || [] : [];
       } catch {
         return [];
       }
@@ -22136,7 +22154,7 @@ var require_cli = __commonJS({
       const rest = argv.slice(1);
       switch (cmd) {
         case "config": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           if (rest[0] === "validate") {
             const engineName = cfg.engine && cfg.engine.name;
             const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
@@ -22170,14 +22188,14 @@ var require_cli = __commonJS({
           return 0;
         }
         case "impact": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { files } = changedFiles(flag(rest, "--base"), C, cfg);
           out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
           return 0;
         }
         case "options": {
           try {
-            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const cfg = loadCfg(C);
             const { args, ci } = optionsInput(rest);
             const resolved = resolveOptions({ args, config: cfg, ci });
             out(JSON.stringify(resolved, null, 2));
@@ -22194,7 +22212,7 @@ var require_cli = __commonJS({
               out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join("/")})`);
               return 1;
             }
-            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const cfg = loadCfg(C);
             const slicesPath = flag(rest, "--slices");
             out(
               formatStartup({
@@ -22216,7 +22234,7 @@ var require_cli = __commonJS({
           }
         }
         case "plan": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const filesPath = flag(rest, "--files");
           const diffPath = flag(rest, "--diff");
           const statPath = flag(rest, "--stat");
@@ -22301,7 +22319,7 @@ var require_cli = __commonJS({
           return diffFor(diffPath, rawPath, C.ROOT, excludedPathsOrNone(C));
         }
         case "emit": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { BASE: base } = learningPaths(cfg, C);
           const reviewId = flag(rest, "--review") || "review";
           const raw = JSON.parse(readFileSync(flag(rest, "--in"), "utf8"));
@@ -22310,7 +22328,7 @@ var require_cli = __commonJS({
           return 0;
         }
         case "filter": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { BASE: base, LEARNINGS } = learningPaths(cfg, C);
           const inPath = flag(rest, "--in") || join(base, "findings.json");
           const raw = JSON.parse(readFileSync(inPath, "utf8"));
@@ -22772,7 +22790,7 @@ var require_cli = __commonJS({
           const refuse = (stage, reason) => finish({ ok: false, stage, reason, count: 0, mode: null, dropped: [] });
           let excludedPaths;
           try {
-            excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+            excludedPaths = existsSync(C.CONFIG) ? loadCfg(C).excluded_paths || [] : [];
           } catch (e) {
             return refuse("config", `could not read excluded_paths from the review config: ${e.message}`);
           }
@@ -22950,7 +22968,7 @@ var require_cli = __commonJS({
             ), null, 2));
             return 0;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const astConfig = cfg.static_analysis && cfg.static_analysis.ast_grep || {};
           const result = buildEvidence({
             diffPath: flag(rest, "--diff"),
@@ -23049,7 +23067,7 @@ var require_cli = __commonJS({
             out("usage: agent-review rollout --eval <summary.json> --telemetry <summary.json>");
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const readiness = rolloutReadiness({
             evaluation: readData(evalPath),
             telemetry: readData(telemetryPath),
@@ -23059,7 +23077,7 @@ var require_cli = __commonJS({
           return rest.includes("--fail-on-gate") && !readiness.readyForEveryPr ? 2 : 0;
         }
         case "rules": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { LEARNINGS } = learningPaths(cfg, C);
           out(
             JSON.stringify(
@@ -23076,7 +23094,7 @@ var require_cli = __commonJS({
             out("usage: agent-review feedback <pendingFile> [--print-path]");
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { BASE } = learningPaths(cfg, C);
           const entries = parsePending(readFileSync(pendingFile, "utf8")).map((e) => ({
             ts: (/* @__PURE__ */ new Date()).toISOString(),
@@ -23091,7 +23109,7 @@ var require_cli = __commonJS({
           return 0;
         }
         case "learn": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const resolved = resolveMinSupport(cfg, flag(rest, "--min-support"));
           if (resolved.error) {
             out(`error: ${resolved.error}`);
@@ -23108,7 +23126,7 @@ var require_cli = __commonJS({
           return 0;
         }
         case "learnings": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { LEARNINGS } = learningPaths(cfg, C);
           out(
             JSON.stringify(
@@ -23125,7 +23143,7 @@ var require_cli = __commonJS({
             out(`usage: agent-review ${cmd} <id>`);
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { LEARNINGS } = learningPaths(cfg, C);
           const status = cmd === "approve" ? "approved" : "rejected";
           saveLearnings(
@@ -23143,7 +23161,7 @@ var require_cli = __commonJS({
             out(`error: unknown mode "${mode}" (use ${MODES.join("/")})`);
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { base: b, files } = changedFiles(base, C, cfg);
           const diff = execFileSync("git", ["-C", C.ROOT, "diff", `${b}...HEAD`], {
             encoding: "utf8",

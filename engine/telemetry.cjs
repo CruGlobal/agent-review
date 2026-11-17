@@ -2,7 +2,7 @@
 
 const { readFileSync, statSync } = require('node:fs');
 const { DISMISSAL_REASONS } = require('./evalSuite.cjs');
-const { feedbackFiles } = require('./learningsStore.cjs');
+const { feedbackFiles, byTs } = require('./learningsStore.cjs');
 
 // path is one file, or the learnings folder: its old feedback.jsonl (if any)
 // plus every file in its feedback/ folder.
@@ -16,7 +16,7 @@ function readTelemetry(path) {
   }
   return text.split('\n').filter(Boolean).map((line, i) => {
     try { return JSON.parse(line); }
-    catch (e) { throw new Error(`invalid telemetry JSONL line ${i + 1}: ${e.message}`); }
+    catch (e) { throw new Error(`invalid telemetry JSONL line ${i + 1} in ${path}: ${e.message}`); }
   });
 }
 
@@ -27,7 +27,7 @@ function rate(num, den) {
 function summarizeTelemetry(entries) {
   const deduped = [];
   const positions = new Map();
-  for (const entry of entries) {
+  for (const entry of byTs(entries)) {
     const identity = entry.reviewId && (entry.signature || entry.id)
       ? `${entry.reviewId}:${entry.signature || entry.id}`
       : null;

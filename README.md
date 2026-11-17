@@ -763,8 +763,10 @@ pinned refs), shows the diff, and offers a PR. If the fresh caller says `advisor
 `.claude/review/config.yml` still says `rollout.mode: shadow`, it offers to change the config in
 the same PR, because the reusable workflow refuses a caller whose mode disagrees with config.
 It also adds any `.gitignore` lines `/agent-review:init` writes that the repo lacks, adds
-`learnings/feedback/.gitkeep`, drops the old `feedback.jsonl merge=union` line from
-`.gitattributes`, offers to add the `learnings/feedback/**` excluded path to the config, offers
+`learnings/feedback/.gitkeep`, keeps the old `feedback.jsonl merge=union` line in
+`.gitattributes` for teammates still on an older plugin, offers to add the
+`learnings/feedback/**` excluded path to the config (optional: the engine always skips the
+feedback files), offers
 to untrack review files a repo committed before it ignored them, and offers the
 `.dockerignore` lines when a `Dockerfile` copies the whole tree.
 Reviews flag both kinds of staleness automatically: the report gains a footer when a repo's

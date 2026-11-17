@@ -129,6 +129,16 @@ function feedbackFiles(base) {
   }
   return files;
 }
+// Repo-relative globs for every feedback file under a learnings folder.
+function feedbackGlobs(relBase) {
+  return [`${relBase}/feedback.jsonl`, `${relBase}/feedback/**`];
+}
+// Oldest first by ts, so the newest entry for a repeated finding wins whichever
+// file it came from. An entry with no ts counts as the oldest.
+function byTs(entries) {
+  const ts = (e) => (e && typeof e.ts === 'string' ? e.ts : '');
+  return [...entries].sort((a, b) => (ts(a) < ts(b) ? -1 : ts(a) > ts(b) ? 1 : 0));
+}
 function loadFeedback(base) {
   const out = [];
   for (const file of feedbackFiles(base)) {
@@ -141,7 +151,7 @@ function loadFeedback(base) {
       }
     }
   }
-  return out;
+  return byTs(out);
 }
 // 20261117T190312Z
 function utcStamp(date = new Date()) {
@@ -167,6 +177,8 @@ module.exports = {
   saveLearnings,
   feedbackDir,
   feedbackFiles,
+  feedbackGlobs,
+  byTs,
   loadFeedback,
   writeFeedbackBatch,
   emitFindings,

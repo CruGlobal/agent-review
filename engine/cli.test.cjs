@@ -206,6 +206,87 @@ test('plan subcommand rejects an unknown --mode', () => {
   assert.match(text, /unknown mode "bananas"/);
 });
 
+// A repo whose config, like the fleet's, does not list the feedback folder in excluded_paths.
+function feedbackRepo({ patterns = [], agents, learningPath = null }) {
+  const root = mkdtempSync(join(os.tmpdir(), 'ar-fb-'));
+  mkdirSync(join(root, '.claude/review'), { recursive: true });
+  writeFileSync(join(root, '.claude/review/config.yml'), [
+    'version: 2', 'profile: standard',
+    'risk:', `  patterns: ${JSON.stringify(patterns)}`,
+    '  unmatched_file_points: 1',
+    '  volume_multiplier: [{ upTo: null, points: 0 }]',
+    '  scope_multiplier: { single_feature: 1.0 }',
+    '  special: []',
+    '  levels: [{ range: [0, 3], level: LOW, reviewer: entry }, { range: [4, null], level: MEDIUM, reviewer: entry }]',
+    `agents: ${JSON.stringify(agents)}`,
+    "excluded_paths: ['.claude/review/learnings/feedback.jsonl']",
+    ...(learningPath ? ['learning:', `  path: ${learningPath}`] : []),
+    '',
+  ].join('\n'));
+  return root;
+}
+
+function planFor(root, files) {
+  const f = join(root, 'files.txt'); writeFileSync(f, files.join('\n') + '\n');
+  const d = join(root, 'diff.txt'); writeFileSync(d, '');
+  const s = join(root, 'stat.txt'); writeFileSync(s, ` ${files.length} file changed, 3 insertions(+)\n`);
+  return JSON.parse(captured(() => main(['plan', '--files', f, '--diff', d, '--stat', s, '--root', root])));
+}
+
+const NEW_FEEDBACK = '.claude/review/learnings/feedback/address-52-20261117T190312Z-123-1.jsonl';
+
+test('plan: a new feedback file adds no risk points, even where .claude/review/** is worth 3 (mpdx_api)', () => {
+  const root = feedbackRepo({
+    patterns: [{ glob: '.claude/review/**', points: 3 }],
+    agents: [{ id: 'standards', triggers: { paths: ['src/**'] } }],
+  });
+  try {
+    const plan = planFor(root, [NEW_FEEDBACK]);
+    assert.equal(plan.risk.score, 0);
+    assert.deepEqual(plan.agents, []);
+    const withCode = planFor(root, [NEW_FEEDBACK, 'src/a.ts']);
+    assert.equal(withCode.risk.score, 1);
+    assert.equal(withCode.risk.level, 'LOW');
+    // The same pattern still scores the rest of the review folder.
+    assert.equal(planFor(root, ['.claude/review/rules/x.md']).risk.score, 3);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('plan: a new feedback file triggers no .claude/** agent (mpdx-react)', () => {
+  const root = feedbackRepo({
+    agents: [{ id: 'security', escalates: true, triggers: { paths: ['.claude/**'] } }],
+  });
+  try {
+    assert.deepEqual(planFor(root, [NEW_FEEDBACK]).agents, []);
+    assert.deepEqual(planFor(root, ['.claude/review/learnings/feedback.jsonl']).agents, []);
+    assert.deepEqual(planFor(root, ['.claude/settings.json']).agents.map((a) => a.id), ['security']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('config: the feedback globs follow learning.path and show in excluded_paths', () => {
+  const root = feedbackRepo({
+    agents: [{ id: 'security', escalates: true, triggers: { paths: ['**'] } }],
+    learningPath: 'review-data',
+  });
+  try {
+    const listed = JSON.parse(captured(() => main(['config', 'get', 'excluded_paths', '--root', root])));
+    assert.deepEqual(listed, [
+      '.claude/review/learnings/feedback.jsonl',
+      'review-data/feedback.jsonl',
+      'review-data/feedback/**',
+    ]);
+    const plan = planFor(root, ['review-data/feedback/x.jsonl', 'review-data/feedback.jsonl']);
+    assert.equal(plan.risk.score, 0);
+    assert.deepEqual(plan.agents, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('slice subcommand writes per-agent diff files and prints a JSON manifest', () => {
   const { readFileSync, existsSync } = require('node:fs');
   const root = mkdtempSync(join(os.tmpdir(), 'ar-slice-'));

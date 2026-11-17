@@ -46,7 +46,30 @@ test('telemetry --in a learnings folder reads the old file and every folder file
     assert.equal(out.totals.duplicatesIgnored, 1);
     assert.equal(readTelemetry(join(base, 'feedback.jsonl')).length, 1, 'one file still reads as before');
     writeFileSync(join(base, 'feedback', 'r3-20261117T000000Z-cccccc.jsonl'), 'NOT JSON\n');
-    assert.throws(() => readTelemetry(base), /invalid telemetry JSONL line 1/, 'a bad line still fails loudly');
+    assert.throws(() => readTelemetry(base), /invalid telemetry JSONL line 1 in .*r3-20261117T000000Z-cccccc\.jsonl/,
+      'a bad line still fails loudly, and names its file');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('telemetry keeps the newest entry by ts for a repeated finding, whichever file it is in', () => {
+  const { readTelemetry } = require('./telemetry.cjs');
+  const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = require('node:fs');
+  const { join } = require('node:path');
+  const base = mkdtempSync(join(require('node:os').tmpdir(), 'tel-ts-'));
+  try {
+    const line = (o) => JSON.stringify(o) + '\n';
+    // A teammate on the old plugin appends to feedback.jsonl after CI wrote the folder file.
+    writeFileSync(join(base, 'feedback.jsonl'),
+      line({ ts: '2026-11-18T10:00:00.000Z', reviewId: 'r1', signature: 's1', outcome: 'accepted' }));
+    mkdirSync(join(base, 'feedback'));
+    writeFileSync(join(base, 'feedback', 'address-9-20261117T000000Z-1-1.jsonl'),
+      line({ ts: '2026-11-17T00:00:00.000Z', reviewId: 'r1', signature: 's1', outcome: 'dismissed', dismissalReason: 'intentional' }));
+    const out = summarizeTelemetry(readTelemetry(base));
+    assert.equal(out.totals.accepted, 1, 'the newer entry in the old file wins');
+    assert.equal(out.totals.dismissed, 0);
+    assert.equal(out.totals.duplicatesIgnored, 1);
   } finally {
     rmSync(base, { recursive: true, force: true });
   }

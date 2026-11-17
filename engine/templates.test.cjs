@@ -2440,7 +2440,12 @@ test('interact writes each run\'s outcomes to a new file in learnings/feedback/,
   assert.ok(step.run.includes('cat "$RUNNER_TEMP/address-feedback.jsonl" > "$FEEDBACK_FILE"'), 'a new file, written with >');
   assert.ok(!/>>\s*"\$FEEDBACK_FILE"/.test(step.run), 'never appended to');
   assert.ok(!step.run.includes('"feedback.jsonl"'), 'the old shared file is never written');
-  assert.ok(step.run.indexOf('FEEDBACK_FILE=$(node -e') < step.run.indexOf('address feedback'), 'the path is checked before anything is written');
+  const hasFeedback = step.run.indexOf('if [ -s "$RUNNER_TEMP/address-feedback.jsonl" ]; then');
+  assert.ok(step.run.indexOf('address feedback') < hasFeedback, 'the outcomes go to a temp file first');
+  for (const part of ['TRUSTED_REVIEW_DIR=', 'config get learning.path', 'FEEDBACK_FILE=$(node -e']) {
+    assert.ok(step.run.indexOf(part) > hasFeedback, `${part} runs only when there is feedback, so a bad path cannot stop a run with none`);
+  }
+  assert.ok(step.run.indexOf('FEEDBACK_FILE=$(node -e') < step.run.indexOf('> "$FEEDBACK_FILE"'), 'the path is checked before anything is written');
   const script = step.run.match(/FEEDBACK_FILE=\$\(node -e '\n([\s\S]*?)\n\s*'\)\n/)[1];
   const root = mkdtempSync(join(os.tmpdir(), 'ar-feedback-path-'));
   const outside = mkdtempSync(join(os.tmpdir(), 'ar-feedback-outside-'));
@@ -3544,7 +3549,10 @@ test('update-files adds the same bookkeeping lines as init, once each, and recor
   assert.ok(!flat.includes('If Stage 1B changed something, skip Stage 3'), 'never on Stage 1B alone');
   assert.ok(flat.includes('Stage by name: the workflow files this skill wrote, `.claude/review/config.yml` when the user accepted the `rollout.mode` change or the feedback folder exclusion, and each file in `bookkeeping_changed.txt`'), 'the accepted config change goes in the same commit');
   assert.ok(flat.includes("offer to add `- '.claude/review/learnings/feedback/**'` in the same PR"), 'a config without the feedback folder exclusion gets the offer');
+  assert.ok(flat.includes('The engine always skips the feedback files, whatever this list says, so this step is optional'), 'and the offer says it is optional');
   assert.ok(!/add_line \.gitattributes/.test(update + init), 'neither skill adds the merge=union line any more');
+  assert.ok(!/drop_line|grep -v[^\n]*gitattributes/.test(update), 'update-files keeps the merge=union line for teammates on an older plugin');
+  assert.ok(flat.includes('Leave a `feedback.jsonl merge=union` line in `.gitattributes` too.'));
   assert.ok(flat.includes("once the PR merges, each teammate's next pull deletes their copies"), 'the untrack offer says what it does to teammates');
   assert.ok(flat.includes('commit with `chore: keep agent-review bookkeeping out of git`'));
   assert.ok(flat.includes('Never `git add -A` or `git add .`.'));
@@ -3576,21 +3584,21 @@ test('update-files adds the same bookkeeping lines as init, once each, and recor
       const second = execFileSync(shell, ['-c', script], { cwd: repo, encoding: 'utf8' });
       const read = (f) => readFileSync(join(repo, f), 'utf8');
       assert.equal(read('.gitignore'), `node_modules/\n${BOOKKEEPING_IGNORES.join('\n')}\n`, `${shell}: added once, on its own line`);
-      assert.equal(read('.gitattributes'), '*.png binary\n*.jpg binary\n', `${shell}: only the merge=union line goes`);
+      assert.equal(read('.gitattributes'), `*.png binary\n${union}\n*.jpg binary`, `${shell}: the merge=union line stays`);
       assert.equal(read('.claude/review/learnings/feedback/.gitkeep'), '', `${shell}: the feedback folder is kept in git`);
       assert.equal(read('.claude/review/learnings/feedback.jsonl'), '{}\n', `${shell}: the old file stays`);
       assert.equal(read('.dockerignore'), 'tmp/\n/.claude\n**/CLAUDE.md\n**/AGENTS.md\n', `${shell}: the globs are written as typed`);
-      assert.ok(first.includes(`removed from .gitattributes: ${union}`), `${shell}: ${first}`);
+      assert.ok(!first.includes('.gitattributes'), `${shell}: .gitattributes is not touched: ${first}`);
       assert.ok(first.includes('added .claude/review/learnings/feedback/.gitkeep'), `${shell}: ${first}`);
       assert.ok(first.includes('added to .gitignore: /.claude/review/learnings/pending/'), `${shell}: ${first}`);
       assert.ok(first.includes('tracked: .claude/review/metrics/severity_history.txt'), `${shell}: a committed metrics file is listed`);
       assert.ok(!/added|removed/.test(second), `${shell}: a second run changes nothing: ${second}`);
-      assert.equal(readFileSync(join(updateDir, 'bookkeeping_changed.txt'), 'utf8'), '.gitignore\n.gitattributes\n.claude/review/learnings/feedback/.gitkeep\n.dockerignore\n', shell);
+      assert.equal(readFileSync(join(updateDir, 'bookkeeping_changed.txt'), 'utf8'), '.gitignore\n.claude/review/learnings/feedback/.gitkeep\n.dockerignore\n', shell);
       assert.equal(readFileSync(join(updateDir, 'bookkeeping_dirty.txt'), 'utf8'), '.dockerignore\n', `${shell}: only the file with other changes`);
       git('rm', '-r', '--cached', '--quiet', '--', '.claude/review/metrics/severity_history.txt');
       const shown = execFileSync(shell, ['-c', at(diff)], { cwd: repo, encoding: 'utf8', env: { ...process.env, GIT_PAGER: 'cat' } });
       assert.ok(shown.includes('+/.claude/review/learnings/findings.json'), `${shell}: the .gitignore diff shows: ${shown}`);
-      assert.ok(shown.includes(`-${union}\n`), `${shell}: the dropped line shows: ${shown}`);
+      assert.ok(!shown.includes(union), `${shell}: no merge=union change shows: ${shown}`);
       assert.ok(shown.includes('new file .claude/review/learnings/feedback/.gitkeep:'), `${shell}: a new file is named`);
       assert.ok(shown.includes('D\t.claude/review/metrics/severity_history.txt'), `${shell}: the untracked file is named`);
       assert.ok(existsSync(join(repo, '.claude/review/metrics/severity_history.txt')), `${shell}: and its local copy stays`);
