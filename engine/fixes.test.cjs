@@ -98,9 +98,8 @@ test('detectSpecial: negative/boundary cases do not over-flag', () => {
 
 test('learningsStore.loadFeedback: skips malformed JSONL lines', () => {
   const dir = mkdtempSync(join(os.tmpdir(), 'fb-'));
-  const p = join(dir, 'feedback.jsonl');
-  writeFileSync(p, '{"a":1}\nNOT JSON\n{"b":2}\n');
-  assert.deepEqual(loadFeedback(p), [{ a: 1 }, { b: 2 }]);
+  writeFileSync(join(dir, 'feedback.jsonl'), '{"a":1}\nNOT JSON\n{"b":2}\n');
+  assert.deepEqual(loadFeedback(dir), [{ a: 1 }, { b: 2 }]);
   rmSync(dir, { recursive: true, force: true });
 });
 

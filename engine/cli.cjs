@@ -31,7 +31,8 @@ const { queryImpact } = require('./queryImpact.cjs');
 const { mineLearnings } = require('./mineLearnings.cjs');
 const {
   parsePending,
-  appendFeedback,
+  writeFeedbackBatch,
+  feedbackGlobs,
   loadFeedback,
   loadLearnings,
   saveLearnings,
@@ -186,7 +187,19 @@ const CI_REVIEW_WORKFLOWS = ['agent-review.yml', 'agent-review-interact.yml', 'a
 function learningPaths(cfg, C) {
   const lp = (cfg.learning && cfg.learning.path) || null;
   const base = lp ? (require('node:path').isAbsolute(lp) ? lp : join(C.ROOT, lp)) : join(C.RD, 'learnings');
-  return { FEEDBACK: join(base, 'feedback.jsonl'), LEARNINGS: join(base, 'learnings.yml') };
+  return { BASE: base, LEARNINGS: join(base, 'learnings.yml') };
+}
+
+// The config plus the learnings feedback files in excluded_paths, whatever the repo lists, so
+// feedback that CI and the address skill commit to a PR is never scored, triggers no agent and
+// is never reviewed.
+function loadCfg(C) {
+  const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+  const rel = relative(C.ROOT, learningPaths(cfg, C).BASE).split('\\').join('/');
+  if (!rel || rel === '..' || rel.startsWith('../') || isAbsolute(rel)) return cfg;
+  const listed = cfg.excluded_paths || [];
+  const missing = feedbackGlobs(rel).filter((g) => !listed.includes(g));
+  return missing.length ? { ...cfg, excluded_paths: [...listed, ...missing] } : cfg;
 }
 
 function validRef(ref) {
@@ -266,7 +279,7 @@ function indexOpts(cfg) {
 }
 
 function loadIndex(C, cfg, { force } = {}) {
-  const c = cfg || loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+  const c = cfg || loadCfg(C);
   const indexPath =
     c.index && c.index.path ? join(C.ROOT, c.index.path) : C.INDEX;
   if (force) {
@@ -646,7 +659,7 @@ function diffFor(diffPath, rawPath, root, excludedPaths) {
 // diff-for only narrows what the lane reads, so a config it cannot read excludes nothing.
 function excludedPathsOrNone(C) {
   try {
-    return existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+    return existsSync(C.CONFIG) ? loadCfg(C).excluded_paths || [] : [];
   } catch {
     return [];
   }
@@ -684,10 +697,10 @@ const USAGE = `usage: agent-review <command>
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
   eval prepare --suite <f> --case <id> --repo <d> --out <d>   create a seeded disposable worktree
-  telemetry --in <feedback.jsonl>   summarize review dispositions and dismissal reasons
+  telemetry --in <learnings dir | file>   summarize review dispositions and dismissal reasons (a folder reads its feedback.jsonl and feedback/*.jsonl)
   rollout --eval <summary.json> --telemetry <summary.json>   check every-PR readiness gates
   rules                          list rules synthesized from approved learnings
-  feedback <pendingFile>         ingest marked outcomes
+  feedback <pendingFile> [--print-path]   ingest marked outcomes into a new file in learnings/feedback/ (--print-path prints only that file's path, or nothing)
   learn [--min-support N]        mine feedback into proposed learnings
   learnings [--status S]         list learnings
   approve <id> | reject <id>     set a learning's status
@@ -718,7 +731,7 @@ function main(rawArgv) {
   const rest = argv.slice(1);
   switch (cmd) {
     case 'config': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       if (rest[0] === 'validate') {
         const engineName = cfg.engine && cfg.engine.name;
         const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
@@ -755,14 +768,14 @@ function main(rawArgv) {
       return 0;
     }
     case 'impact': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const { files } = changedFiles(flag(rest, '--base'), C, cfg);
       out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
       return 0;
     }
     case 'options': {
       try {
-        const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+        const cfg = loadCfg(C);
         const { args, ci } = optionsInput(rest);
         const resolved = resolveOptions({ args, config: cfg, ci });
         out(JSON.stringify(resolved, null, 2));
@@ -779,7 +792,7 @@ function main(rawArgv) {
           out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join('/')})`);
           return 1;
         }
-        const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+        const cfg = loadCfg(C);
         const slicesPath = flag(rest, '--slices');
         out(
           formatStartup({
@@ -803,7 +816,7 @@ function main(rawArgv) {
       }
     }
     case 'plan': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const filesPath = flag(rest, '--files');
       const diffPath = flag(rest, '--diff');
       const statPath = flag(rest, '--stat');
@@ -899,9 +912,8 @@ function main(rawArgv) {
       return diffFor(diffPath, rawPath, C.ROOT, excludedPathsOrNone(C));
     }
     case 'emit': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      const { FEEDBACK } = learningPaths(cfg, C);
-      const base = dirname(FEEDBACK);
+      const cfg = loadCfg(C);
+      const { BASE: base } = learningPaths(cfg, C);
       const reviewId = flag(rest, '--review') || 'review';
       const raw = JSON.parse(readFileSync(flag(rest, '--in'), 'utf8'));
       const findings = emitFindings({ dir: base, reviewId, rawFindings: raw });
@@ -909,9 +921,8 @@ function main(rawArgv) {
       return 0;
     }
     case 'filter': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
-      const base = dirname(FEEDBACK);
+      const cfg = loadCfg(C);
+      const { BASE: base, LEARNINGS } = learningPaths(cfg, C);
       const inPath = flag(rest, '--in') || join(base, 'findings.json');
       const raw = JSON.parse(readFileSync(inPath, 'utf8'));
       out(
@@ -1404,7 +1415,7 @@ function main(rawArgv) {
       let excludedPaths;
       try {
         excludedPaths = existsSync(C.CONFIG)
-          ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || []
+          ? loadCfg(C).excluded_paths || []
           : [];
       } catch (e) {
         return refuse('config', `could not read excluded_paths from the review config: ${e.message}`);
@@ -1588,7 +1599,7 @@ function main(rawArgv) {
         ), null, 2));
         return 0;
       }
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const astConfig = cfg.static_analysis && cfg.static_analysis.ast_grep || {};
       const result = buildEvidence({
         diffPath: flag(rest, '--diff'),
@@ -1669,7 +1680,7 @@ function main(rawArgv) {
     case 'telemetry': {
       const path = flag(rest, '--in');
       if (!path) {
-        out('usage: agent-review telemetry --in <feedback.jsonl>');
+        out('usage: agent-review telemetry --in <learnings dir | feedback file>');
         return 1;
       }
       out(JSON.stringify(summarizeTelemetry(readTelemetry(path)), null, 2));
@@ -1682,7 +1693,7 @@ function main(rawArgv) {
         out('usage: agent-review rollout --eval <summary.json> --telemetry <summary.json>');
         return 1;
       }
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const readiness = rolloutReadiness({
         evaluation: readData(evalPath),
         telemetry: readData(telemetryPath),
@@ -1692,7 +1703,7 @@ function main(rawArgv) {
       return rest.includes('--fail-on-gate') && !readiness.readyForEveryPr ? 2 : 0;
     }
     case 'rules': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const { LEARNINGS } = learningPaths(cfg, C);
       out(
         JSON.stringify(
@@ -1704,30 +1715,35 @@ function main(rawArgv) {
       return 0;
     }
     case 'feedback': {
-      if (!rest[0]) {
-        out('usage: agent-review feedback <pendingFile>');
+      const pendingFile = rest.find((a) => a !== '--print-path');
+      if (!pendingFile) {
+        out('usage: agent-review feedback <pendingFile> [--print-path]');
         return 1;
       }
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-      const { FEEDBACK } = learningPaths(cfg, C);
-      const entries = parsePending(readFileSync(rest[0], 'utf8')).map((e) => ({
+      const cfg = loadCfg(C);
+      const { BASE } = learningPaths(cfg, C);
+      const entries = parsePending(readFileSync(pendingFile, 'utf8')).map((e) => ({
         ts: new Date().toISOString(),
         ...e,
       }));
-      appendFeedback(FEEDBACK, entries);
-      out(`Ingested ${entries.length} outcomes`);
+      const written = writeFeedbackBatch(BASE, entries.length && entries[0].reviewId, entries);
+      if (rest.includes('--print-path')) {
+        if (written) out(written);
+      } else {
+        out(`Ingested ${entries.length} outcomes`);
+      }
       return 0;
     }
     case 'learn': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const resolved = resolveMinSupport(cfg, flag(rest, '--min-support'));
       if (resolved.error) {
         out(`error: ${resolved.error}`);
         return 1;
       }
       const { minSupport } = resolved;
-      const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
-      const proposals = mineLearnings(loadFeedback(FEEDBACK), { minSupport });
+      const { BASE, LEARNINGS } = learningPaths(cfg, C);
+      const proposals = mineLearnings(loadFeedback(BASE), { minSupport });
       const merged = mergeProposals(loadLearnings(LEARNINGS), proposals);
       saveLearnings(LEARNINGS, merged);
       out(
@@ -1736,7 +1752,7 @@ function main(rawArgv) {
       return 0;
     }
     case 'learnings': {
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const { LEARNINGS } = learningPaths(cfg, C);
       out(
         JSON.stringify(
@@ -1753,7 +1769,7 @@ function main(rawArgv) {
         out(`usage: agent-review ${cmd} <id>`);
         return 1;
       }
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const { LEARNINGS } = learningPaths(cfg, C);
       const status = cmd === 'approve' ? 'approved' : 'rejected';
       saveLearnings(
@@ -1773,7 +1789,7 @@ function main(rawArgv) {
         out(`error: unknown mode "${mode}" (use ${MODES.join('/')})`);
         return 1;
       }
-      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const cfg = loadCfg(C);
       const { base: b, files } = changedFiles(base, C, cfg);
       const diff = execFileSync('git', ['-C', C.ROOT, 'diff', `${b}...HEAD`], {
         encoding: 'utf8',

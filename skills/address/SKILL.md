@@ -325,14 +325,15 @@ const yaml = "reviewId: address-" + process.env.PR_NUMBER + "\nfindings:\n" + li
     dismissal_reason: l.dismissalReason || "", reason: l.dismissalDetail || ""})).join("\n");
 require("fs").writeFileSync(process.env.RUN_DIR + "/address_pending.yml", yaml);
 '
-agent-review feedback "$RUN_DIR"/address_pending.yml
-git add .claude/review/learnings/feedback.jsonl && git commit -m "chore(review): record finding outcomes" && git push
+FEEDBACK_FILE=$(agent-review feedback "$RUN_DIR"/address_pending.yml --print-path) || exit 1
+[ -z "$FEEDBACK_FILE" ] || { git add -- "$FEEDBACK_FILE" && git commit -m "chore(review): record finding outcomes" && git push; }
 ```
 
 (The feedback store is repo-tracked; committing it to the PR branch is what persists the signal —
-it merges with the PR. Skip the commit if nothing was dismissed and no fix was applied. It is
-excluded from review and scoring, and repos set up by init mark it `merge=union`, so a local merge
-of the base branch keeps both sides' lines.)
+it merges with the PR. `--print-path` prints nothing when there was nothing to record, and then
+nothing is committed. Each run writes its own new file in `learnings/feedback/`, so two PRs that
+both record outcomes add different files and never conflict. The folder is excluded from review
+and scoring.)
 
 ## Stage 5 — Report back
 

@@ -325,10 +325,10 @@ Also treat the review harness itself as sensitive: the config, ratified learning
 that gate review (`.claude/review/config.yml`, `.claude/review/learnings/learnings.yml`,
 `.claude/settings.json`) are worth `2`-`3` points, because weakening them weakens every future
 review. A `.claude/review/**` glob is fine too, but only because the skeleton's `excluded_paths`
-keep out the bookkeeping files: `learnings/feedback.jsonl`, which `/agent-review:address` commits
-to PRs, the `metrics/` and `index/` files reviews write, and the learning loop's local scratch
-(`learnings/pending/` and `learnings/findings.json`). Keep those exclusions; without them a small
-fix scores as critical.
+keep out the bookkeeping files: `learnings/feedback/`, where `/agent-review:address` commits a
+new file to PRs on each run, the `metrics/` and `index/` files reviews write, and the learning
+loop's local scratch (`learnings/pending/` and `learnings/findings.json`). Keep those exclusions;
+without them a small fix scores as critical.
 
 **Docker images.** If a `Dockerfile` copies the whole tree (`COPY . .` or `ADD . .`) and
 `.dockerignore` does not already leave them out, propose adding `/.claude`, `**/CLAUDE.md`, and
@@ -773,11 +773,10 @@ Present the complete proposal:
    than the bot's.
 8. **`.claude/settings.json` changes** — the exact keys being added (`extraKnownMarketplaces`,
    `enabledPlugins`), and a diff-style before/after if the file already exists.
-9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback.jsonl`,
+9. **Everything else that will be created** — `learnings/learnings.yml`, `learnings/feedback/.gitkeep`,
    the `.gitignore` lines for `.claude/review/metrics/`, `.claude/review/index/`,
-   `.claude/review/learnings/pending/`, and `.claude/review/learnings/findings.json`, the
-   `.gitattributes` line that merges `feedback.jsonl` with `merge=union`, and the `.dockerignore`
-   lines when the repo builds an image from the whole tree.
+   `.claude/review/learnings/pending/`, and `.claude/review/learnings/findings.json`, and the
+   `.dockerignore` lines when the repo builds an image from the whole tree.
 
 Then ask, plainly: *"Approve writing these files? (yes / edit <what> / no)"*
 
@@ -793,7 +792,7 @@ Only after explicit approval:
 ```bash
 RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 . "$RUN_DIR"/init.sh 2>/dev/null || true
-mkdir -p .claude/review/rules .claude/review/learnings \
+mkdir -p .claude/review/rules .claude/review/learnings/feedback \
   .claude/review/evals/patches .claude/review/evals/results .github/workflows
 ```
 
@@ -807,7 +806,7 @@ RUN_DIR=$(agent-review run-dir) || exit 1; export RUN_DIR
 . "$RUN_DIR"/init.sh 2>/dev/null || true
 cp "$TPL/workflows/agent-review-approve.yml" .github/workflows/agent-review-approve.yml
 printf 'version: 1\nlearnings: []\n' > .claude/review/learnings/learnings.yml
-: > .claude/review/learnings/feedback.jsonl
+: > .claude/review/learnings/feedback/.gitkeep
 : > .claude/review/evals/results/.gitkeep
 ```
 
@@ -815,11 +814,10 @@ Keep the review's bookkeeping out of git. Reviews write `.claude/review/metrics/
 `.claude/review/index/` cache on every run, so both are ignored. With learning on, each review's
 `agent-review emit` also writes `learnings/findings.json`, which the same run reads back, and a
 `learnings/pending/<reviewId>.yml` outcomes file, which `/agent-review:learn` reads locally and
-ingests into `feedback.jsonl`. Both are local scratch, so both are ignored. `feedback.jsonl` and
-`learnings.yml` are the learning files git keeps. `feedback.jsonl` is committed and
-only ever appended to, so `merge=union` keeps both sides' lines when a branch merges the base
-branch locally. GitHub's web merge and "Update branch" ignore `.gitattributes`, so a conflict there
-is still fixed by merging locally. Each line is added once, on its own line. A file is listed for
+ingests into `learnings/feedback/`. Both are local scratch, so both are ignored. The files in
+`learnings/feedback/` and `learnings.yml` are the learning files git keeps. Each address or
+feedback run writes a new file in `learnings/feedback/` and never edits an old one, so two PRs that
+both record outcomes never conflict. Each line is added once, on its own line. A file is listed for
 the bootstrap commit only when it had no other changes before init touched it, so 3E never commits
 someone's unrelated edits:
 
@@ -838,7 +836,6 @@ add_line .gitignore '/.claude/review/metrics/'
 add_line .gitignore '/.claude/review/index/'
 add_line .gitignore '/.claude/review/learnings/pending/'
 add_line .gitignore '/.claude/review/learnings/findings.json'
-add_line .gitattributes '.claude/review/learnings/feedback.jsonl merge=union'
 ```
 
 If the user said yes to the `.dockerignore` lines, also run `add_line .dockerignore '/.claude'`,

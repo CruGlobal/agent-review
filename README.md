@@ -477,9 +477,12 @@ as a clean run, so blocking it is a false blocker. Set `thresholds.suggestion_re
 After shadow PRs accumulate dispositions:
 
 ```bash
-agent-review telemetry --in .claude/review/learnings/feedback.jsonl > telemetry.json
+agent-review telemetry --in .claude/review/learnings > telemetry.json
 agent-review rollout --eval evaluation.json --telemetry telemetry.json --fail-on-gate
 ```
+
+`telemetry --in` takes the learnings folder (it reads the old `feedback.jsonl`, if the repo still
+has one, and every file in `feedback/`) or a single feedback file.
 
 `rollout` fails closed until the configured sample sizes, evaluation thresholds, and dismissal
 thresholds all pass. `.github/workflows/readiness.yml` provides the same gate as a reusable,
@@ -642,8 +645,16 @@ in the reply; the remaining operations still run.
 
 Fixes on fork PRs remain advisory because the base repository token cannot push to a fork.
 Maintainer-authorized dismissals still update the canonical ledger, but they do not reach
-`learnings/feedback.jsonl` — that file is committed alongside the fix, so the learning loop
+`learnings/feedback/`, since the feedback file is committed alongside the fix, so the learning loop
 records outcomes from same-repository PRs only.
+
+Each address run, local or CI, writes its outcomes to a new file in
+`.claude/review/learnings/feedback/` (for example
+`address-3715-20261117T190312Z-a3f9c1.jsonl`) and never edits an old one. Two PRs that both
+record outcomes add two different files, so the second one to merge does not conflict, whether
+it merges through GitHub's button, "Update branch", or a merge bot. Repos set up before 1.1.10
+kept everything in one `feedback.jsonl`. That file stays where it is and readers (`learn`,
+`telemetry`, the readiness workflow) read it along with the folder, so nothing needs to move.
 
 The `agent-review.yml` template calls `review.yml` with `mode: auto` (depth from the risk score:
 score 0 skips for free, LOW runs quick, MEDIUM/HIGH standard, CRITICAL deep). Set the
@@ -751,8 +762,12 @@ repo's own settings (`auto_approve` on each caller, `rollout_mode`, secret names
 pinned refs), shows the diff, and offers a PR. If the fresh caller says `advisory` but the repo's
 `.claude/review/config.yml` still says `rollout.mode: shadow`, it offers to change the config in
 the same PR, because the reusable workflow refuses a caller whose mode disagrees with config.
-It also adds any `.gitignore` and `.gitattributes` lines `/agent-review:init` writes that the repo
-lacks, offers to untrack review files a repo committed before it ignored them, and offers the
+It also adds any `.gitignore` lines `/agent-review:init` writes that the repo lacks, adds
+`learnings/feedback/.gitkeep`, keeps the old `feedback.jsonl merge=union` line in
+`.gitattributes` for teammates still on an older plugin, offers to add the
+`learnings/feedback/**` excluded path to the config (optional: the engine always skips the
+feedback files), offers
+to untrack review files a repo committed before it ignored them, and offers the
 `.dockerignore` lines when a `Dockerfile` copies the whole tree.
 Reviews flag both kinds of staleness automatically: the report gains a footer when a repo's
 workflow files are behind the templates, and local runs note when the installed plugin is behind

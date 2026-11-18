@@ -18148,8 +18148,9 @@ var require_learningsStore = __commonJS({
       writeFileSync,
       existsSync,
       mkdirSync,
-      appendFileSync
+      readdirSync
     } = require("node:fs");
+    var { randomBytes } = require("node:crypto");
     var { join, dirname } = require("node:path");
     var YAML = require_dist();
     var { signature } = require_findingSignature();
@@ -18239,21 +18240,52 @@ var require_learningsStore = __commonJS({
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, YAML.stringify(obj));
     }
-    function loadFeedback(path) {
-      if (!existsSync(path)) return [];
-      const out = [];
-      for (const line of readFileSync(path, "utf8").split("\n")) {
-        if (!line.trim()) continue;
-        try {
-          out.push(JSON.parse(line));
-        } catch {
+    function feedbackDir(base) {
+      return join(base, "feedback");
+    }
+    function feedbackFiles(base) {
+      const files = [];
+      const legacy = join(base, "feedback.jsonl");
+      if (existsSync(legacy)) files.push(legacy);
+      const dir = feedbackDir(base);
+      if (existsSync(dir)) {
+        for (const name of readdirSync(dir).sort()) {
+          if (name.endsWith(".jsonl")) files.push(join(dir, name));
         }
       }
-      return out;
+      return files;
     }
-    function appendFeedback(path, entries) {
-      mkdirSync(dirname(path), { recursive: true });
-      for (const e of entries) appendFileSync(path, JSON.stringify(e) + "\n");
+    function feedbackGlobs(relBase) {
+      return [`${relBase}/feedback.jsonl`, `${relBase}/feedback/**`];
+    }
+    function byTs(entries) {
+      const ts = (e) => e && typeof e.ts === "string" ? e.ts : "";
+      return [...entries].sort((a, b) => ts(a) < ts(b) ? -1 : ts(a) > ts(b) ? 1 : 0);
+    }
+    function loadFeedback(base) {
+      const out = [];
+      for (const file of feedbackFiles(base)) {
+        for (const line of readFileSync(file, "utf8").split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            out.push(JSON.parse(line));
+          } catch {
+          }
+        }
+      }
+      return byTs(out);
+    }
+    function utcStamp(date = /* @__PURE__ */ new Date()) {
+      return date.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
+    }
+    function writeFeedbackBatch(base, reviewId, entries) {
+      if (!entries.length) return null;
+      const id = String(reviewId || "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+/, "").slice(0, 80) || "feedback";
+      const dir = feedbackDir(base);
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, `${id}-${utcStamp()}-${randomBytes(3).toString("hex")}.jsonl`);
+      writeFileSync(path, entries.map((e) => JSON.stringify(e) + "\n").join(""), { flag: "wx" });
+      return path;
     }
     module2.exports = {
       mergeProposals,
@@ -18261,8 +18293,12 @@ var require_learningsStore = __commonJS({
       loadApproved,
       loadLearnings,
       saveLearnings,
+      feedbackDir,
+      feedbackFiles,
+      feedbackGlobs,
+      byTs,
       loadFeedback,
-      appendFeedback,
+      writeFeedbackBatch,
       emitFindings
     };
     if (require.main === module2) {
@@ -18270,7 +18306,6 @@ var require_learningsStore = __commonJS({
       const { reviewDir } = require_paths();
       const a = parseArgs(process.argv.slice(2));
       const base = a["learning-dir"] || join(reviewDir({ root: a.root, reviewDir: a["review-dir"] }), "learnings");
-      const feedbackPath = join(base, "feedback.jsonl");
       const learningsPath = join(base, "learnings.yml");
       const findingsPath = join(base, "findings.json");
       if (a.emit) {
@@ -18286,12 +18321,12 @@ var require_learningsStore = __commonJS({
         const entries = parsePending(readFileSync(pendingFile, "utf8")).map(
           (e) => ({ ts: (/* @__PURE__ */ new Date()).toISOString(), ...e })
         );
-        appendFeedback(feedbackPath, entries);
+        writeFeedbackBatch(base, entries.length && entries[0].reviewId, entries);
         process.stdout.write(`Ingested ${entries.length} outcomes
 `);
       } else if (a.mine) {
         const minSupport = typeof a["min-support"] === "string" ? Number(a["min-support"]) : 3;
-        const proposals = mineLearnings(loadFeedback(feedbackPath), { minSupport });
+        const proposals = mineLearnings(loadFeedback(base), { minSupport });
         const merged = mergeProposals(loadLearnings(learningsPath), proposals);
         saveLearnings(learningsPath, merged);
         process.stdout.write(
@@ -20688,9 +20723,11 @@ var require_slice = __commonJS({
 var require_telemetry = __commonJS({
   "engine/telemetry.cjs"(exports2, module2) {
     "use strict";
-    var { readFileSync } = require("node:fs");
+    var { readFileSync, statSync } = require("node:fs");
     var { DISMISSAL_REASONS } = require_evalSuite();
+    var { feedbackFiles, byTs } = require_learningsStore();
     function readTelemetry(path) {
+      if (statSync(path).isDirectory()) return feedbackFiles(path).flatMap((file) => readTelemetry(file));
       const text = readFileSync(path, "utf8").trim();
       if (!text) return [];
       if (/\.json$/i.test(path)) {
@@ -20701,7 +20738,7 @@ var require_telemetry = __commonJS({
         try {
           return JSON.parse(line);
         } catch (e) {
-          throw new Error(`invalid telemetry JSONL line ${i + 1}: ${e.message}`);
+          throw new Error(`invalid telemetry JSONL line ${i + 1} in ${path}: ${e.message}`);
         }
       });
     }
@@ -20711,7 +20748,7 @@ var require_telemetry = __commonJS({
     function summarizeTelemetry(entries) {
       const deduped = [];
       const positions = /* @__PURE__ */ new Map();
-      for (const entry of entries) {
+      for (const entry of byTs(entries)) {
         const identity = entry.reviewId && (entry.signature || entry.id) ? `${entry.reviewId}:${entry.signature || entry.id}` : null;
         if (identity && positions.has(identity)) deduped[positions.get(identity)] = entry;
         else {
@@ -20794,7 +20831,7 @@ var require_package = __commonJS({
   "package.json"(exports2, module2) {
     module2.exports = {
       name: "agent-review",
-      version: "1.1.9",
+      version: "1.1.10",
       private: true,
       description: "Multi-agent PR review for Claude Code: risk-scored agent selection, debate/consensus, repo-bootstrapped rules, and a learning loop.",
       license: "MIT",
@@ -21509,7 +21546,8 @@ var require_cli = __commonJS({
     var { mineLearnings } = require_mineLearnings();
     var {
       parsePending,
-      appendFeedback,
+      writeFeedbackBatch,
+      feedbackGlobs,
       loadFeedback,
       loadLearnings,
       saveLearnings,
@@ -21648,7 +21686,15 @@ var require_cli = __commonJS({
     function learningPaths(cfg, C) {
       const lp = cfg.learning && cfg.learning.path || null;
       const base = lp ? require("node:path").isAbsolute(lp) ? lp : join(C.ROOT, lp) : join(C.RD, "learnings");
-      return { FEEDBACK: join(base, "feedback.jsonl"), LEARNINGS: join(base, "learnings.yml") };
+      return { BASE: base, LEARNINGS: join(base, "learnings.yml") };
+    }
+    function loadCfg(C) {
+      const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const rel = relative(C.ROOT, learningPaths(cfg, C).BASE).split("\\").join("/");
+      if (!rel || rel === ".." || rel.startsWith("../") || isAbsolute(rel)) return cfg;
+      const listed = cfg.excluded_paths || [];
+      const missing = feedbackGlobs(rel).filter((g) => !listed.includes(g));
+      return missing.length ? { ...cfg, excluded_paths: [...listed, ...missing] } : cfg;
     }
     function validRef(ref) {
       return /^[A-Za-z0-9._/~^-]+$/.test(ref) && !ref.startsWith("-");
@@ -21712,7 +21758,7 @@ var require_cli = __commonJS({
       return { aliases: ix.aliases, exts: ix.extensions, roots: ix.roots };
     }
     function loadIndex(C, cfg, { force } = {}) {
-      const c = cfg || loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+      const c = cfg || loadCfg(C);
       const indexPath = c.index && c.index.path ? join(C.ROOT, c.index.path) : C.INDEX;
       if (force) {
         const gf = join(indexPath, "graph.json");
@@ -22041,7 +22087,7 @@ var require_cli = __commonJS({
     }
     function excludedPathsOrNone(C) {
       try {
-        return existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+        return existsSync(C.CONFIG) ? loadCfg(C).excluded_paths || [] : [];
       } catch {
         return [];
       }
@@ -22078,10 +22124,10 @@ var require_cli = __commonJS({
   context validate|inventory|pack --manifest <f> [--dir <d>]   validate/inventory/package SHA-pinned context
   eval validate --suite <f> | score --suite <f> --results <f>   seeded-bug evaluation tools
   eval prepare --suite <f> --case <id> --repo <d> --out <d>   create a seeded disposable worktree
-  telemetry --in <feedback.jsonl>   summarize review dispositions and dismissal reasons
+  telemetry --in <learnings dir | file>   summarize review dispositions and dismissal reasons (a folder reads its feedback.jsonl and feedback/*.jsonl)
   rollout --eval <summary.json> --telemetry <summary.json>   check every-PR readiness gates
   rules                          list rules synthesized from approved learnings
-  feedback <pendingFile>         ingest marked outcomes
+  feedback <pendingFile> [--print-path]   ingest marked outcomes into a new file in learnings/feedback/ (--print-path prints only that file's path, or nothing)
   learn [--min-support N]        mine feedback into proposed learnings
   learnings [--status S]         list learnings
   approve <id> | reject <id>     set a learning's status
@@ -22108,7 +22154,7 @@ var require_cli = __commonJS({
       const rest = argv.slice(1);
       switch (cmd) {
         case "config": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           if (rest[0] === "validate") {
             const engineName = cfg.engine && cfg.engine.name;
             const problems = engineName === ENGINE_CODE_REVIEW ? codeReviewEngineProblems(cfg) : [];
@@ -22142,14 +22188,14 @@ var require_cli = __commonJS({
           return 0;
         }
         case "impact": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { files } = changedFiles(flag(rest, "--base"), C, cfg);
           out(JSON.stringify(queryImpact(files, loadIndex(C, cfg), {}), null, 2));
           return 0;
         }
         case "options": {
           try {
-            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const cfg = loadCfg(C);
             const { args, ci } = optionsInput(rest);
             const resolved = resolveOptions({ args, config: cfg, ci });
             out(JSON.stringify(resolved, null, 2));
@@ -22166,7 +22212,7 @@ var require_cli = __commonJS({
               out(`error: unknown final mode "${mode}" (use ${FINAL_MODES.join("/")})`);
               return 1;
             }
-            const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+            const cfg = loadCfg(C);
             const slicesPath = flag(rest, "--slices");
             out(
               formatStartup({
@@ -22188,7 +22234,7 @@ var require_cli = __commonJS({
           }
         }
         case "plan": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const filesPath = flag(rest, "--files");
           const diffPath = flag(rest, "--diff");
           const statPath = flag(rest, "--stat");
@@ -22273,9 +22319,8 @@ var require_cli = __commonJS({
           return diffFor(diffPath, rawPath, C.ROOT, excludedPathsOrNone(C));
         }
         case "emit": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-          const { FEEDBACK } = learningPaths(cfg, C);
-          const base = dirname(FEEDBACK);
+          const cfg = loadCfg(C);
+          const { BASE: base } = learningPaths(cfg, C);
           const reviewId = flag(rest, "--review") || "review";
           const raw = JSON.parse(readFileSync(flag(rest, "--in"), "utf8"));
           const findings = emitFindings({ dir: base, reviewId, rawFindings: raw });
@@ -22283,9 +22328,8 @@ var require_cli = __commonJS({
           return 0;
         }
         case "filter": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-          const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
-          const base = dirname(FEEDBACK);
+          const cfg = loadCfg(C);
+          const { BASE: base, LEARNINGS } = learningPaths(cfg, C);
           const inPath = flag(rest, "--in") || join(base, "findings.json");
           const raw = JSON.parse(readFileSync(inPath, "utf8"));
           out(
@@ -22746,7 +22790,7 @@ var require_cli = __commonJS({
           const refuse = (stage, reason) => finish({ ok: false, stage, reason, count: 0, mode: null, dropped: [] });
           let excludedPaths;
           try {
-            excludedPaths = existsSync(C.CONFIG) ? loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA }).excluded_paths || [] : [];
+            excludedPaths = existsSync(C.CONFIG) ? loadCfg(C).excluded_paths || [] : [];
           } catch (e) {
             return refuse("config", `could not read excluded_paths from the review config: ${e.message}`);
           }
@@ -22924,7 +22968,7 @@ var require_cli = __commonJS({
             ), null, 2));
             return 0;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const astConfig = cfg.static_analysis && cfg.static_analysis.ast_grep || {};
           const result = buildEvidence({
             diffPath: flag(rest, "--diff"),
@@ -23010,7 +23054,7 @@ var require_cli = __commonJS({
         case "telemetry": {
           const path = flag(rest, "--in");
           if (!path) {
-            out("usage: agent-review telemetry --in <feedback.jsonl>");
+            out("usage: agent-review telemetry --in <learnings dir | feedback file>");
             return 1;
           }
           out(JSON.stringify(summarizeTelemetry(readTelemetry(path)), null, 2));
@@ -23023,7 +23067,7 @@ var require_cli = __commonJS({
             out("usage: agent-review rollout --eval <summary.json> --telemetry <summary.json>");
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const readiness = rolloutReadiness({
             evaluation: readData(evalPath),
             telemetry: readData(telemetryPath),
@@ -23033,7 +23077,7 @@ var require_cli = __commonJS({
           return rest.includes("--fail-on-gate") && !readiness.readyForEveryPr ? 2 : 0;
         }
         case "rules": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { LEARNINGS } = learningPaths(cfg, C);
           out(
             JSON.stringify(
@@ -23045,30 +23089,35 @@ var require_cli = __commonJS({
           return 0;
         }
         case "feedback": {
-          if (!rest[0]) {
-            out("usage: agent-review feedback <pendingFile>");
+          const pendingFile = rest.find((a) => a !== "--print-path");
+          if (!pendingFile) {
+            out("usage: agent-review feedback <pendingFile> [--print-path]");
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
-          const { FEEDBACK } = learningPaths(cfg, C);
-          const entries = parsePending(readFileSync(rest[0], "utf8")).map((e) => ({
+          const cfg = loadCfg(C);
+          const { BASE } = learningPaths(cfg, C);
+          const entries = parsePending(readFileSync(pendingFile, "utf8")).map((e) => ({
             ts: (/* @__PURE__ */ new Date()).toISOString(),
             ...e
           }));
-          appendFeedback(FEEDBACK, entries);
-          out(`Ingested ${entries.length} outcomes`);
+          const written = writeFeedbackBatch(BASE, entries.length && entries[0].reviewId, entries);
+          if (rest.includes("--print-path")) {
+            if (written) out(written);
+          } else {
+            out(`Ingested ${entries.length} outcomes`);
+          }
           return 0;
         }
         case "learn": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const resolved = resolveMinSupport(cfg, flag(rest, "--min-support"));
           if (resolved.error) {
             out(`error: ${resolved.error}`);
             return 1;
           }
           const { minSupport } = resolved;
-          const { FEEDBACK, LEARNINGS } = learningPaths(cfg, C);
-          const proposals = mineLearnings(loadFeedback(FEEDBACK), { minSupport });
+          const { BASE, LEARNINGS } = learningPaths(cfg, C);
+          const proposals = mineLearnings(loadFeedback(BASE), { minSupport });
           const merged = mergeProposals(loadLearnings(LEARNINGS), proposals);
           saveLearnings(LEARNINGS, merged);
           out(
@@ -23077,7 +23126,7 @@ var require_cli = __commonJS({
           return 0;
         }
         case "learnings": {
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { LEARNINGS } = learningPaths(cfg, C);
           out(
             JSON.stringify(
@@ -23094,7 +23143,7 @@ var require_cli = __commonJS({
             out(`usage: agent-review ${cmd} <id>`);
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { LEARNINGS } = learningPaths(cfg, C);
           const status = cmd === "approve" ? "approved" : "rejected";
           saveLearnings(
@@ -23112,7 +23161,7 @@ var require_cli = __commonJS({
             out(`error: unknown mode "${mode}" (use ${MODES.join("/")})`);
             return 1;
           }
-          const cfg = loadConfig({ configPath: C.CONFIG, schemaPath: C.SCHEMA });
+          const cfg = loadCfg(C);
           const { base: b, files } = changedFiles(base, C, cfg);
           const diff = execFileSync("git", ["-C", C.ROOT, "diff", `${b}...HEAD`], {
             encoding: "utf8",
